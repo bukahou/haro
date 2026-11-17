@@ -8,7 +8,7 @@ require (
 	github.com/gen2brain/malgo v0.11.28
 	github.com/k2-fsa/sherpa-onnx-go v1.13.8
 	github.com/modelcontextprotocol/go-sdk v1.8.0
-	github.com/yalue/onnxruntime_go v1.32.1
+	github.com/yalue/onnxruntime_go v1.38.0
 	go.opentelemetry.io/otel v1.47.0
 	go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp v1.47.0
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.47.0
