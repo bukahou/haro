@@ -77,7 +77,7 @@ func (r *Runner) Run(ctx context.Context) {
 	if n, err := r.store.InterruptActive(ctx); err != nil {
 		r.logger.Warn("标记上次没查完的调查失败", "err", err)
 	} else if n > 0 {
-		r.logger.Info("上次大脑停止时没查完的调查已标为被中断", "count", n)
+		r.logger.Info("上次服务端停止时没查完的调查已标为被中断", "count", n)
 	}
 	close(r.ready)
 	for {
@@ -186,7 +186,7 @@ func (r *Runner) runTask(ctx context.Context, id int64) {
 		r.logger.Info("调查已取消", "id", id, "elapsed", time.Since(started).Round(time.Second))
 		return
 	}
-	if ctx.Err() != nil { // 大脑在关：下次启动时标成被中断
+	if ctx.Err() != nil { // 服务端在关：下次启动时标成被中断
 		return
 	}
 	if err := r.store.Finish(context.WithoutCancel(ctx), id, outcome.status, outcome.conclusion, outcome.sources, outcome.reason); err != nil {

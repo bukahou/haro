@@ -32,7 +32,7 @@ func (m *memoryStore) SaveConversation(record ConversationRecord) error {
 
 var bookPersonas = []Persona{{ID: "buddy", Name: "毒舌搭子"}, {ID: "gentle", Name: "温柔陪伴"}}
 
-// v4 D1：每人一份对话（历史、性格各管各的），存盘后新的对话簿（大脑重启）读得回来。
+// v4 D1：每人一份对话（历史、性格各管各的），存盘后新的对话簿（服务端重启）读得回来。
 func TestConversationBookSeparatesPeopleAndPersists(t *testing.T) {
 	store := &memoryStore{}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))

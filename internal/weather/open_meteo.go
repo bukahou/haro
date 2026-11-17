@@ -57,7 +57,7 @@ type Client struct {
 	attemptTimeout            time.Duration // 每次请求最多等多久；超时或连不上时再试一次
 }
 
-// 每次请求最多等 3.5 秒，失败再试一次（两次合计 7 秒，留在大脑 10 秒的工具时限内）。
+// 每次请求最多等 3.5 秒，失败再试一次（两次合计 7 秒，留在服务端 10 秒的工具时限内）。
 // 实测（2026-11-17）：平时 0.8 秒左右，偶尔有一次请求卡住到超时、紧接着再请求就正常。
 const (
 	defaultAttemptTimeout = 3500 * time.Millisecond

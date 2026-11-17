@@ -1,7 +1,7 @@
 // Package enrollment 是终端一侧的远程登记声纹（v4 C-3，`haro -enroll 名字`）：在终端这台机器上录几句话，
-// 发给大脑（大脑转给 haro-asr 算向量、存进大脑的数据目录、立刻生效）。终端不需要说话人识别模型。
+// 发给服务端（服务端转给 haro-asr 算向量、存进服务端的数据目录、立刻生效）。终端不需要说话人识别模型。
 //
-// ⚠️ 录音经与对话同一个 WebSocket 接口发给大脑（没有加密和鉴权，只在可信网络里用）；声纹只存在大脑那边。
+// ⚠️ 录音经与对话同一个 WebSocket 接口发给服务端（没有加密和鉴权，只在可信网络里用）；声纹只存在服务端那边。
 package enrollment
 
 import (
@@ -25,20 +25,20 @@ import (
 
 // Options 是一次登记的参数。
 type Options struct {
-	BrainURL string // 大脑的地址（同 HARO_BRAIN_URL）
-	Name     string
-	Append   bool          // 补录（换了麦克风、换了位置时）
-	Seconds  time.Duration // 每句录多久
-	Recorder assistant.AudioRecorder
-	In       io.Reader // 按回车开始录（一般是 os.Stdin）
-	Out      io.Writer
-	Client   *http.Client
+	ServerURL string // 服务端的地址（同 HARO_SERVER_URL）
+	Name      string
+	Append    bool          // 补录（换了麦克风、换了位置时）
+	Seconds   time.Duration // 每句录多久
+	Recorder  assistant.AudioRecorder
+	In        io.Reader // 按回车开始录（一般是 os.Stdin）
+	Out       io.Writer
+	Client    *http.Client
 }
 
 // minLevel：音量（RMS）低于这个就让用户重读。
 const minLevel = 0.005
 
-// Run 录 voiceprint.EnrollmentSentences 里的每一句，发给大脑登记，打印结果。
+// Run 录 voiceprint.EnrollmentSentences 里的每一句，发给服务端登记，打印结果。
 func Run(ctx context.Context, opts Options) error {
 	if opts.Name == "" {
 		return fmt.Errorf("要给出登记的名字")
@@ -116,7 +116,7 @@ func upload(ctx context.Context, opts Options, clips []string) (result, error) {
 	if err != nil {
 		return result{}, err
 	}
-	endpoint := strings.TrimRight(opts.BrainURL, "/") + "/v1/voiceprints/" + url.PathEscape(opts.Name)
+	endpoint := strings.TrimRight(opts.ServerURL, "/") + "/v1/voiceprints/" + url.PathEscape(opts.Name)
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return result{}, err
@@ -124,7 +124,7 @@ func upload(ctx context.Context, opts Options, clips []string) (result, error) {
 	request.Header.Set("Content-Type", "application/json")
 	response, err := opts.Client.Do(request)
 	if err != nil {
-		return result{}, fmt.Errorf("连不上大脑 %s: %w", opts.BrainURL, err)
+		return result{}, fmt.Errorf("连不上服务端 %s: %w", opts.ServerURL, err)
 	}
 	defer response.Body.Close()
 	data, _ := io.ReadAll(io.LimitReader(response.Body, 1<<20))

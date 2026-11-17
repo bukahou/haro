@@ -58,7 +58,7 @@ type DeviceOpener interface {
 	OpenCamera(ctx context.Context, startup Choice, pick CameraPicker, options CameraOptions) Camera
 }
 
-// Camera 是打开的摄像头：能取帧，也能说出现在能不能用（看守据此告诉大脑，没有摄像头时大脑不给模型看画面的工具）。
+// Camera 是打开的摄像头：能取帧，也能说出现在能不能用（看守据此告诉服务端，没有摄像头时服务端不给模型看画面的工具）。
 type Camera interface {
 	assistant.FrameSource
 	CurrentName() string // 现在能用的摄像头名字；不可用时为空
@@ -79,6 +79,6 @@ type CameraOptions struct {
 // Choice 是选中的设备。
 type Choice struct {
 	ID     string // 交给平台层打开的 ID；空 = 系统默认（音箱跟随切换）
-	Name   string // 给人看的名字（日志、告诉大脑）
+	Name   string // 给人看的名字（日志、告诉服务端）
 	Reason string // 为什么选它（日志）
 }

@@ -1,8 +1,8 @@
 // Package assistant 是 haro 对外唯一的入口：终端循环。
 //
-// 终端只管输入输出硬件：触发 → 录音 → 取帧 → 交给大脑 → 播放大脑返回的音频。
-// 「听懂、思考、说什么」都在大脑（BrainSession）里；终端与大脑之间只传 realtimeproto 事件。
-// v1.5 大脑在同一进程（brain.Session）；v3 换成 WebSocket 客户端，本包不改。
+// 终端只管输入输出硬件：触发 → 录音 → 取帧 → 交给服务端 → 播放服务端返回的音频。
+// 「听懂、思考、说什么」都在服务端（BrainSession）里；终端与服务端之间只传 realtimeproto 事件。
+// v1.5 服务端在同一进程（brain.Session）；v3 换成 WebSocket 客户端，本包不改。
 //
 // 本文件定义终端依赖的各段能力（Go interface，放在使用方一侧），由 cmd/haro 组装注入。
 package assistant
@@ -52,7 +52,7 @@ type AudioStream interface {
 	Played() time.Duration // 已经播出多长（v2 按「用户实际听到的部分」截断历史用）
 }
 
-// BrainSession 是终端看到的大脑。
+// BrainSession 是终端看到的服务端。
 type BrainSession interface {
 	Send(ctx context.Context, event realtimeproto.ClientEvent) error
 	Events() <-chan realtimeproto.ServerEvent

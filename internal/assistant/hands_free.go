@@ -78,7 +78,7 @@ func (a *Assistant) converse(parent context.Context) error {
 		case realtimeproto.HaroNotice:
 			a.playNotice(ctx, e)
 		case realtimeproto.Error:
-			a.logger.Error("大脑出错", "message", e.Message)
+			a.logger.Error("服务端出错", "message", e.Message)
 		default:
 			// 上一轮被取消后迟到的回答事件等，忽略
 		}
@@ -143,7 +143,7 @@ func (a *Assistant) respondHandsFree(ctx context.Context, speechEnd time.Time) (
 	return false
 }
 
-// uploadMicrophone 把麦克风的每一块音频交给大脑；静音期间上传等长的静音，保持时间轴连续。
+// uploadMicrophone 把麦克风的每一块音频交给服务端；静音期间上传等长的静音，保持时间轴连续。
 func (a *Assistant) uploadMicrophone(ctx context.Context, mic MicrophoneStream) error {
 	for chunk := range mic.Chunks() {
 		if a.uplink.muted() {
@@ -164,7 +164,7 @@ func (a *Assistant) uploadMicrophone(ctx context.Context, mic MicrophoneStream) 
 var ErrMicrophoneStopped = errors.New("麦克风意外停止")
 
 // micUplink 记录已上传音频的时间轴，用于把 VAD 给出的「音频时间」换算成墙上时间。
-// 时间轴跨对话模式累计（大脑的转写会话在整个程序生命周期内只有一个）。
+// 时间轴跨对话模式累计（服务端的转写会话在整个程序生命周期内只有一个）。
 type micUplink struct {
 	mu       sync.Mutex
 	sentMs   int64

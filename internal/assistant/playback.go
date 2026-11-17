@@ -16,10 +16,10 @@ import (
 // errInterrupted 表示这次回答被用户用唤醒词打断了（v3 I-1）。
 var errInterrupted = errors.New("回答被打断")
 
-// cancelDrainTimeout：被打断后等大脑确认取消（response.done）最多这么久。
+// cancelDrainTimeout：被打断后等服务端确认取消（response.done）最多这么久。
 const cancelDrainTimeout = 3 * time.Second
 
-// playResponse 消费大脑的事件，直到回答结束、声音播完：日志记文字，音频交给后台写入。
+// playResponse 消费服务端的事件，直到回答结束、声音播完：日志记文字，音频交给后台写入。
 //
 // 为什么音频要后台写（v3 I-1）：播放器的管道满了写入就会阻塞，而语音合成比播放快——如果在这里直接写，
 // 大部分播放时间都卡在写入和「等播完」上，「唤醒（打断）」事件要排在一堆音频后面好几秒才轮得到。
@@ -85,7 +85,7 @@ func (a *Assistant) playResponse(ctx context.Context, turnSpan trace.Span, commi
 				}
 				player.enqueue(e.Audio.Data)
 			case realtimeproto.Error:
-				a.logger.Error("大脑出错", "message", e.Message)
+				a.logger.Error("服务端出错", "message", e.Message)
 			case realtimeproto.ResponseDone:
 				done = &e
 				if player == nil { // 没有声音（失败、空识别等）
@@ -111,14 +111,14 @@ func (a *Assistant) finishResponse(turnSpan trace.Span, done realtimeproto.Respo
 		a.logger.Info("本轮完成", "total", time.Since(committedAt).Round(time.Millisecond))
 		return nil
 	case realtimeproto.StatusFailed:
-		return fail(turnSpan, "大脑", errors.New(done.Reason))
+		return fail(turnSpan, "服务端", errors.New(done.Reason))
 	default:
 		a.logger.Info("本轮未完成", "status", done.Status, "reason", done.Reason)
 		return nil
 	}
 }
 
-// interrupt 处理打断（v3 I-1 / I-2）：立即停播；告诉大脑用户听到了多少（conversation.item.truncate）；
+// interrupt 处理打断（v3 I-1 / I-2）：立即停播；告诉服务端用户听到了多少（conversation.item.truncate）；
 // 回答还没结束时再取消，并等它确认（期间收到的其他事件留给主循环）。
 func (a *Assistant) interrupt(ctx context.Context, turnSpan trace.Span, p *player, responseDone bool, answer string) error {
 	var played time.Duration
@@ -131,7 +131,7 @@ func (a *Assistant) interrupt(ctx context.Context, turnSpan trace.Span, p *playe
 		attribute.Float64("haro.turn.played_seconds", played.Seconds()))
 	brain := a.parts.Brain
 	if err := brain.Send(ctx, realtimeproto.ConversationItemTruncate{AudioEndMs: played.Milliseconds()}); err != nil {
-		a.logger.Warn("通知大脑截断历史失败", "err", err)
+		a.logger.Warn("通知服务端截断历史失败", "err", err)
 	}
 	if !responseDone {
 		if err := brain.Send(ctx, realtimeproto.ResponseCancel{}); err != nil {
@@ -151,7 +151,7 @@ func (a *Assistant) waitCancelled(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-timeout:
-			a.logger.Warn("等大脑确认取消超时")
+			a.logger.Warn("等服务端确认取消超时")
 			return
 		case event := <-a.parts.Brain.Events():
 			switch event.(type) {

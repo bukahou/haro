@@ -552,7 +552,7 @@ func TestVoiceprintGatesWakeAndLabelsSpeaker(t *testing.T) {
 		t.Errorf("应标上主人：%+v", completed)
 	}
 
-	embedder.current.Store(stranger) // 醒着时陌生人说话：照常识别，但标为没认出来（由大脑决定不理）
+	embedder.current.Store(stranger) // 醒着时陌生人说话：照常识别，但标为没认出来（由服务端决定不理）
 	transcriber.text = "你好啊"
 	sendPattern(t, ctx, conn, [2]int{500, 1}, [2]int{400, 0})
 	events = readEvents(t, ctx, conn, 3)
@@ -608,7 +608,7 @@ func TestWeakWakeRechecksTheSentence(t *testing.T) {
 			if !ok {
 				t.Fatalf("过了唤醒门槛应能唤醒：%v", events)
 			}
-			if wake.Score < 0.3 || wake.Score > 0.4 || wake.Level <= 0 { // v4 D2：唤醒质量带给大脑做仲裁
+			if wake.Score < 0.3 || wake.Score > 0.4 || wake.Level <= 0 { // v4 D2：唤醒质量带给服务端做仲裁
 				t.Errorf("唤醒事件应带上声纹分数和音量：%+v", wake)
 			}
 			completed, ok := events[3].(realtimeproto.InputAudioTranscriptionCompleted)

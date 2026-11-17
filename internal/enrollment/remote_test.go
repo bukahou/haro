@@ -53,7 +53,7 @@ func TestRemoteEnrollmentUploadsClips(t *testing.T) {
 
 	sentences := len(voiceprint.EnrollmentSentences)
 	var out bytes.Buffer
-	err := Run(context.Background(), Options{BrainURL: brain.URL, Name: "主人", Append: true, Seconds: time.Millisecond,
+	err := Run(context.Background(), Options{ServerURL: brain.URL, Name: "主人", Append: true, Seconds: time.Millisecond,
 		Recorder: &fakeRecorder{amplitudes: []int16{10}}, // 第一句太小声：重读
 		In:       strings.NewReader(strings.Repeat("\n", sentences+1)), Out: &out, Client: brain.Client()})
 	if err != nil {
@@ -75,9 +75,9 @@ func TestRemoteEnrollmentReportsBrainError(t *testing.T) {
 		_, _ = w.Write([]byte(`{"error":{"message":"「主人」还没登记过","type":"invalid_request_error"}}`))
 	}))
 	defer brain.Close()
-	err := Run(context.Background(), Options{BrainURL: brain.URL, Name: "主人", Append: true, Seconds: time.Millisecond,
+	err := Run(context.Background(), Options{ServerURL: brain.URL, Name: "主人", Append: true, Seconds: time.Millisecond,
 		Recorder: &fakeRecorder{}, In: strings.NewReader(strings.Repeat("\n", 5)), Out: &bytes.Buffer{}, Client: brain.Client()})
 	if err == nil || !strings.Contains(err.Error(), "还没登记过") {
-		t.Errorf("应把大脑的错误说清楚：%v", err)
+		t.Errorf("应把服务端的错误说清楚：%v", err)
 	}
 }

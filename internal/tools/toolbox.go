@@ -1,6 +1,6 @@
-// Package tools 把内置工具和第三方 MCP 工具服务汇总成大脑能用的 Toolbox（v2.5；v5 改为下面的分工）。
+// Package tools 把内置工具和第三方 MCP 工具服务汇总成服务端能用的 Toolbox（v2.5；v5 改为下面的分工）。
 //
-// v5 裁定：自研工具（时间、记事本、网络诊断……）一律内置，在大脑进程里直接执行（各类一个 XxxTools 函数，返回 []Builtin）；
+// v5 裁定：自研工具（时间、记事本、网络诊断……）一律内置，在服务端进程里直接执行（各类一个 XxxTools 函数，返回 []Builtin）；
 // MCP 只用于第三方服务。MCP 服务现在由 haro 作为子进程启动，经 stdio 通信（官方 Go SDK 的 CommandTransport）；
 // 远程服务（Streamable HTTP）在 v5 补上。
 package tools

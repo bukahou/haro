@@ -122,7 +122,7 @@ func TestWakeWordConversation(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	// 睡着时大脑发来提示（后台调查查完了）：响一声
+	// 睡着时服务端发来提示（后台调查查完了）：响一声
 	notices.Notify(brain.SharedPerson, realtimeproto.HaroNotice{Kind: realtimeproto.NoticeResearchDone})
 	for _, audio, _ := speaker.snapshot(); audio != want+"[叮咚]"; _, audio, _ = speaker.snapshot() {
 		if time.Now().After(deadline) {

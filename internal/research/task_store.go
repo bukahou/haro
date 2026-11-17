@@ -1,6 +1,6 @@
-// Package research 是后台调查（v5 第 3 节）：主对话派任务、立刻回话；调查在大脑进程的后台跑，
+// Package research 是后台调查（v5 第 3 节）：主对话派任务、立刻回话；调查在服务端进程的后台跑，
 // 受程序强制的上限约束（时间 / 轮数 / 搜索次数 / token，R2），结论写进任务账本；
-// 每轮对话的系统提示词里放「任务板」（R3 a / R4），大脑不会忘了自己派过什么、查到了什么。
+// 每轮对话的系统提示词里放「任务板」（R3 a / R4），服务端不会忘了自己派过什么、查到了什么。
 //
 // 对外：OpenTaskStore（Facade）+ TaskStore（接口）；Runner（排队与执行）；Tools（主对话的工具）；Runner 兼任 brain.Briefer。
 package research
@@ -30,7 +30,7 @@ const (
 	StatusPartial     Status = "partial"     // 到上限收工，结论可能不全
 	StatusFailed      Status = "failed"      // 出错（模型 / 搜索服务不可用）
 	StatusCancelled   Status = "cancelled"   // 主人说不查了
-	StatusInterrupted Status = "interrupted" // 大脑重启，没查完
+	StatusInterrupted Status = "interrupted" // 服务端重启，没查完
 )
 
 // Label 是给模型看的中文状态。
@@ -49,7 +49,7 @@ func (s Status) Label() string {
 	case StatusCancelled:
 		return "取消了"
 	case StatusInterrupted:
-		return "被中断了（大脑重启）"
+		return "被中断了（服务端重启）"
 	default:
 		return string(s)
 	}
@@ -88,7 +88,7 @@ type TaskStore interface {
 	MarkReported(ctx context.Context, ids ...int64) error
 	// Search 按问题或结论里的关键词找某人以前的任务（「上周让你查的那个」）。
 	Search(ctx context.Context, person, query string, limit int) ([]Task, error)
-	// InterruptActive 把排队中、在查的都标成被中断（大脑启动时调用）；返回条数。
+	// InterruptActive 把排队中、在查的都标成被中断（服务端启动时调用）；返回条数。
 	InterruptActive(ctx context.Context) (int, error)
 	Close() error
 }
@@ -96,7 +96,7 @@ type TaskStore interface {
 // ErrTaskNotFound 表示没有这个任务。
 var ErrTaskNotFound = errors.New("没有这个调查任务")
 
-// OpenTaskStore 打开任务账本：path 是 SQLite 文件路径；空 = 只在内存里（大脑重启就没了）。
+// OpenTaskStore 打开任务账本：path 是 SQLite 文件路径；空 = 只在内存里（服务端重启就没了）。
 func OpenTaskStore(ctx context.Context, path string) (TaskStore, error) {
 	location := "file::memory:"
 	if path != "" {
@@ -261,7 +261,7 @@ const searchWindow = 500
 
 func (s *sqliteTaskStore) InterruptActive(ctx context.Context) (int, error) {
 	result, err := s.db.ExecContext(ctx, `UPDATE research_tasks SET status = ?, stop_reason = ?, finished_at = ? WHERE status IN (?, ?)`,
-		string(StatusInterrupted), "大脑重启", time.Now().Unix(), string(StatusQueued), string(StatusRunning))
+		string(StatusInterrupted), "服务端重启", time.Now().Unix(), string(StatusQueued), string(StatusRunning))
 	if err != nil {
 		return 0, err
 	}

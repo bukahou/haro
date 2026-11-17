@@ -239,7 +239,7 @@ func TestResearchBudgetQueueCancelAndRestart(t *testing.T) {
 		t.Fatalf("取消在查的：%+v %v", cancelled, err)
 	}
 
-	// 大脑停掉：第二个没查完；重启后标成被中断，并在任务板上告诉主人
+	// 服务端停掉：第二个没查完；重启后标成被中断，并在任务板上告诉主人
 	time.Sleep(20 * time.Millisecond)
 	cancel()
 	time.Sleep(80 * time.Millisecond)

@@ -62,5 +62,5 @@ func (c *OnDemandCamera) LatestFrame(ctx context.Context) ([]byte, time.Time, er
 	return stdout.Bytes(), time.Now(), nil
 }
 
-// CurrentName 是现在能用的摄像头名字；不可用时为空（看守据此告诉大脑）。
+// CurrentName 是现在能用的摄像头名字；不可用时为空（看守据此告诉服务端）。
 func (c *OnDemandCamera) CurrentName() string { return c.health.currentName() }

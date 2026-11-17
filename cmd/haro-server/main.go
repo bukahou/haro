@@ -1,4 +1,4 @@
-// haro-brain：haro 的大脑（架构见 docs/architecture.md）。
+// haro-server：haro 的服务端（架构见 docs/architecture.md）。
 // 识别（haro-asr 子进程）→ 模型 → 工具 → 性格 → 语音合成（GPT-SoVITS 服务或 Piper），
 // 经 WebSocket（Realtime 事件）为终端 haro 服务。一条连接一个会话（S-3）。
 // 这里只做组装：读配置 → 创建各段实现 → 挂到 HTTP 服务上。
@@ -37,10 +37,10 @@ import (
 )
 
 func main() {
-	logger := slog.New(slog.NewTextHandler(os.Stderr, nil)).With("service", "haro-brain")
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil)).With("service", "haro-server")
 	slog.SetDefault(logger)
 	if err := run(logger); err != nil && !errors.Is(err, context.Canceled) {
-		logger.Error("haro-brain 退出", "err", err)
+		logger.Error("haro-server 退出", "err", err)
 		os.Exit(1)
 	}
 }
@@ -80,7 +80,7 @@ func run(logger *slog.Logger) error {
 	}
 	defer ledger.Close()
 	if settings.UsageDB == "" {
-		logger.Warn("没设 HARO_USAGE_DB：用量只记在内存里，大脑重启后额度重新计算")
+		logger.Warn("没设 HARO_USAGE_DB：用量只记在内存里，服务端重启后额度重新计算")
 	}
 	guard := spending.NewGuard(ledger, spending.Limits{ResearchDailyYen: settings.ResearchDailyYen,
 		LLMMonthlyYen: settings.MonthlyYen, SearchDailyCredits: settings.SearchDailyCredits, WarnRatio: 0.8}, logger)
@@ -146,7 +146,7 @@ func run(logger *slog.Logger) error {
 			return speech.NewSentenceSegmenter(settings.FirstSegmentMinRunes, settings.MaxSegmentRunes)
 		},
 	}
-	// 对话簿所有终端连接共用：换终端、重连、大脑重启都接得上（v4 D1）
+	// 对话簿所有终端连接共用：换终端、重连、服务端重启都接得上（v4 D1）
 	var conversationStore brain.ConversationStore
 	if settings.ConversationsDir != "" {
 		conversationStore = conversationstore.NewFileStore(settings.ConversationsDir)
@@ -167,7 +167,7 @@ func run(logger *slog.Logger) error {
 	}
 	newSession := func() brainserver.Session { return brain.NewSession(components, options, logger) }
 
-	listener, err := net.Listen("tcp", settings.BrainListen)
+	listener, err := net.Listen("tcp", settings.ServerListen)
 	if err != nil {
 		return err
 	}
@@ -178,7 +178,7 @@ func run(logger *slog.Logger) error {
 		defer cancel()
 		_ = server.Shutdown(shutdownCtx)
 	}()
-	logger.Info("haro-brain 启动", "listen", listener.Addr().String(), "model", activeModel(settings), "tts", settings.TTS,
+	logger.Info("haro-server 启动", "listen", listener.Addr().String(), "model", activeModel(settings), "tts", settings.TTS,
 		"personas", len(options.Personas))
 	if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
@@ -230,8 +230,8 @@ func buildRecognizer(ctx context.Context, settings config.Settings, httpClient *
 
 func localURL(port int) string { return "http://127.0.0.1:" + strconv.Itoa(port) }
 
-// brainHandler 是大脑对终端的全部 HTTP 入口：对话（WebSocket）+ 远程登记声纹（v4 C-3，转给 haro-asr）。
-// 终端只认识大脑的地址；haro-asr 只监听本机（容器部署时在同一个容器里）。
+// brainHandler 是服务端对终端的全部 HTTP 入口：对话（WebSocket）+ 远程登记声纹（v4 C-3，转给 haro-asr）。
+// 终端只认识服务端的地址；haro-asr 只监听本机（容器部署时在同一个容器里）。
 func brainHandler(settings config.Settings, newSession brainserver.SessionFactory, logger *slog.Logger) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/", brainserver.NewHandler(newSession, logger))
@@ -242,7 +242,7 @@ func brainHandler(settings config.Settings, newSession brainserver.SessionFactor
 	return mux
 }
 
-// buildChatModel 按 HARO_LLM_PROVIDER 组装大脑用的模型，HARO_LLM_FALLBACK 时另一个当退路：
+// buildChatModel 按 HARO_LLM_PROVIDER 组装服务端用的模型，HARO_LLM_FALLBACK 时另一个当退路：
 //   - cloud：云端为主、本地 ollama 退路（D-A ②）
 //   - local：本地 ollama 为主、云端退路（本地模型那台机器离线时自动改用云端）
 //
@@ -272,18 +272,18 @@ func buildChatModel(settings config.Settings, httpClient *http.Client, ledger sp
 	var paid, free brain.ChatModel // paid：平时用的那套（可能花钱）；free：月度额度用完后退回的本地模型（R5 c）
 	switch {
 	case settings.LLMProvider != config.LLMCloud && !settings.LLMFallback:
-		logger.Info("大脑：本地模型", "model", settings.Model)
+		logger.Info("服务端：本地模型", "model", settings.Model)
 		paid = newLocal(httpClient)
 		free = paid
 	case settings.LLMProvider != config.LLMCloud:
-		logger.Info("大脑：本地模型，失败退回云端", "model", settings.Model, "fallback", settings.CloudLLMModel)
+		logger.Info("服务端：本地模型，失败退回云端", "model", settings.Model, "fallback", settings.CloudLLMModel)
 		paid = llm.NewFallbackChatModel(newLocal(quickClient), "local", newCloud(httpClient), "cloud", settings.LLMCooldown, logger)
 		free = newLocal(httpClient)
 	case !settings.LLMFallback:
-		logger.Info("大脑：云端模型（月度额度用完后不回答：没有本地退路）", "model", settings.CloudLLMModel)
+		logger.Info("服务端：云端模型（月度额度用完后不回答：没有本地退路）", "model", settings.CloudLLMModel)
 		paid = newCloud(quickClient)
 	default:
-		logger.Info("大脑：云端模型，失败退回本地", "model", settings.CloudLLMModel, "fallback", settings.Model)
+		logger.Info("服务端：云端模型，失败退回本地", "model", settings.CloudLLMModel, "fallback", settings.Model)
 		paid = llm.NewFallbackChatModel(newCloud(quickClient), "cloud", newLocal(httpClient), "local", settings.LLMCooldown, logger)
 		free = newLocal(httpClient)
 	}
@@ -323,7 +323,7 @@ func weatherHome(ctx context.Context, settings config.Settings, httpClient *http
 	}
 }
 
-// connectWebSearch 连接联网搜索（v5 E3）；没设密钥或连不上时返回 nil：第三方服务出问题不影响大脑启动，只是没有联网搜索。
+// connectWebSearch 连接联网搜索（v5 E3）；没设密钥或连不上时返回 nil：第三方服务出问题不影响服务端启动，只是没有联网搜索。
 func connectWebSearch(ctx context.Context, settings config.Settings, httpClient *http.Client, logger *slog.Logger) *tools.TavilySearcher {
 	if settings.TavilyAPIKey == "" {
 		logger.Info("联网搜索：没设 HARO_TAVILY_API_KEY，不提供")
@@ -333,7 +333,7 @@ func connectWebSearch(ctx context.Context, settings config.Settings, httpClient 
 	defer cancel()
 	searcher, err := tools.ConnectTavily(connectCtx, settings.TavilyMCPURL, settings.TavilyAPIKey, httpClient, logger)
 	if err != nil {
-		logger.Warn("联网搜索：连不上 Tavily，这次不提供（重启大脑再试）", "err", err)
+		logger.Warn("联网搜索：连不上 Tavily，这次不提供（重启服务端再试）", "err", err)
 		return nil
 	}
 	return searcher
@@ -347,7 +347,7 @@ func startResearch(ctx context.Context, settings config.Settings, httpClient *ht
 		return nil, nil, err
 	}
 	if settings.ResearchDB == "" {
-		logger.Warn("没设 HARO_RESEARCH_DB：调查任务只记在内存里，大脑重启后就忘了")
+		logger.Warn("没设 HARO_RESEARCH_DB：调查任务只记在内存里，服务端重启后就忘了")
 	}
 	pricing := pricingOf(settings)
 	var model brain.ChatModel

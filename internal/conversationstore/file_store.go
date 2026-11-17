@@ -1,7 +1,7 @@
 // Package conversationstore 存对话（v4 D1，实现 brain.ConversationStore）：每人一个 JSON 文件，<目录>/<人>.json。
 //
 // 对话里是家里人说过的话：文件权限 0600（和声纹一样），先写临时文件再改名（写到一半断电也不会坏）。
-// 以后要多副本大脑时换成 Redis 等实现，大脑其他代码不用改。
+// 以后要多副本服务端时换成 Redis 等实现，服务端其他代码不用改。
 package conversationstore
 
 import (

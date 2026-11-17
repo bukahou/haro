@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1
-# haro-brain 镜像（v4 第 4 步）：大脑（含记事本等内置工具，v5）+ haro-asr（cgo，sherpa-onnx），一个容器、一个 Pod。
+# haro-server 镜像（v4 第 4 步）：服务端（含记事本等内置工具，v5）+ haro-asr（cgo，sherpa-onnx），一个容器、一个 Pod。
 #
 # 构建（在仓库根目录；模型不在仓库里，用命名构建上下文 models 指向本机的模型目录）：
-#   make image          # = docker buildx build -f deploy/brain/Dockerfile --build-context models=$HOME/.local/share/haro .
+#   make image          # = docker buildx build -f deploy/server/Dockerfile --build-context models=$HOME/.local/share/haro .
 #
 # 镜像里有什么 / 没什么（v4 4-1 b：公开仓库）：
 #   ✅ 两个程序、识别 / 唤醒 / 声纹模型（都是公开模型）、唤醒词文件
@@ -16,8 +16,8 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-# haro-brain 纯 Go；haro-asr 要 cgo（sherpa-onnx 的原生库随 Go 模块下载，运行时用 LD_LIBRARY_PATH 找）
-RUN CGO_ENABLED=0 go build -trimpath -o /out/bin/haro-brain ./cmd/haro-brain \
+# haro-server 纯 Go；haro-asr 要 cgo（sherpa-onnx 的原生库随 Go 模块下载，运行时用 LD_LIBRARY_PATH 找）
+RUN CGO_ENABLED=0 go build -trimpath -o /out/bin/haro-server ./cmd/haro-server \
  && go build -trimpath -o /out/bin/haro-asr ./cmd/haro-asr \
  && mkdir -p /out/lib \
  && cp "$(go list -m -f '{{.Dir}}' github.com/k2-fsa/sherpa-onnx-go-linux)"/lib/x86_64-unknown-linux-gnu/*.so /out/lib/
@@ -38,7 +38,7 @@ COPY --from=models speaker/3dspeaker_speech_campplus_sv_zh_en_16k-common_advance
 
 # 镜像内部的路径（和镜像一起变）；环境相关的配置（TTS 地址、大模型、性格目录……）由 K8s ConfigMap 给
 ENV LD_LIBRARY_PATH=/opt/haro/lib \
-    HARO_BRAIN_LISTEN=0.0.0.0:59130 \
+    HARO_SERVER_LISTEN=0.0.0.0:59130 \
     HARO_ASR=local \
     HARO_ASR_BIN=/opt/haro/bin/haro-asr \
     HARO_ASR_MODEL_DIR=/opt/haro/models/sensevoice \
@@ -56,4 +56,4 @@ ENV LD_LIBRARY_PATH=/opt/haro/lib \
 
 USER 10001:10001
 EXPOSE 59130
-ENTRYPOINT ["/opt/haro/bin/haro-brain"]
+ENTRYPOINT ["/opt/haro/bin/haro-server"]

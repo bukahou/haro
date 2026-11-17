@@ -2,7 +2,7 @@
 //
 // 大模型与联网搜索都按量计费。每次调用记一笔（token 数、搜索积分、折成日元），按天、按月汇总；
 // Guard 据此决定还能不能花：后台调查按天封顶、大模型按月封顶、搜索积分按天封顶。
-// 云厂商的预算告警一般只发提醒、不会停服务，真正能拦住的只有大脑自己。
+// 云厂商的预算告警一般只发提醒、不会停服务，真正能拦住的只有服务端自己。
 //
 // 对外：OpenLedger（Facade）+ Ledger（接口）；Guard；MeteredChatModel / BudgetedChatModel（装饰 brain.ChatModel）。
 package spending
@@ -53,7 +53,7 @@ type Ledger interface {
 	Close() error
 }
 
-// OpenLedger 打开用量账本：path 是 SQLite 文件路径；空 = 只在内存里（大脑重启就清零，额度也跟着重置）。
+// OpenLedger 打开用量账本：path 是 SQLite 文件路径；空 = 只在内存里（服务端重启就清零，额度也跟着重置）。
 func OpenLedger(ctx context.Context, path string) (Ledger, error) {
 	location := "file::memory:"
 	if path != "" {

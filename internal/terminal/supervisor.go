@@ -1,12 +1,12 @@
 // Package terminal 是终端的看守（v4 第 1 步，D3「终端永不崩溃」）：按状态机把终端一直跑下去，
 // 除非收到关机信号，否则不退出。
 //
-//	连大脑（断了就按 1→2→4…→30 秒的间隔重连）
+//	连服务端（断了就按 1→2→4…→30 秒的间隔重连）
 //	  → 等麦克风（没有就待机，每 2 秒查一次）
 //	  → 运行对话（assistant）；同时每 2 秒按选择规则重新选一次设备（1-C）
 //
-// 运行中任何一处出错（大脑断了、麦克风没了、该换麦克风了），都关掉这条连接、退回「连大脑」重来（1-A）。
-// 大脑断开超过 10 秒，用本地提示音说一声；恢复时再说一声（1-B：断开时终端听不出唤醒词，只能主动说）。
+// 运行中任何一处出错（服务端断了、麦克风没了、该换麦克风了），都关掉这条连接、退回「连服务端」重来（1-A）。
+// 服务端断开超过 10 秒，用本地提示音说一声；恢复时再说一声（1-B：断开时终端听不出唤醒词，只能主动说）。
 package terminal
 
 import (
@@ -19,7 +19,7 @@ import (
 	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
-// Connection 是一条到大脑的连接。
+// Connection 是一条到服务端的连接。
 type Connection interface {
 	assistant.BrainSession
 	Done() <-chan struct{} // 连接断了时关闭
@@ -50,13 +50,13 @@ type Parts struct {
 	CameraName         func() string                                  // 现在能用的摄像头名字；空 = 没有（nil = 这台终端不用摄像头）
 	NewSession         func(conn Connection, devices Devices) Session // 用这条连接和这组设备创建一次对话运行
 	ToneSink           assistant.AudioSink                            // 播提示音用（跟系统默认）
-	Offline            realtimeproto.PCMAudio                         // 「我和大脑断开了……」
+	Offline            realtimeproto.PCMAudio                         // 「我和服务端断开了……」
 	Online             realtimeproto.PCMAudio                         // 「我回来了」
 }
 
 // Timing 是看守的各个时间。
 type Timing struct {
-	OfflineNotice time.Duration // 大脑断开这么久才提示（躲开 make deploy 这种几秒的重启）
+	OfflineNotice time.Duration // 服务端断开这么久才提示（躲开 make deploy 这种几秒的重启）
 	Poll          time.Duration // 多久查一次设备
 	BackoffMin    time.Duration // 重连间隔：从这么久开始翻倍
 	BackoffMax    time.Duration // 重连间隔上限
@@ -80,13 +80,13 @@ func NewSupervisor(parts Parts, timing Timing, logger *slog.Logger) *Supervisor 
 
 // 一次运行为什么结束。
 var (
-	errBrainLost      = errors.New("和大脑的连接断了")
+	errBrainLost      = errors.New("和服务端的连接断了")
 	errSwitchDevice   = errors.New("该换麦克风了")
 	errShutdown       = errors.New("关机")
 	microphoneStopped = assistant.ErrMicrophoneStopped
 )
 
-// offlineState 记大脑从什么时候连不上、有没有提示过。
+// offlineState 记服务端从什么时候连不上、有没有提示过。
 type offlineState struct {
 	since     time.Time
 	announced bool
@@ -101,7 +101,7 @@ func (s *Supervisor) Run(ctx context.Context) error {
 			return nil // 只有关机才会连不上而返回
 		}
 		if offline.announced {
-			s.playTone(ctx, s.parts.Online, "大脑恢复了")
+			s.playTone(ctx, s.parts.Online, "服务端恢复了")
 		}
 		offline = offlineState{}
 		reason := s.serve(ctx, conn)
@@ -110,13 +110,13 @@ func (s *Supervisor) Run(ctx context.Context) error {
 		case ctx.Err() != nil || errors.Is(reason, errShutdown):
 			return nil
 		case errors.Is(reason, errBrainLost):
-			s.logger.Warn("和大脑的连接断了：重连")
+			s.logger.Warn("和服务端的连接断了：重连")
 			offline = offlineState{since: time.Now()}
 		}
 	}
 }
 
-// connect 连大脑，连不上就按翻倍的间隔重试；断开超过 OfflineNotice 时提示一次。
+// connect 连服务端，连不上就按翻倍的间隔重试；断开超过 OfflineNotice 时提示一次。
 func (s *Supervisor) connect(ctx context.Context, offline *offlineState) (Connection, error) {
 	backoff := s.timing.BackoffMin
 	for {
@@ -130,19 +130,19 @@ func (s *Supervisor) connect(ctx context.Context, offline *offlineState) (Connec
 		if offline.since.IsZero() { // 不是因为断线才来重连的（例如刚换完麦克风）：从现在开始算
 			offline.since = time.Now()
 		}
-		s.logger.Warn("连不上大脑", "err", err, "retry_in", backoff)
+		s.logger.Warn("连不上服务端", "err", err, "retry_in", backoff)
 		retryAt := time.Now().Add(backoff)
 		for time.Now().Before(retryAt) {
 			wait := time.Until(retryAt)
 			if !offline.announced {
 				if untilNotice := time.Until(offline.since.Add(s.timing.OfflineNotice)); untilNotice <= 0 {
-					// 到提示时间先立刻再连一次：大脑可能正好在两次重试之间起来了（make deploy 时大脑启动要好几秒，
+					// 到提示时间先立刻再连一次：服务端可能正好在两次重试之间起来了（make deploy 时服务端启动要好几秒，
 					// 而重试间隔在翻倍，下一次可能要等到 15 秒以后）；还连不上才提示（1-B：躲开这类重启）
 					if conn, err := s.parts.Dial(ctx); err == nil {
 						return conn, nil
 					}
 					offline.announced = true
-					s.playTone(ctx, s.parts.Offline, "大脑断开超过提示时间")
+					s.playTone(ctx, s.parts.Offline, "服务端断开超过提示时间")
 					continue
 				} else {
 					wait = min(wait, untilNotice)
@@ -201,7 +201,7 @@ func (s *Supervisor) serve(ctx context.Context, conn Connection) error {
 	return errShutdown // Run 正常返回 = 键盘输入结束等，按关机处理
 }
 
-// waitForMicrophone 等到有麦克风为止（没有就待机）；期间大脑断了就返回 errBrainLost。
+// waitForMicrophone 等到有麦克风为止（没有就待机）；期间服务端断了就返回 errBrainLost。
 func (s *Supervisor) waitForMicrophone(ctx context.Context, conn Connection) (Devices, error) {
 	logged := false
 	for {
@@ -226,8 +226,8 @@ func (s *Supervisor) waitForMicrophone(ctx context.Context, conn Connection) (De
 	}
 }
 
-// watch 在对话运行期间看着连接和设备：大脑断了就结束；该换麦克风时（不在回答中）结束、重来；
-// 音箱、摄像头有无变化时告诉大脑（没有音箱就不合成语音；没有摄像头就不给模型看画面的工具）。
+// watch 在对话运行期间看着连接和设备：服务端断了就结束；该换麦克风时（不在回答中）结束、重来；
+// 音箱、摄像头有无变化时告诉服务端（没有音箱就不合成语音；没有摄像头就不给模型看画面的工具）。
 func (s *Supervisor) watch(ctx context.Context, stop context.CancelCauseFunc, conn Connection, session Session, current Devices) {
 	ticker := time.NewTicker(s.timing.Poll)
 	defer ticker.Stop()
@@ -257,13 +257,13 @@ func (s *Supervisor) watch(ctx context.Context, stop context.CancelCauseFunc, co
 			}
 			changed = true
 		}
-		if latest.Camera != current.Camera { // 摄像头自己会记日志（只在状态变化时），这里只告诉大脑
+		if latest.Camera != current.Camera { // 摄像头自己会记日志（只在状态变化时），这里只告诉服务端
 			current.Camera = latest.Camera
 			changed = true
 		}
 		if changed {
 			if err := conn.Send(ctx, report(current)); err != nil {
-				s.logger.Warn("告诉大脑设备变化失败", "err", err)
+				s.logger.Warn("告诉服务端设备变化失败", "err", err)
 			}
 		}
 	}
@@ -309,7 +309,7 @@ func (s *Supervisor) scan() Devices {
 	return devices
 }
 
-// report 把设备情况转成发给大脑的事件。
+// report 把设备情况转成发给服务端的事件。
 func report(devices Devices) realtimeproto.HaroTerminalDevices {
 	event := realtimeproto.HaroTerminalDevices{Camera: devices.Camera}
 	if devices.HasMicrophone {

@@ -1,11 +1,11 @@
 # haro 构建入口。bin/ 不进 git。
-#   make build        生成 bin/haro-brain（大脑，纯 Go；记事本、网络诊断等自研工具都内置在里面，v5）；bin/haro（终端，cgo：
+#   make build        生成 bin/haro-server（服务端，纯 Go；记事本、网络诊断等自研工具都内置在里面，v5）；bin/haro（终端，cgo：
 #                     音频库 miniaudio 随源码编译，不用装系统库，v4 D10）
-#                     与 bin/haro-asr（cgo，依赖 sherpa-onnx 原生库；由 haro-brain 作为子进程拉起，路径由 HARO_ASR_BIN 指定）
-#                     登记声纹用终端的 bin/haro -enroll <名字>（经大脑登记）
-#   make run          构建后同时运行大脑（后台）和终端（前台）；Ctrl+C 两个一起停（v3 第 3 步：拆成两个程序）
-#   make run-brain    只运行大脑
-#   make run-terminal 只运行终端（大脑要已经在跑）
+#                     与 bin/haro-asr（cgo，依赖 sherpa-onnx 原生库；由 haro-server 作为子进程拉起，路径由 HARO_ASR_BIN 指定）
+#                     登记声纹用终端的 bin/haro -enroll <名字>（经服务端登记）
+#   make run          构建后同时运行服务端（后台）和终端（前台）；Ctrl+C 两个一起停（v3 第 3 步：拆成两个程序）
+#   make run-server    只运行服务端
+#   make run-terminal 只运行终端（服务端要已经在跑）
 #   make test         全部测试
 #   make check-darwin 在 Linux 上检查 Mac 版能否满足平台层契约（GOOS=darwin 类型检查纯 Go 部分；含 cgo 的音频只能在 Mac 上编）
 #
@@ -13,34 +13,34 @@
 #   make install-services    装上并启用（以后登录桌面就自动启动）
 #   make uninstall-services  停掉并卸下
 #   make deploy              构建后重启服务（换上新版本）
-#   开关：systemctl --user start|stop haro.service haro-brain.service；日志：journalctl --user -u haro-brain -f
-.PHONY: build run run-brain run-terminal test check-darwin install-services uninstall-services deploy check-not-running check-no-manual-run image image-push
+#   开关：systemctl --user start|stop haro.service haro-server.service；日志：journalctl --user -u haro-server -f
+.PHONY: build run run-server run-terminal test check-darwin install-services uninstall-services deploy check-not-running check-no-manual-run image image-push
 
-SERVICES := haro-brain.service haro.service
+SERVICES := haro-server.service haro.service
 
-# 大脑镜像（v4 第 4 步，deploy/brain/Dockerfile）：标签 = 提交号；有没提交的改动时拒绝（镜像要能对上源码）
-IMAGE      ?= bukahou/haro-brain
+# 服务端镜像（v4 第 4 步，deploy/server/Dockerfile）：标签 = 提交号；有没提交的改动时拒绝（镜像要能对上源码）
+IMAGE      ?= bukahou/haro-server
 IMAGE_TAG  ?= $(shell git rev-parse --short HEAD)
 MODELS_DIR ?= $(HOME)/.local/share/haro
 
 build:
 	go build -o bin/haro ./cmd/haro            # cgo：终端音频用 miniaudio（v4 D10）
-	CGO_ENABLED=0 go build -o bin/haro-brain ./cmd/haro-brain
+	CGO_ENABLED=0 go build -o bin/haro-server ./cmd/haro-server
 	go build -o bin/haro-asr ./cmd/haro-asr
 
-# 大脑和终端在同一个进程组：Ctrl+C 两个都会收到；终端先退出时 trap 收掉大脑
+# 服务端和终端在同一个进程组：Ctrl+C 两个都会收到；终端先退出时 trap 收掉服务端
 # 开发时直接跑：服务在跑就会抢麦克风和端口 ⇒ 先停服务
 check-not-running:
 	@if systemctl --user is-active --quiet $(SERVICES); then \
-		echo "haro 服务正在运行（会抢麦克风和端口）：先 systemctl --user stop haro.service haro-brain.service，跑完再 start"; exit 1; fi
+		echo "haro 服务正在运行（会抢麦克风和端口）：先 systemctl --user stop haro.service haro-server.service，跑完再 start"; exit 1; fi
 
 run: check-not-running build
-	@./bin/haro-brain & brain=$$!; \
-	trap 'kill $$brain 2>/dev/null; wait $$brain 2>/dev/null' EXIT INT TERM; \
+	@./bin/haro-server & server=$$!; \
+	trap 'kill $$server 2>/dev/null; wait $$server 2>/dev/null' EXIT INT TERM; \
 	./bin/haro
 
-run-brain: check-not-running build
-	./bin/haro-brain
+run-server: check-not-running build
+	./bin/haro-server
 
 run-terminal: check-not-running build
 	./bin/haro
@@ -55,7 +55,7 @@ check-darwin:
 	GOOS=windows CGO_ENABLED=0 go vet ./internal/platform/osdiff/ ./internal/terminal/
 
 check-no-manual-run:
-	@if pgrep -u "$$USER" -x haro-brain >/dev/null && ! systemctl --user is-active --quiet haro-brain.service; then \
+	@if pgrep -u "$$USER" -x haro-server >/dev/null && ! systemctl --user is-active --quiet haro-server.service; then \
 		echo "有手动启动的 haro 在跑（make run）：先在那个终端按 Ctrl+C 停掉"; exit 1; fi
 
 install-services: check-no-manual-run build
@@ -67,10 +67,10 @@ uninstall-services:
 deploy: check-no-manual-run build
 	systemctl --user restart $(SERVICES)
 
-# 构建大脑镜像（只在本机，不推送）。模型目录不在仓库里：用命名构建上下文 models 传进去
+# 构建服务端镜像（只在本机，不推送）。模型目录不在仓库里：用命名构建上下文 models 传进去
 image:
 	@git diff --quiet HEAD || { echo "有没提交的改动：先提交，镜像标签要能对上源码"; exit 1; }
-	docker buildx build --platform linux/amd64 -f deploy/brain/Dockerfile \
+	docker buildx build --platform linux/amd64 -f deploy/server/Dockerfile \
 		--build-context models=$(MODELS_DIR) -t $(IMAGE):$(IMAGE_TAG) --load .
 
 # 推送到 Docker Hub（公开仓库，v4 4-1 b）。推之前先看一遍镜像里有什么：

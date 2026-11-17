@@ -39,9 +39,9 @@ type Components struct {
 
 // Options 是终端行为的可调参数。
 type Options struct {
-	Instructions string        // 系统提示词，启动时经 session.update 交给大脑
+	Instructions string        // 系统提示词，启动时经 session.update 交给服务端
 	MinSpeech    time.Duration // 按键模式：短于这个时长的录音视为误触，直接丢弃
-	// TurnDetection 非 nil 时为免按键模式（v2）：大脑侧 VAD 判断说完；nil 为按键模式（v1.5）。
+	// TurnDetection 非 nil 时为免按键模式（v2）：服务端侧 VAD 判断说完；nil 为按键模式（v1.5）。
 	TurnDetection *realtimeproto.TurnDetection
 	EchoGuard     time.Duration // 免按键模式：播完后再静音这么久才恢复上传，防止把自己的回音当成用户说话
 	// WakeWord 非 nil 时启用唤醒词（v2.2，需要 TurnDetection）：叫唤醒词才听，对话窗口结束自动休眠。
@@ -49,7 +49,7 @@ type Options struct {
 	// BargeIn 为 true 时可以用唤醒词打断回答（v3 I-1，需要 WakeWord）：播放时麦克风照常上传，
 	// 语音前端只听唤醒词；听到就停播、取消回答、转为听用户说。
 	BargeIn bool
-	// NoticeTone 是大脑发来提示（haro.notice，例如后台调查查完了）时播的一声；空 = 只写日志
+	// NoticeTone 是服务端发来提示（haro.notice，例如后台调查查完了）时播的一声；空 = 只写日志
 	NoticeTone realtimeproto.PCMAudio
 }
 
@@ -60,7 +60,7 @@ type WakeWordOptions struct {
 	SleepTone   realtimeproto.PCMAudio // 休眠时播一声（「我去睡觉了」），让人知道要重新叫唤醒词；空 = 不播
 }
 
-// Assistant 是 haro 的对外入口：反复执行「听 → 看 → 交给大脑 → 说」。
+// Assistant 是 haro 的对外入口：反复执行「听 → 看 → 交给服务端 → 说」。
 type Assistant struct {
 	parts  Components
 	opts   Options
@@ -83,7 +83,7 @@ func (a *Assistant) Run(ctx context.Context) error {
 	update := realtimeproto.SessionUpdate{Instructions: a.opts.Instructions, TurnDetection: a.opts.TurnDetection,
 		WakeWord: a.opts.TurnDetection != nil && a.opts.WakeWord != nil, NoCamera: a.parts.Camera == nil}
 	if err := a.parts.Brain.Send(ctx, update); err != nil {
-		return fmt.Errorf("初始化大脑会话: %w", err)
+		return fmt.Errorf("初始化服务端会话: %w", err)
 	}
 	switch {
 	case update.WakeWord:
@@ -138,7 +138,7 @@ func (a *Assistant) HandleTurn(ctx context.Context) error {
 	if err := brain.Send(ctx, realtimeproto.InputAudioBufferCommit{}); err != nil {
 		return fail(span, "提交录音", err)
 	}
-	// 大脑已经开始识别；取帧与识别并行（常驻摄像头不用等）。没有摄像头时跳过。
+	// 服务端已经开始识别；取帧与识别并行（常驻摄像头不用等）。没有摄像头时跳过。
 	if err := a.attachFrame(ctx, span); err != nil {
 		return fail(span, "提交画面", err)
 	}
@@ -171,8 +171,8 @@ func fail(span trace.Span, step string, err error) error {
 	return wrapped
 }
 
-// attachFrame 把「说完那一刻」的画面交给大脑。没有摄像头（v3 H-2）时什么都不做；取帧失败只记日志，本轮不带画面。
-// 只有交给大脑失败时返回错误。
+// attachFrame 把「说完那一刻」的画面交给服务端。没有摄像头（v3 H-2）时什么都不做；取帧失败只记日志，本轮不带画面。
+// 只有交给服务端失败时返回错误。
 func (a *Assistant) attachFrame(ctx context.Context, span trace.Span) error {
 	if a.parts.Camera == nil {
 		return nil

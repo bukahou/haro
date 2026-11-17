@@ -10,7 +10,7 @@ import (
 	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
-// Components 是大脑需要的全部能力，由 cmd/haro 组装注入。
+// Components 是服务端需要的全部能力，由 cmd/haro 组装注入。
 type Components struct {
 	Recognizer   SpeechRecognizer
 	Streaming    StreamingRecognizer // 可选：免按键（server_vad）模式需要
@@ -30,11 +30,11 @@ type Components struct {
 	Notices *NoticeHub
 }
 
-// Options 是大脑的可调参数。
+// Options 是服务端的可调参数。
 type Options struct {
 	MaxHistoryTurn int // 保留最近几轮（一问一答算一轮）的文字历史
 
-	// Instructions 是默认的基础提示词（身份、能力、底线）。v3 起由大脑持有，终端不再发；
+	// Instructions 是默认的基础提示词（身份、能力、底线）。v3 起由服务端持有，终端不再发；
 	// 终端在 session.update 里带了 instructions 时以终端的为准（与 Realtime 一致）。
 	Instructions string
 
@@ -181,7 +181,7 @@ func (s *Session) Send(ctx context.Context, event realtimeproto.ClientEvent) err
 	defer s.mu.Unlock()
 	switch e := event.(type) {
 	case realtimeproto.SessionUpdate:
-		if e.Instructions != "" { // 不带 instructions 时保留大脑自己的默认提示词
+		if e.Instructions != "" { // 不带 instructions 时保留服务端自己的默认提示词
 			s.instructions = e.Instructions
 		}
 		s.noCamera = e.NoCamera

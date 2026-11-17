@@ -63,7 +63,7 @@ func (c *ContinuousCamera) Run(ctx context.Context) {
 	}
 }
 
-// CurrentName 是现在能用的摄像头名字；不可用时为空（看守据此告诉大脑）。
+// CurrentName 是现在能用的摄像头名字；不可用时为空（看守据此告诉服务端）。
 func (c *ContinuousCamera) CurrentName() string { return c.health.currentName() }
 
 func (c *ContinuousCamera) runFFmpeg(ctx context.Context, input []string, name string) error {

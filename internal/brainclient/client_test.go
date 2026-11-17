@@ -152,7 +152,7 @@ func TestConversationOverWebSocket(t *testing.T) {
 	}
 }
 
-// trackingListener 记下每条底层连接，killAll 一次性关掉（模拟大脑进程挂掉；httptest 管不到已升级成 WebSocket 的连接）。
+// trackingListener 记下每条底层连接，killAll 一次性关掉（模拟服务端进程挂掉；httptest 管不到已升级成 WebSocket 的连接）。
 type trackingListener struct {
 	net.Listener
 	mu    sync.Mutex
@@ -177,7 +177,7 @@ func (l *trackingListener) killAll() {
 	}
 }
 
-// 回答到一半大脑断了：终端收到 error + 失败的 response.done（不会一直等），之后 Send 返回 ErrDisconnected。
+// 回答到一半服务端断了：终端收到 error + 失败的 response.done（不会一直等），之后 Send 返回 ErrDisconnected。
 func TestDisconnectDuringResponse(t *testing.T) {
 	server := newServer(slowModel{tokens: []string{"说到一半"}, hang: true})
 	server.Close() // 只借用它的 handler，改用自己的监听
@@ -220,22 +220,22 @@ func TestDisconnectDuringResponse(t *testing.T) {
 	}
 }
 
-// 大脑一直没起来：等满 wait 后给出明确的错误。
+// 服务端一直没起来：等满 wait 后给出明确的错误。
 func TestDialGivesUpAfterWait(t *testing.T) {
 	server := newServer(slowModel{})
 	url := server.URL
 	server.Close() // 地址存在但没人监听
 	started := time.Now()
 	_, err := brainclient.Dial(context.Background(), url, mic16k, 1500*time.Millisecond, quiet)
-	if err == nil || !strings.Contains(err.Error(), "连不上大脑") {
-		t.Fatalf("应返回「连不上大脑」，得到 %v", err)
+	if err == nil || !strings.Contains(err.Error(), "连不上服务端") {
+		t.Fatalf("应返回「连不上服务端」，得到 %v", err)
 	}
 	if elapsed := time.Since(started); elapsed < time.Second {
 		t.Errorf("应该重试到等待时间用完，只等了 %s", elapsed)
 	}
 }
 
-// 音频格式和声明的不一致：直接拒绝（避免大脑按错的采样率去识别）。
+// 音频格式和声明的不一致：直接拒绝（避免服务端按错的采样率去识别）。
 func TestRejectsMismatchedAudioFormat(t *testing.T) {
 	server := newServer(slowModel{})
 	defer server.Close()

@@ -7,7 +7,7 @@ import (
 )
 
 // 本文件是「转写会话」（OpenAI Realtime 的 intent=transcription）在 WebSocket 上的 JSON 格式子集，
-// 用于 haro 大脑 ↔ haro-asr。和官方的差异：
+// 用于 haro 服务端 ↔ haro-asr。和官方的差异：
 //   - 音频固定为 16kHz 单声道 pcm16（官方 pcm 只支持 24kHz）；在 session.update 的 format.rate 里声明。
 //   - 只实现 server_vad；服务端不发 session.created / committed，只发下面列出的事件。
 // ⚠️ 落地 v3 或对接官方实现前，须对照当时的官方文档核对字段。

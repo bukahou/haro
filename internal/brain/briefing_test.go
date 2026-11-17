@@ -48,7 +48,7 @@ func TestBriefingGoesBeforeTheUserTurn(t *testing.T) {
 	}
 }
 
-// 模型返回 SpokenError（例如额度用完）时，大脑把原因说出来，而不是只报错。
+// 模型返回 SpokenError（例如额度用完）时，服务端把原因说出来，而不是只报错。
 type overBudgetModel struct{}
 
 type spokenErr struct{}

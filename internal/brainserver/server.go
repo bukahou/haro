@@ -1,9 +1,9 @@
-// Package brainserver 把大脑挂到 WebSocket 上（v3 第 3 步）：
+// Package brainserver 把服务端挂到 WebSocket 上（v3 第 3 步）：
 //   - GET /v1/realtime：对话会话（Realtime 事件，格式见 realtimeproto/conversation_wire.go）
 //   - GET /health
 //
 // 一条连接一个会话（S-3，与 OpenAI Realtime 一致）：连接断了，这次的对话历史就没了（性格记在文件里，不受影响）。
-// 本包只管协议和连接，会话由外部注入（haro-brain 注入 brain.Session）。
+// 本包只管协议和连接，会话由外部注入（haro-server 注入 brain.Session）。
 package brainserver
 
 import (
