@@ -12,9 +12,16 @@ updates:
     target-branch: dev
     schedule:
       interval: weekly
+    ignore:
+      # onnxruntime_go 要和 sherpa-onnx 自带的 onnxruntime 动态库对得上（internal/smartturn/detector.go）：单独升会在运行时坏掉
+      # （2026-11-17 提议过 v1.32.1 → v1.38.0：API 28 → 31，自带的是 1.28.2）。升级 sherpa-onnx 时再手动一起对齐；
+      # 对不上时 internal/smartturn 的 TestBundledOnnxRuntimeSupportsBinding 会失败
+      - dependency-name: github.com/yalue/onnxruntime_go
     groups:
       go:
         patterns: ["*"]
+        # 识别引擎 sherpa-onnx 单独开 PR：它带着 onnxruntime 动态库和模型接口，升级要单独看、单独验收
+        exclude-patterns: ["github.com/k2-fsa/sherpa-onnx-go*"]
     commit-message:
       prefix: "deps(go)"
 
