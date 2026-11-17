@@ -1,0 +1,12 @@
+{
+  "name": "example",
+  "description": "示例声音档案（GPT-SoVITS）：每种情绪一段参考录音（录音文件放在 TTS 服务那台机器的 HARO_TTS_REF_DIR 里）与它的原文。只有 default 是必须的，没配的情绪用 default。请用你有权使用的声音。",
+  "references": {
+    "default": {"file": "ref-default.wav", "text": "今天也辛苦了，有什么想聊的吗？", "lang": "zh"},
+    "tease":   {"file": "ref-tease.wav",   "text": "哟，这么简单的事也要问我呀？", "lang": "zh"},
+    "laugh":   {"file": "ref-laugh.wav",   "text": "哈哈哈，这也太好笑了吧。", "lang": "zh"},
+    "excited": {"file": "ref-excited.wav", "text": "真的吗？那太好了！", "lang": "zh"},
+    "gentle":  {"file": "ref-gentle.wav",  "text": "没关系，慢慢来，我一直都在。", "lang": "zh"},
+    "whisper": {"file": "ref-whisper.wav", "text": "嘘，小声一点，别吵醒别人。", "lang": "zh"}
+  }
+}

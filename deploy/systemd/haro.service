@@ -1,0 +1,22 @@
+# haro 终端（v3 第 4 步）：麦克风、音箱、摄像头，连本机的大脑。
+# 依赖桌面会话里的 PipeWire（麦克风等设备的权限只发给登录中的桌面会话）⇒ 跟着桌面会话启停（4-1）。
+# 大脑重启、断线时终端不退出，自己重连（v4 D3 看守）；Restart 只作兜底。没有键盘（stdin 为空）时只用唤醒词。
+[Unit]
+Description=haro 终端
+Documentation=file://%h/work/github/haro/docs/architecture.md
+Wants=haro-brain.service
+After=haro-brain.service graphical-session.target pipewire.service wireplumber.service
+PartOf=graphical-session.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+# 配置（含凭证）放在 ~/.config/haro/haro.env（可以是指向别处的软链接）；.service 里不放任何凭证
+Environment=HARO_ENV_FILE=%h/.config/haro/haro.env
+ExecStart=%h/work/github/haro/deploy/systemd/run-with-env.sh bin/haro
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=graphical-session.target
