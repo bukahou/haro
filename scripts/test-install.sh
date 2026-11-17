@@ -22,7 +22,8 @@ asset=$(basename "$tarball")
 if command -v sha256sum >/dev/null 2>&1; then sum=$(sha256sum "$release/$asset" | cut -d' ' -f1); else sum=$(shasum -a 256 "$release/$asset" | cut -d' ' -f1); fi
 printf '%s  %s\n' "$sum" "$asset" >"$release/SHA256SUMS"
 
-installer() { HOME=$home HARO_RELEASE_BASE_URL=file://$release sh "$root/scripts/install.sh" --no-service "$@"; }
+# ${1+"$@"}：没有参数时什么都不展开（老的 sh 在 set -u 下展开空的 "$@" 可能报错）
+installer() { HOME=$home HARO_RELEASE_BASE_URL=file://$release sh "$root/scripts/install.sh" --no-service ${1+"$@"}; }
 fail() {
 	echo "❌ 安装脚本测试失败：$*" >&2
 	exit 1
@@ -30,10 +31,12 @@ fail() {
 
 echo "== 第一次安装不给服务端地址：必须拒绝"
 if installer >"$work/out" 2>&1; then fail "没给 --server-url 也装上了"; fi
+# 阳性对照：要确认是因为没给地址才拒绝，而不是脚本自己出错（macOS 上曾经是后者，这一条却照样通过）
+grep -F '第一次安装要告诉终端服务端在哪' "$work/out" >/dev/null || fail "拒绝的原因不对：$(cat "$work/out")"
 
 echo "== 第一次安装"
 installer --server-url http://192.0.2.10:59130
-"$home/.local/bin/haro" -version | grep -F "haro $want " >/dev/null || fail "装上的版本不是 $want：$("$home/.local/bin/haro" -version)"
+"$home/.local/bin/haro" -version | grep -F "haro $want " >/dev/null || fail "装上的版本不是 ${want}：$("$home/.local/bin/haro" -version)"
 grep -Fx 'HARO_SERVER_URL="http://192.0.2.10:59130"' "$home/.config/haro/haro.env" >/dev/null || fail "配置文件里没有服务端地址"
 
 echo "== 再装一次（升级）：配置文件不变"
@@ -50,4 +53,4 @@ echo "== 卸载：程序删掉，配置文件留着"
 installer --uninstall
 [ ! -e "$home/.local/bin/haro" ] || fail "卸载后程序还在"
 [ -f "$home/.config/haro/haro.env" ] || fail "卸载时删了配置文件"
-echo "✅ 安装脚本测试通过（$asset，$want）"
+echo "✅ 安装脚本测试通过（${asset}，${want}）"

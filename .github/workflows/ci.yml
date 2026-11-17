@@ -69,6 +69,14 @@ jobs:
           command -v shellcheck >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck; }
           shellcheck --version | head -2
           shellcheck --severity=warning scripts/*.sh deploy/systemd/run-with-env.sh
+      # macOS 的 sh 是 bash 3.2：紧跟在 $变量名 后面的中文会被当成变量名的一部分（报 unbound variable，2026-11-17 踩过）
+      #   ⇒ 变量后面紧跟非 ASCII 字符时一律写成 ${变量名}
+      - name: 变量名后面不能紧跟中文（macOS 兼容）
+        run: |
+          if grep -nP '(?<!\\)\$[A-Za-z_][A-Za-z0-9_]*(?=[^\x00-\x7F])' scripts/*.sh deploy/systemd/run-with-env.sh; then
+            echo '::error::上面这些地方要写成 ${变量名}'
+            exit 1
+          fi
 
   build:
     needs: version

@@ -67,7 +67,7 @@ done
 os=$(uname -s)
 case $os in
 Linux | Darwin) ;;
-*) die "不支持这个系统：$os（支持 Linux、macOS）" ;;
+*) die "不支持这个系统：${os}（支持 Linux、macOS）" ;;
 esac
 
 # owned FILE：这个服务文件是本脚本装的（文件里有标记）
@@ -104,7 +104,7 @@ uninstall() {
 			warn "$binary 看起来不是 haro 终端，没有删"
 		fi
 	fi
-	[ ! -e "$env_file" ] || say "配置文件留着：$env_file（不要了就自己删）"
+	[ ! -e "$env_file" ] || say "配置文件留着：${env_file}（不要了就自己删）"
 }
 
 if [ "$action" = uninstall ]; then
@@ -121,7 +121,7 @@ case $os/$arch in
 Linux/x86_64 | Linux/amd64) platform=linux-amd64 ;;
 Linux/aarch64 | Linux/arm64) platform=linux-arm64 ;;
 Darwin/arm64) platform=darwin-arm64 ;;
-*) die "不支持这个平台：$os $arch（支持 Linux x86_64 / arm64、macOS Apple 芯片）" ;;
+*) die "不支持这个平台：$os ${arch}（支持 Linux x86_64 / arm64、macOS Apple 芯片）" ;;
 esac
 asset=haro-$platform.tar.gz
 
@@ -153,7 +153,7 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 trap 'exit 130' INT TERM
 
-say "下载 $asset（$version）"
+say "下载 ${asset}（${version}）"
 curl -fsSL --retry 3 --retry-delay 2 -o "$work/SHA256SUMS" "$base_url/SHA256SUMS" ||
 	die "下载不了 $base_url/SHA256SUMS（版本写对了吗？）"
 curl -fsSL --retry 3 --retry-delay 2 -o "$work/$asset" "$base_url/$asset" ||
@@ -161,7 +161,7 @@ curl -fsSL --retry 3 --retry-delay 2 -o "$work/$asset" "$base_url/$asset" ||
 expected=$(awk -v name="$asset" '$2 == name || $2 == "*" name { print $1; exit }' "$work/SHA256SUMS")
 [ -n "$expected" ] || die "SHA256SUMS 里没有 $asset"
 actual=$(sha256_of "$work/$asset")
-[ "$actual" = "$expected" ] || die "校验不过：$asset 的 sha256 是 $actual，SHA256SUMS 写的是 $expected（下载出错或文件被改过），没有安装"
+[ "$actual" = "$expected" ] || die "校验不过：$asset 的 sha256 是 ${actual}，SHA256SUMS 写的是 ${expected}（下载出错或文件被改过），没有安装"
 
 mkdir -p "$work/unpacked" "$bin_dir"
 tar -xzf "$work/$asset" -C "$work/unpacked"
@@ -218,7 +218,7 @@ install_systemd_unit() {
 	fi
 	mkdir -p "$(dirname "$unit_file")"
 	cat >"$unit_file" <<EOF
-# $marker（$installed）。重新运行安装脚本会覆盖本文件；卸载：安装脚本加 --uninstall
+# ${marker}（${installed}）。重新运行安装脚本会覆盖本文件；卸载：安装脚本加 --uninstall
 # 依赖桌面会话里的 PipeWire（麦克风等设备的权限只发给登录中的桌面会话）⇒ 跟着桌面会话启停。
 # 服务端重启、断线时终端不退出，自己重连；Restart 只作兜底。
 [Unit]
@@ -254,7 +254,7 @@ install_launch_agent() {
 	cat >"$plist_file" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- $marker（$installed）。重新运行安装脚本会覆盖本文件；卸载：安装脚本加 --uninstall -->
+<!-- ${marker}（${installed}）。重新运行安装脚本会覆盖本文件；卸载：安装脚本加 --uninstall -->
 <plist version="1.0">
 <dict>
 	<key>Label</key>
@@ -280,7 +280,7 @@ install_launch_agent() {
 EOF
 	launchctl bootout "gui/$(id -u)/$launchd_label" 2>/dev/null || true
 	launchctl bootstrap "gui/$(id -u)" "$plist_file"
-	say "已装成 LaunchAgent 并启动：$launchd_label（日志：tail -f $log_file）"
+	say "已装成 LaunchAgent 并启动：${launchd_label}（日志：tail -f ${log_file}）"
 	say "第一次运行时 macOS 会问能不能用麦克风；没弹窗时到「系统设置 → 隐私与安全性 → 麦克风」里允许"
 }
 

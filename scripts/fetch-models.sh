@@ -87,17 +87,17 @@ while read -r sha256 size asset path url member; do
 			rm -f "$work/archive"
 		fi
 		[ -f "$unpacked/$member" ] || {
-			echo "压缩包里没有 $member（$url）" >&2
+			echo "压缩包里没有 ${member}（${url}）" >&2
 			exit 1
 		}
 		cp "$unpacked/$member" "$staged"
 	fi
 	if ! matches "$staged" "$sha256" "$size"; then
-		echo "校验不过：$asset —— 应为 $size 字节 / sha256 $sha256，实际 $(size_of "$staged") 字节 / $(sha256_of "$staged")" >&2
+		echo "校验不过：$asset —— 应为 $size 字节 / sha256 ${sha256}，实际 $(size_of "$staged") 字节 / $(sha256_of "$staged")" >&2
 		exit 1
 	fi
 	mkdir -p "$(dirname "$target")"
 	mv -f "$staged" "$target"
 	fetched=$((fetched + 1))
 done <"$work/entries"
-echo "模型齐了（$release）：新下载 $fetched 个，原有 $kept 个 → $dest"
+echo "模型齐了（${release}）：新下载 $fetched 个，原有 $kept 个 → $dest"
