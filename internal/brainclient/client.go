@@ -16,7 +16,7 @@ import (
 
 	"github.com/coder/websocket"
 
-	"haro/internal/realtimeproto"
+	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
 // ErrDisconnected 表示和大脑的连接断了。

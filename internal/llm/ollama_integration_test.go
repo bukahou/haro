@@ -16,7 +16,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"haro/internal/brain"
+	"github.com/bukahou/haro/internal/brain"
 )
 
 func TestOllamaStreamReplyLive(t *testing.T) {

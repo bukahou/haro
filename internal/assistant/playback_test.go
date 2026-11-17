@@ -11,7 +11,7 @@ import (
 
 	"go.opentelemetry.io/otel/trace"
 
-	"haro/internal/realtimeproto"
+	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
 // scriptedBrain：事件由测试推送；收到 response.cancel 时按真实大脑的样子补发（先一个用户开口的事件，再 response.done）。

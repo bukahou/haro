@@ -9,8 +9,8 @@ import (
 
 	"github.com/gen2brain/malgo"
 
-	"haro/internal/assistant"
-	"haro/internal/realtimeproto"
+	"github.com/bukahou/haro/internal/assistant"
+	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
 // 播放设备的缓冲：一个周期 20 ms、3 个周期 ⇒ 设备侧约 60 ms 延迟。

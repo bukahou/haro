@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"haro/internal/brain"
+	"github.com/bukahou/haro/internal/brain"
 )
 
 // FallbackChatModel 先用主模型（云端）；主模型在**产出任何内容之前**就失败了（断网、超时、服务报错），

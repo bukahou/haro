@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"haro/internal/brain"
-	"haro/internal/weather"
+	"github.com/bukahou/haro/internal/brain"
+	"github.com/bukahou/haro/internal/weather"
 )
 
 // fakeOpenMeteo 回固定的地名与预报，记下查的坐标。

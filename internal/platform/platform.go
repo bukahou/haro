@@ -13,11 +13,11 @@ import (
 	"context"
 	"log/slog"
 
-	"haro/internal/assistant"
-	"haro/internal/platform/audio"
-	"haro/internal/platform/camera"
-	"haro/internal/platform/osdiff"
-	"haro/internal/terminal"
+	"github.com/bukahou/haro/internal/assistant"
+	"github.com/bukahou/haro/internal/platform/audio"
+	"github.com/bukahou/haro/internal/platform/camera"
+	"github.com/bukahou/haro/internal/platform/osdiff"
+	"github.com/bukahou/haro/internal/terminal"
 )
 
 // LocalDevices 是本机的设备层（整个终端进程一个）。

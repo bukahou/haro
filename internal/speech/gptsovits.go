@@ -16,8 +16,8 @@ import (
 	"strings"
 	"time"
 
-	"haro/internal/brain"
-	"haro/internal/realtimeproto"
+	"github.com/bukahou/haro/internal/brain"
+	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
 // GPTSoVITSSynthesizer 调用 GPT-SoVITS 的 api_v2（POST /tts）边合成边产出。

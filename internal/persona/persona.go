@@ -12,7 +12,7 @@ import (
 	"sort"
 	"strings"
 
-	"haro/internal/brain"
+	"github.com/bukahou/haro/internal/brain"
 )
 
 // file 是性格档案的文件格式。

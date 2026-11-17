@@ -14,14 +14,14 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
-	"haro/internal/realtimeproto"
-	"haro/internal/telemetry"
+	"github.com/bukahou/haro/internal/realtimeproto"
+	"github.com/bukahou/haro/internal/telemetry"
 )
 
 var (
-	tracer = otel.Tracer("haro/assistant")
+	tracer = otel.Tracer("github.com/bukahou/haro/assistant")
 	// timeToFirstAudio 是核心指标：用户说完（commit）→ 第一段回答音频写入播放器。
-	timeToFirstAudio = telemetry.MustLatencyHistogram(otel.Meter("haro/assistant"),
+	timeToFirstAudio = telemetry.MustLatencyHistogram(otel.Meter("github.com/bukahou/haro/assistant"),
 		"haro.turn.time_to_first_audio", "用户说完到第一段回答音频写入播放器的时间")
 )
 

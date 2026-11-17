@@ -14,7 +14,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"haro/internal/brain"
+	"github.com/bukahou/haro/internal/brain"
 )
 
 // Toolbox 实现 brain.Toolbox。

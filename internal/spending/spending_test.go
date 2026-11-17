@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"haro/internal/brain"
+	"github.com/bukahou/haro/internal/brain"
 )
 
 var quietLogger = slog.New(slog.NewTextHandler(io.Discard, nil))

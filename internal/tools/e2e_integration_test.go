@@ -18,12 +18,12 @@ import (
 	"testing"
 	"time"
 
-	"haro/internal/brain"
-	"haro/internal/llm"
-	"haro/internal/netdiag"
-	"haro/internal/notes"
-	"haro/internal/realtimeproto"
-	"haro/internal/speech"
+	"github.com/bukahou/haro/internal/brain"
+	"github.com/bukahou/haro/internal/llm"
+	"github.com/bukahou/haro/internal/netdiag"
+	"github.com/bukahou/haro/internal/notes"
+	"github.com/bukahou/haro/internal/realtimeproto"
+	"github.com/bukahou/haro/internal/speech"
 )
 
 type textRecognizer struct {

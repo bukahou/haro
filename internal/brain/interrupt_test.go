@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"haro/internal/brain"
-	"haro/internal/realtimeproto"
-	"haro/internal/speech"
+	"github.com/bukahou/haro/internal/brain"
+	"github.com/bukahou/haro/internal/realtimeproto"
+	"github.com/bukahou/haro/internal/speech"
 )
 
 // oneSecondSynth 每句产出 1 秒的声音（16 kHz 单声道 = 32000 字节），方便按时间截断。

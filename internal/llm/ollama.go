@@ -14,7 +14,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"haro/internal/brain"
+	"github.com/bukahou/haro/internal/brain"
 )
 
 // OllamaChatModel 调用 ollama 的 /api/chat（流式）。

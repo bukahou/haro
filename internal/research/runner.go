@@ -11,8 +11,8 @@ import (
 	"time"
 	"unicode"
 
-	"haro/internal/brain"
-	"haro/internal/tools"
+	"github.com/bukahou/haro/internal/brain"
+	"github.com/bukahou/haro/internal/tools"
 )
 
 // Limits 是每个调查任务的硬上限（R2）：由程序强制，不靠模型自己停。先到先停。

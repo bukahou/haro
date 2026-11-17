@@ -10,7 +10,7 @@ import (
 	"net/http"
 	"strings"
 
-	"haro/internal/realtimeproto"
+	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
 // OpenAITranscriptionRecognizer 调用任何 OpenAI 兼容的 POST /v1/audio/transcriptions 做语音转文字：

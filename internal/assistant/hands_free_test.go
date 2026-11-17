@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"haro/internal/assistant"
-	"haro/internal/brain"
-	"haro/internal/realtimeproto"
-	"haro/internal/speech"
+	"github.com/bukahou/haro/internal/assistant"
+	"github.com/bukahou/haro/internal/brain"
+	"github.com/bukahou/haro/internal/realtimeproto"
+	"github.com/bukahou/haro/internal/speech"
 )
 
 // 免按键整轮：进入对话模式 → 麦克风持续上传 → 替身 VAD 判定说完 → 回答播完 → 退出。

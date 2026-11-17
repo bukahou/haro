@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"haro/internal/brain"
-	"haro/internal/realtimeproto"
+	"github.com/bukahou/haro/internal/brain"
+	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
 // PiperHTTPSynthesizer 调用 Piper 官方 HTTP 服务（python -m piper.http_server）逐句合成。

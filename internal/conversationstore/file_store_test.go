@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"haro/internal/brain"
+	"github.com/bukahou/haro/internal/brain"
 )
 
 func TestFileStoreRoundTrip(t *testing.T) {

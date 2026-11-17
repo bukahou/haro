@@ -4,7 +4,7 @@ import (
 	"regexp"
 	"strings"
 
-	"haro/internal/terminal"
+	"github.com/bukahou/haro/internal/terminal"
 )
 
 // 这个文件不带构建标签（文件名不以 _darwin.go 结尾）：macOS 的解析规则在开发机上也能测。

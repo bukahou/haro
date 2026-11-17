@@ -9,7 +9,7 @@ import (
 
 	sherpa "github.com/k2-fsa/sherpa-onnx-go/sherpa_onnx"
 
-	"haro/internal/realtimeproto"
+	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
 // SpeakerEmbedder 用说话人识别模型（sherpa-onnx，CAM++）把一段 16 kHz 语音算成声纹向量（v3 H-3）。

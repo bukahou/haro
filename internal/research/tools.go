@@ -8,8 +8,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"haro/internal/brain"
-	"haro/internal/tools"
+	"github.com/bukahou/haro/internal/brain"
+	"github.com/bukahou/haro/internal/tools"
 )
 
 // Tools 返回主对话里的三个调查工具（R1：复杂问题派后台调查；简单的用 web_search 当场答）。

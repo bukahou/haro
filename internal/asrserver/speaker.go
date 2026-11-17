@@ -4,7 +4,7 @@ import (
 	"math"
 	"sync"
 
-	"haro/internal/voiceprint"
+	"github.com/bukahou/haro/internal/voiceprint"
 )
 
 // SpeakerEmbedder 把一段 16 kHz 语音算成声纹向量（cgo 实现在 sensevoice，v3 H-3）。

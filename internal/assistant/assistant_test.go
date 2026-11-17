@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"haro/internal/assistant"
-	"haro/internal/brain"
-	"haro/internal/realtimeproto"
-	"haro/internal/speech"
+	"github.com/bukahou/haro/internal/assistant"
+	"github.com/bukahou/haro/internal/brain"
+	"github.com/bukahou/haro/internal/realtimeproto"
+	"github.com/bukahou/haro/internal/speech"
 )
 
 // 终端 + 真实的 brain.Session + 替身硬件/模型：验证一轮对话从按键到播完的整条路径。

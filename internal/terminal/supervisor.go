@@ -15,8 +15,8 @@ import (
 	"log/slog"
 	"time"
 
-	"haro/internal/assistant"
-	"haro/internal/realtimeproto"
+	"github.com/bukahou/haro/internal/assistant"
+	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
 // Connection 是一条到大脑的连接。

@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"haro/internal/brain"
-	"haro/internal/netdiag"
-	"haro/internal/notes"
+	"github.com/bukahou/haro/internal/brain"
+	"github.com/bukahou/haro/internal/netdiag"
+	"github.com/bukahou/haro/internal/notes"
 )
 
 // buildFakeServer 把测试用的第三方 MCP 服务（testdata/fakemcp）编译到临时目录。

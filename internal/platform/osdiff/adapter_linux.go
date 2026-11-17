@@ -5,7 +5,7 @@ package osdiff
 import (
 	"context"
 
-	"haro/internal/terminal"
+	"github.com/bukahou/haro/internal/terminal"
 )
 
 // linuxAdapter：音频设备 ID 是 PulseAudio / PipeWire 的节点名；摄像头走 V4L2。

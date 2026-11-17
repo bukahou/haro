@@ -16,8 +16,8 @@ import (
 
 	sherpa "github.com/k2-fsa/sherpa-onnx-go/sherpa_onnx"
 
-	"haro/internal/asrserver"
-	"haro/internal/realtimeproto"
+	"github.com/bukahou/haro/internal/asrserver"
+	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
 // Recognizer 封装 sherpa-onnx 的离线识别器。

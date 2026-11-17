@@ -4,7 +4,7 @@ import (
 	"sync"
 	"time"
 
-	"haro/internal/realtimeproto"
+	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
 // NoticeHub 把大脑给某个人的提示（例如后台调查查完了）送到他最近说话的那台终端（v5：大脑还不能主动开口，

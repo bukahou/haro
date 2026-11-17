@@ -7,7 +7,7 @@ import (
 	"errors"
 	"os/exec"
 
-	"haro/internal/terminal"
+	"github.com/bukahou/haro/internal/terminal"
 )
 
 // darwinAdapter：音频设备 ID 是 CoreAudio 的设备 UID；摄像头走 AVFoundation（经 ffmpeg）。

@@ -10,12 +10,12 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 
-	"haro/internal/realtimeproto"
-	"haro/internal/telemetry"
+	"github.com/bukahou/haro/internal/realtimeproto"
+	"github.com/bukahou/haro/internal/telemetry"
 )
 
 // endpointDelay：用户真正说完 → VAD 判定说完（主要是等静音的时间）。
-var endpointDelay = telemetry.MustLatencyHistogram(otel.Meter("haro/assistant"),
+var endpointDelay = telemetry.MustLatencyHistogram(otel.Meter("github.com/bukahou/haro/assistant"),
 	"haro.turn.endpoint_delay", "用户说完到判定说完的时间（等静音 + 判断）")
 
 // runHandsFree 是 v2.0 的免按键模式：按回车进入对话模式，之后自动轮流；再按回车退出。

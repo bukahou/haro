@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"haro/internal/realtimeproto"
+	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
 func TestHardwareSmoke(t *testing.T) {

@@ -19,10 +19,10 @@ import (
 	"syscall"
 	"time"
 
-	"haro/internal/asrserver"
-	"haro/internal/sensevoice"
-	"haro/internal/smartturn"
-	"haro/internal/voiceprint"
+	"github.com/bukahou/haro/internal/asrserver"
+	"github.com/bukahou/haro/internal/sensevoice"
+	"github.com/bukahou/haro/internal/smartturn"
+	"github.com/bukahou/haro/internal/voiceprint"
 )
 
 func main() {

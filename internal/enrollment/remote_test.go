@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"haro/internal/assistant"
-	"haro/internal/realtimeproto"
-	"haro/internal/voiceprint"
+	"github.com/bukahou/haro/internal/assistant"
+	"github.com/bukahou/haro/internal/realtimeproto"
+	"github.com/bukahou/haro/internal/voiceprint"
 )
 
 // fakeRecorder 每次录出一段固定幅度的声音（第一次可以设成太小声）。

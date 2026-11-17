@@ -8,7 +8,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"haro/internal/realtimeproto"
+	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
 func TestOpenAITranscriptionRecognizer(t *testing.T) {

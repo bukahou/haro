@@ -16,7 +16,7 @@ import (
 
 	"github.com/coder/websocket"
 
-	"haro/internal/realtimeproto"
+	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
 // Session 是一次对话会话（brain.Session 实现了它）。

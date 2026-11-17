@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"time"
 
-	"haro/internal/voiceprint"
+	"github.com/bukahou/haro/internal/voiceprint"
 )
 
 // 远程登记声纹（v4 C-3）：终端录几句话发过来，这里算向量、存进声纹目录、立刻生效（不用重启）。

@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"haro/internal/brain"
-	"haro/internal/realtimeproto"
-	"haro/internal/speech"
+	"github.com/bukahou/haro/internal/brain"
+	"github.com/bukahou/haro/internal/realtimeproto"
+	"github.com/bukahou/haro/internal/speech"
 )
 
 var testFormat = realtimeproto.AudioFormat{SampleRate: 16000, Channels: 1}

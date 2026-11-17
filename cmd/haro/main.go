@@ -18,16 +18,16 @@ import (
 	"syscall"
 	"time"
 
-	"haro/assets/tones"
-	"haro/internal/assistant"
-	"haro/internal/brainclient"
-	"haro/internal/config"
-	"haro/internal/enrollment"
-	"haro/internal/platform"
-	"haro/internal/realtimeproto"
-	"haro/internal/telemetry"
-	"haro/internal/terminal"
-	"haro/internal/trigger"
+	"github.com/bukahou/haro/assets/tones"
+	"github.com/bukahou/haro/internal/assistant"
+	"github.com/bukahou/haro/internal/brainclient"
+	"github.com/bukahou/haro/internal/config"
+	"github.com/bukahou/haro/internal/enrollment"
+	"github.com/bukahou/haro/internal/platform"
+	"github.com/bukahou/haro/internal/realtimeproto"
+	"github.com/bukahou/haro/internal/telemetry"
+	"github.com/bukahou/haro/internal/terminal"
+	"github.com/bukahou/haro/internal/trigger"
 )
 
 // microphoneFormat 是麦克风上传给大脑的格式（平台层固定为 16 kHz 单声道；声明在 session.update 里）。

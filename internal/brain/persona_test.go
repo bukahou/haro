@@ -10,9 +10,9 @@ import (
 	"sync"
 	"testing"
 
-	"haro/internal/brain"
-	"haro/internal/realtimeproto"
-	"haro/internal/speech"
+	"github.com/bukahou/haro/internal/brain"
+	"github.com/bukahou/haro/internal/realtimeproto"
+	"github.com/bukahou/haro/internal/speech"
 )
 
 var testPersonas = []brain.Persona{

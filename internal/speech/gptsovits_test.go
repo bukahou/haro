@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"haro/internal/brain"
+	"github.com/bukahou/haro/internal/brain"
 )
 
 // streamingWAVHeader 仿照 api_v2 的 wave_header_chunk：标准 44 字节头，data 长度为 0。

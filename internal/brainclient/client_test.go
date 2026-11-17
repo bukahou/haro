@@ -14,11 +14,11 @@ import (
 	"testing"
 	"time"
 
-	"haro/internal/brain"
-	"haro/internal/brainclient"
-	"haro/internal/brainserver"
-	"haro/internal/realtimeproto"
-	"haro/internal/speech"
+	"github.com/bukahou/haro/internal/brain"
+	"github.com/bukahou/haro/internal/brainclient"
+	"github.com/bukahou/haro/internal/brainserver"
+	"github.com/bukahou/haro/internal/realtimeproto"
+	"github.com/bukahou/haro/internal/speech"
 )
 
 var (

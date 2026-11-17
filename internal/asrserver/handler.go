@@ -16,8 +16,8 @@ import (
 	"net/http"
 	"time"
 
-	"haro/internal/realtimeproto"
-	"haro/internal/speech"
+	"github.com/bukahou/haro/internal/realtimeproto"
+	"github.com/bukahou/haro/internal/speech"
 )
 
 // Transcriber 是识别引擎。

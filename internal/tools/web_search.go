@@ -10,7 +10,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"haro/internal/brain"
+	"github.com/bukahou/haro/internal/brain"
 )
 
 // WebSearcher 是联网搜索的能力（v5 E3）：主对话的快查（R1）与后台调查共用。

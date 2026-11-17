@@ -8,8 +8,8 @@ import (
 
 	"github.com/gen2brain/malgo"
 
-	"haro/internal/assistant"
-	"haro/internal/realtimeproto"
+	"github.com/bukahou/haro/internal/assistant"
+	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
 // recordFormat 是录音格式：16 kHz 单声道 pcm16（和 PipeWire 版一致；设备原生格式由 miniaudio 转换、重采样）。

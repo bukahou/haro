@@ -19,8 +19,8 @@ import (
 	"strings"
 	"time"
 
-	"haro/internal/assistant"
-	"haro/internal/voiceprint"
+	"github.com/bukahou/haro/internal/assistant"
+	"github.com/bukahou/haro/internal/voiceprint"
 )
 
 // Options 是一次登记的参数。

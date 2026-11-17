@@ -7,7 +7,7 @@ import (
 	"log/slog"
 	"sync"
 
-	"haro/internal/realtimeproto"
+	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
 // Components 是大脑需要的全部能力，由 cmd/haro 组装注入。

@@ -10,9 +10,9 @@ import (
 	"sync"
 	"testing"
 
-	"haro/internal/brain"
-	"haro/internal/realtimeproto"
-	"haro/internal/speech"
+	"github.com/bukahou/haro/internal/brain"
+	"github.com/bukahou/haro/internal/realtimeproto"
+	"github.com/bukahou/haro/internal/speech"
 )
 
 // scriptedToolModel：消息列表最后一条是用户的话时，按 script 返回工具调用；最后一条是工具结果时，把结果念出来。

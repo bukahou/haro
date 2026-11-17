@@ -11,7 +11,7 @@ import (
 	"net/url"
 	"testing"
 
-	"haro/internal/voiceprint"
+	"github.com/bukahou/haro/internal/voiceprint"
 )
 
 func postEnrollment(t *testing.T, handler http.Handler, name string, request EnrollmentRequest) (*http.Response, EnrollmentResult) {

@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"testing"
 
-	"haro/internal/realtimeproto"
+	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
 func TestWAVRoundTrip(t *testing.T) {

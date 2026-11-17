@@ -3,7 +3,7 @@ package llm
 import (
 	"testing"
 
-	"haro/internal/brain"
+	"github.com/bukahou/haro/internal/brain"
 )
 
 func TestUserImageIsSplitIntoItsOwnMessage(t *testing.T) {

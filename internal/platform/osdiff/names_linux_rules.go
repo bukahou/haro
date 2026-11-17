@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"haro/internal/terminal"
+	"github.com/bukahou/haro/internal/terminal"
 )
 
 // 这个文件不带构建标签（文件名不以 _linux.go 结尾）：Linux 的解析规则在任何机器上都能测。

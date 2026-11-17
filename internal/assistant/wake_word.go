@@ -6,7 +6,7 @@ import (
 	"io"
 	"time"
 
-	"haro/internal/realtimeproto"
+	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
 // runWakeWord 是 v2.2 的唤醒词模式：麦克风一直开着，语音前端从休眠开始。

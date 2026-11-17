@@ -12,8 +12,8 @@ import (
 	"strings"
 	"testing"
 
-	"haro/internal/realtimeproto"
-	"haro/internal/speech"
+	"github.com/bukahou/haro/internal/realtimeproto"
+	"github.com/bukahou/haro/internal/speech"
 )
 
 type fakeTranscriber struct{ got realtimeproto.PCMAudio }

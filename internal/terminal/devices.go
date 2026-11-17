@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"haro/internal/assistant"
+	"github.com/bukahou/haro/internal/assistant"
 )
 
 // 服务层需要的设备能力（v4 第 5 步「底层分层」）：服务层只定义「需要什么」，平台层（internal/platform）去实现。

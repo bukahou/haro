@@ -11,7 +11,7 @@ import (
 	"context"
 	"time"
 
-	"haro/internal/realtimeproto"
+	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
 // TurnTrigger 决定一轮对话什么时候开始、什么时候结束说话。

@@ -6,7 +6,7 @@ import (
 	"iter"
 	"log/slog"
 
-	"haro/internal/brain"
+	"github.com/bukahou/haro/internal/brain"
 )
 
 // MeteredChatModel 给一个模型记账（装饰器）：每次请求结束时按 Usage 记一笔。

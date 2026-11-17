@@ -6,7 +6,7 @@ import (
 	"reflect"
 	"testing"
 
-	"haro/internal/terminal"
+	"github.com/bukahou/haro/internal/terminal"
 )
 
 func TestLinuxAudioBus(t *testing.T) {

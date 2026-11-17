@@ -4,8 +4,8 @@ import (
 	"context"
 	"encoding/json"
 
-	"haro/internal/brain"
-	"haro/internal/netdiag"
+	"github.com/bukahou/haro/internal/brain"
+	"github.com/bukahou/haro/internal/netdiag"
 )
 
 // Builtin 是大脑进程里直接执行的工具（不走 MCP）。

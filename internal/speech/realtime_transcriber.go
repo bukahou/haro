@@ -9,8 +9,8 @@ import (
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
 
-	"haro/internal/brain"
-	"haro/internal/realtimeproto"
+	"github.com/bukahou/haro/internal/brain"
+	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
 // RealtimeTranscriptionClient 连接 OpenAI Realtime 风格的转写会话（WebSocket，server_vad）。

@@ -9,8 +9,8 @@ import (
 
 	sherpa "github.com/k2-fsa/sherpa-onnx-go/sherpa_onnx"
 
-	"haro/internal/asrserver"
-	"haro/internal/realtimeproto"
+	"github.com/bukahou/haro/internal/asrserver"
+	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
 // KeywordSpotterConfig 是唤醒词识别的配置。

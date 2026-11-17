@@ -15,7 +15,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"haro/internal/realtimeproto"
+	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
 //go:embed offline.wav

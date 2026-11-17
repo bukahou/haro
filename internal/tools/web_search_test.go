@@ -15,7 +15,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"haro/internal/brain"
+	"github.com/bukahou/haro/internal/brain"
 )
 
 // fakeTavily 是假的 Tavily 远程 MCP（Streamable HTTP）：只认 Bearer 密钥，记下收到的参数。

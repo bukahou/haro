@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"haro/internal/brain"
+	"github.com/bukahou/haro/internal/brain"
 )
 
 // sseServer 返回一个按 chunks 依次推送 SSE 的假服务，并把收到的请求体交给 inspect。

@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 
-	"haro/internal/realtimeproto"
+	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
 // EncodeWAV 给 s16le PCM 加上 44 字节的 WAV 头（上传给只认文件格式的服务用）。

@@ -15,7 +15,7 @@ import (
 	"strconv"
 	"strings"
 
-	"haro/internal/brain"
+	"github.com/bukahou/haro/internal/brain"
 )
 
 // OpenAIChatModel 调用任何 OpenAI 兼容的 POST /chat/completions（流式）：

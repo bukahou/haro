@@ -8,8 +8,8 @@ import (
 	"log/slog"
 	"strings"
 
-	"haro/internal/brain"
-	"haro/internal/notes"
+	"github.com/bukahou/haro/internal/brain"
+	"github.com/bukahou/haro/internal/notes"
 )
 
 // NoteTools 返回记事本的四个内置工具。

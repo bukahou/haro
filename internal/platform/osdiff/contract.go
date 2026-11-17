@@ -11,7 +11,7 @@ package osdiff
 import (
 	"context"
 
-	"haro/internal/terminal"
+	"github.com/bukahou/haro/internal/terminal"
 )
 
 // Adapter 是每个操作系统各写一份的部分。

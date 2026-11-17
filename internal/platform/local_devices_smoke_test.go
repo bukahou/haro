@@ -10,7 +10,7 @@ import (
 	"os"
 	"testing"
 
-	"haro/internal/terminal"
+	"github.com/bukahou/haro/internal/terminal"
 )
 
 func TestLocalDevicesSmoke(t *testing.T) {

@@ -3,12 +3,12 @@ package brain
 import (
 	"go.opentelemetry.io/otel"
 
-	"haro/internal/telemetry"
+	"github.com/bukahou/haro/internal/telemetry"
 )
 
 var (
-	tracer = otel.Tracer("haro/brain")
-	meter  = otel.Meter("haro/brain")
+	tracer = otel.Tracer("github.com/bukahou/haro/brain")
+	meter  = otel.Meter("github.com/bukahou/haro/brain")
 
 	// timeToFirstToken：请求模型 → 第一个可见 token。
 	timeToFirstToken = telemetry.MustLatencyHistogram(meter, "haro.llm.time_to_first_token",

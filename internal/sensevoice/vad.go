@@ -7,8 +7,8 @@ import (
 
 	sherpa "github.com/k2-fsa/sherpa-onnx-go/sherpa_onnx"
 
-	"haro/internal/asrserver"
-	"haro/internal/realtimeproto"
+	"github.com/bukahou/haro/internal/asrserver"
+	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
 // SileroDetector 是 sherpa-onnx 的 Silero VAD，一个转写会话一个实例。

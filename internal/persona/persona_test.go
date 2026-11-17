@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"haro/internal/brain"
+	"github.com/bukahou/haro/internal/brain"
 )
 
 func TestLoadCatalogFromRepo(t *testing.T) {

@@ -13,7 +13,7 @@ import (
 	"path/filepath"
 	"regexp"
 
-	"haro/internal/brain"
+	"github.com/bukahou/haro/internal/brain"
 )
 
 // FileStore 把对话存在一个目录里。

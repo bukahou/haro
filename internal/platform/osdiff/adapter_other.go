@@ -5,7 +5,7 @@ package osdiff
 import (
 	"context"
 
-	"haro/internal/terminal"
+	"github.com/bukahou/haro/internal/terminal"
 )
 
 // otherAdapter：还没适配的系统（Windows 等）。照样能编译、能录音放音，只是认不出蓝牙、没有摄像头（降级，不崩）。

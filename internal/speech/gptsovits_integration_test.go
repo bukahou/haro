@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"haro/internal/brain"
-	"haro/internal/realtimeproto"
+	"github.com/bukahou/haro/internal/brain"
+	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
 // TestGPTSoVITSLive 连真实的 GPT-SoVITS 服务（haro.env 里的 HARO_TTS_*），按情绪各合成一句，测首段延迟。

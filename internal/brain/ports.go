@@ -9,7 +9,7 @@ import (
 	"encoding/json"
 	"iter"
 
-	"haro/internal/realtimeproto"
+	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
 // SpeechRecognizer 把一段语音转成文字。

@@ -17,7 +17,7 @@ import (
 
 	_ "modernc.org/sqlite" // 纯 Go 的 SQLite 驱动
 
-	"haro/internal/notes"
+	"github.com/bukahou/haro/internal/notes"
 )
 
 // Status 是任务状态。

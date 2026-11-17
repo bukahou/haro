@@ -7,8 +7,8 @@ import (
 	"log/slog"
 	"strings"
 
-	"haro/internal/brain"
-	"haro/internal/weather"
+	"github.com/bukahou/haro/internal/brain"
+	"github.com/bukahou/haro/internal/weather"
 )
 
 // WeatherTools 返回查天气的内置工具（v5 E2 / R7 c）。home 给出「家」的位置（配置的坐标，或按 IP 定位）；nil = 必须说地名。

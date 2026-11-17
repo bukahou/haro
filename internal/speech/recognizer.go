@@ -11,7 +11,7 @@ import (
 	"net/http"
 	"strings"
 
-	"haro/internal/realtimeproto"
+	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
 // VoiceAPIRecognizer 调用外部的 Whisper 转写服务（whisper.cpp 兼容的 HTTP 接口）做语音转文字。

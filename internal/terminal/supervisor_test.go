@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"haro/internal/assistant"
-	"haro/internal/realtimeproto"
+	"github.com/bukahou/haro/internal/assistant"
+	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
 var testTiming = Timing{OfflineNotice: 60 * time.Millisecond, Poll: 10 * time.Millisecond,

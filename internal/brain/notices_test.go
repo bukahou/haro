@@ -5,7 +5,7 @@ import (
 	"log/slog"
 	"testing"
 
-	"haro/internal/realtimeproto"
+	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
 func newHubSession(hub *NoticeHub) *Session {

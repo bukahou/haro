@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"haro/internal/realtimeproto"
+	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
 // streamFormat 是免按键模式要求的音频格式（与转写会话一致）。

@@ -1,4 +1,4 @@
-module haro
+module github.com/bukahou/haro
 
 go 1.27
 

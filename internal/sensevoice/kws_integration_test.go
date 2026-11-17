@@ -13,7 +13,7 @@ import (
 	"strings"
 	"testing"
 
-	"haro/internal/speech"
+	"github.com/bukahou/haro/internal/speech"
 )
 
 func TestKeywordSpotterLive(t *testing.T) {

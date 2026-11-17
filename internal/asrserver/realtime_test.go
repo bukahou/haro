@@ -16,8 +16,8 @@ import (
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
 
-	"haro/internal/realtimeproto"
-	"haro/internal/voiceprint"
+	"github.com/bukahou/haro/internal/realtimeproto"
+	"github.com/bukahou/haro/internal/voiceprint"
 )
 
 // energyDetector 是按幅度判断的替身 VAD：幅度 > 0.1 算语音，连续 silenceSamples 个静音采样点后结束一段。
