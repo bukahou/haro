@@ -127,6 +127,8 @@ make version          # 这次构建的版本号
   4. 改部署仓库里的镜像标签（生产环境要人工 SYNC 才会换版本）。
 - **模型的 Release**：原发布方随时可能删文件 ⇒ 模型第一次从原发布方下载、校验后，放进本仓库的 Release
   （`models-v1`，由 `.github/workflows/models.yml` 建：推 `models-v*` 标签，或在 Actions 页面手动运行）；之后构建只从这里下载。
+- **依赖更新**：Dependabot 每周检查 Go 依赖、基础镜像（Dockerfile 里钉了 digest）、GitHub Actions，有新版就开 PR 到 `dev`（`.github/dependabot.yml`）；
+  镜像构建时还会打上 Debian 的安全补丁。
 - **安装终端**：`curl -fsSL https://github.com/bukahou/haro/releases/latest/download/install.sh | sh -s -- --server-url http://服务端地址:59130`
   （装到 `~/.local/bin/haro`，配置在 `~/.config/haro/haro.env`，Linux 装成 systemd 用户服务、macOS 装成 LaunchAgent；
   再跑一次就是升级；`--uninstall` 卸载）。冒烟测试：`scripts/test-install.sh`。
