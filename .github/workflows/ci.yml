@@ -1,5 +1,5 @@
 ## ============================================================
-## ci —— 推 dev、开往 main 的 PR 时运行；发版流程（release.yml）也先调用它：测试不过就不发版（v6）
+## ci —— 推 dev、开往 main / dev 的 PR（含 Dependabot 的 PR）时运行；发版流程（release.yml）也先调用它：测试不过就不发版（v6）
 ## ============================================================
 ##   version  版本号 = v + VERSION 文件 + 提交号前 7 位（= Release 标签 = 镜像标签），例如 v0.5.0-1a2b3c4
 ##   test     gofmt + go vet + go test -short（跳过要网络的测试）+ check-darwin
@@ -14,7 +14,7 @@ on:
   push:
     branches: [dev]
   pull_request:
-    branches: [main]
+    branches: [main, dev] # dev：Dependabot 的 PR 开到 dev
   workflow_call:
     outputs:
       tag:

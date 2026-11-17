@@ -1,0 +1,41 @@
+# Dependabot（v6）：每周检查一次依赖有没有新版本，有就开 PR 到 dev ——
+# 和平时的改动走同一条路：dev 上 ci 通过 → 合并到 dev → 再开 PR 合到 main 发版。
+#   gomod           Go 依赖（安全修复也在这里：例如 golang.org/x/net）；一周合成一个 PR
+#   docker          服务端镜像的基础镜像（deploy/server/Dockerfile 钉了 digest；官方镜像重建后改 digest）
+#   github-actions  workflow 里用的 action
+# 「Dependabot 安全更新」（按告警自动开 PR）没有打开：它只会开到 main，绕过 dev。告警照常在 Security 页里看。
+# ⚠️ release.yml 里 Trivy 的版本（aquasec/trivy:x.y.z）写在命令里，Dependabot 不会改，要手动升。
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    target-branch: dev
+    schedule:
+      interval: weekly
+    groups:
+      go:
+        patterns: ["*"]
+    commit-message:
+      prefix: "deps(go)"
+
+  - package-ecosystem: docker
+    directory: /deploy/server
+    target-branch: dev
+    schedule:
+      interval: weekly
+    groups:
+      base-images:
+        patterns: ["*"]
+    commit-message:
+      prefix: "deps(docker)"
+
+  - package-ecosystem: github-actions
+    directory: /
+    target-branch: dev
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "deps(actions)"
