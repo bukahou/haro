@@ -33,6 +33,12 @@ type SpokenError interface {
 	SpokenMessage() string
 }
 
+// ProfileSource 给出主人资料（v5 U1–U5）：全家共用的 + 说话人自己的事实与偏好，外部注入（不在公开代码里）。
+// 放在系统提示词里内置规矩之后、性格之前；很少变，所以不影响提示词缓存。没有资料时返回空。
+type ProfileSource interface {
+	Profile(person string) string
+}
+
 // Briefer 在每轮对话前给模型补充即时情况（时间、位置、额度提醒、后台调查的任务板……）。
 // 返回的几行附在这一轮主人的话前面（不放系统提示词：见 Session.userTurn）、不进历史；person 是这一轮说话人的对话名。
 // 每轮都会调用：不要在这里做网络请求。

@@ -24,6 +24,8 @@ type Components struct {
 	WakeArbiter *WakeArbiter
 	// Briefers 每轮补充给模型的即时情况（v5：额度提醒、任务板）；可以为空
 	Briefers []Briefer
+	// Profiles 是主人资料（v5）；nil = 没有
+	Profiles ProfileSource
 	// Notices 是所有终端连接共用的提示中转（v5：后台调查查完了让终端响一声）；nil = 不发提示
 	Notices *NoticeHub
 }

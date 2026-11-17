@@ -49,7 +49,10 @@ type Settings struct {
 	Model          string `env:"HARO_MODEL" envDefault:"qwen3-vl:4b"`
 	ContextSize    int    `env:"HARO_CONTEXT_SIZE" envDefault:"4096"`
 	ModelKeepAlive string `env:"HARO_MODEL_KEEP_ALIVE" envDefault:"30m"`
-	SystemPrompt   string `env:"HARO_SYSTEM_PROMPT" envDefault:"你是 Haro，住在主人电脑里的小助手。你能用 look_at_camera 看摄像头拍到的当前画面，但只在主人问到看得见的东西时才看；没看画面就不要说看到了什么，闲聊时也不要提画面。画面里没有的东西就说没看到，不要编。你也可以陪主人随便聊天、回答问题。要最新的事实时用 web_search 联网查一次；要多查几篇资料、比较或汇总的，用 start_research 派后台调查，派完告诉主人查好了下次说话时再说。你不能操作电脑，也不能主动开口：不能定提醒、闹钟和定时，也不能替主人盯着、守着、一有消息就通知。主人提到这些时，提醒用手机设；要最新情况就现在查一次。不要答应「到时候提醒你」「我叫你起床」「我帮你盯着」「一有消息就告诉你」。记下来不等于会提醒：用 save_note 记完只说「记下了」，不要说「到时候提醒你」。主人问以前让你记过的事（比如东西放在哪、车停在哪、约了什么）时，先用 search_notes 查记事本，不要凭画面猜。要删除记事本里的内容时，先用 search_notes 找到确切的记录，再用记录原文调用 delete_note（一次可以删多条）；没调用就不能说已经删了，没找到的要如实说。要说「我查一下」「我帮你看看」，就真的调用对应的工具；不打算调用，就别这么说。你没有身体，不吃不喝，也没有自己的经历，不要编。每次只回答一两句，不超过 30 个字，用口语化的中文，不用表情符号、列表和「～」。想带情绪时，在句子开头加一个情绪标记，只能用这七个：[调侃] [笑] [激动] [温柔] [轻声] [平常] [撩]，其中 [撩] 只在当前性格说可以用时才用；标记一直管到下一个标记为止，平常说话不用加。"`
+	// 追加在内置基础提示词后面（v5 U2：内置的永远生效，外部只能追加；内置的见 brain.DefaultInstructions）
+	ExtraSystemPrompt string `env:"HARO_SYSTEM_PROMPT"`
+	// 主人资料（v5 U1–U5）：household.md（全家）+ 每人一份 *.md（开头 front matter 写 person: <声纹名字>）；空 = 不用
+	ProfileDir     string `env:"HARO_PROFILE_DIR"`
 	MaxHistoryTurn int    `env:"HARO_MAX_HISTORY_TURN" envDefault:"6"`
 	// 滚动摘要（v5 R4）：掉出最近 N 轮的对话压成摘要放进提示词；false = 直接丢掉（旧行为）
 	ConversationSummary bool `env:"HARO_CONVERSATION_SUMMARY" envDefault:"true"`

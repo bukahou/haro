@@ -19,7 +19,6 @@ import (
 	"time"
 
 	"haro/internal/brain"
-	"haro/internal/config"
 	"haro/internal/llm"
 	"haro/internal/netdiag"
 	"haro/internal/notes"
@@ -62,7 +61,6 @@ func TestConversationLive(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer box.Close()
-	settings, _ := config.LoadBrainSettings() // 只为拿默认系统提示词；其他字段不用
 	recognizer := &textRecognizer{}
 	session := brain.NewSession(brain.Components{
 		Recognizer: recognizer, Synthesizer: textSynthesizer{}, Tools: box,
@@ -72,7 +70,7 @@ func TestConversationLive(t *testing.T) {
 	defer session.Close()
 	turns := []string{"帮我记一下，车停在C3的7号位。", "我的车停在哪了？", "现在几点了？", "家里网络正常吗？",
 		"我最近都记了些什么？", "把车停车位那条记录删了。", "确认", "你能看到我吗？"}
-	_ = session.Send(ctx, realtimeproto.SessionUpdate{Instructions: settings.SystemPrompt})
+	_ = session.Send(ctx, realtimeproto.SessionUpdate{Instructions: brain.DefaultInstructions})
 	if conversation := os.Getenv("HARO_TEST_CONVERSATION"); conversation != "" {
 		turns = strings.Split(conversation, "|")
 	}

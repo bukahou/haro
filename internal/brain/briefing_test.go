@@ -71,3 +71,26 @@ func TestSpokenErrorIsSaidAloud(t *testing.T) {
 		t.Errorf("应念出原因：status=%v said=%+v", done.Status, said)
 	}
 }
+
+type staticProfiles map[string]string
+
+func (p staticProfiles) Profile(person string) string { return p[person] }
+
+// 主人资料放在系统提示词里：内置规矩之后、性格之前；按说话人选。
+func TestProfileGoesIntoSystemPromptAfterInstructions(t *testing.T) {
+	model := &fakeModel{tokens: []string{"好的。"}}
+	session := brain.NewSession(brain.Components{
+		Recognizer: fakeRecognizer{text: "你好"}, Model: model, Synthesizer: fakeSynthesizer{},
+		NewSegmenter: func() brain.TextSegmenter { return speech.NewSentenceSegmenter(4, 40) },
+		Profiles:     staticProfiles{brain.SharedPerson: "【主人资料】不吃香菜"},
+	}, brain.Options{MaxHistoryTurn: 6, Instructions: brain.ComposeInstructions("追加的一条规矩")}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	defer session.Close()
+	askOneTurn(t, context.Background(), session, nil)
+	system := model.history[0].Text
+	builtin := strings.Index(system, "你是 Haro")
+	extra := strings.Index(system, "追加的一条规矩")
+	profile := strings.Index(system, "不吃香菜")
+	if builtin != 0 || extra < builtin || profile < extra {
+		t.Errorf("顺序应为 内置规矩 → 外部追加 → 主人资料：%d %d %d\n%s", builtin, extra, profile, system)
+	}
+}

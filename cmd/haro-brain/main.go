@@ -26,6 +26,7 @@ import (
 	"haro/internal/netdiag"
 	"haro/internal/notes"
 	"haro/internal/persona"
+	"haro/internal/profile"
 	"haro/internal/realtimeproto"
 	"haro/internal/research"
 	"haro/internal/speech"
@@ -151,6 +152,12 @@ func run(logger *slog.Logger) error {
 		conversationStore = conversationstore.NewFileStore(settings.ConversationsDir)
 	}
 	components.Conversations = brain.NewConversationBook(conversationStore, options, logger)
+	if settings.ProfileDir != "" { // 主人资料（v5 U1–U5）：外部注入，改了文件下一轮就生效
+		profiles := profile.OpenDir(settings.ProfileDir, logger)
+		household, people := profiles.Summary()
+		logger.Info("主人资料", "dir", settings.ProfileDir, "household_runes", household, "people", people)
+		components.Profiles = profiles
+	}
 	if settings.ConversationSummary { // 滚动摘要（v5 R4）：和主对话同一套模型，按 summary 用途记账
 		components.Conversations.SummarizeWith(buildChatModel(settings, httpClient, ledger, guard, spending.PurposeSummary,
 			logger.With("model_use", "summary")))
@@ -401,7 +408,8 @@ func buildSynthesizer(ctx context.Context, settings config.Settings, httpClient 
 
 // buildBrainOptions 读取性格档案（v3 第 2 步）；没设 HARO_PERSONAS_DIR 时不分性格。
 func buildBrainOptions(settings config.Settings) (brain.Options, error) {
-	options := brain.Options{MaxHistoryTurn: settings.MaxHistoryTurn, Instructions: settings.SystemPrompt}
+	// 基础提示词：内置的永远生效，HARO_SYSTEM_PROMPT 只能追加（v5 U2）
+	options := brain.Options{MaxHistoryTurn: settings.MaxHistoryTurn, Instructions: brain.ComposeInstructions(settings.ExtraSystemPrompt)}
 	if settings.PersonasDir == "" {
 		return options, nil
 	}
