@@ -16,6 +16,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/bukahou/haro/internal/buildinfo"
 	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
@@ -49,6 +50,7 @@ func NewHandler(newSession SessionFactory, logger *slog.Logger) http.Handler {
 }
 
 func serveConversation(w http.ResponseWriter, r *http.Request, newSession SessionFactory, logger *slog.Logger) {
+	w.Header().Set(buildinfo.Header, buildinfo.Version) // 握手响应里报服务端的版本（v6 T6）
 	conn, err := websocket.Accept(w, r, nil)
 	if err != nil {
 		logger.Warn("WebSocket 握手失败", "remote", r.RemoteAddr, "err", err)
@@ -61,7 +63,12 @@ func serveConversation(w http.ResponseWriter, r *http.Request, newSession Sessio
 
 	session := newSession()
 	defer session.Close()
-	logger.Info("终端已连接", "remote", r.RemoteAddr)
+	if terminalVersion := r.Header.Get(buildinfo.Header); buildinfo.Mismatch(buildinfo.Version, terminalVersion) {
+		logger.Warn("终端已连接，但版本和服务端不同：在那台终端上重新运行安装脚本升到最新", "remote", r.RemoteAddr,
+			"terminal", buildinfo.Reported(terminalVersion), "server", buildinfo.Version)
+	} else {
+		logger.Info("终端已连接", "remote", r.RemoteAddr, "version", buildinfo.Reported(terminalVersion))
+	}
 
 	var writeMu sync.Mutex
 	write := func(event realtimeproto.ServerEvent) error {

@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/bukahou/haro/internal/assistant"
+	"github.com/bukahou/haro/internal/buildinfo"
 	"github.com/bukahou/haro/internal/voiceprint"
 )
 
@@ -122,6 +123,8 @@ func upload(ctx context.Context, opts Options, clips []string) (result, error) {
 		return result{}, err
 	}
 	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("User-Agent", buildinfo.UserAgent())
+	request.Header.Set(buildinfo.Header, buildinfo.Version)
 	response, err := opts.Client.Do(request)
 	if err != nil {
 		return result{}, fmt.Errorf("连不上服务端 %s: %w", opts.ServerURL, err)

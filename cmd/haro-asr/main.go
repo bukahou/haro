@@ -12,6 +12,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -20,6 +21,7 @@ import (
 	"time"
 
 	"github.com/bukahou/haro/internal/asrserver"
+	"github.com/bukahou/haro/internal/buildinfo"
 	"github.com/bukahou/haro/internal/sensevoice"
 	"github.com/bukahou/haro/internal/smartturn"
 	"github.com/bukahou/haro/internal/voiceprint"
@@ -42,7 +44,12 @@ func main() {
 	speakerThreshold := flag.Float64("speaker-threshold", 0.5, "声纹相似度达到这个值才算认出来（0–1）")
 	wakeSpeakerThreshold := flag.Float64("wake-speaker-threshold", 0.2,
 		"唤醒词的声纹达到这个值就能唤醒（唤醒词很短，算不稳；没到 -speaker-threshold 的，接着说的话还要再比对）")
+	showVersion := flag.Bool("version", false, "打印版本号后退出")
 	flag.Parse()
+	if *showVersion {
+		fmt.Println(buildinfo.Describe("haro-asr"))
+		return
+	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil)).With("service", "haro-asr")
 	if err := run(options{listen: *listen, modelDir: *modelDir, vadModel: *vadModel, turnModel: *turnModel,

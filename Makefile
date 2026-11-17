@@ -8,25 +8,36 @@
 #   make run-terminal 只运行终端（服务端要已经在跑）
 #   make test         全部测试
 #   make check-darwin 在 Linux 上检查 Mac 版能否满足平台层契约（GOOS=darwin 类型检查纯 Go 部分；含 cgo 的音频只能在 Mac 上编）
+#   make version      打印这次构建的版本号
+#
+# 发版（v6）：合并到 main 后由 GitHub Actions 自动完成（.github/workflows/release.yml）——终端各平台程序进 GitHub Release，
+#   服务端镜像推 Docker Hub，再改部署仓库里的镜像标签。本机不推送镜像。
 #
 # 常驻（v3 第 4 步：systemd 用户服务，跟着桌面会话启停；单元文件在 deploy/systemd/）
 #   make install-services    装上并启用（以后登录桌面就自动启动）
 #   make uninstall-services  停掉并卸下
 #   make deploy              构建后重启服务（换上新版本）
 #   开关：systemctl --user start|stop haro.service haro-server.service；日志：journalctl --user -u haro-server -f
-.PHONY: build run run-server run-terminal test check-darwin install-services uninstall-services deploy check-not-running check-no-manual-run image image-push
+.PHONY: build run run-server run-terminal test check-darwin install-services uninstall-services deploy check-not-running check-no-manual-run image version
 
 SERVICES := haro-server.service haro.service
 
-# 服务端镜像（v4 第 4 步，deploy/server/Dockerfile）：标签 = 提交号；有没提交的改动时拒绝（镜像要能对上源码）
+# 版本号（v6）：v + VERSION 文件 + 提交号（和 GitHub Release、镜像的标签同一个字符串）；有没提交的改动时加 -dirty
+VERSION  := v$(shell cat VERSION)-$(shell git rev-parse --short=7 HEAD)$(shell git diff --quiet HEAD || echo -dirty)
+LDFLAGS  := -X github.com/bukahou/haro/internal/buildinfo.Version=$(VERSION)
+
+# 服务端镜像（v4 第 4 步，deploy/server/Dockerfile）：标签 = 版本号；有没提交的改动时拒绝（镜像要能对上源码）
 IMAGE      ?= bukahou/haro-server
-IMAGE_TAG  ?= $(shell git rev-parse --short HEAD)
+IMAGE_TAG  ?= $(VERSION)
 MODELS_DIR ?= $(HOME)/.local/share/haro
 
+version:
+	@echo $(VERSION)
+
 build:
-	go build -o bin/haro ./cmd/haro            # cgo：终端音频用 miniaudio（v4 D10）
-	CGO_ENABLED=0 go build -o bin/haro-server ./cmd/haro-server
-	go build -o bin/haro-asr ./cmd/haro-asr
+	go build -ldflags '$(LDFLAGS)' -o bin/haro ./cmd/haro            # cgo：终端音频用 miniaudio（v4 D10）
+	CGO_ENABLED=0 go build -ldflags '$(LDFLAGS)' -o bin/haro-server ./cmd/haro-server
+	go build -ldflags '$(LDFLAGS)' -o bin/haro-asr ./cmd/haro-asr
 
 # 服务端和终端在同一个进程组：Ctrl+C 两个都会收到；终端先退出时 trap 收掉服务端
 # 开发时直接跑：服务在跑就会抢麦克风和端口 ⇒ 先停服务
@@ -67,13 +78,10 @@ uninstall-services:
 deploy: check-no-manual-run build
 	systemctl --user restart $(SERVICES)
 
-# 构建服务端镜像（只在本机，不推送）。模型目录不在仓库里：用命名构建上下文 models 传进去
+# 构建服务端镜像（只在本机试，不推送：推送只走 CI，v6）。模型不在仓库里：用命名构建上下文 models 传进去，
+# 目录结构见 deploy/server/models.lock；没有模型时先 scripts/fetch-models.sh $(MODELS_DIR)。看镜像里有什么：
+#   docker run --rm --entrypoint sh $(IMAGE):$(IMAGE_TAG) -c 'ls -R /opt/haro /etc/haro'
 image:
 	@git diff --quiet HEAD || { echo "有没提交的改动：先提交，镜像标签要能对上源码"; exit 1; }
-	docker buildx build --platform linux/amd64 -f deploy/server/Dockerfile \
+	docker buildx build --platform linux/amd64 -f deploy/server/Dockerfile --build-arg VERSION=$(IMAGE_TAG) \
 		--build-context models=$(MODELS_DIR) -t $(IMAGE):$(IMAGE_TAG) --load .
-
-# 推送到 Docker Hub（公开仓库，v4 4-1 b）。推之前先看一遍镜像里有什么：
-#   docker run --rm --entrypoint sh $(IMAGE):$(IMAGE_TAG) -c 'ls -R /opt/haro /etc/haro'
-image-push:
-	docker push $(IMAGE):$(IMAGE_TAG)

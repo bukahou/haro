@@ -3,7 +3,11 @@
 /bin/
 /data/
 /docs/
+/dist/
 /deploy/
+# 例外：模型的来源与许可证说明要进镜像（随模型一起分发）
+!/deploy/server/MODELS.md
+!/deploy/server/MODEL-LICENSES.txt
 /assets/personas/
 /assets/voices/
 /assets/tones/*.wav

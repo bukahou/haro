@@ -1,0 +1,232 @@
+## ============================================================
+## release —— 合并到 main 就发版（v6 C1）
+## ============================================================
+##   ① ci        调用 ci.yml：测试 + 终端三个平台的程序（测试不过就到此为止）
+##   ② terminal  把 ① 编好、测过的程序发到 GitHub Release（标签 = 版本号），附 SHA256SUMS、install.sh、
+##               来源证明（attestation）；设为 latest（安装脚本默认装它）；v* 的 Release 只留最近 20 个（C3）
+##   ③ server    模型（本仓库 Release models-v1，按 models.lock 校验）→ 构建服务端镜像 → Trivy 扫描
+##               （有可修的 CRITICAL 就不推，C8）→ 推 Docker Hub（版本号 + latest）→ 来源证明
+##   ④ deploy    ②③ 都成功后，改部署仓库里的镜像标签（bot 提交，C7）。
+##               ⚠️ 生产是手动 SYNC：这里只改配置，线上不会自动换版本
+##
+## 版本号 = Release 标签 = 镜像标签 = 程序里的 buildinfo.Version，例如 v0.5.0-1a2b3c4（C2）。
+## ⛔ 部署清单不依赖 latest：部署仓库里写的不可变标签才是「线上跑的是哪个提交」的唯一答案。
+## ⛔ 需要的 secret（3 个）：DOCKERHUB_USERNAME · DOCKERHUB_TOKEN · CONFIG_REPO_TOKEN
+## ============================================================
+name: release
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: # 只改文档时不发版
+      - "**/*.md"
+      - "docs/**"
+      - "LICENSE"
+
+concurrency:
+  group: release
+  cancel-in-progress: false # 发版不取消：每次合并都完整跑完，部署仓库不会停在中间状态
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: docker.io/bukahou/haro-server
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  terminal:
+    needs: ci
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write # 建 Release、删旧 Release
+      id-token: write # 来源证明（Sigstore 签名）
+      attestations: write
+    env:
+      TAG: ${{ needs.ci.outputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: haro-*
+          path: dist
+          merge-multiple: true
+      - name: SHA256SUMS
+        run: |
+          cp scripts/install.sh dist/install.sh
+          cd dist
+          # 阳性对照：三个平台都要在，少一个就不发
+          n=$(ls haro-*.tar.gz | wc -l)
+          [ "$n" -eq 3 ] || { echo "::error::应有 3 个平台的压缩包，只有 ${n} 个"; ls -la; exit 1; }
+          sha256sum haro-*.tar.gz install.sh > SHA256SUMS
+          cat SHA256SUMS
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-checksums: dist/SHA256SUMS
+      - name: 建 Release
+        run: |
+          previous=$(gh release list --limit 100 --json tagName,createdAt \
+            --jq '[.[] | select(.tagName | test("^v[0-9]"))] | sort_by(.createdAt) | last | .tagName // ""')
+          {
+            echo "终端安装 / 升级（Linux x86_64 / arm64、macOS Apple 芯片；装在自己的用户目录，不需要 root）："
+            echo '```sh'
+            echo "curl -fsSL https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/install.sh | sh -s -- --server-url http://服务端地址:59130"
+            echo '```'
+            echo "装这个版本：把 \`latest/download\` 换成 \`download/${TAG}\`，并加 \`--version ${TAG}\`。"
+            echo
+            echo "- 服务端镜像：\`${IMAGE}:${TAG}\`"
+            echo "- 提交：${GITHUB_SHA}"
+            if [ -n "$previous" ] && [ "$previous" != "$TAG" ]; then
+              echo "- 变更：https://github.com/${GITHUB_REPOSITORY}/compare/${previous}...${TAG}"
+            fi
+            echo "- 校验：\`sha256sum -c SHA256SUMS --ignore-missing\`；来源证明：\`gh attestation verify haro-linux-amd64.tar.gz --repo ${GITHUB_REPOSITORY}\`"
+          } > notes.md
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            # 重跑同一次提交（例如后面某一步失败后 Re-run）：换上这次的文件
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* --title "$TAG" --target "$GITHUB_SHA" --notes-file notes.md --latest
+          fi
+      - name: v* 的 Release 只留最近 20 个
+        run: |
+          gh release list --limit 1000 --json tagName,createdAt \
+            --jq '[.[] | select(.tagName | test("^v[0-9]"))] | sort_by(.createdAt) | reverse | .[20:] | .[].tagName' |
+          while read -r old; do
+            echo "删除旧版本 ${old}"
+            gh release delete "$old" --yes --cleanup-tag
+          done
+
+  server:
+    needs: ci
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      TAG: ${{ needs.ci.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      # 模型约 280 MB：按 models.lock 的内容缓存，没变就不重新下载（fetch-models.sh 仍会逐个校验 sha256）
+      - uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/models
+          key: models-${{ hashFiles('deploy/server/models.lock') }}
+      - name: 模型（本仓库 Release，按 models.lock 校验）
+        run: |
+          scripts/fetch-models.sh "$RUNNER_TEMP/models" || {
+            echo "::error::模型下载 / 校验失败。模型的 Release（models.lock 里 release 那一行）建好了吗？推 models-v* 标签会自动建（models.yml）"
+            exit 1
+          }
+      # 先登录：拉基础镜像和 Trivy 镜像也走登录后的额度
+      - uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@v4
+      - name: 构建（先不推）
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: deploy/server/Dockerfile
+          build-contexts: models=${{ runner.temp }}/models
+          build-args: VERSION=${{ env.TAG }}
+          platforms: linux/amd64 # 只做 x86（v4 D6）
+          provenance: false # 单个 manifest；来源证明用下面的 attest（存在 GitHub）
+          load: true
+          tags: ${{ env.IMAGE }}:${{ env.TAG }}
+          cache-from: type=gha,scope=haro-server
+          cache-to: type=gha,scope=haro-server,mode=max
+      - name: 镜像里的程序版本
+        run: docker run --rm "${IMAGE}:${TAG}" -version | grep -F "haro-server ${TAG} "
+      - name: Trivy 扫描（有可修的 CRITICAL 或疑似凭证就不推）
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$RUNNER_TEMP:/out" \
+            aquasec/trivy:0.76.2 image --quiet --list-all-pkgs --format json --output /out/trivy.json "${IMAGE}:${TAG}"
+          report="$RUNNER_TEMP/trivy.json"
+          # 阳性对照：确认真的扫到了东西，不是空扫（Trivy 不认识系统版本时会安静地什么都不报）
+          jq -e '.Metadata.OS.Family == "debian"' "$report" >/dev/null ||
+            { echo "::error::Trivy 没认出镜像的系统 —— 这次扫描不算数"; exit 1; }
+          jq -e '[.Results[]? | select(.Class == "os-pkgs") | .Vulnerabilities[]?] | length > 0' "$report" >/dev/null ||
+            { echo "::error::系统包一条漏洞记录都没匹配到（Debian 镜像总有一些未修复的低危记录）—— 漏洞库没生效，这次扫描不算数"; exit 1; }
+          jq -e '[.Results[]? | select(.Type == "gobinary")] | length >= 2' "$report" >/dev/null ||
+            { echo "::error::没扫到 haro-server / haro-asr 两个 Go 程序 —— 这次扫描不算数"; exit 1; }
+          echo "高危以上（可修的 CRITICAL 会挡住发版）："
+          jq -r '.Results[]? | .Target as $t | .Vulnerabilities[]? | select(.Severity == "CRITICAL" or .Severity == "HIGH")
+            | [.Severity, .VulnerabilityID, .PkgName, .InstalledVersion, (.FixedVersion // "-"), $t] | @tsv' "$report"
+          critical=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL" and (.FixedVersion // "") != "")] | length' "$report")
+          secrets=$(jq '[.Results[]?.Secrets[]?] | length' "$report")
+          jq -r '.Results[]? | .Target as $t | .Secrets[]? | "疑似凭证：\($t) \(.RuleID) 第 \(.StartLine) 行"' "$report"
+          [ "$critical" -eq 0 ] || { echo "::error::有 ${critical} 个可修的 CRITICAL 漏洞：升级基础镜像 / 依赖后再发"; exit 1; }
+          [ "$secrets" -eq 0 ] || { echo "::error::镜像里有 ${secrets} 处疑似凭证（公开镜像！）"; exit 1; }
+      - name: 推送（版本号 + latest）
+        id: push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: deploy/server/Dockerfile
+          build-contexts: models=${{ runner.temp }}/models
+          build-args: VERSION=${{ env.TAG }}
+          platforms: linux/amd64
+          provenance: false
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ env.TAG }}
+            ${{ env.IMAGE }}:latest
+          cache-from: type=gha,scope=haro-server
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: false
+
+  deploy:
+    needs: [ci, terminal, server]
+    runs-on: ubuntu-24.04
+    env:
+      TAG: ${{ needs.ci.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          path: haro
+      - name: 改部署仓库里的镜像标签
+        env:
+          GH_TOKEN: ${{ secrets.CONFIG_REPO_TOKEN }}
+          # 部署仓库里本应用清单的目录（与 melete / atlhyper 的发布流程同样写死；路径里的名字经判定可以公开）
+          APP_PATH: clusters/requiem/apps/haro
+        run: |
+          git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/bukahou/config.git" config
+          sh haro/scripts/set-image-tag.sh "config/${APP_PATH}/kustomization.yaml" bukahou/haro-server "$TAG"
+          printf '{"repo":"%s","sha":"%s","branch":"%s","tag":"%s"}\n' \
+            "$GITHUB_REPOSITORY" "$GITHUB_SHA" "$GITHUB_REF_NAME" "$TAG" > "config/${APP_PATH}/source.json"
+          cd config
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -- "${APP_PATH}/kustomization.yaml" "${APP_PATH}/source.json"
+          git diff --cached --stat
+          git diff --cached --quiet && { echo "（没有改动）"; exit 0; }
+          git commit -q -m "deploy(haro): ${TAG}"
+          # 别的仓库的发布流程也在往部署仓库推：被抢先时 rebase 再推，最多 3 次
+          for attempt in 1 2 3; do
+            git push -q && exit 0
+            echo "推送被拒（第 ${attempt} 次），rebase 后重试"
+            git pull -q --rebase
+          done
+          exit 1
+      - name: Summary
+        run: |
+          {
+            echo "### haro ${TAG}"
+            echo "- 终端：https://github.com/${GITHUB_REPOSITORY}/releases/tag/${TAG}"
+            echo "- 服务端镜像：\`${IMAGE}:${TAG}\`"
+            echo "- 部署仓库的镜像标签已改成 \`${TAG}\`"
+            echo "- ⚠️ 生产是【手动 SYNC】：线上不会自动换版本，要在 Argo CD 里点 SYNC"
+          } >> "$GITHUB_STEP_SUMMARY"

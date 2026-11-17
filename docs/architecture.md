@@ -100,7 +100,8 @@ haro 是一个家用语音助手：家里每个房间放一台**终端**（麦�
 全部来自环境变量（`internal/config/config.go` 里每一项都有说明）。通常写在一个 env 文件里，
 systemd 用户服务从 `~/.config/haro/haro.env` 读取（`deploy/systemd/`）。凭证（云端模型、搜索服务的密钥）只放在环境变量里，没有默认值。
 
-模型文件（识别、VAD、说完判断、唤醒词、声纹）不在仓库里，路径都由配置指定。
+模型文件（识别、VAD、说完判断、唤醒词、声纹）不在仓库里，路径都由配置指定；服务端镜像里已经带着
+（清单、来源与许可证：`deploy/server/models.lock`、`deploy/server/MODELS.md`；本机下载：`scripts/fetch-models.sh ~/.local/share/haro`）。
 
 ## 构建与运行
 
@@ -109,8 +110,26 @@ make build            # bin/haro、bin/haro-server、bin/haro-asr
 make test
 make run              # 前台同时跑服务端和终端
 make install-services # 装成 systemd 用户服务（跟着桌面会话启停：麦克风权限只给登录中的桌面会话）
-make image            # 服务端镜像（deploy/server/Dockerfile；模型用构建上下文 models 传进去）
+make image            # 在本机试建服务端镜像（deploy/server/Dockerfile；模型用构建上下文 models 传进去；不推送）
+make version          # 这次构建的版本号
 ```
+
+## 版本与发版（v6）
+
+- **版本号** = `v` + 仓库根目录的 `VERSION` + 提交号前 7 位，例如 `v0.5.0-1a2b3c4`。GitHub Release 的标签、
+  服务端镜像的标签、程序里的版本（`haro -version`、启动日志）是同一个字符串。`VERSION` 只在阶段性的大改时调。
+- **终端和服务端握手时互报版本**（HTTP 头 `X-Haro-Version`）：版本不同时两边的日志都会提醒升级终端。
+- **合并到 `main` 就发版**（`.github/workflows/release.yml`；日常开发在 `dev`，推 `dev` 和开 PR 时跑 `ci.yml`）：
+  1. 测试 + 终端三个平台（Linux x86_64 / arm64、macOS Apple 芯片）的程序，各在原生机器上编译，用安装脚本装、卸一遍；
+  2. 程序发到 GitHub Release（附 `SHA256SUMS`、`install.sh`、来源证明），设为 latest；`v*` 的 Release 只留最近 20 个；
+  3. 服务端镜像：模型从本仓库的 Release 下载并按 `models.lock` 校验 → 构建 → Trivy 扫描（有可修的 CRITICAL
+     或疑似凭证就不推）→ 推 Docker Hub `bukahou/haro-server`（版本号 + latest）；
+  4. 改部署仓库里的镜像标签（生产环境要人工 SYNC 才会换版本）。
+- **模型的 Release**：原发布方随时可能删文件 ⇒ 模型第一次从原发布方下载、校验后，放进本仓库的 Release
+  （`models-v1`，由 `.github/workflows/models.yml` 建：推 `models-v*` 标签，或在 Actions 页面手动运行）；之后构建只从这里下载。
+- **安装终端**：`curl -fsSL https://github.com/bukahou/haro/releases/latest/download/install.sh | sh -s -- --server-url http://服务端地址:59130`
+  （装到 `~/.local/bin/haro`，配置在 `~/.config/haro/haro.env`，Linux 装成 systemd 用户服务、macOS 装成 LaunchAgent；
+  再跑一次就是升级；`--uninstall` 卸载）。冒烟测试：`scripts/test-install.sh`。
 
 ## 安全说明
 

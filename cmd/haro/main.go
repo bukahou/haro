@@ -21,6 +21,7 @@ import (
 	"github.com/bukahou/haro/assets/tones"
 	"github.com/bukahou/haro/internal/assistant"
 	"github.com/bukahou/haro/internal/brainclient"
+	"github.com/bukahou/haro/internal/buildinfo"
 	"github.com/bukahou/haro/internal/config"
 	"github.com/bukahou/haro/internal/enrollment"
 	"github.com/bukahou/haro/internal/platform"
@@ -37,7 +38,12 @@ func main() {
 	enrollName := flag.String("enroll", "", "登记声纹（v4 C-3）：在这台终端上录 3 句话，发给服务端登记，例如 -enroll 主人")
 	enrollAppend := flag.Bool("append", false, "和 -enroll 一起用：补录（换了麦克风、换了位置时），加进原来的声纹")
 	enrollSeconds := flag.Duration("seconds", 5*time.Second, "和 -enroll 一起用：每句录多久")
+	showVersion := flag.Bool("version", false, "打印版本号后退出")
 	flag.Parse()
+	if *showVersion {
+		fmt.Println(buildinfo.Describe("haro"))
+		return
+	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	slog.SetDefault(logger)
 	if *enrollName != "" {
@@ -79,7 +85,7 @@ func run(logger *slog.Logger) error {
 	}
 	keyboard := trigger.NewKeyboardTrigger(os.Stdin, os.Stdout)
 	options := assistantOptions(settings, sounds)
-	logger.Info("haro 启动", "brain", settings.ServerURL, "turn_mode", settings.TurnMode,
+	logger.Info("haro 启动", "version", buildinfo.Version, "server", settings.ServerURL, "turn_mode", settings.TurnMode,
 		"turn_detection", settings.TurnDetection, "wake_word", options.WakeWord != nil,
 		"barge_in", options.BargeIn, "camera_mode", settings.CameraMode)
 

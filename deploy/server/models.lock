@@ -1,0 +1,31 @@
+# 服务端镜像用到的模型（v6 C6）：每个文件的 sha256、大小、在本仓库 Release 里的名字、放到哪、原发布方。
+# scripts/fetch-models.sh 读这个文件；来源与许可证见同目录的 MODELS.md。
+#
+# 为什么有自己的 Release：原发布方（GitHub Release、Hugging Face）随时可能删文件或换内容 ⇒
+#   第一次从原发布方下载、按这里的 sha256 校验后，传到本仓库的 Release（下面 release 那一行的标签）留底；
+#   之后构建镜像只从本仓库的 Release 下载，同样按 sha256 校验。
+# 换模型：改这里（新的 sha256 / 大小 / 地址），release 改成下一个标签（models-v2），提交后推这个标签（或在 Actions 页面
+#   手动运行 models）⇒ .github/workflows/models.yml 从原发布方下载、校验，建好新的 Release。旧的 Release 不动（旧镜像仍能重建）。
+#
+# 格式：release 一行；之后每行一个文件，空白分隔 ——
+#   sha256  大小(字节)  Release 里的文件名  放到哪（models 构建上下文里的相对路径，Dockerfile 按它拷）  原发布方地址  压缩包里的路径（不是压缩包写 -）
+release models-v1
+
+# SenseVoice（多语种识别；用 int8 量化版）
+c71f0ce00bec95b07744e116345e33d8cbbe08cef896382cf907bf4b51a2cd51 239233841 sense-voice-2024-07-17.model.int8.onnx asr/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/model.int8.onnx https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17.tar.bz2 sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/model.int8.onnx
+f449eb28dc567533d7fa59be34e2abca8784f771850c78a47fb731a31429a1dc 315894 sense-voice-2024-07-17.tokens.txt asr/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/tokens.txt https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17.tar.bz2 sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/tokens.txt
+
+# 唤醒词（sherpa-onnx KWS，中英 3M；只用 chunk-16 那一组，关键词文件是预先切好的拼音，不需要 en.phone）
+408bbd740838c42d5bf6d1c5b80b3c88b616c7860b92d980328b5b068c76ae48 4599656 kws-zipformer-zh-en-3M-2025-12-20.encoder-epoch-13-avg-2-chunk-16-left-64.int8.onnx asr/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20/encoder-epoch-13-avg-2-chunk-16-left-64.int8.onnx https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20.tar.bz2 sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20/encoder-epoch-13-avg-2-chunk-16-left-64.int8.onnx
+63a22dd60f40fff082ac3e09afa507f6787da36df76ded2fbe145fa233e22c21 759829 kws-zipformer-zh-en-3M-2025-12-20.decoder-epoch-13-avg-2-chunk-16-left-64.onnx asr/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20/decoder-epoch-13-avg-2-chunk-16-left-64.onnx https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20.tar.bz2 sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20/decoder-epoch-13-avg-2-chunk-16-left-64.onnx
+190d4067b4cc20b72a42a1916e69d92052000fb7051a427ebb1bc72a69207dc1 86629 kws-zipformer-zh-en-3M-2025-12-20.joiner-epoch-13-avg-2-chunk-16-left-64.int8.onnx asr/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20/joiner-epoch-13-avg-2-chunk-16-left-64.int8.onnx https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20.tar.bz2 sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20/joiner-epoch-13-avg-2-chunk-16-left-64.int8.onnx
+2d3f32311f9b692b964da3c90e830258d3e78e013cb0c992dbfb15cd5a1a71b0 1928 kws-zipformer-zh-en-3M-2025-12-20.tokens.txt asr/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20/tokens.txt https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20.tar.bz2 sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20/tokens.txt
+
+# Silero VAD（说话起止）
+9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6 643854 silero_vad.onnx asr/silero_vad.onnx https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx -
+
+# Smart Turn v3.2（话说完了没有；地址钉在 Hugging Face 的一个提交上，main 以后变了也不受影响）
+2bb026316b14a660486a75b1733cd3fbab8c2fd0314dc9af7be49f8cca967e4f 8679182 smart-turn-v3.2-cpu.onnx asr/smart-turn-v3.2-cpu.onnx https://huggingface.co/pipecat-ai/smart-turn-v3/resolve/f766f81d3cfdf7737ac64aad813d91bbfd56bf93/smart-turn-v3.2-cpu.onnx -
+
+# CAM++（声纹；文件名不能改：声纹记录里存的是模型文件名）
+aa3cfc16963a10586a9393f5035d6d6b57e98d358b347f80c2a30bf4f00ceba2 28281164 3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx speaker/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx -

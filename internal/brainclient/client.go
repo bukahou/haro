@@ -10,12 +10,14 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/coder/websocket"
 
+	"github.com/bukahou/haro/internal/buildinfo"
 	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
@@ -44,15 +46,25 @@ func Dial(ctx context.Context, baseURL string, inputFormat realtimeproto.AudioFo
 	logger *slog.Logger) (*Client, error) {
 	url := "ws" + strings.TrimPrefix(strings.TrimRight(baseURL, "/"), "http") + realtimeproto.ConversationPath
 	deadline := time.Now().Add(wait)
+	// 握手时报上终端的版本（v6 T6）；服务端在响应里报它的版本，不一样时在日志里提醒升级
+	options := &websocket.DialOptions{HTTPHeader: http.Header{
+		"User-Agent":     {buildinfo.UserAgent()},
+		buildinfo.Header: {buildinfo.Version},
+	}}
 	for attempt := 1; ; attempt++ {
-		conn, _, err := websocket.Dial(ctx, url, nil)
+		conn, response, err := websocket.Dial(ctx, url, options)
 		if err == nil {
 			conn.SetReadLimit(8 << 20)
 			readCtx, cancel := context.WithCancel(context.Background())
 			client := &Client{conn: conn, inputFormat: inputFormat, logger: logger, cancel: cancel,
 				events: make(chan realtimeproto.ServerEvent, 64), done: make(chan struct{})}
 			go client.readEvents(readCtx)
-			logger.Info("已连接服务端", "url", url)
+			if serverVersion := response.Header.Get(buildinfo.Header); buildinfo.Mismatch(buildinfo.Version, serverVersion) {
+				logger.Warn("已连接服务端，但版本和终端不同：服务端更新后，重新运行安装脚本把终端升到最新", "url", url,
+					"terminal", buildinfo.Version, "server", buildinfo.Reported(serverVersion))
+			} else {
+				logger.Info("已连接服务端", "url", url, "server_version", buildinfo.Reported(serverVersion))
+			}
 			return client, nil
 		}
 		if ctx.Err() != nil || time.Now().After(deadline) {

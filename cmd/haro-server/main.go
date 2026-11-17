@@ -7,6 +7,8 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -20,6 +22,7 @@ import (
 
 	"github.com/bukahou/haro/internal/brain"
 	"github.com/bukahou/haro/internal/brainserver"
+	"github.com/bukahou/haro/internal/buildinfo"
 	"github.com/bukahou/haro/internal/config"
 	"github.com/bukahou/haro/internal/conversationstore"
 	"github.com/bukahou/haro/internal/llm"
@@ -37,6 +40,12 @@ import (
 )
 
 func main() {
+	showVersion := flag.Bool("version", false, "打印版本号后退出")
+	flag.Parse()
+	if *showVersion {
+		fmt.Println(buildinfo.Describe("haro-server"))
+		return
+	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil)).With("service", "haro-server")
 	slog.SetDefault(logger)
 	if err := run(logger); err != nil && !errors.Is(err, context.Canceled) {
@@ -178,7 +187,7 @@ func run(logger *slog.Logger) error {
 		defer cancel()
 		_ = server.Shutdown(shutdownCtx)
 	}()
-	logger.Info("haro-server 启动", "listen", listener.Addr().String(), "model", activeModel(settings), "tts", settings.TTS,
+	logger.Info("haro-server 启动", "version", buildinfo.Version, "listen", listener.Addr().String(), "model", activeModel(settings), "tts", settings.TTS,
 		"personas", len(options.Personas))
 	if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
