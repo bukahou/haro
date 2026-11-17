@@ -14,7 +14,7 @@ import (
 	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
-// scriptedBrain：事件由测试推送；收到 response.cancel 时按真实大脑的样子补发（先一个用户开口的事件，再 response.done）。
+// scriptedBrain：事件由测试推送；收到 response.cancel 时按真实服务端的样子补发（先一个用户开口的事件，再 response.done）。
 type scriptedBrain struct {
 	events chan realtimeproto.ServerEvent
 	mu     sync.Mutex
@@ -85,7 +85,7 @@ func newBargeInAssistant(brain *scriptedBrain, sink *slowSink) *Assistant {
 
 func noSpan() trace.Span { return trace.SpanFromContext(context.Background()) }
 
-// 回答还在生成时喊唤醒词：立即停播，告诉大脑听到了多少，再取消；取消期间用户开口的事件留给主循环。
+// 回答还在生成时喊唤醒词：立即停播，告诉服务端听到了多少，再取消；取消期间用户开口的事件留给主循环。
 func TestBargeInWhileGenerating(t *testing.T) {
 	brain, sink := &scriptedBrain{events: make(chan realtimeproto.ServerEvent, 16)}, newSlowSink()
 	a := newBargeInAssistant(brain, sink)

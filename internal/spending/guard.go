@@ -50,7 +50,7 @@ type Limits struct {
 // ErrOverBudget 表示额度用完了（errors.Is 判断）。
 var ErrOverBudget = errors.New("额度用完了")
 
-// budgetError 是额度用完的具体说明：Is(ErrOverBudget)；SpokenMessage 让大脑直接念给主人，而不是报「出错了」。
+// budgetError 是额度用完的具体说明：Is(ErrOverBudget)；SpokenMessage 让服务端直接念给主人，而不是报「出错了」。
 type budgetError struct{ message string }
 
 func (e *budgetError) Error() string         { return e.message }

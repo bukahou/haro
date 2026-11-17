@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-// 本文件是「对话会话」在 WebSocket 上的 JSON 格式：终端（haro）↔ 大脑（haro-brain），v3 第 3 步。
+// 本文件是「对话会话」在 WebSocket 上的 JSON 格式：终端（haro）↔ 服务端（haro-server），v3 第 3 步。
 // 事件名与字段照 OpenAI Realtime 正式版（GA）的子集；和官方不同的地方：
 //   - 音频不限 24 kHz：输入格式在 session.update 的 session.audio.input.format 里声明（haro 用 16 kHz）；
 //     输出格式随每段 response.output_audio.delta 放在 haro 扩展字段里（语音合成引擎决定，GPT-SoVITS 是 32 kHz）。
@@ -17,7 +17,7 @@ import (
 //   - 服务端不发 session.created / response.created 等 haro 用不到的事件；客户端不认识的事件一律忽略。
 // 转写会话（haro ↔ haro-asr）的格式在 transcription_wire.go，两者共用服务端事件的解码。
 
-// ConversationPath 是对话会话的 WebSocket 路径（haro-brain 提供）。
+// ConversationPath 是对话会话的 WebSocket 路径（haro-server 提供）。
 const ConversationPath = "/v1/realtime"
 
 // DefaultOutputFormat 是官方 Realtime 的输出音频格式；delta 没声明格式时用它。
@@ -264,7 +264,7 @@ type wireResponseDone struct {
 	} `json:"response"`
 }
 
-// EncodeServerEvent 把大脑的事件编码成 JSON。
+// EncodeServerEvent 把服务端的事件编码成 JSON。
 func EncodeServerEvent(event ServerEvent) ([]byte, error) {
 	switch e := event.(type) {
 	case InputAudioBufferSpeechStarted:

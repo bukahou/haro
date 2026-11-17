@@ -13,7 +13,7 @@ import (
 )
 
 // NoteTools 返回记事本的四个内置工具。
-// v5 裁定：自研工具直接内置到大脑（记事本只是一个数据库连接，没必要单独成程序），MCP 只用于第三方服务。
+// v5 裁定：自研工具直接内置到服务端（记事本只是一个数据库连接，没必要单独成程序），MCP 只用于第三方服务。
 // 工具名、说明、参数、结果格式与原 haro-notes（MCP 服务）完全一致，模型看到的东西不变。
 func NoteTools(store notes.Repository, logger *slog.Logger) []Builtin {
 	logger = logger.With("tool", "notes")

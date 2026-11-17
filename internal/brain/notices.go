@@ -7,7 +7,7 @@ import (
 	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
-// NoticeHub 把大脑给某个人的提示（例如后台调查查完了）送到他最近说话的那台终端（v5：大脑还不能主动开口，
+// NoticeHub 把服务端给某个人的提示（例如后台调查查完了）送到他最近说话的那台终端（v5：服务端还不能主动开口，
 // 先让终端响一声）。所有终端连接共用一个；会话建立时加入、关闭时离开。
 type NoticeHub struct {
 	mu       sync.Mutex

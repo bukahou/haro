@@ -64,7 +64,7 @@ func TestToolboxWithThirdPartyServer(t *testing.T) {
 	}
 }
 
-// 记事本内置在大脑里（v5）：工具名、要不要确认、结果格式与原 haro-notes 一致。
+// 记事本内置在服务端里（v5）：工具名、要不要确认、结果格式与原 haro-notes 一致。
 func TestNoteToolsBuiltin(t *testing.T) {
 	ctx := context.Background()
 	store, err := notes.Open(ctx, filepath.Join(t.TempDir(), "notes.db"))

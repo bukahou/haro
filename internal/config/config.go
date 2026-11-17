@@ -11,7 +11,7 @@ import (
 	"github.com/caarlos0/env/v11"
 )
 
-// 大脑的来源。
+// 服务端的来源。
 const (
 	LLMLocal = "local" // 本机 ollama
 	LLMCloud = "cloud" // OpenAI 兼容的云端接口（Bedrock 等）
@@ -57,7 +57,7 @@ type Settings struct {
 	// 滚动摘要（v5 R4）：掉出最近 N 轮的对话压成摘要放进提示词；false = 直接丢掉（旧行为）
 	ConversationSummary bool `env:"HARO_CONVERSATION_SUMMARY" envDefault:"true"`
 
-	// 大脑：local（ollama）/ cloud（OpenAI 兼容接口，失败时这一轮退回 ollama）
+	// 服务端：local（ollama）/ cloud（OpenAI 兼容接口，失败时这一轮退回 ollama）
 	LLMProvider     string        `env:"HARO_LLM_PROVIDER" envDefault:"local"`
 	CloudLLMURL     string        `env:"HARO_CLOUD_LLM_URL"`                          // OpenAI 兼容接口的根地址（…/v1）
 	CloudLLMModel   string        `env:"HARO_CLOUD_LLM_MODEL"`                        // 云端的模型 ID
@@ -111,15 +111,15 @@ type Settings struct {
 
 	// 声纹（v3 H-3）：只有登记过的人能唤醒、才会被回答。不设模型 = 关闭；设了但还没人登记 = 不过滤
 	SpeakerModel     string  `env:"HARO_SPEAKER_MODEL"`                      // sherpa-onnx 说话人识别模型（CAM++）
-	VoiceprintsDir   string  `env:"HARO_VOICEPRINTS_DIR"`                    // 登记的声纹（终端 haro -enroll 经大脑登记生成；生物特征，只在本地）
+	VoiceprintsDir   string  `env:"HARO_VOICEPRINTS_DIR"`                    // 登记的声纹（终端 haro -enroll 经服务端登记生成；生物特征，只在本地）
 	SpeakerThreshold float64 `env:"HARO_SPEAKER_THRESHOLD" envDefault:"0.5"` // 相似度达到这个值才算认出来
 	// 唤醒词只有 1 秒多，声纹算不稳（真机：同一人同一位置，整句 0.73、唤醒词 0.25–0.38）：唤醒用低一些的门槛（v3 BV）。
 	// 只过了这个门槛的唤醒，接着说的话仍要达到 HARO_SPEAKER_THRESHOLD 才回答
 	WakeSpeakerThreshold float64 `env:"HARO_WAKE_SPEAKER_THRESHOLD" envDefault:"0.2"`
 
-	// 工具（见 docs/architecture.md）：自研工具内置在大脑里，MCP 只接第三方服务
+	// 工具（见 docs/architecture.md）：自研工具内置在服务端里，MCP 只接第三方服务
 	Tools   bool   `env:"HARO_TOOLS" envDefault:"true"`
-	NotesDB string `env:"HARO_NOTES_DB"` // 记事本存储：SQLite 文件路径（v5 起大脑直接连，不再有 haro-notes 程序）
+	NotesDB string `env:"HARO_NOTES_DB"` // 记事本存储：SQLite 文件路径（v5 起服务端直接连，不再有 haro-notes 程序）
 	// 联网搜索（v5 E3）：Tavily 官方远程 MCP。密钥不设 = 不提供联网搜索（凭证：无默认值，只来自环境变量）
 	TavilyAPIKey string `env:"HARO_TAVILY_API_KEY"`
 	TavilyMCPURL string `env:"HARO_TAVILY_MCP_URL" envDefault:"https://mcp.tavily.com/mcp/"`
@@ -158,7 +158,7 @@ type Settings struct {
 	PersonasDir      string        `env:"HARO_PERSONAS_DIR"`
 	PersonaDefault   string        `env:"HARO_PERSONA_DEFAULT" envDefault:"buddy"`  // 没记过当前性格时用哪个（ID）
 	PersonaState     string        `env:"HARO_PERSONA_STATE"`                       // 记住当前性格的文件；空 = 重启回到默认
-	ConversationsDir string        `env:"HARO_CONVERSATIONS_DIR"`                   // 对话跟人走（v4 D1）：每人一个文件；空 = 只在内存里（大脑重启就没了）
+	ConversationsDir string        `env:"HARO_CONVERSATIONS_DIR"`                   // 对话跟人走（v4 D1）：每人一个文件；空 = 只在内存里（服务端重启就没了）
 	WakeArbitration  time.Duration `env:"HARO_WAKE_ARBITRATION" envDefault:"300ms"` // 多台终端同时听到唤醒词时等多久再选一台（v4 D2 / C-2）；0 = 不仲裁
 
 	// 切句
@@ -170,7 +170,7 @@ type Settings struct {
 	AudioSource  string `env:"HARO_AUDIO_SOURCE"`  // 空 = 自动：跟系统默认，但跳过蓝牙麦克风
 	AudioSink    string `env:"HARO_AUDIO_SINK"`    // 空 = 跟系统默认（蓝牙重连后自动接回）
 	CameraDevice string `env:"HARO_CAMERA_DEVICE"` // 空 = 自动找；none = 不用摄像头
-	// 终端的提示音（大脑连不上 / 回来了）：目录里放 offline.wav、online.wav（16 bit PCM）；不设 = 内置的不含人声的提示音
+	// 终端的提示音（服务端连不上 / 回来了）：目录里放 offline.wav、online.wav（16 bit PCM）；不设 = 内置的不含人声的提示音
 	TonesDir    string        `env:"HARO_TONES_DIR"`
 	CameraMode  string        `env:"HARO_CAMERA_MODE" envDefault:"continuous"`
 	CameraSize  string        `env:"HARO_CAMERA_SIZE" envDefault:"1280x720"`
@@ -179,9 +179,9 @@ type Settings struct {
 	FrameMaxAge time.Duration `env:"HARO_FRAME_MAX_AGE" envDefault:"3s"`
 	MinSpeech   time.Duration `env:"HARO_MIN_SPEECH" envDefault:"700ms"`
 
-	// 终端 ↔ 大脑：默认都在本机，大脑只监听本机；终端在别的机器上时改监听地址（只在可信网络里）
-	BrainListen string `env:"HARO_BRAIN_LISTEN" envDefault:"127.0.0.1:59130"`     // haro-brain 监听地址
-	BrainURL    string `env:"HARO_BRAIN_URL" envDefault:"http://127.0.0.1:59130"` // 终端连大脑的地址
+	// 终端 ↔ 服务端：默认都在本机，服务端只监听本机；终端在别的机器上时改监听地址（只在可信网络里）
+	ServerListen string `env:"HARO_SERVER_LISTEN" envDefault:"127.0.0.1:59130"`     // haro-server 监听地址
+	ServerURL    string `env:"HARO_SERVER_URL" envDefault:"http://127.0.0.1:59130"` // 终端连服务端的地址
 
 	// 其他
 	RequestTimeout time.Duration `env:"HARO_REQUEST_TIMEOUT" envDefault:"120s"`
@@ -190,7 +190,7 @@ type Settings struct {
 
 func parseSettings() (Settings, error) { return env.ParseAs[Settings]() }
 
-// LoadBrainSettings 读取并校验大脑（haro-brain）用到的配置：模型、识别、语音合成、工具。
+// LoadBrainSettings 读取并校验服务端（haro-server）用到的配置：模型、识别、语音合成、工具。
 func LoadBrainSettings() (Settings, error) {
 	settings, err := parseSettings()
 	if err != nil {
@@ -199,7 +199,7 @@ func LoadBrainSettings() (Settings, error) {
 	return settings, settings.validateBrain()
 }
 
-// LoadTerminalSettings 读取并校验终端（haro）用到的配置：轮流方式、摄像头、大脑地址。
+// LoadTerminalSettings 读取并校验终端（haro）用到的配置：轮流方式、摄像头、服务端地址。
 func LoadTerminalSettings() (Settings, error) {
 	settings, err := parseSettings()
 	if err != nil {
@@ -221,13 +221,13 @@ func (settings Settings) validateTerminal() error {
 	if settings.CameraMode != CameraContinuous && settings.CameraMode != CameraOnDemand {
 		return fmt.Errorf("HARO_CAMERA_MODE 只能是 %s 或 %s，现在是 %q", CameraContinuous, CameraOnDemand, settings.CameraMode)
 	}
-	if settings.BrainURL == "" {
-		return fmt.Errorf("必须设 HARO_BRAIN_URL（haro-brain 的地址）")
+	if settings.ServerURL == "" {
+		return fmt.Errorf("必须设 HARO_SERVER_URL（haro-server 的地址）")
 	}
 	return nil
 }
 
-// validateBrain 校验大脑的配置。免按键、唤醒词要用到的模型由大脑（haro-asr）加载，所以 HARO_TURN_MODE 也在这里看。
+// validateBrain 校验服务端的配置。免按键、唤醒词要用到的模型由服务端（haro-asr）加载，所以 HARO_TURN_MODE 也在这里看。
 func (settings Settings) validateBrain() error {
 	switch settings.TTS {
 	case TTSPiper:
@@ -314,8 +314,8 @@ func (settings Settings) validateBrain() error {
 	if settings.Tools && settings.NotesDB == "" {
 		return fmt.Errorf("HARO_TOOLS=true 时必须设 HARO_NOTES_DB（或设 HARO_TOOLS=false）")
 	}
-	if settings.BrainListen == "" {
-		return fmt.Errorf("必须设 HARO_BRAIN_LISTEN（haro-brain 的监听地址）")
+	if settings.ServerListen == "" {
+		return fmt.Errorf("必须设 HARO_SERVER_LISTEN（haro-server 的监听地址）")
 	}
 	return nil
 }

@@ -1,0 +1,118 @@
+## ============================================================
+## ci —— 推 dev、开往 main 的 PR 时运行；发版流程（release.yml）也先调用它：测试不过就不发版（v6）
+## ============================================================
+##   version  版本号 = v + VERSION 文件 + 提交号前 7 位（= Release 标签 = 镜像标签），例如 v0.5.0-1a2b3c4
+##   test     gofmt + go vet + go test -short（跳过要网络的测试）+ check-darwin
+##   scripts  shellcheck（安装脚本、模型下载脚本等）
+##   build    终端三个平台（Linux x86_64 / arm64、macOS Apple 芯片），各在原生机器上编译、跑一次 -version，
+##            再用安装脚本装一遍、升一遍、卸一遍（含「校验和不对必须拒装」的阳性对照）。
+##            产物传成 artifact：release.yml 直接拿去发布 —— 发布的就是这里测过的那一份，不重新编译。
+## ============================================================
+name: ci
+
+on:
+  push:
+    branches: [dev]
+  pull_request:
+    branches: [main]
+  workflow_call:
+    outputs:
+      tag:
+        description: 版本号（= Release 标签 = 镜像标签），例如 v0.5.0-1a2b3c4
+        value: ${{ jobs.version.outputs.tag }}
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - id: tag
+        run: |
+          version=$(cat VERSION)
+          echo "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' ||
+            { echo "::error file=VERSION::VERSION 要写成 X.Y.Z，现在是「${version}」"; exit 1; }
+          echo "tag=v${version}-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          echo "版本号：v${version}-${GITHUB_SHA::7}"
+
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          [ -z "$unformatted" ] || { echo "::error::这些文件没有 gofmt：${unformatted}"; exit 1; }
+      - run: go vet ./...
+      - run: go test -short ./...
+      - run: make check-darwin
+
+  scripts:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: shellcheck
+        run: |
+          command -v shellcheck >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck; }
+          shellcheck --version | head -2
+          shellcheck --severity=warning scripts/*.sh deploy/systemd/run-with-env.sh
+      # macOS 的 sh 是 bash 3.2：紧跟在 $变量名 后面的中文会被当成变量名的一部分（报 unbound variable，2026-11-17 踩过）
+      #   ⇒ 变量后面紧跟非 ASCII 字符时一律写成 ${变量名}
+      - name: 变量名后面不能紧跟中文（macOS 兼容）
+        run: |
+          if grep -nP '(?<!\\)\$[A-Za-z_][A-Za-z0-9_]*(?=[^\x00-\x7F])' scripts/*.sh deploy/systemd/run-with-env.sh; then
+            echo '::error::上面这些地方要写成 ${变量名}'
+            exit 1
+          fi
+
+  build:
+    needs: version
+    name: build (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: linux-amd64, runner: ubuntu-24.04 }
+          - { platform: linux-arm64, runner: ubuntu-24.04-arm } # 公开仓库免费
+          - { platform: darwin-arm64, runner: macos-15 }
+    runs-on: ${{ matrix.runner }}
+    env:
+      TAG: ${{ needs.version.outputs.tag }}
+      ASSET: haro-${{ matrix.platform }}.tar.gz
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      # 终端要 cgo（音频库 miniaudio 随源码编译，不用装系统库）⇒ 每个平台在自己的机器上编，不交叉编译
+      - name: 编译终端
+        run: |
+          mkdir -p dist/pkg
+          go build -trimpath -ldflags "-s -w -X github.com/bukahou/haro/internal/buildinfo.Version=${TAG}" -o dist/pkg/haro ./cmd/haro
+          ./dist/pkg/haro -version
+          ./dist/pkg/haro -version | grep -F "haro ${TAG} " >/dev/null
+          cp LICENSE dist/pkg/
+          tar -czf "dist/${ASSET}" -C dist/pkg haro LICENSE
+      - name: 安装脚本：装、升、卸 + 阳性对照
+        run: sh scripts/test-install.sh "dist/${ASSET}" "${TAG}"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: haro-${{ matrix.platform }}
+          path: dist/${{ env.ASSET }}
+          if-no-files-found: error
+          retention-days: 7

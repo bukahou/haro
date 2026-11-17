@@ -1,9 +1,9 @@
-// Package brainserver 把大脑挂到 WebSocket 上（v3 第 3 步）：
+// Package brainserver 把服务端挂到 WebSocket 上（v3 第 3 步）：
 //   - GET /v1/realtime：对话会话（Realtime 事件，格式见 realtimeproto/conversation_wire.go）
 //   - GET /health
 //
 // 一条连接一个会话（S-3，与 OpenAI Realtime 一致）：连接断了，这次的对话历史就没了（性格记在文件里，不受影响）。
-// 本包只管协议和连接，会话由外部注入（haro-brain 注入 brain.Session）。
+// 本包只管协议和连接，会话由外部注入（haro-server 注入 brain.Session）。
 package brainserver
 
 import (
@@ -16,6 +16,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/bukahou/haro/internal/buildinfo"
 	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
@@ -49,6 +50,7 @@ func NewHandler(newSession SessionFactory, logger *slog.Logger) http.Handler {
 }
 
 func serveConversation(w http.ResponseWriter, r *http.Request, newSession SessionFactory, logger *slog.Logger) {
+	w.Header().Set(buildinfo.Header, buildinfo.Version) // 握手响应里报服务端的版本（v6 T6）
 	conn, err := websocket.Accept(w, r, nil)
 	if err != nil {
 		logger.Warn("WebSocket 握手失败", "remote", r.RemoteAddr, "err", err)
@@ -61,7 +63,12 @@ func serveConversation(w http.ResponseWriter, r *http.Request, newSession Sessio
 
 	session := newSession()
 	defer session.Close()
-	logger.Info("终端已连接", "remote", r.RemoteAddr)
+	if terminalVersion := r.Header.Get(buildinfo.Header); buildinfo.Mismatch(buildinfo.Version, terminalVersion) {
+		logger.Warn("终端已连接，但版本和服务端不同：在那台终端上重新运行安装脚本升到最新", "remote", r.RemoteAddr,
+			"terminal", buildinfo.Reported(terminalVersion), "server", buildinfo.Version)
+	} else {
+		logger.Info("终端已连接", "remote", r.RemoteAddr, "version", buildinfo.Reported(terminalVersion))
+	}
 
 	var writeMu sync.Mutex
 	write := func(event realtimeproto.ServerEvent) error {

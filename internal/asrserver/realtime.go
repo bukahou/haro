@@ -325,7 +325,7 @@ func (s *transcriptionSession) wakeUp(ctx context.Context, keyword string, speak
 	// 唤醒词只有 1 秒多，声纹算不稳：门槛比说话时低（v3 BV）；没到说话门槛的，唤醒句照常比对
 	wakeSpeaker, wakeGuess := "", ""
 	window := pcm16ToFloat(s.sliceHistory(s.wakeWindowStart(), s.totalSamples))
-	quality := wakeQuality{level: rootMeanSquare(window)} // 几台终端同时听到时，大脑据此选一台回答（v4 D2）
+	quality := wakeQuality{level: rootMeanSquare(window)} // 几台终端同时听到时，服务端据此选一台回答（v4 D2）
 	if s.deps.Speakers.enabled() {
 		name, score, sure, err := s.deps.Speakers.identifyWake(window)
 		quality.score = score
@@ -577,7 +577,7 @@ func (s *transcriptionSession) sinceWakeMs(sample int) int {
 	return (sample - s.lastWakeAt) / samplesPerMs
 }
 
-// identifySpeaker 比对这句话的声纹（v3 H-3）；没登记声纹或算不出来时 checked = false（大脑不过滤）。
+// identifySpeaker 比对这句话的声纹（v3 H-3）；没登记声纹或算不出来时 checked = false（服务端不过滤）。
 func (s *transcriptionSession) identifySpeaker(itemID string, pcm []byte) (string, bool) {
 	if !s.deps.Speakers.enabled() {
 		return "", false

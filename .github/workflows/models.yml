@@ -1,0 +1,65 @@
+## ============================================================
+## models —— 建模型的 Release（v6 C6）
+## ============================================================
+##   从原发布方下载 deploy/server/models.lock 里的每个文件 → 按 sha256 校验（= 开发机上一直在用的那几个文件）→
+##   建 Release（标签 = models.lock 里 release 那一行；不设为 latest，安装脚本的 latest 仍指向终端的版本）→
+##   再按镜像构建时的方式从这个 Release 下载一遍校验（阳性对照：证明构建那条路走得通）。
+##   Release 里同时放 models.lock、MODELS.md、MODEL-LICENSES.txt、LICENSE（许可证要求随模型一起分发）。
+##
+## 两种运行方式（第一次、以后换模型时各一次）：
+##   · 推标签：git tag models-v1 && git push origin models-v1
+##     ⭐ 第一次只能这样：Actions 页面上的按钮要等这个文件合并进 main 才会出现，而合并到 main 的发版就要用到模型
+##   · Actions 页面 → models → Run workflow（合并进 main 以后）
+## ⛔ 同名 Release 已经存在就失败：建好的不覆盖（旧镜像要能重建）；换模型请在 models.lock 里换一个新标签。
+## ============================================================
+name: models
+
+on:
+  push:
+    tags: ["models-v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write # 建 Release
+
+jobs:
+  mirror:
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: 定标签；Release 不能已经存在
+        id: tag
+        run: |
+          want=$(awk '$1 == "release" { print $2; exit }' deploy/server/models.lock)
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "$want" ]; then
+            echo "::error::推的标签是 ${GITHUB_REF_NAME}，models.lock 写的是 ${want}"
+            exit 1
+          fi
+          if gh release view "$want" >/dev/null 2>&1; then
+            echo "::error::Release ${want} 已经存在：不覆盖（换模型请在 models.lock 里换一个新标签）"
+            exit 1
+          fi
+          echo "tag=${want}" >> "$GITHUB_OUTPUT"
+      - name: 从原发布方下载并校验
+        run: scripts/fetch-models.sh --from-upstream --flat "$RUNNER_TEMP/models"
+      - name: 建 Release
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          cp deploy/server/models.lock deploy/server/MODELS.md deploy/server/MODEL-LICENSES.txt LICENSE "$RUNNER_TEMP/models/"
+          (cd "$RUNNER_TEMP/models" && sha256sum -- * > SHA256SUMS && cat SHA256SUMS)
+          {
+            echo "haro-server 镜像用的公开模型：原样从原发布方下载，按 \`deploy/server/models.lock\` 的 sha256 校验后放在这里留底"
+            echo "（原发布方删了文件也不影响以后构建镜像）。来源与许可证见 MODELS.md、MODEL-LICENSES.txt。"
+            echo
+            echo "- 提交：${GITHUB_SHA}"
+          } > "$RUNNER_TEMP/notes.md"
+          # 推标签触发时标签已经在了（--target 不起作用）；按钮触发时在这次的提交上建标签
+          gh release create "$TAG" "$RUNNER_TEMP"/models/* --title "模型 ${TAG}" --notes-file "$RUNNER_TEMP/notes.md" \
+            --latest=false --target "$GITHUB_SHA"
+      - name: 阳性对照：按镜像构建的方式从这个 Release 下载一遍
+        run: scripts/fetch-models.sh "$RUNNER_TEMP/check"

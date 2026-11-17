@@ -17,7 +17,7 @@ import (
 var testTiming = Timing{OfflineNotice: 60 * time.Millisecond, Poll: 10 * time.Millisecond,
 	BackoffMin: 10 * time.Millisecond, BackoffMax: 20 * time.Millisecond}
 
-// fakeConn 是一条假的大脑连接：记下发过的设备事件；cut() 模拟断线。
+// fakeConn 是一条假的服务端连接：记下发过的设备事件；cut() 模拟断线。
 type fakeConn struct {
 	done    chan struct{}
 	once    sync.Once
@@ -194,7 +194,7 @@ func eventually(t *testing.T, what string, condition func() bool) {
 	}
 }
 
-// 大脑断开：短时间内恢复不出声；超过提示时间就说「断开了」，恢复时说「回来了」；关机正常退出。
+// 服务端断开：短时间内恢复不出声；超过提示时间就说「断开了」，恢复时说「回来了」；关机正常退出。
 func TestSupervisorReconnectsAndAnnouncesLongOutage(t *testing.T) {
 	r := newRig()
 	stop := startSupervisor(t, r)
@@ -216,7 +216,7 @@ func TestSupervisorReconnectsAndAnnouncesLongOutage(t *testing.T) {
 	}
 }
 
-// 大脑在两次重试之间起来（make deploy：大脑启动要几秒，重试间隔在翻倍）：到提示时间先再连一次，连上就不出声。
+// 服务端在两次重试之间起来（make deploy：服务端启动要几秒，重试间隔在翻倍）：到提示时间先再连一次，连上就不出声。
 func TestSupervisorRetriesBeforeAnnouncing(t *testing.T) {
 	r := newRig()
 	r.brainUp.Store(false)
@@ -230,7 +230,7 @@ func TestSupervisorRetriesBeforeAnnouncing(t *testing.T) {
 	eventually(t, "连上并运行", func() bool { return r.sessionCount() == 1 })
 	time.Sleep(50 * time.Millisecond)
 	if n := r.sink.count(); n != 0 {
-		t.Fatalf("到提示时间时大脑已经起来了，不该出声：%d", n)
+		t.Fatalf("到提示时间时服务端已经起来了，不该出声：%d", n)
 	}
 }
 
@@ -254,7 +254,7 @@ func TestSupervisorWaitsForAndSwitchesMicrophone(t *testing.T) {
 	_ = stop()
 }
 
-// 音箱没了 / 回来了，都告诉大脑（没有音箱时大脑只发文字）。
+// 音箱没了 / 回来了，都告诉服务端（没有音箱时服务端只发文字）。
 func TestSupervisorReportsSpeakerChanges(t *testing.T) {
 	r := newRig()
 	stop := startSupervisor(t, r)
@@ -276,7 +276,7 @@ func TestSupervisorReportsSpeakerChanges(t *testing.T) {
 	_ = stop()
 }
 
-// 摄像头被拔掉 / 插回来，都告诉大脑（v4 第 5 步 b：没有摄像头时大脑不给模型看画面的工具），且不重来。
+// 摄像头被拔掉 / 插回来，都告诉服务端（v4 第 5 步 b：没有摄像头时服务端不给模型看画面的工具），且不重来。
 func TestSupervisorReportsCameraChanges(t *testing.T) {
 	r := newRig()
 	stop := startSupervisor(t, r)

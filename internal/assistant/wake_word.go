@@ -72,7 +72,7 @@ func (a *Assistant) runWakeWord(ctx context.Context) error {
 	}
 }
 
-// handleWakeEvent 处理唤醒词模式下大脑发来的一个事件。
+// handleWakeEvent 处理唤醒词模式下服务端发来的一个事件。
 func (a *Assistant) handleWakeEvent(ctx context.Context, window *conversationWindow, event realtimeproto.ServerEvent) {
 	switch e := event.(type) {
 	case realtimeproto.HaroWakeWordDetected:
@@ -95,7 +95,7 @@ func (a *Assistant) handleWakeEvent(ctx context.Context, window *conversationWin
 	case realtimeproto.HaroNotice:
 		a.playNotice(ctx, e)
 	case realtimeproto.Error:
-		a.logger.Error("大脑出错", "message", e.Message)
+		a.logger.Error("服务端出错", "message", e.Message)
 	}
 }
 
@@ -109,14 +109,14 @@ func (a *Assistant) sleep(ctx context.Context, window *conversationWindow, reaso
 	a.playSleepTone(ctx)
 }
 
-// playNotice 大脑有事告诉主人（例如后台调查查完了）：响一声。醒着、睡着都响；主人叫醒后大脑会先说是什么事。
+// playNotice 服务端有事告诉主人（例如后台调查查完了）：响一声。醒着、睡着都响；主人叫醒后服务端会先说是什么事。
 func (a *Assistant) playNotice(ctx context.Context, notice realtimeproto.HaroNotice) {
-	a.logger.Info("🔔 大脑提示", "kind", notice.Kind)
+	a.logger.Info("🔔 服务端提示", "kind", notice.Kind)
 	a.playClip(ctx, a.opts.NoticeTone, "提示音")
 }
 
 // playSleepTone 休眠时说一声（2026-11-17：休眠没有声音，人不知道它已经睡了，接着说话没反应）。
-// 放在通知大脑休眠之后：这时语音前端只认唤醒词，提示音不会被当成用户说话。
+// 放在通知服务端休眠之后：这时语音前端只认唤醒词，提示音不会被当成用户说话。
 func (a *Assistant) playSleepTone(ctx context.Context) {
 	a.playClip(ctx, a.opts.WakeWord.SleepTone, "休眠提示音")
 }

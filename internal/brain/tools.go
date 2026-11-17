@@ -18,7 +18,7 @@ const (
 	toolTimeout   = 10 * time.Second // 单次工具执行的超时
 )
 
-// lookAtCameraTool 是大脑内置的「看画面」工具（D-B ②）：画面由终端每轮提供，模型需要看时才交给它。
+// lookAtCameraTool 是服务端内置的「看画面」工具（D-B ②）：画面由终端每轮提供，模型需要看时才交给它。
 const lookAtCameraTool = "look_at_camera"
 
 var lookAtCameraSpec = ToolSpec{Name: lookAtCameraTool,

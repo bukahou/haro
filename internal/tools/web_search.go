@@ -33,7 +33,7 @@ type SearchMeter interface {
 }
 
 // TavilySearcher 经 Tavily 官方远程 MCP（https://mcp.tavily.com/mcp/）搜索。
-// 只用 tavily_search / tavily_extract 两个工具；crawl / map / research 不用（贵、慢，调查流程由大脑自己控制）。
+// 只用 tavily_search / tavily_extract 两个工具；crawl / map / research 不用（贵、慢，调查流程由服务端自己控制）。
 type TavilySearcher struct {
 	server *MCPServer
 }

@@ -1,9 +1,13 @@
-# haro-brain 镜像的构建上下文（deploy/brain/Dockerfile）：只要源码和唤醒词
+# haro-server 镜像的构建上下文（deploy/server/Dockerfile）：只要源码和唤醒词
 # ⛔ 性格档案、声音档案不进镜像（由部署方挂载，例如 K8s ConfigMap）
 /bin/
 /data/
 /docs/
+/dist/
 /deploy/
+# 例外：模型的来源与许可证说明要进镜像（随模型一起分发）
+!/deploy/server/MODELS.md
+!/deploy/server/MODEL-LICENSES.txt
 /assets/personas/
 /assets/voices/
 /assets/tones/*.wav

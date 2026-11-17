@@ -8,7 +8,7 @@ import (
 	"github.com/bukahou/haro/internal/netdiag"
 )
 
-// Builtin 是大脑进程里直接执行的工具（不走 MCP）。
+// Builtin 是服务端进程里直接执行的工具（不走 MCP）。
 type Builtin struct {
 	Spec brain.ToolSpec
 	Run  func(context.Context, map[string]any) (string, error)
@@ -16,7 +16,7 @@ type Builtin struct {
 
 // NetworkDiagnostics 返回网络诊断的两个内置工具（v3 V-4：内置到主程序，不再是 haro-netdiag 子进程）。
 // 说明文字沿用 v2.5 的 haro-netdiag（已删）：「不调用就不知道」那句是实测加的，去掉会让模型凭空回答。
-// 它查的是大脑所在机器的网络（大脑在容器里时，查的是容器的网络）。
+// 它查的是服务端所在机器的网络（服务端在容器里时，查的是容器的网络）。
 func NetworkDiagnostics(checker *netdiag.Checker) []Builtin {
 	noParameters := json.RawMessage(`{"type":"object","properties":{}}`)
 	return []Builtin{

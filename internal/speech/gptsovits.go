@@ -162,7 +162,7 @@ func (g *GPTSoVITSSynthesizer) post(ctx context.Context, utterance brain.Utteran
 	payload, err := json.Marshal(gptSoVITSRequest{
 		Text: utterance.Text, TextLang: language,
 		RefAudioPath: path.Join(g.RefDir, ref.File), PromptText: ref.Text, PromptLang: promptLang,
-		TextSplitMethod: "cut0", // 大脑已经切好句了，不再切（再切会在句中插入停顿）
+		TextSplitMethod: "cut0", // 服务端已经切好句了，不再切（再切会在句中插入停顿）
 		BatchSize:       1, MediaType: "wav", StreamingMode: g.StreamingMode,
 	})
 	if err != nil {

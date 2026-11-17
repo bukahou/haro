@@ -2,7 +2,7 @@
 //
 // 对外：Open（Facade，按连接地址选择实现，形同 database/sql.Open）+ Repository（接口）。
 // 现在只有 SQLite 实现（开发阶段：数据就在项目的 data/ 下，随时可以清理）；
-// 以后可以新增 PostgreSQL / MySQL 实现，改配置即可切换，调用方（大脑里的记事本工具，v5 起内置）不用改。
+// 以后可以新增 PostgreSQL / MySQL 实现，改配置即可切换，调用方（服务端里的记事本工具，v5 起内置）不用改。
 package notes
 
 import (

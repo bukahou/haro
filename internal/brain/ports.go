@@ -1,7 +1,7 @@
-// Package brain 是 haro 的大脑：识别 → 模型流式回答 → 按句切分 → 合成。
+// Package brain 是 haro 的服务端：识别 → 模型流式回答 → 按句切分 → 合成。
 //
-// 对外只暴露 Session（经 realtimeproto 事件与终端交互）；本文件定义大脑依赖的各段能力（Go interface），
-// 实现在 speech / llm 包，由 cmd/haro 组装注入。v3 大脑与终端分机部署时，本包不改，只在外面套 WebSocket。
+// 对外只暴露 Session（经 realtimeproto 事件与终端交互）；本文件定义服务端依赖的各段能力（Go interface），
+// 实现在 speech / llm 包，由 cmd/haro 组装注入。v3 服务端与终端分机部署时，本包不改，只在外面套 WebSocket。
 package brain
 
 import (
@@ -27,7 +27,7 @@ type ChatModel interface {
 }
 
 // SpokenError 是可以直接念给主人的错误（例如「这个月的额度用完了」）：模型或工具返回它时，
-// 大脑把 SpokenMessage 说出来，而不是只报「出错了」。用 errors.As 判断。
+// 服务端把 SpokenMessage 说出来，而不是只报「出错了」。用 errors.As 判断。
 type SpokenError interface {
 	error
 	SpokenMessage() string
@@ -126,7 +126,7 @@ type ToolSpec struct {
 	RequiresConfirmation bool            // 会删除或修改数据（MCP destructiveHint）：执行前要用户口头确认
 }
 
-// ToolCall 是模型发起的一次工具调用。ID 在一次会话内唯一（模型没给时由大脑补上），
+// ToolCall 是模型发起的一次工具调用。ID 在一次会话内唯一（模型没给时由服务端补上），
 // 用来把调用和结果对上；各家模型对 ID 格式的要求不同，由适配器按目标模型重写。
 type ToolCall struct {
 	ID        string         `json:"id"`
@@ -134,7 +134,7 @@ type ToolCall struct {
 	Arguments map[string]any `json:"arguments,omitempty"`
 }
 
-// Toolbox 是大脑能用的全部工具（内置 + 各 MCP 服务）。
+// Toolbox 是服务端能用的全部工具（内置 + 各 MCP 服务）。
 type Toolbox interface {
 	Specs() []ToolSpec
 	// Call 执行一次调用，返回给模型看的结果（一般是 JSON 文本）。

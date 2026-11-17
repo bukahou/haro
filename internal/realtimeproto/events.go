@@ -1,38 +1,38 @@
-// Package realtimeproto 定义终端与大脑之间的事件：取 OpenAI Realtime 事件模型的子集。
+// Package realtimeproto 定义终端与服务端之间的事件：取 OpenAI Realtime 事件模型的子集。
 //
 // v1.5 两侧在同一进程，事件经 Go channel 传递；v3 在本包加 WebSocket + JSON 编解码，
-// 终端（assistant）与大脑（brain）的代码都不改。每个事件的 Type() 返回 Realtime 正式版的事件名。
+// 终端（assistant）与服务端（brain）的代码都不改。每个事件的 Type() 返回 Realtime 正式版的事件名。
 // ⚠️ v3 落地前须对照当时的官方文档再核对事件名与字段。
 package realtimeproto
 
 import "time"
 
-// ClientEvent 是终端发给大脑的事件。
+// ClientEvent 是终端发给服务端的事件。
 type ClientEvent interface {
 	Type() string
 	clientEvent()
 }
 
-// ServerEvent 是大脑发给终端的事件。
+// ServerEvent 是服务端发给终端的事件。
 type ServerEvent interface {
 	Type() string
 	serverEvent()
 }
 
-// ——— 终端 → 大脑 ———
+// ——— 终端 → 服务端 ———
 
 // SessionUpdate 更新会话配置。
 type SessionUpdate struct {
 	Instructions string
 	// TurnDetection 为 nil 表示按键模式（终端自己 commit，相当于 turn_detection: null）；
-	// 非 nil 表示由大脑侧的 VAD 判断说话开始与结束（v2 免按键）。
+	// 非 nil 表示由服务端侧的 VAD 判断说话开始与结束（v2 免按键）。
 	TurnDetection *TurnDetection
 	// WakeWord 为 true 时启用唤醒门（haro 扩展，v2.2）：会话从休眠开始，听到唤醒词才处理用户说的话。
 	WakeWord bool
 	// InputFormat 是之后 input_audio_buffer.append 的音频格式（v3 走 WebSocket 时声明在会话里，S-1）。
 	// 进程内可以不填：每段音频本身带格式。
 	InputFormat AudioFormat
-	// NoCamera 为 true 表示这个终端没有摄像头（haro 扩展，v3 H-2）：大脑不提供「看画面」工具。
+	// NoCamera 为 true 表示这个终端没有摄像头（haro 扩展，v3 H-2）：服务端不提供「看画面」工具。
 	// 默认 false = 有摄像头（不声明时保持原来的行为）。
 	NoCamera bool
 }
@@ -50,7 +50,7 @@ type ConversationItemCreate struct {
 	Item ConversationItem
 }
 
-// ResponseCreate 请大脑基于当前对话生成回答。
+// ResponseCreate 请服务端基于当前对话生成回答。
 type ResponseCreate struct{}
 
 // ResponseCancel 取消正在生成的回答（Ctrl+C；v2 打断）。
@@ -75,7 +75,7 @@ func (HaroPlaybackStarted) clientEvent() {}
 func (HaroPlaybackStopped) clientEvent() {}
 
 // HaroTerminalDevices 是终端现在有哪些设备（haro 扩展，v4 D3）：连上时发一次，之后有变化再发。
-// 名字为空 = 没有这个设备。没有音箱时大脑不再合成语音，只发文字（终端写进日志）。
+// 名字为空 = 没有这个设备。没有音箱时服务端不再合成语音，只发文字（终端写进日志）。
 type HaroTerminalDevices struct {
 	Microphone string
 	Speaker    string
@@ -86,7 +86,7 @@ func (HaroTerminalDevices) Type() string { return "haro.terminal.devices" }
 func (HaroTerminalDevices) clientEvent() {}
 
 // ConversationItemTruncate 表示用户只听到了回答的前 AudioEndMs 毫秒（被打断时由终端发出，v3 I-2）：
-// 大脑只把听到的部分记进历史。与 Realtime 的 conversation.item.truncate 一致（haro 只截最近一次回答，不带 item_id）。
+// 服务端只把听到的部分记进历史。与 Realtime 的 conversation.item.truncate 一致（haro 只截最近一次回答，不带 item_id）。
 type ConversationItemTruncate struct {
 	AudioEndMs int64
 }
@@ -113,7 +113,7 @@ func (ConversationItemCreate) clientEvent() {}
 func (ResponseCreate) clientEvent()         {}
 func (ResponseCancel) clientEvent()         {}
 
-// ——— 大脑 → 终端 ———
+// ——— 服务端 → 终端 ———
 
 // HaroWakeWordDetected 表示听到了唤醒词，语音前端已进入唤醒状态（haro 扩展）。
 type HaroWakeWordDetected struct {
@@ -127,7 +127,7 @@ type HaroWakeWordDetected struct {
 func (HaroWakeWordDetected) Type() string { return "haro.wake_word.detected" }
 func (HaroWakeWordDetected) serverEvent() {}
 
-// HaroNotice 是大脑给终端的一个提示（haro 扩展，v5）：终端播一声提示音、不说话（大脑还不能主动开口）。
+// HaroNotice 是服务端给终端的一个提示（haro 扩展，v5）：终端播一声提示音、不说话（服务端还不能主动开口）。
 // 例如后台调查查完了：主人听到后叫醒 haro，它先说结论。
 type HaroNotice struct {
 	Kind string // NoticeResearchDone 等；终端不认识的种类也照样响一声
@@ -178,7 +178,7 @@ type ResponseDone struct {
 	Usage  *Usage
 }
 
-// Error 是大脑侧的错误。出错的回答之后仍会有一个 Status=failed 的 ResponseDone。
+// Error 是服务端侧的错误。出错的回答之后仍会有一个 Status=failed 的 ResponseDone。
 type Error struct {
 	Message string
 }

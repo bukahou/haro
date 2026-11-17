@@ -1,4 +1,4 @@
-// Package brainclient 是终端一侧的大脑：经 WebSocket 连 haro-brain（v3 第 3 步），实现 assistant.BrainSession。
+// Package brainclient 是终端一侧的服务端：经 WebSocket 连 haro-server（v3 第 3 步），实现 assistant.BrainSession。
 //
 // 与进程内的 brain.Session 保持同样的约定：Events() 在会话期间不关闭。
 // 连接断了时：补发一个 Error；如果正有回答在进行，再补发一个 status=failed 的 ResponseDone（终端就不会一直等）；
@@ -10,19 +10,21 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/coder/websocket"
 
+	"github.com/bukahou/haro/internal/buildinfo"
 	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
-// ErrDisconnected 表示和大脑的连接断了。
-var ErrDisconnected = errors.New("和大脑的连接断了")
+// ErrDisconnected 表示和服务端的连接断了。
+var ErrDisconnected = errors.New("和服务端的连接断了")
 
-// Client 是一条到 haro-brain 的对话会话。
+// Client 是一条到 haro-server 的对话会话。
 type Client struct {
 	conn        *websocket.Conn
 	inputFormat realtimeproto.AudioFormat
@@ -38,28 +40,38 @@ type Client struct {
 	closing      bool
 }
 
-// Dial 连接大脑；大脑还没起来时每秒重试一次，最多等 wait（开机时终端可能比大脑先启动）。
+// Dial 连接服务端；服务端还没起来时每秒重试一次，最多等 wait（开机时终端可能比服务端先启动）。
 // inputFormat 是之后发送的麦克风音频格式，会声明在 session.update 里（S-1）。
 func Dial(ctx context.Context, baseURL string, inputFormat realtimeproto.AudioFormat, wait time.Duration,
 	logger *slog.Logger) (*Client, error) {
 	url := "ws" + strings.TrimPrefix(strings.TrimRight(baseURL, "/"), "http") + realtimeproto.ConversationPath
 	deadline := time.Now().Add(wait)
+	// 握手时报上终端的版本（v6 T6）；服务端在响应里报它的版本，不一样时在日志里提醒升级
+	options := &websocket.DialOptions{HTTPHeader: http.Header{
+		"User-Agent":     {buildinfo.UserAgent()},
+		buildinfo.Header: {buildinfo.Version},
+	}}
 	for attempt := 1; ; attempt++ {
-		conn, _, err := websocket.Dial(ctx, url, nil)
+		conn, response, err := websocket.Dial(ctx, url, options)
 		if err == nil {
 			conn.SetReadLimit(8 << 20)
 			readCtx, cancel := context.WithCancel(context.Background())
 			client := &Client{conn: conn, inputFormat: inputFormat, logger: logger, cancel: cancel,
 				events: make(chan realtimeproto.ServerEvent, 64), done: make(chan struct{})}
 			go client.readEvents(readCtx)
-			logger.Info("已连接大脑", "url", url)
+			if serverVersion := response.Header.Get(buildinfo.Header); buildinfo.Mismatch(buildinfo.Version, serverVersion) {
+				logger.Warn("已连接服务端，但版本和终端不同：服务端更新后，重新运行安装脚本把终端升到最新", "url", url,
+					"terminal", buildinfo.Version, "server", buildinfo.Reported(serverVersion))
+			} else {
+				logger.Info("已连接服务端", "url", url, "server_version", buildinfo.Reported(serverVersion))
+			}
 			return client, nil
 		}
 		if ctx.Err() != nil || time.Now().After(deadline) {
-			return nil, fmt.Errorf("连不上大脑 %s（等了 %s，haro-brain 起来了吗？）: %w", url, wait, err)
+			return nil, fmt.Errorf("连不上服务端 %s（等了 %s，haro-server 起来了吗？）: %w", url, wait, err)
 		}
 		if attempt == 1 {
-			logger.Info("等大脑启动", "url", url, "wait", wait)
+			logger.Info("等服务端启动", "url", url, "wait", wait)
 		}
 		select {
 		case <-ctx.Done():
@@ -106,7 +118,7 @@ func (c *Client) Send(ctx context.Context, event realtimeproto.ClientEvent) erro
 	return err
 }
 
-// Events 返回大脑发来的事件（会话期间不关闭）。
+// Events 返回服务端发来的事件（会话期间不关闭）。
 func (c *Client) Events() <-chan realtimeproto.ServerEvent { return c.events }
 
 // Done 在连接断开后关闭。
@@ -130,7 +142,7 @@ func (c *Client) readEvents(ctx context.Context) {
 		}
 		event, err := realtimeproto.DecodeServerWireEvent(data)
 		if err != nil {
-			c.logger.Warn("解析大脑的事件失败", "err", err)
+			c.logger.Warn("解析服务端的事件失败", "err", err)
 			continue
 		}
 		if event == nil { // 不认识的事件（例如以后新增的）：忽略
@@ -164,7 +176,7 @@ func (c *Client) disconnect(cause error) {
 	if closing {
 		return
 	}
-	c.logger.Error("和大脑的连接断了", "err", cause)
+	c.logger.Error("和服务端的连接断了", "err", cause)
 	go func() { // 不在读循环里阻塞：没人读事件时也不会卡住
 		c.events <- realtimeproto.Error{Message: ErrDisconnected.Error()}
 		if inFlight {

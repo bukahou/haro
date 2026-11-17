@@ -1,5 +1,6 @@
 /haro
 /bin/
+/dist/
 /data/
 *.wav
 # 例外：终端内置的提示音（assets/tones/gen_tones.go 生成，不含人声，编进终端程序）

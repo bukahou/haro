@@ -1,9 +1,9 @@
-// Package tones 是终端在大脑连不上时自己播的提示音（v4 第 1 步 1-B）：大脑断开时没有语音合成可用，
+// Package tones 是终端在服务端连不上时自己播的提示音（v4 第 1 步 1-B）：服务端断开时没有语音合成可用，
 // 所以提示音是提前做好的。
 //
 // 编进程序里的是不含人声的提示音（gen_tones.go 生成：断开 = 由高到低两声，回来 = 由低到高三声，
 // 去休眠 = 轻轻的由高到低两声，提示 = 明亮的「叮咚」）。
-// 想用自己的声音录的提示音（例如「我和大脑断开了」「我回来了」「我去睡觉了」）：把 offline.wav、online.wav、
+// 想用自己的声音录的提示音（例如「我和服务端断开了」「我回来了」「我去睡觉了」）：把 offline.wav、online.wav、
 // sleep.wav、notice.wav 放进一个目录，设 HARO_TONES_DIR 指向它（Load；缺哪个就用内置的那个）。
 package tones
 
@@ -32,10 +32,10 @@ var noticeWAV []byte
 
 // Tones 是终端的全部提示音。
 type Tones struct {
-	Offline realtimeproto.PCMAudio // 大脑断开了
-	Online  realtimeproto.PCMAudio // 大脑回来了
+	Offline realtimeproto.PCMAudio // 服务端断开了
+	Online  realtimeproto.PCMAudio // 服务端回来了
 	Sleep   realtimeproto.PCMAudio // 对话结束、去休眠了
-	Notice  realtimeproto.PCMAudio // 大脑的提示（例如后台调查查完了）：叫醒问就行
+	Notice  realtimeproto.PCMAudio // 服务端的提示（例如后台调查查完了）：叫醒问就行
 }
 
 // Offline 返回「断开了」的提示音。
