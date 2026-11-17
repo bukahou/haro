@@ -108,7 +108,7 @@ func (r *Runner) Brief(person string) []string {
 			if task.Status == StatusPartial {
 				note = "（到上限收工，可能不全：" + task.StopReason + "）"
 			}
-			lines = append(lines, fmt.Sprintf("后台调查 #%d「%s」查完了%s。这一轮先用一两句把结论告诉主人，再回答他这次说的话。结论：%s",
+			lines = append(lines, fmt.Sprintf("后台调查 #%d「%s」查完了%s。这一轮先把结论告诉主人（按需要的长短说，讲清楚为止），再回答他这次说的话。结论：%s",
 				task.ID, task.Question, note, clip(task.Conclusion, briefingConclusionRunes)))
 		default:
 			lines = append(lines, fmt.Sprintf("后台调查 #%d「%s」没完成（%s：%s）。这一轮顺便告诉主人一声。",

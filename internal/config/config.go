@@ -59,11 +59,11 @@ type Settings struct {
 
 	// 大脑：local（ollama）/ cloud（OpenAI 兼容接口，失败时这一轮退回 ollama）
 	LLMProvider     string        `env:"HARO_LLM_PROVIDER" envDefault:"local"`
-	CloudLLMURL     string        `env:"HARO_CLOUD_LLM_URL"`                     // OpenAI 兼容接口的根地址（…/v1）
-	CloudLLMModel   string        `env:"HARO_CLOUD_LLM_MODEL"`                   // 云端的模型 ID
-	CloudLLMAPIKey  string        `env:"HARO_CLOUD_LLM_API_KEY"`                 // 凭证：无默认值，只来自环境变量
-	CloudLLMTimeout time.Duration `env:"HARO_CLOUD_LLM_TIMEOUT" envDefault:"4s"` // 等云端开始响应的上限，超过就退回本地（正常 2 s 内开始响应）
-	CloudMaxTokens  int           `env:"HARO_CLOUD_LLM_MAX_TOKENS" envDefault:"300"`
+	CloudLLMURL     string        `env:"HARO_CLOUD_LLM_URL"`                          // OpenAI 兼容接口的根地址（…/v1）
+	CloudLLMModel   string        `env:"HARO_CLOUD_LLM_MODEL"`                        // 云端的模型 ID
+	CloudLLMAPIKey  string        `env:"HARO_CLOUD_LLM_API_KEY"`                      // 凭证：无默认值，只来自环境变量
+	CloudLLMTimeout time.Duration `env:"HARO_CLOUD_LLM_TIMEOUT" envDefault:"4s"`      // 等云端开始响应的上限，超过就退回本地（正常 2 s 内开始响应）
+	CloudMaxTokens  int           `env:"HARO_CLOUD_LLM_MAX_TOKENS" envDefault:"800"`  // 每次最多输出多少 token：要能装下约 300 字的详细回答（2026-11-17 从 300 提高）
 	LLMFallback     bool          `env:"HARO_LLM_FALLBACK" envDefault:"true"`         // cloud 失败时退回本地 ollama
 	LLMCooldown     time.Duration `env:"HARO_LLM_FALLBACK_COOLDOWN" envDefault:"30s"` // cloud 失败后这么久内直接用本地（熔断）
 
