@@ -128,6 +128,9 @@ func (s *Store) refresh() {
 			continue
 		}
 		body = s.limit(name, body, personAdviseRunes)
+		if body == "" {
+			continue // 模板原样、还没填内容：不算有资料
+		}
 		for _, person := range names {
 			if _, dup := people[person]; dup {
 				s.logger.Warn("同一个人有两份资料，后读到的覆盖前面的", "person", person, "file", name)

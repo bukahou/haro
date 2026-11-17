@@ -92,6 +92,9 @@ func TestExampleTemplatesAreEmpty(t *testing.T) {
 	if got := templates.Profile("主人"); got != "" {
 		t.Errorf("没填的模板不该发给模型：%q", got)
 	}
+	if household, people := templates.Summary(); household != 0 || len(people) != 0 {
+		t.Errorf("没填的模板不算有资料：%d %v", household, people)
+	}
 	data, err := os.ReadFile(filepath.Join(dir, "owner.md"))
 	if err != nil {
 		t.Fatal(err)
