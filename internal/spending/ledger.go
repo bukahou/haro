@@ -26,6 +26,7 @@ const (
 	PurposeResearch Purpose = "research" // 后台调查（R2 / R5：按天封顶）
 	PurposeSearch   Purpose = "search"   // 主对话里的快查（R1）
 	PurposeSummary  Purpose = "summary"  // 滚动摘要（R4）
+	PurposeVision   Purpose = "vision"   // 看画面的幕后专家（与主对话分开记，看得出看画面花了多少）
 )
 
 // Charge 是一笔花费。

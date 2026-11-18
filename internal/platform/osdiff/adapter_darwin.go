@@ -32,6 +32,7 @@ func (darwinAdapter) Cameras(ctx context.Context) ([]terminal.Device, error) {
 	return parseAVFoundationCameras(string(output)), nil
 }
 
-func (darwinAdapter) CameraInput(id, captureSize string) []string {
-	return avfoundationInput(id, captureSize)
+// CameraInput：avfoundation 要的分辨率摄像头没有时 ffmpeg 直接报错退出（不会悄悄换），所以照原样要。
+func (darwinAdapter) CameraInput(_ context.Context, id, captureSize string) CameraCapture {
+	return CameraCapture{Input: avfoundationInput(id, captureSize), Size: captureSize}
 }

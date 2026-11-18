@@ -57,8 +57,3 @@ func videoNumber(path string) int {
 	}
 	return number
 }
-
-// v4l2Input 是 Linux 上 ffmpeg 的摄像头输入参数。
-func v4l2Input(id, captureSize string) []string {
-	return []string{"-f", "v4l2", "-video_size", captureSize, "-i", id}
-}

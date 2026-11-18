@@ -81,10 +81,6 @@ func TestParseAVFoundationCameras(t *testing.T) {
 }
 
 func TestCameraInputs(t *testing.T) {
-	if got := v4l2Input("/dev/video0", "1280x720"); !reflect.DeepEqual(got,
-		[]string{"-f", "v4l2", "-video_size", "1280x720", "-i", "/dev/video0"}) {
-		t.Errorf("Linux 输入参数不对：%v", got)
-	}
 	if got := avfoundationInput("1", "1280x720"); got[1] != "avfoundation" || got[len(got)-1] != "1" {
 		t.Errorf("Mac 输入参数不对：%v", got)
 	}

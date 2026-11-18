@@ -44,20 +44,40 @@ func (s *Session) toolSpecs() []ToolSpec {
 	if spec, ok := switchPersonaSpec(s.opts.Personas); ok {
 		specs = append(specs, spec)
 	}
+	if s.opts.Escalation {
+		specs = append(specs, askStrongerSpec)
+	}
 	if s.parts.Tools != nil {
 		specs = append(specs, s.parts.Tools.Specs()...)
 	}
 	return specs
 }
 
-// lookAtCamera 返回交给模型的工具结果，以及承载画面的用户消息（没有画面时为空）。
-func (s *Session) lookAtCamera(frame []byte) (string, []ChatMessage) {
-	if len(frame) == 0 {
+// expertReportNote 放在专家的判断前面：告诉前台怎么转述（只在这条工具结果里，不改系统提示词，免得提示词缓存失效）。
+const expertReportNote = "看图更准的专家看了当前画面，判断如下。用你自己的口吻告诉主人（不用提专家）：" +
+	"保留它的把握程度（确定 / 看着像 / 不确定），不要说得比它更肯定，不要补充它没说的细节；它请主人拿近或换角度的，照样转达。" +
+	"它已经按需要联网核对过，这次不要再为画面里的东西另外去搜。\n\n"
+
+// lookAtCamera 返回交给模型的工具结果，以及承载画面的用户消息（没有画面、或由专家看了时为空）。
+// 有看画面的专家时先问专家；专家出错时退回把画面直接交给前台模型。
+func (s *Session) lookAtCamera(ctx context.Context, view cameraView) (string, []ChatMessage) {
+	if len(view.frame) == 0 {
 		s.logger.Info("调用工具", "tool", lookAtCameraTool, "frame", false)
 		return "摄像头现在没有画面，看不到。", nil
 	}
-	s.logger.Info("调用工具", "tool", lookAtCameraTool, "frame_bytes", len(frame))
-	return "已拿到摄像头当前画面，见下一条消息。", []ChatMessage{{Role: RoleUser, Text: cameraFrameNote, Image: frame}}
+	if s.parts.FrameExpert != nil {
+		report, err := s.parts.FrameExpert.ExamineFrame(ctx, view.frame, view.request)
+		if err == nil {
+			s.logger.Info("调用工具", "tool", lookAtCameraTool, "frame_bytes", len(view.frame), "by", "专家")
+			return expertReportNote + report, nil
+		}
+		if ctx.Err() != nil {
+			return "没看成（被打断了）。", nil
+		}
+		s.logger.Warn("看画面的专家出错：这次把画面直接交给前台模型", "err", err)
+	}
+	s.logger.Info("调用工具", "tool", lookAtCameraTool, "frame_bytes", len(view.frame))
+	return "已拿到摄像头当前画面，见下一条消息。", []ChatMessage{{Role: RoleUser, Text: cameraFrameNote, Image: view.frame}}
 }
 
 // needsConfirmation 判断这批调用里有没有要用户口头确认的（MCP destructiveHint，T3 ①）。
@@ -192,7 +212,7 @@ func (s *Session) handleConfirmation(ctx context.Context, text string, pending [
 		// 由模型根据执行结果回答（v3 D-1）：删了哪几条、哪些没找到、失败了为什么，固定的「删掉了」说不清这些。
 		history := append(s.historyWithInstructions(), s.userTurn(text))
 		history = append(history, trail[:len(trail)-1]...)
-		answer, moreTrail, usage, err := s.speakAnswer(ctx, history, trail[len(trail)-1], nil)
+		answer, moreTrail, usage, err := s.speakAnswer(ctx, history, trail[len(trail)-1], cameraView{})
 		if ctx.Err() != nil {
 			return realtimeproto.ResponseDone{Status: realtimeproto.StatusCancelled}, true
 		}

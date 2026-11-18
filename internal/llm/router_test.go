@@ -39,7 +39,7 @@ func TestRouterChoosesModelByRule(t *testing.T) {
 	}{
 		{"平常的一句", []brain.ChatMessage{system, {Role: brain.RoleUser, Text: "今天几号"}}, "haiku"},
 		{"看了画面：带画面的那次请求", []brain.ChatMessage{system, {Role: brain.RoleUser, Text: "这是什么"}, look, lookResult, frame}, "sonnet"},
-		{"主人在纠正", []brain.ChatMessage{system, {Role: brain.RoleUser, Text: "那是耳机"}, {Role: brain.RoleAssistant, Text: "是充电宝"},
+		{"请更强的模型重答", []brain.ChatMessage{system, {Role: brain.RoleUser, Text: "那是耳机"}, {Role: brain.RoleAssistant, Text: "是充电宝"},
 			{Role: brain.RoleUser, Text: "不对", Escalate: true}}, "sonnet"},
 		{"纠正那一轮里调了工具：仍看本轮主人那句", []brain.ChatMessage{system, {Role: brain.RoleUser, Text: "不对", Escalate: true},
 			{Role: brain.RoleAssistant, ToolCalls: []brain.ToolCall{{ID: "2", Name: "web_search"}}},

@@ -18,4 +18,6 @@ func Current() Adapter { return otherAdapter{} }
 
 func (otherAdapter) AudioBus(string, string) terminal.Bus               { return terminal.BusUnknown }
 func (otherAdapter) Cameras(context.Context) ([]terminal.Device, error) { return nil, nil }
-func (otherAdapter) CameraInput(string, string) []string                { return nil }
+func (otherAdapter) CameraInput(context.Context, string, string) CameraCapture {
+	return CameraCapture{}
+}

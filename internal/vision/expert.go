@@ -1,0 +1,140 @@
+// Package vision 是看画面的幕后专家：前台模型不直接看图，要看画面时把画面和主人这一轮的原话交给更强的模型，
+// 拿回一段文字判断交给前台转述（实现 brain.FrameExpert）。
+//
+// 专家只看画面和主人的原话：不带性格、不带对话记录，输入小（约 1.6k token），比让更强的模型接手整轮便宜得多。
+// 需要联网核对时专家自己查：只有它看得到画面，才能按「画面比搜到的资料可靠」取舍搜索结果。
+package vision
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"strings"
+	"time"
+	"unicode/utf8"
+
+	"github.com/bukahou/haro/internal/brain"
+)
+
+const (
+	maxSearches    = 2                // 专家一次最多联网查几次
+	examineTimeout = 25 * time.Second // 看一次（含联网查）最多多久；前台在等，超时就退回把画面交给前台
+)
+
+// Search 是专家联网查一次的做法（含额度与记账）；nil = 不能联网。
+type Search func(ctx context.Context, query string) (string, error)
+
+// Expert 看画面的幕后专家。
+type Expert struct {
+	model     brain.ChatModel // 已按用途记账、查额度
+	modelName string          // 只用于日志
+	search    Search
+	logger    *slog.Logger
+}
+
+// NewExpert 创建专家；search 为 nil 时专家不能联网。
+func NewExpert(model brain.ChatModel, modelName string, search Search, logger *slog.Logger) *Expert {
+	return &Expert{model: model, modelName: modelName, search: search, logger: logger}
+}
+
+var _ brain.FrameExpert = (*Expert)(nil)
+
+const searchTool = "search_web"
+
+var searchSpec = brain.ToolSpec{Name: searchTool,
+	Description: "联网搜索一次，用来核对画面里的东西（例如确认产品名、型号）。搜索词用外观特征加上画面里读到的字。",
+	Parameters:  json.RawMessage(`{"type":"object","properties":{"query":{"type":"string","description":"搜索词，例如「蓝色 包装盒 M.2 硬盘盒 Groovy」"}},"required":["query"]}`)}
+
+// expertPrompt 是专家的提示词：只管看画面、说出判断，由前台转述给主人。
+var expertPrompt = "你是看图专家，帮家里的语音助手看摄像头画面。主人一般是手举着东西、离镜头一臂远在问。你的回答由助手转述给主人。" +
+	"先用一两句说出看到的：形状、颜色、材质、上面的字和图案；字看不清就说看不清，不要猜字。再说是什么，并说出把握：确定、看着像、还是不确定。" +
+	"画面里直接看到的比搜到的资料可靠，两者对不上时以画面为准，并说不确定。" +
+	fmt.Sprintf("主人问的是画面上看不全的信息（规格、价格、用法、确切型号）时，用画面里读到的品牌、型号和外观特征去 %s 查，最多 %d 次；", searchTool, maxSearches) +
+	"只问是什么、而画面已经看得出来时不用查。说出哪些是画面上看到的、哪些是查到的。" +
+	"不确定时，说清要主人怎么做：拿近一点，或者把哪一面转向镜头。只回答主人问的，150 字以内，用口语，不用列表和 Markdown。画面里没有的东西不要编。"
+
+// ExamineFrame 看一帧画面，回答主人这一轮的话；需要时联网查（最多 maxSearches 次）。
+func (e *Expert) ExamineFrame(ctx context.Context, frame []byte, request string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, examineTimeout)
+	defer cancel()
+	started := time.Now()
+	messages := []brain.ChatMessage{
+		{Role: brain.RoleSystem, Text: expertPrompt},
+		{Role: brain.RoleUser, Text: "主人说：「" + request + "」"},
+		{Role: brain.RoleUser, Text: "这是摄像头当前画面。", Image: frame},
+	}
+	searches, promptTokens, outputTokens := 0, 0, 0
+	for round := 1; ; round++ {
+		var specs []brain.ToolSpec
+		if e.search != nil && searches < maxSearches {
+			specs = []brain.ToolSpec{searchSpec}
+		}
+		text, calls, usage, err := complete(ctx, e.model, messages, specs)
+		promptTokens, outputTokens = promptTokens+usage.PromptTokens, outputTokens+usage.OutputTokens
+		if err != nil {
+			e.logger.Warn("看画面的专家出错", "model", e.modelName, "elapsed", since(started), "err", err)
+			return "", err
+		}
+		if len(calls) == 0 || len(specs) == 0 {
+			report := strings.TrimSpace(text)
+			if report == "" {
+				return "", errors.New("看画面的专家没有给出判断")
+			}
+			e.logger.Info("看画面：专家看完", "model", e.modelName, "elapsed", since(started), "searches", searches,
+				"chars", utf8.RuneCountInString(report), "prompt_tokens", promptTokens, "output_tokens", outputTokens)
+			return report, nil
+		}
+		for i := range calls {
+			if calls[i].ID == "" {
+				calls[i].ID = fmt.Sprintf("v%d-%d", round, i)
+			}
+		}
+		messages = append(messages, brain.ChatMessage{Role: brain.RoleAssistant, Text: text, ToolCalls: calls})
+		for _, call := range calls {
+			messages = append(messages, brain.ChatMessage{Role: brain.RoleTool, ToolName: call.Name, ToolCallID: call.ID,
+				Text: e.runTool(ctx, call, &searches)})
+		}
+	}
+}
+
+// runTool 执行专家的一次工具调用；出错也作为文字交给专家，让它根据画面回答。
+func (e *Expert) runTool(ctx context.Context, call brain.ToolCall, searches *int) string {
+	if call.Name != searchTool {
+		return "没有叫 " + call.Name + " 的工具"
+	}
+	if *searches >= maxSearches {
+		return fmt.Sprintf("搜索次数已经用完（上限 %d 次）。根据画面和已有资料回答。", maxSearches)
+	}
+	query, _ := call.Arguments["query"].(string)
+	if strings.TrimSpace(query) == "" {
+		return "query 不能为空"
+	}
+	*searches++
+	result, err := e.search(ctx, query)
+	if err != nil {
+		return "搜索失败：" + err.Error() + "。根据画面回答，并说没能核对。"
+	}
+	return result
+}
+
+// complete 请求模型一次，收齐文字、工具调用与用量。
+func complete(ctx context.Context, model brain.ChatModel, messages []brain.ChatMessage, specs []brain.ToolSpec) (string, []brain.ToolCall, brain.ReplyUsage, error) {
+	var text strings.Builder
+	var calls []brain.ToolCall
+	var usage brain.ReplyUsage
+	for delta, err := range model.StreamReply(ctx, messages, specs) {
+		if err != nil {
+			return text.String(), calls, usage, err
+		}
+		text.WriteString(delta.Text)
+		calls = append(calls, delta.ToolCalls...)
+		if delta.Usage != nil {
+			usage = *delta.Usage
+		}
+	}
+	return text.String(), calls, usage, nil
+}
+
+func since(started time.Time) time.Duration { return time.Since(started).Round(time.Millisecond) }

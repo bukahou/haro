@@ -37,6 +37,7 @@ import (
 	"github.com/bukahou/haro/internal/spending"
 	"github.com/bukahou/haro/internal/telemetry"
 	"github.com/bukahou/haro/internal/tools"
+	"github.com/bukahou/haro/internal/vision"
 	"github.com/bukahou/haro/internal/weather"
 )
 
@@ -102,6 +103,7 @@ func run(logger *slog.Logger) error {
 	briefers := []brain.Briefer{brain.ClockBriefer{}, guard} // 每轮补充给模型的即时情况：现在几号几点、额度提醒、任务板
 	notices := brain.NewNoticeHub()                          // 给终端的提示（后台调查查完了让终端响一声）
 	var toolbox brain.Toolbox
+	var expertSearch vision.Search // 看画面的专家联网查：和主对话的快查同一套搜索与额度
 	if settings.Tools {
 		// 自研工具内置（v5）：记事本直接连数据库，网络诊断在本进程里执行；MCP 只接第三方（现在还没有）
 		store, err := notes.Open(ctx, settings.NotesDB)
@@ -125,6 +127,9 @@ func run(logger *slog.Logger) error {
 			defer searcher.Close()
 			meter := spending.NewSearchMeter(guard, ledger, pricingOf(settings), spending.PurposeSearch, "tavily")
 			builtins = append(builtins, tools.WebSearchTools(searcher, meter, logger)...)
+			expertSearch = func(ctx context.Context, query string) (string, error) {
+				return tools.QuickSearch(ctx, searcher, meter, query, logger)
+			}
 			runner, closeRunner, err := startResearch(ctx, settings, claude, httpClient, searcher, ledger, guard, logger)
 			if err != nil {
 				return err
@@ -160,6 +165,9 @@ func run(logger *slog.Logger) error {
 		NewSegmenter: func() brain.TextSegmenter {
 			return speech.NewSentenceSegmenter(settings.FirstSegmentMinRunes, settings.MaxSegmentRunes)
 		},
+	}
+	if settings.VisionExpert() {
+		components.FrameExpert = newVisionExpert(settings, claude, httpClient, ledger, guard, expertSearch, logger)
 	}
 	// 对话簿所有终端连接共用：换终端、重连、服务端重启都接得上（v4 D1）
 	var conversationStore brain.ConversationStore
@@ -314,11 +322,11 @@ func buildChatModel(settings config.Settings, claude *llm.ClaudeAPI, httpClient 
 	return spending.NewBudgetedChatModel(paid, free, guard, logger)
 }
 
-// routeToStrong 按规则把看画面、主人纠正上一句的请求交给更强的模型（HARO_STRONG_LLM_*），其余照旧；
+// routeToStrong 按规则把看画面（takeover 时）、前台请它重答的请求交给更强的模型（HARO_STRONG_LLM_*），其余照旧；
 // 更强的模型出错或等太久（HARO_STRONG_LLM_TIMEOUT）时由原来那套接手。没设更强的模型、或这两类都不用它时原样返回。
 func routeToStrong(settings config.Settings, claude *llm.ClaudeAPI, client *http.Client, base brain.ChatModel, maxTokens int,
 	pricing spending.Pricing, ledger spending.Ledger, logger *slog.Logger) brain.ChatModel {
-	vision, correction := settings.StrongLLMFor(config.StrongForVision), settings.StrongLLMFor(config.StrongForCorrection)
+	vision, correction := settings.VisionTakeover(), settings.StrongLLMFor(config.StrongForCorrection)
 	if !vision && !correction {
 		return base
 	}
@@ -333,8 +341,19 @@ func routeToStrong(settings config.Settings, claude *llm.ClaudeAPI, client *http
 		options.Correction, options.CorrectionName = strongOrBase, settings.StrongLLMModel
 	}
 	logger.Info("选模型：按规则交给更强的模型", "model", settings.StrongLLMModel, "use", settings.StrongLLMUse,
-		"effort", settings.StrongLLMEffort, "thinking", settings.StrongLLMThinking)
+		"vision_mode", settings.StrongLLMVisionMode, "effort", settings.StrongLLMEffort, "thinking", settings.StrongLLMThinking)
 	return llm.NewRouterChatModel(options)
+}
+
+// newVisionExpert 创建看画面的幕后专家（HARO_STRONG_LLM_VISION_MODE=expert）：用更强的模型，按 vision 用途记账、查月度额度。
+// 它出错或等太久时，brain 退回把画面直接交给前台模型（不经选模型的包装层，前台照常是云端模型）。
+func newVisionExpert(settings config.Settings, claude *llm.ClaudeAPI, client *http.Client, ledger spending.Ledger, guard *spending.Guard,
+	search vision.Search, logger *slog.Logger) brain.FrameExpert {
+	model := spending.NewMeteredChatModel(newCloudChatModel(settings, claude, settings.StrongLLMModel, settings.CloudMaxTokens,
+		settings.StrongLLMEffort, settings.StrongLLMThinking, 0, settings.StrongLLMTimeout, client),
+		settings.StrongLLMModel, spending.PurposeVision, pricingOf(settings), ledger, logger)
+	logger.Info("看画面：交给幕后专家，判断由前台转述", "model", settings.StrongLLMModel, "search", search != nil)
+	return vision.NewExpert(spending.NewBudgetedChatModel(model, nil, guard, logger), settings.StrongLLMModel, search, logger)
 }
 
 // newClaudeAPI 创建全进程共用的 Claude 客户端（HARO_CLOUD_LLM_API=anthropic 时）；其余情况为 nil。
@@ -519,7 +538,8 @@ func buildSynthesizer(ctx context.Context, settings config.Settings, httpClient 
 // buildBrainOptions 读取性格档案（v3 第 2 步）；没设 HARO_PERSONAS_DIR 时不分性格。
 func buildBrainOptions(settings config.Settings) (brain.Options, error) {
 	// 基础提示词：内置的永远生效，HARO_SYSTEM_PROMPT 只能追加（v5 U2）
-	options := brain.Options{MaxHistoryTurn: settings.MaxHistoryTurn, Instructions: brain.ComposeInstructions(settings.ExtraSystemPrompt)}
+	options := brain.Options{MaxHistoryTurn: settings.MaxHistoryTurn, Instructions: brain.ComposeInstructions(settings.ExtraSystemPrompt),
+		Escalation: settings.StrongLLMFor(config.StrongForCorrection)} // 和 routeToStrong 配「重答」那条路的条件一致
 	if settings.PersonasDir == "" {
 		return options, nil
 	}

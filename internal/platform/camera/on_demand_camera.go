@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os/exec"
-	"strconv"
 	"sync"
 	"time"
 )
@@ -21,8 +20,9 @@ var errNoCamera = errors.New("现在没有摄像头")
 // 用于 HARO_CAMERA_MODE=on-demand：摄像头平时不开。抓失败后，下一次先重新找摄像头。
 type OnDemandCamera struct {
 	locate      Locate
-	outputWidth int // 送给模型的宽度，高度按比例
+	outputWidth int // 送给模型的最大宽度（画面更小就原样送），高度按比例
 	health      *health
+	frameSize   *frameSizeLog
 
 	mu    sync.Mutex
 	input []string // 当前摄像头的输入参数；nil = 下次先重新找
@@ -30,7 +30,8 @@ type OnDemandCamera struct {
 
 // NewOnDemandCamera 创建按需抓帧器；name 是启动时选中的摄像头。
 func NewOnDemandCamera(locate Locate, name string, outputWidth int, logger *slog.Logger) *OnDemandCamera {
-	return &OnDemandCamera{locate: locate, outputWidth: outputWidth, health: newHealth(name, logger)}
+	return &OnDemandCamera{locate: locate, outputWidth: outputWidth, health: newHealth(name, logger),
+		frameSize: newFrameSizeLog(logger)}
 }
 
 // LatestFrame 现抓一帧（JPEG）。
@@ -48,7 +49,7 @@ func (c *OnDemandCamera) LatestFrame(ctx context.Context) ([]byte, time.Time, er
 	}
 	var stdout, stderr bytes.Buffer
 	args := append([]string{"-hide_banner", "-loglevel", "error"}, c.input...)
-	args = append(args, "-frames:v", "1", "-vf", "scale="+strconv.Itoa(c.outputWidth)+":-2",
+	args = append(args, "-frames:v", "1", "-vf", scaleFilter(c.outputWidth),
 		"-f", "image2", "-c:v", "mjpeg", "pipe:1")
 	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
@@ -59,6 +60,7 @@ func (c *OnDemandCamera) LatestFrame(ctx context.Context) ([]byte, time.Time, er
 		return nil, time.Time{}, err
 	}
 	c.health.markUp(name)
+	c.frameSize.observe(stdout.Bytes())
 	return stdout.Bytes(), time.Now(), nil
 }
 
