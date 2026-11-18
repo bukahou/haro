@@ -42,7 +42,7 @@ func (m *MeteredChatModel) StreamReply(ctx context.Context, messages []brain.Cha
 
 func (m *MeteredChatModel) record(usage *brain.ReplyUsage) {
 	charge := Charge{Purpose: m.purpose, Item: "llm:" + m.model, InputTokens: usage.PromptTokens, OutputTokens: usage.OutputTokens,
-		Yen: m.pricing.LLMYen(m.model, usage.PromptTokens, usage.OutputTokens)}
+		CacheReadTokens: usage.CacheReadTokens, CacheWriteTokens: usage.CacheWriteTokens, Yen: m.pricing.LLMYen(m.model, *usage)}
 	// 用独立的 context：回答被打断（ctx 取消）时，已经产生的费用照样要记
 	if err := m.ledger.Record(context.Background(), charge); err != nil {
 		m.logger.Warn("用量没记上", "err", err, "yen", charge.Yen)

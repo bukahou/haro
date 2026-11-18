@@ -33,7 +33,7 @@ haro 是一个家用语音助手：家里每个房间放一台**终端**（麦�
 | 接口 | 实现 |
 |---|---|
 | `SpeechRecognizer` / `StreamingRecognizer` | `internal/speech`：本地 haro-asr、OpenAI 兼容的转写服务 |
-| `ChatModel` | `internal/llm`：ollama（本地）、OpenAI 兼容接口（云端）；主备切换（`FallbackChatModel`） |
+| `ChatModel` | `internal/llm`：ollama（本地）、Claude API 或 OpenAI 兼容接口（云端）；主备切换（`FallbackChatModel`） |
 | `SpeechSynthesizer` | `internal/speech`：GPT-SoVITS（边合成边播放）、Piper |
 | `Toolbox` | `internal/tools`：内置工具 + 第三方 MCP 服务 |
 | `ConversationStore` | `internal/conversationstore`：每人一个文件 |
@@ -99,6 +99,18 @@ haro 是一个家用语音助手：家里每个房间放一台**终端**（麦�
 
 全部来自环境变量（`internal/config/config.go` 里每一项都有说明）。通常写在一个 env 文件里，
 systemd 用户服务从 `~/.config/haro/haro.env` 读取（`deploy/systemd/`）。凭证（云端模型、搜索服务的密钥）只放在环境变量里，没有默认值。
+
+云端模型（`HARO_LLM_PROVIDER=cloud`）的接口格式由 `HARO_CLOUD_LLM_API` 选：
+
+- `anthropic`：Claude API（官方 Go SDK `anthropic-sdk-go`）。`HARO_CLOUD_LLM_MODEL` 例如 `claude-haiku-5-5`；
+  思考关掉求快，回答力度用 `HARO_CLOUD_LLM_EFFORT`（聊天、摘要）/ `HARO_RESEARCH_EFFORT`（后台调查）；
+  开着提示词缓存，缓存读写的单价用 `HARO_CLOUD_LLM_PRICE_CACHE_READ` / `_WRITE` 记账（不设就按普通输入价，记多不记少）。
+  凭证：`HARO_ANTHROPIC_API_KEY`；不填时交给 SDK 自己找——在 Kubernetes 里可以用 Workload Identity Federation
+  （服务账号令牌换短期令牌，不放长期密钥），配法见 Anthropic 文档「Use WIF with Kubernetes」。
+  不要用 `ANTHROPIC_API_KEY` 放 haro 的 key：开发机上 Claude Code 也读这个变量。
+- `openai`（默认）：任意 OpenAI 兼容的 `/chat/completions`（`HARO_CLOUD_LLM_URL`、`HARO_CLOUD_LLM_API_KEY`）。
+
+真实接口的冒烟测试（花钱，默认不跑）：`HARO_ANTHROPIC_API_KEY=… go test -tags integration -run AnthropicLive -v ./internal/llm/`。
 
 模型文件（识别、VAD、说完判断、唤醒词、声纹）不在仓库里，路径都由配置指定；服务端镜像里已经带着
 （清单、来源与许可证：`deploy/server/models.lock`、`deploy/server/MODELS.md`；本机下载：`scripts/fetch-models.sh ~/.local/share/haro`）。

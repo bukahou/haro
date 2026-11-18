@@ -33,10 +33,13 @@ type Charge struct {
 	At           time.Time
 	Purpose      Purpose
 	Item         string // 花在什么上，例如 "llm:<模型 ID>"、"tavily"
-	InputTokens  int
+	InputTokens  int    // 输入的总数（含缓存读、缓存写）
 	OutputTokens int
-	Credits      int     // 搜索服务的积分
-	Yen          float64 // 折成日元（按配置的单价与汇率）
+	// 提示词缓存（v7）：输入里有多少是读缓存 / 写缓存的（价格不同；看缓存效果也靠它们）
+	CacheReadTokens  int
+	CacheWriteTokens int
+	Credits          int     // 搜索服务的积分
+	Yen              float64 // 折成日元（按配置的单价与汇率）
 }
 
 // Totals 是一段时间的合计。
@@ -73,7 +76,41 @@ func OpenLedger(ctx context.Context, path string) (Ledger, error) {
 		db.Close()
 		return nil, fmt.Errorf("初始化用量账本: %w", err)
 	}
+	if err := addCacheColumns(ctx, db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("升级用量账本: %w", err)
+	}
 	return &sqliteLedger{db: db}, nil
+}
+
+// addCacheColumns 给 v7 以前建的账本补上缓存读写两列（旧记录按 0；已经有了就不动）。
+func addCacheColumns(ctx context.Context, db *sql.DB) error {
+	rows, err := db.QueryContext(ctx, `SELECT name FROM pragma_table_info('charges')`)
+	if err != nil {
+		return err
+	}
+	existing := map[string]bool{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			rows.Close()
+			return err
+		}
+		existing[name] = true
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, column := range []string{"cache_read_tokens", "cache_write_tokens"} {
+		if existing[column] {
+			continue
+		}
+		if _, err := db.ExecContext(ctx, `ALTER TABLE charges ADD COLUMN `+column+` INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 const ledgerSchema = `
@@ -84,6 +121,8 @@ CREATE TABLE IF NOT EXISTS charges (
 	item          TEXT    NOT NULL,
 	input_tokens  INTEGER NOT NULL DEFAULT 0,
 	output_tokens INTEGER NOT NULL DEFAULT 0,
+	cache_read_tokens  INTEGER NOT NULL DEFAULT 0, -- v7：输入里读缓存的部分（旧账本由 addCacheColumns 补列）
+	cache_write_tokens INTEGER NOT NULL DEFAULT 0, -- v7：输入里写缓存的部分
 	credits       INTEGER NOT NULL DEFAULT 0,
 	yen           REAL    NOT NULL DEFAULT 0
 );
@@ -98,8 +137,10 @@ func (l *sqliteLedger) Record(ctx context.Context, charge Charge) error {
 		charge.At = time.Now()
 	}
 	_, err := l.db.ExecContext(ctx,
-		`INSERT INTO charges (at, purpose, item, input_tokens, output_tokens, credits, yen) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		charge.At.Unix(), string(charge.Purpose), charge.Item, charge.InputTokens, charge.OutputTokens, charge.Credits, charge.Yen)
+		`INSERT INTO charges (at, purpose, item, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, credits, yen)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		charge.At.Unix(), string(charge.Purpose), charge.Item, charge.InputTokens, charge.OutputTokens,
+		charge.CacheReadTokens, charge.CacheWriteTokens, charge.Credits, charge.Yen)
 	return err
 }
 
