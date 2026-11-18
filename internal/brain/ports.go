@@ -109,6 +109,8 @@ type ChatMessage struct {
 	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`   // assistant：这一轮模型要求调用的工具
 	ToolName   string     `json:"tool_name,omitempty"`    // tool：这条是哪个工具的结果
 	ToolCallID string     `json:"tool_call_id,omitempty"` // tool：对应哪一次调用（ToolCall.ID）
+	// Escalate：这一轮主人在纠正上一句（例如说「不对」），选模型的包装层据此交给更强的模型。只标在本轮输入上，不存盘
+	Escalate bool `json:"-"`
 }
 
 // ReplyDelta 是模型流式输出的一段。

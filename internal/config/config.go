@@ -5,6 +5,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -84,6 +85,17 @@ type Settings struct {
 	CloudMaxTokens  int           `env:"HARO_CLOUD_LLM_MAX_TOKENS" envDefault:"800"`  // 每次最多输出多少 token：要能装下约 300 字的详细回答（2026-11-17 从 300 提高）
 	LLMFallback     bool          `env:"HARO_LLM_FALLBACK" envDefault:"true"`         // cloud 失败时退回本地 ollama
 	LLMCooldown     time.Duration `env:"HARO_LLM_FALLBACK_COOLDOWN" envDefault:"30s"` // cloud 失败后这么久内直接用本地（熔断）
+	// anthropic 的思考：disabled（关掉）/ between_tools（Sonnet 5.5 关掉思考的写法，它不接受 disabled）/ adaptive（思考关不掉的模型）
+	CloudLLMThinking string `env:"HARO_CLOUD_LLM_THINKING" envDefault:"disabled"`
+
+	// 更强的模型（可选）：按规则把几类请求交给它，其余仍用 HARO_CLOUD_LLM_MODEL；接口（HARO_CLOUD_LLM_API）与凭证和云端模型相同。
+	// 空 = 不分，全部用云端模型。用在哪些地方（逗号分隔）：vision = 带摄像头画面的请求；correction = 主人在纠正上一句；
+	// research = 后台调查写结论。思考写法同 HARO_CLOUD_LLM_THINKING（默认按 Sonnet 5.5）；它出错或等太久时由云端模型接手
+	StrongLLMModel    string        `env:"HARO_STRONG_LLM_MODEL"`
+	StrongLLMUse      []string      `env:"HARO_STRONG_LLM_USE" envDefault:"vision,correction,research" envSeparator:","`
+	StrongLLMEffort   string        `env:"HARO_STRONG_LLM_EFFORT" envDefault:"low"` // 调查写结论用 HARO_RESEARCH_EFFORT
+	StrongLLMThinking string        `env:"HARO_STRONG_LLM_THINKING" envDefault:"between_tools"`
+	StrongLLMTimeout  time.Duration `env:"HARO_STRONG_LLM_TIMEOUT" envDefault:"10s"` // 看画面 / 纠正时等它开始回答的上限（带图片比平时慢）
 
 	// 费用（v5 R5）：用量账本与上限。价格、汇率都来自配置（云端价格会变，不写死在代码里）
 	UsageDB          string  `env:"HARO_USAGE_DB"`               // 用量账本（SQLite 文件）；空 = 只在内存里，重启清零
@@ -93,10 +105,15 @@ type Settings struct {
 	// 提示词缓存（v7，Claude）：读缓存 / 写缓存每百万 token 的美元价；不设 = 按普通输入价算（记多不记少）
 	CloudLLMPriceCacheRead  float64 `env:"HARO_CLOUD_LLM_PRICE_CACHE_READ"`
 	CloudLLMPriceCacheWrite float64 `env:"HARO_CLOUD_LLM_PRICE_CACHE_WRITE"`
-	ResearchDailyYen        float64 `env:"HARO_RESEARCH_DAILY_YEN" envDefault:"100"`  // 后台调查每天上限；0 = 不限
-	MonthlyYen              float64 `env:"HARO_MONTHLY_YEN"`                          // 每月总费用上限（大模型 + 搜索）；0 = 不限（未定）
-	SearchDailyCredits      int     `env:"HARO_SEARCH_DAILY_CREDITS" envDefault:"30"` // 搜索积分每天上限（封在 Tavily 免费额度内）；0 = 不限
-	SearchCreditUSD         float64 `env:"HARO_SEARCH_CREDIT_USD"`                    // 每个搜索积分的美元价；0 = 免费额度内
+	// 更强的模型的单价（设了 HARO_STRONG_LLM_MODEL 时输入、输出必填）
+	StrongLLMPriceIn         float64 `env:"HARO_STRONG_LLM_PRICE_INPUT"`
+	StrongLLMPriceOut        float64 `env:"HARO_STRONG_LLM_PRICE_OUTPUT"`
+	StrongLLMPriceCacheRead  float64 `env:"HARO_STRONG_LLM_PRICE_CACHE_READ"`
+	StrongLLMPriceCacheWrite float64 `env:"HARO_STRONG_LLM_PRICE_CACHE_WRITE"`
+	ResearchDailyYen         float64 `env:"HARO_RESEARCH_DAILY_YEN" envDefault:"100"`  // 后台调查每天上限；0 = 不限
+	MonthlyYen               float64 `env:"HARO_MONTHLY_YEN"`                          // 每月总费用上限（大模型 + 搜索）；0 = 不限（未定）
+	SearchDailyCredits       int     `env:"HARO_SEARCH_DAILY_CREDITS" envDefault:"30"` // 搜索积分每天上限（封在 Tavily 免费额度内）；0 = 不限
+	SearchCreditUSD          float64 `env:"HARO_SEARCH_CREDIT_USD"`                    // 每个搜索积分的美元价；0 = 免费额度内
 
 	// 语音识别
 	ASR          string `env:"HARO_ASR" envDefault:"local"` // local / openai / voice-api
@@ -333,6 +350,9 @@ func (settings Settings) validateBrain() error {
 	if settings.UsesCloudLLM() && (settings.USDToYen <= 0 || settings.CloudLLMPriceIn <= 0 || settings.CloudLLMPriceOut <= 0) {
 		return fmt.Errorf("用到云端模型时必须设 HARO_USD_JPY、HARO_CLOUD_LLM_PRICE_INPUT、HARO_CLOUD_LLM_PRICE_OUTPUT（费用上限要靠它们折算，v5 R5）")
 	}
+	if err := settings.validateStrongLLM(); err != nil {
+		return err
+	}
 	if settings.SpeakerModel != "" && settings.VoiceprintsDir == "" {
 		return fmt.Errorf("设了 HARO_SPEAKER_MODEL 时必须设 HARO_VOICEPRINTS_DIR（声纹放在哪）")
 	}
@@ -427,6 +447,47 @@ const (
 	WeatherBackupJMA  = "jma"
 	WeatherBackupNone = "none"
 )
+
+// HARO_STRONG_LLM_USE 的取值：更强的模型用在哪些地方。
+const (
+	StrongForVision     = "vision"     // 带摄像头画面的请求
+	StrongForCorrection = "correction" // 主人在纠正上一句
+	StrongForResearch   = "research"   // 后台调查写结论
+)
+
+// claudeThinking 是 HARO_CLOUD_LLM_THINKING / HARO_STRONG_LLM_THINKING 的取值。
+var claudeThinking = map[string]bool{"disabled": true, "between_tools": true, "adaptive": true}
+
+// StrongLLMFor 判断更强的模型是否用在 use（StrongForVision 等）上。
+func (s Settings) StrongLLMFor(use string) bool {
+	return s.StrongLLMModel != "" && slices.Contains(s.StrongLLMUse, use)
+}
+
+// validateStrongLLM 检查思考写法与更强的模型的配置。
+func (s Settings) validateStrongLLM() error {
+	if !claudeThinking[s.CloudLLMThinking] || !claudeThinking[s.StrongLLMThinking] {
+		return fmt.Errorf("HARO_CLOUD_LLM_THINKING、HARO_STRONG_LLM_THINKING 只能是 disabled、between_tools 或 adaptive，现在是 %q、%q",
+			s.CloudLLMThinking, s.StrongLLMThinking)
+	}
+	if s.StrongLLMModel == "" {
+		return nil
+	}
+	for _, use := range s.StrongLLMUse {
+		if use != StrongForVision && use != StrongForCorrection && use != StrongForResearch {
+			return fmt.Errorf("HARO_STRONG_LLM_USE 只能是 %s、%s、%s 的组合（逗号分隔），现在有 %q", StrongForVision, StrongForCorrection, StrongForResearch, use)
+		}
+	}
+	if err := s.cloudLLMReady(); err != nil {
+		return fmt.Errorf("设了 HARO_STRONG_LLM_MODEL（它和云端模型用同一个接口）时%w", err)
+	}
+	if s.CloudLLMAPI == CloudAPIAnthropic && !claudeEfforts[s.StrongLLMEffort] {
+		return fmt.Errorf("HARO_STRONG_LLM_EFFORT 只能是 low、medium 或 high，现在是 %q", s.StrongLLMEffort)
+	}
+	if s.USDToYen <= 0 || s.StrongLLMPriceIn <= 0 || s.StrongLLMPriceOut <= 0 {
+		return fmt.Errorf("设了 HARO_STRONG_LLM_MODEL 时必须设 HARO_USD_JPY、HARO_STRONG_LLM_PRICE_INPUT、HARO_STRONG_LLM_PRICE_OUTPUT（费用上限要靠它们折算）")
+	}
+	return nil
+}
 
 // validateWeather 检查天气相关的配置：家的位置、备用来源。
 func (s Settings) validateWeather() error {

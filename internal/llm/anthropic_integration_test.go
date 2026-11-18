@@ -8,9 +8,14 @@
 package llm
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/color"
+	"image/draw"
+	"image/jpeg"
 	"os"
 	"strings"
 	"testing"
@@ -112,4 +117,64 @@ func liveRound(t *testing.T, model *AnthropicChatModel, messages []brain.ChatMes
 		time.Since(started).Round(time.Millisecond), firstText.Round(time.Millisecond), text.String(), len(calls),
 		usage.PromptTokens, usage.CacheReadTokens, usage.CacheWriteTokens, usage.OutputTokens)
 	return text.String(), calls, usage
+}
+
+// 更强的模型（默认 Sonnet 5.5，HARO_TEST_STRONG_MODEL 可改）：关思考要用 between_tools；工具来回两三次
+// （两次工具调用之间它会返回思考块，haro 带不回、丢掉）后请求仍被接受；不给工具的那一轮被接受；带图片的请求能回答。
+// 约 5 次小请求，不到 5 日元。
+func TestAnthropicLiveStrongModel(t *testing.T) {
+	key := os.Getenv("HARO_ANTHROPIC_API_KEY")
+	if key == "" {
+		t.Skip("没设 HARO_ANTHROPIC_API_KEY")
+	}
+	modelName := os.Getenv("HARO_TEST_STRONG_MODEL")
+	if modelName == "" {
+		modelName = "claude-sonnet-5-5"
+	}
+	model := NewAnthropicChatModel(AnthropicOptions{API: NewClaudeAPI(key, "", nil), Model: modelName, MaxTokens: 400,
+		Effort: "low", Thinking: ThinkingBetweenTools})
+	tools := []brain.ToolSpec{
+		{Name: "get_current_time", Description: "查现在的日期和时间", Parameters: json.RawMessage(`{"type":"object","properties":{}}`)},
+		{Name: "get_weather", Description: "查一个地方现在的天气", Parameters: json.RawMessage(
+			`{"type":"object","properties":{"place":{"type":"string"}},"required":["place"]}`)},
+	}
+	history := []brain.ChatMessage{
+		{Role: brain.RoleSystem, Text: "你是家用语音助手 haro，用中文一句话回答。先用 get_current_time 查时间，再用 get_weather 查天气，每次只调用一个工具，都查完再回答。"},
+		{Role: brain.RoleUser, Text: "现在几点？东京天气怎么样？"},
+	}
+	results := map[string]string{"get_current_time": `{"now":"2026-11-18 16:30"}`, "get_weather": `{"weather":"晴","temperature_c":18}`}
+	answer := ""
+	for round := 1; round <= 4 && answer == ""; round++ {
+		text, calls, _ := liveRound(t, model, history, tools, fmt.Sprintf("第 %d 次", round))
+		if len(calls) == 0 {
+			answer = text
+			break
+		}
+		history = append(history, brain.ChatMessage{Role: brain.RoleAssistant, Text: text, ToolCalls: calls})
+		for _, call := range calls {
+			history = append(history, brain.ChatMessage{Role: brain.RoleTool, ToolName: call.Name, ToolCallID: call.ID, Text: results[call.Name]})
+		}
+	}
+	if answer == "" {
+		t.Fatal("工具来回之后应给出回答")
+	}
+
+	// 不给工具的那一轮（历史里有工具往来 ⇒ 补工具定义 + tool_choice none）
+	history = append(history, brain.ChatMessage{Role: brain.RoleAssistant, Text: answer}, brain.ChatMessage{Role: brain.RoleUser, Text: "谢谢，再说一遍时间就好"})
+	if text, calls, _ := liveRound(t, model, history, nil, "不给工具"); text == "" || len(calls) > 0 {
+		t.Errorf("不给工具时应直接回答：%q %+v", text, calls)
+	}
+
+	// 带图片：纯红的方块
+	picture := image.NewRGBA(image.Rect(0, 0, 64, 64))
+	draw.Draw(picture, picture.Bounds(), &image.Uniform{C: color.RGBA{R: 220, A: 255}}, image.Point{}, draw.Src)
+	var frame bytes.Buffer
+	if err := jpeg.Encode(&frame, picture, nil); err != nil {
+		t.Fatal(err)
+	}
+	look := []brain.ChatMessage{{Role: brain.RoleSystem, Text: "用中文一句话回答。"},
+		{Role: brain.RoleUser, Text: "这张图是什么颜色？"}, {Role: brain.RoleUser, Text: "这是摄像头当前画面。", Image: frame.Bytes()}}
+	if text, _, _ := liveRound(t, model, look, nil, "带图片"); !strings.Contains(text, "红") {
+		t.Errorf("应认出红色：%q", text)
+	}
 }

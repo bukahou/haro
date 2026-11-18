@@ -50,8 +50,8 @@ func NewClaudeAPI(apiKey, baseURL string, httpClient *http.Client) *ClaudeAPI {
 // AnthropicChatModel 调用 Claude API 的 Messages 接口（官方 Go SDK，流式；v7 D2）。不同用途（聊天 / 摘要 / 调查）各一个，
 // 共用同一个 ClaudeAPI。
 //
-// 思考是关掉的：工具往来时，思考块（带签名）必须原样回传，而 brain.ChatMessage 带不回原始内容块；
-// 关掉也最快（聊天 4 秒内要开始回答）。回答花多少力气由 Effort 管。
+// 思考默认关掉：工具往来时，思考块（带签名）应原样回传，而 brain.ChatMessage 带不回原始内容块；
+// 关掉也最快（聊天 4 秒内要开始回答）。回答花多少力气由 Effort 管。各模型「关掉」的写法不同，见 Thinking。
 //
 // 提示词缓存两个断点：① 系统提示词末尾（工具定义 + 系统提示词）② 上一轮结束处（之前的对话）。
 // 不放在请求末尾：每轮附在主人这句话前面的「现在的情况」（时间、位置……）每轮都变、也不进历史，
@@ -61,9 +61,21 @@ type AnthropicChatModel struct {
 	model             string
 	maxTokens         int
 	effort            anthropic.OutputConfigEffort
+	thinking          string
 	maxRetries        int
 	firstTokenTimeout time.Duration
 }
+
+// Thinking 的取值。
+const (
+	// ThinkingDisabled 关掉思考（Haiku 5.5 等）。
+	ThinkingDisabled = "disabled"
+	// ThinkingBetweenTools 是 Sonnet 5.5 关掉思考的写法：它不接受 disabled（400）；回答前不思考，
+	// 只在两次工具调用之间写几句进度说明（以思考块返回；带不回去，丢掉）。
+	ThinkingBetweenTools = "between_tools"
+	// ThinkingAdaptive 让模型自己决定想多少（思考关不掉的模型用这个）。
+	ThinkingAdaptive = "adaptive"
+)
 
 // AnthropicOptions 是创建 AnthropicChatModel 的参数。
 type AnthropicOptions struct {
@@ -71,6 +83,7 @@ type AnthropicOptions struct {
 	Model     string     // 例如 claude-haiku-5-5
 	MaxTokens int        // 每次最多输出多少 token
 	Effort    string     // low / medium / high（思考关掉时只能用这三档）；空 = 模型默认
+	Thinking  string     // 见 ThinkingDisabled 等；空 = disabled
 	// MaxRetries 是 SDK 在 429 / 5xx / 断线时自己重试几次。当主模型时用 0：等不到就退回本地，
 	// 不要在这里多等；后台调查不急，可以重试。
 	MaxRetries int
@@ -82,8 +95,20 @@ type AnthropicOptions struct {
 // NewAnthropicChatModel 创建模型（不发请求）。
 func NewAnthropicChatModel(options AnthropicOptions) *AnthropicChatModel {
 	return &AnthropicChatModel{api: options.API, model: options.Model, maxTokens: options.MaxTokens,
-		effort: anthropic.OutputConfigEffort(options.Effort), maxRetries: options.MaxRetries,
+		effort: anthropic.OutputConfigEffort(options.Effort), thinking: options.Thinking, maxRetries: options.MaxRetries,
 		firstTokenTimeout: options.FirstTokenTimeout}
+}
+
+// thinkingConfig 按 Thinking 组装请求里的 thinking。
+func (m *AnthropicChatModel) thinkingConfig() anthropic.ThinkingConfigParamUnion {
+	switch m.thinking {
+	case ThinkingBetweenTools:
+		return anthropic.ThinkingConfigParamUnion{OfBetweenTools: &anthropic.ThinkingConfigBetweenToolsParam{}}
+	case ThinkingAdaptive:
+		return anthropic.ThinkingConfigParamUnion{OfAdaptive: &anthropic.ThinkingConfigAdaptiveParam{}}
+	default:
+		return anthropic.ThinkingConfigParamUnion{OfDisabled: &anthropic.ThinkingConfigDisabledParam{}}
+	}
 }
 
 // errNoFirstToken 表示在 FirstTokenTimeout 内没等到 Claude 开始回答。它不包着 context.Canceled：
@@ -174,7 +199,7 @@ func (m *AnthropicChatModel) request(messages []brain.ChatMessage, tools []brain
 	params := anthropic.MessageNewParams{
 		Model:     anthropic.Model(m.model),
 		MaxTokens: int64(m.maxTokens),
-		Thinking:  anthropic.ThinkingConfigParamUnion{OfDisabled: &anthropic.ThinkingConfigDisabledParam{}},
+		Thinking:  m.thinkingConfig(),
 	}
 	if m.effort != "" {
 		params.OutputConfig = anthropic.OutputConfigParam{Effort: m.effort}
