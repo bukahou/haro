@@ -70,8 +70,8 @@ type CameraPicker func(ctx context.Context) (choice Choice, ok bool)
 // CameraOptions 是取帧方式（来自 HARO_CAMERA_* 配置）。
 type CameraOptions struct {
 	Continuous  bool          // true = 常驻（随时有最新一帧）；false = 每轮说完时现抓
-	CaptureSize string        // 摄像头采集分辨率，例如 1280x720
-	OutputWidth int           // 送给模型的宽度，高度按比例
+	CaptureSize string        // 想要的摄像头分辨率，例如 1280x720（摄像头没有时各系统可以改要别的）
+	OutputWidth int           // 送给模型的最大宽度（画面更窄就原样送），高度按比例
 	FPS         int           // 常驻模式的输出帧率
 	MaxAge      time.Duration // 常驻模式：超过这么久没有新帧，视为摄像头出问题
 }

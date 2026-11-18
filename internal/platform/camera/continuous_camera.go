@@ -24,6 +24,7 @@ type ContinuousCamera struct {
 	retryMin    time.Duration // 重试间隔：从这么久开始翻倍
 	retryMax    time.Duration
 	health      *health
+	frameSize   *frameSizeLog
 
 	mu      sync.Mutex
 	latest  []byte
@@ -34,7 +35,8 @@ type ContinuousCamera struct {
 func NewContinuousCamera(locate Locate, name string, outputWidth, fps int, maxAge time.Duration,
 	logger *slog.Logger) *ContinuousCamera {
 	return &ContinuousCamera{locate: locate, outputWidth: outputWidth, fps: fps, maxAge: maxAge,
-		retryMin: time.Second, retryMax: 10 * time.Second, health: newHealth(name, logger)}
+		retryMin: time.Second, retryMax: 10 * time.Second, health: newHealth(name, logger),
+		frameSize: newFrameSizeLog(logger)}
 }
 
 // Run 找摄像头、运行 ffmpeg；退出了就重新找、重启，直到 ctx 取消。
@@ -67,7 +69,7 @@ func (c *ContinuousCamera) Run(ctx context.Context) {
 func (c *ContinuousCamera) CurrentName() string { return c.health.currentName() }
 
 func (c *ContinuousCamera) runFFmpeg(ctx context.Context, input []string, name string) error {
-	filter := "fps=" + strconv.Itoa(c.fps) + ",scale=" + strconv.Itoa(c.outputWidth) + ":-2"
+	filter := "fps=" + strconv.Itoa(c.fps) + "," + scaleFilter(c.outputWidth)
 	args := append([]string{"-hide_banner", "-loglevel", "error"}, input...)
 	args = append(args, "-vf", filter, "-f", "image2pipe", "-c:v", "mjpeg", "-q:v", "5", "pipe:1")
 	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
@@ -89,6 +91,7 @@ func (c *ContinuousCamera) runFFmpeg(ctx context.Context, input []string, name s
 		c.latest, c.takenAt = frame, time.Now()
 		c.mu.Unlock()
 		c.health.markUp(name)
+		c.frameSize.observe(frame)
 	}
 	scanErr := scanner.Err()
 	waitErr := cmd.Wait()

@@ -81,12 +81,23 @@ func (d *LocalDevices) OpenSpeaker(id string) assistant.AudioSink {
 // 取帧失败后用 pick（服务层的选择规则）重新找摄像头，再按本系统的做法拼 ffmpeg 输入参数。
 func (d *LocalDevices) OpenCamera(ctx context.Context, startup terminal.Choice, pick terminal.CameraPicker,
 	options terminal.CameraOptions) terminal.Camera {
+	var requested string // 上次向摄像头要的（设备、格式、分辨率）：变了才写日志，重试时不刷屏
 	locate := func(ctx context.Context) ([]string, string, bool) {
 		choice, ok := pick(ctx)
 		if !ok {
 			return nil, "", false
 		}
-		return d.os.CameraInput(choice.ID, options.CaptureSize), choice.Name, true
+		capture := d.os.CameraInput(ctx, choice.ID, options.CaptureSize)
+		if now := choice.ID + " " + capture.Format + " " + capture.Size; now != requested {
+			requested = now
+			format := capture.Format
+			if format == "" {
+				format = "由驱动定"
+			}
+			d.logger.Info("📷 向摄像头要画面", "device", choice.Name, "format", format, "size", capture.Size,
+				"wanted", options.CaptureSize)
+		}
+		return capture.Input, choice.Name, true
 	}
 	if !options.Continuous {
 		return camera.NewOnDemandCamera(locate, startup.Name, options.OutputWidth, d.logger)

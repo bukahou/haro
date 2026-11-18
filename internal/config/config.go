@@ -214,11 +214,13 @@ type Settings struct {
 	AudioSink    string `env:"HARO_AUDIO_SINK"`    // 空 = 跟系统默认（蓝牙重连后自动接回）
 	CameraDevice string `env:"HARO_CAMERA_DEVICE"` // 空 = 自动找；none = 不用摄像头
 	// 终端的提示音（服务端连不上 / 回来了）：目录里放 offline.wav、online.wav（16 bit PCM）；不设 = 内置的不含人声的提示音
-	TonesDir    string        `env:"HARO_TONES_DIR"`
-	CameraMode  string        `env:"HARO_CAMERA_MODE" envDefault:"continuous"`
-	CameraSize  string        `env:"HARO_CAMERA_SIZE" envDefault:"1280x720"`
-	CameraFPS   int           `env:"HARO_CAMERA_FPS" envDefault:"2"`
-	FrameWidth  int           `env:"HARO_FRAME_WIDTH" envDefault:"640"`
+	TonesDir   string `env:"HARO_TONES_DIR"`
+	CameraMode string `env:"HARO_CAMERA_MODE" envDefault:"continuous"`
+	// 想向摄像头要的分辨率；Linux 上摄像头没有它时，改要宽度够的里面最小的（都不够宽就要最大的）
+	CameraSize string `env:"HARO_CAMERA_SIZE" envDefault:"1280x720"`
+	CameraFPS  int    `env:"HARO_CAMERA_FPS" envDefault:"2"`
+	// 送给模型的画面最大宽度：画面更宽就缩到这么宽，更窄就原样送（不放大）。1280×720 约 1,200 token，640×480 约 400
+	FrameWidth  int           `env:"HARO_FRAME_WIDTH" envDefault:"1280"`
 	FrameMaxAge time.Duration `env:"HARO_FRAME_MAX_AGE" envDefault:"3s"`
 	MinSpeech   time.Duration `env:"HARO_MIN_SPEECH" envDefault:"700ms"`
 

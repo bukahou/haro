@@ -1,5 +1,5 @@
 // Package osdiff 是各操作系统做法不同的那部分（v4 第 5 步）。录音放音三个系统共用 miniaudio，不在这里；
-// 这里只有三件事：从设备 ID 认出接口类型、列摄像头、给 ffmpeg 的摄像头输入参数。
+// 这里只有三件事：从设备 ID 认出接口类型、列摄像头、向摄像头要什么格式和分辨率（给 ffmpeg 的输入参数）。
 //
 // 每个系统一份实现（adapter_linux.go / adapter_darwin.go / adapter_other.go），编译时按 GOOS 自动选中一份，
 // 由 Current() 返回。每份都有 `var _ Adapter = …` 编译期检查：少实现一个方法，那个系统的版本就编译不过。
@@ -20,6 +20,14 @@ type Adapter interface {
 	AudioBus(id, name string) terminal.Bus
 	// Cameras 列出摄像头（拍照用的，不含元数据节点、屏幕录制）。
 	Cameras(ctx context.Context) ([]terminal.Device, error)
-	// CameraInput 是交给 ffmpeg 的输入参数（含 -f 与 -i）。
-	CameraInput(id, captureSize string) []string
+	// CameraInput 决定怎样向摄像头要画面：captureSize 是想要的分辨率（例如 1280x720），
+	// 摄像头没有这个分辨率时各系统可以改要别的（见 CameraCapture）。
+	CameraInput(ctx context.Context, id, captureSize string) CameraCapture
+}
+
+// CameraCapture 是向摄像头要画面的做法。
+type CameraCapture struct {
+	Input  []string // 交给 ffmpeg 的输入参数（含 -f 与 -i）
+	Format string   // 向摄像头要的格式（如 mjpeg、yuyv422）；空 = 没指定，由驱动定
+	Size   string   // 向摄像头要的分辨率
 }
