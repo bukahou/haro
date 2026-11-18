@@ -3,6 +3,7 @@ package brain_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"iter"
 	"log/slog"
@@ -274,6 +275,8 @@ func (m *cameraModel) StreamReply(_ context.Context, messages []brain.ChatMessag
 		switch {
 		case len(last.Image) > 0:
 			yield(brain.ReplyDelta{Text: "你拿着" + string(last.Image) + "。"}, nil)
+		case last.Role == brain.RoleTool && last.ToolName == "look_at_camera": // 专家看过了：前台拿到的是文字
+			yield(brain.ReplyDelta{Text: "转述专家的话。"}, nil)
 		case last.Text == "我手里拿着什么？" && len(tools) > 0:
 			yield(brain.ReplyDelta{ToolCalls: []brain.ToolCall{{Name: "look_at_camera"}}}, nil)
 		default:
@@ -321,6 +324,82 @@ func TestLookAtCameraOnDemand(t *testing.T) {
 	if !found {
 		t.Error("历史里应留下「当时看了摄像头画面」")
 	}
+}
+
+// fakeExpert 是看画面的专家：记下拿到的画面和主人的原话。
+type fakeExpert struct {
+	mu       sync.Mutex
+	frames   []string
+	requests []string
+	err      error
+}
+
+func (e *fakeExpert) ExamineFrame(_ context.Context, frame []byte, request string) (string, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.frames, e.requests = append(e.frames, string(frame)), append(e.requests, request)
+	if e.err != nil {
+		return "", e.err
+	}
+	return "白色方块，看着像充电头。", nil
+}
+
+func newExpertSession(model brain.ChatModel, expert brain.FrameExpert, recognizer brain.SpeechRecognizer) *brain.Session {
+	return brain.NewSession(brain.Components{
+		Recognizer: recognizer, Model: model, Synthesizer: fakeSynthesizer{}, FrameExpert: expert,
+		NewSegmenter: func() brain.TextSegmenter { return speech.NewSentenceSegmenter(4, 40) },
+	}, brain.Options{MaxHistoryTurn: 6}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+}
+
+// 有专家时：画面交给专家，前台只拿到专家的判断（文字），历史里留下这段判断。
+func TestLookAtCameraAsksExpert(t *testing.T) {
+	model, expert := &cameraModel{}, &fakeExpert{}
+	recognizer := &switchableRecognizer{}
+	session := newExpertSession(model, expert, recognizer)
+	defer session.Close()
+
+	recognizer.set("我手里拿着什么？")
+	if spoken := spokenText(askOneTurn(t, context.Background(), session, []byte("充电头"))); spoken != "转述专家的话。" {
+		t.Fatalf("应根据专家的判断回答，播出 %q", spoken)
+	}
+	if len(expert.frames) != 1 || expert.frames[0] != "充电头" || expert.requests[0] != "我手里拿着什么？" {
+		t.Fatalf("专家应拿到画面和主人的原话：%v %v", expert.frames, expert.requests)
+	}
+	model.mu.Lock()
+	defer model.mu.Unlock()
+	answered := model.seen[len(model.seen)-1]
+	for _, msg := range answered {
+		if len(msg.Image) > 0 {
+			t.Fatalf("有专家时前台不应看到画面：%+v", msg)
+		}
+	}
+	report := answered[len(answered)-1]
+	if report.Role != brain.RoleTool || !strings.Contains(report.Text, "白色方块，看着像充电头。") || !strings.Contains(report.Text, "不要说得比它更肯定") {
+		t.Errorf("工具结果应是专家的判断加转述要求：%+v", report)
+	}
+}
+
+// 专家出错时：退回把画面直接交给前台。
+func TestLookAtCameraFallsBackWhenExpertFails(t *testing.T) {
+	model, expert := &cameraModel{}, &fakeExpert{err: errors.New("503")}
+	recognizer := &switchableRecognizer{}
+	session := newExpertSession(model, expert, recognizer)
+	defer session.Close()
+
+	recognizer.set("我手里拿着什么？")
+	if spoken := spokenText(askOneTurn(t, context.Background(), session, []byte("手机"))); spoken != "你拿着手机。" {
+		t.Fatalf("专家出错时应由前台直接看画面，播出 %q", spoken)
+	}
+}
+
+func spokenText(events []realtimeproto.ServerEvent) string {
+	var spoken strings.Builder
+	for _, event := range events {
+		if audio, ok := event.(realtimeproto.ResponseOutputAudioDelta); ok {
+			spoken.Write(audio.Audio.Data)
+		}
+	}
+	return spoken.String()
 }
 
 // 一次删多条：确认问句把每一条都列出来（v3 D-1）。

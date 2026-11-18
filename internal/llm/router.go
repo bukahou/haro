@@ -12,7 +12,7 @@ import (
 // RouterChatModel 按每次请求的内容选模型，规则写在代码里、不让模型自己判断要不要换更强的
 // （小模型往往意识不到自己答错了，让它决定的话，该换的时候不换）：
 //   - 这次请求里带摄像头画面 → Vision（画面只在本轮输入里，下一轮自然回到默认模型）
-//   - 主人在纠正上一句（本轮输入标了 Escalate）→ Correction
+//   - 前台模型请更强的模型重答（主人在纠正、或明说要想清楚；本轮输入标了 Escalate）→ Correction
 //   - 其余 → Default
 //
 // Vision / Correction 为 nil 时这类请求也用 Default。
@@ -48,7 +48,7 @@ func (r *RouterChatModel) choose(messages []brain.ChatMessage) (brain.ChatModel,
 		return o.Vision, "看画面", o.VisionName
 	}
 	if o.Correction != nil && escalated(messages) {
-		return o.Correction, "主人在纠正", o.CorrectionName
+		return o.Correction, "重答", o.CorrectionName
 	}
 	return o.Default, "", ""
 }

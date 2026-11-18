@@ -160,19 +160,19 @@ func WebSearchTools(searcher WebSearcher, meter SearchMeter, logger *slog.Logger
 			if strings.TrimSpace(in.Query) == "" {
 				return "", errors.New("query 不能为空")
 			}
-			return meteredSearch(ctx, searcher, meter, in.Query, quickSearchResults, quickSearchMaxRunes, logger)
+			return QuickSearch(ctx, searcher, meter, in.Query, logger)
 		},
 	}}
 }
 
-// meteredSearch 先查额度、搜索、成功后记账。
-func meteredSearch(ctx context.Context, searcher WebSearcher, meter SearchMeter, query string, maxResults, maxRunes int,
-	logger *slog.Logger) (string, error) {
+// QuickSearch 是一次快查（最多 quickSearchResults 条、截到 quickSearchMaxRunes 字）：先查额度、搜索、成功后记账。
+// 主对话的 web_search 和看画面的专家都用它，额度算在同一处。
+func QuickSearch(ctx context.Context, searcher WebSearcher, meter SearchMeter, query string, logger *slog.Logger) (string, error) {
 	credits := searcher.SearchCredits()
 	if err := meter.AllowSearch(ctx, credits); err != nil {
 		return "", err
 	}
-	text, err := searcher.Search(ctx, query, maxResults)
+	text, err := searcher.Search(ctx, query, quickSearchResults)
 	logger.Info("联网搜索", "query", query, "chars", utf8.RuneCountInString(text), "err", err)
 	if err != nil {
 		return "", err
@@ -180,7 +180,7 @@ func meteredSearch(ctx context.Context, searcher WebSearcher, meter SearchMeter,
 	if err := meter.RecordSearch(context.WithoutCancel(ctx), credits); err != nil {
 		logger.Warn("搜索用量没记上", "err", err)
 	}
-	return truncateRunes(text, maxRunes), nil
+	return truncateRunes(text, quickSearchMaxRunes), nil
 }
 
 // truncateRunes 截到 limit 个字（按字符，不切坏中文）。

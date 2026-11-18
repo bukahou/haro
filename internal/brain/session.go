@@ -17,6 +17,7 @@ type Components struct {
 	Model        ChatModel
 	Synthesizer  SpeechSynthesizer
 	Tools        Toolbox              // 可选：v2.5 工具（内置 + MCP）
+	FrameExpert  FrameExpert          // 可选：看画面的幕后专家；nil = 画面直接交给前台模型
 	NewSegmenter func() TextSegmenter // 每次回答新建一个
 	// Conversations 是所有终端连接共用的对话簿（v4 D1）；nil = 每条连接自己一份、只在内存里
 	Conversations *ConversationBook
@@ -42,6 +43,9 @@ type Options struct {
 	Personas       []Persona
 	DefaultPersona string       // 没记过当前性格时用哪个（ID）
 	PersonaState   PersonaState // 可选：记住当前性格，重启后保持
+
+	// Escalation：有更强的模型可以接手重答（选模型的包装层配了这条路）时为 true，提供 ask_stronger_model 工具
+	Escalation bool
 }
 
 // Session 是一次与终端的会话：接收 realtimeproto 客户端事件，经 Events() 发出服务端事件。

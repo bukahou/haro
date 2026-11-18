@@ -26,6 +26,13 @@ type ChatModel interface {
 	Warmup(ctx context.Context) error
 }
 
+// FrameExpert 是看画面的幕后专家（可选）：设了它，look_at_camera 不把画面交给前台模型，
+// 而是把画面和主人这一轮的原话交给专家，前台拿到的是专家的判断（文字），再用自己的口吻转述。
+// 专家出错时退回把画面直接交给前台。
+type FrameExpert interface {
+	ExamineFrame(ctx context.Context, frame []byte, request string) (string, error)
+}
+
 // SpokenError 是可以直接念给主人的错误（例如「这个月的额度用完了」）：模型或工具返回它时，
 // 服务端把 SpokenMessage 说出来，而不是只报「出错了」。用 errors.As 判断。
 type SpokenError interface {
@@ -109,7 +116,7 @@ type ChatMessage struct {
 	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`   // assistant：这一轮模型要求调用的工具
 	ToolName   string     `json:"tool_name,omitempty"`    // tool：这条是哪个工具的结果
 	ToolCallID string     `json:"tool_call_id,omitempty"` // tool：对应哪一次调用（ToolCall.ID）
-	// Escalate：这一轮主人在纠正上一句（例如说「不对」），选模型的包装层据此交给更强的模型。只标在本轮输入上，不存盘
+	// Escalate：这一句交给更强的模型重答（前台模型调用了 ask_stronger_model），选模型的包装层据此换模型。只标在本轮输入上，不存盘
 	Escalate bool `json:"-"`
 }
 

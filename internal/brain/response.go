@@ -101,7 +101,7 @@ func (s *Session) respond(ctx context.Context, job *transcriptionJob, image []by
 
 	// 画面不直接附在这句话上：模型需要看时调用 look_at_camera（D-B ②），闲聊时手里就没有画面
 	input := s.userTurn(job.text) // 带上现在的情况；历史里只存原话（remember 用 job.text）
-	answer, toolTrail, usage, err := s.speakAnswer(ctx, s.historyWithInstructions(), input, image)
+	answer, toolTrail, usage, err := s.speakAnswer(ctx, s.historyWithInstructions(), input, cameraView{frame: image, request: job.text})
 	if ctx.Err() != nil {
 		s.rememberInterrupted(job.text) // 被打断：只记用户听到的部分（v3 I-2）
 		return realtimeproto.ResponseDone{Status: realtimeproto.StatusCancelled}
@@ -153,8 +153,14 @@ func (s *Session) failed(step string, err error) realtimeproto.ResponseDone {
 	return realtimeproto.ResponseDone{Status: realtimeproto.StatusFailed, Reason: step}
 }
 
+// cameraView 是这一轮能看的画面，以及主人这一轮的原话（看画面的专家要知道主人问的是什么）。
+type cameraView struct {
+	frame   []byte
+	request string
+}
+
 // speakAnswer 并行执行「模型流式生成 → 切句」与「逐句合成 → 发给终端」，返回完整回答文字。
-func (s *Session) speakAnswer(ctx context.Context, history []ChatMessage, input ChatMessage, frame []byte) (string, []ChatMessage, *ReplyUsage, error) {
+func (s *Session) speakAnswer(ctx context.Context, history []ChatMessage, input ChatMessage, view cameraView) (string, []ChatMessage, *ReplyUsage, error) {
 	group, groupCtx := errgroup.WithContext(ctx)
 	sentences := make(chan string, 4)
 	var answer strings.Builder
@@ -164,7 +170,7 @@ func (s *Session) speakAnswer(ctx context.Context, history []ChatMessage, input 
 	group.Go(func() error {
 		defer close(sentences)
 		var err error
-		usage, toolTrail, err = s.generateSentences(groupCtx, history, input, frame, sentences, &answer)
+		usage, toolTrail, err = s.generateSentences(groupCtx, history, input, view, sentences, &answer)
 		return err
 	})
 	group.Go(func() error {
@@ -192,7 +198,7 @@ func (s *Session) speakAnswer(ctx context.Context, history []ChatMessage, input 
 // 模型要求调用工具时：执行 → 把结果交回模型 → 再生成（最多 maxToolRounds 轮）；
 // 需要确认的工具不执行，改为问用户「确定要删掉吗」，等下一轮回答（T3 ①）。
 // 返回这一轮的工具往来（assistant 的 tool_calls + 各工具结果），供写进历史。
-func (s *Session) generateSentences(ctx context.Context, history []ChatMessage, input ChatMessage, frame []byte,
+func (s *Session) generateSentences(ctx context.Context, history []ChatMessage, input ChatMessage, view cameraView,
 	sentences chan<- string, answer *strings.Builder) (*ReplyUsage, []ChatMessage, error) {
 	ctx, span := tracer.Start(ctx, "brain.llm.stream")
 	defer span.End()
@@ -220,6 +226,7 @@ func (s *Session) generateSentences(ctx context.Context, history []ChatMessage, 
 	}
 
 	messages := append(history, input)
+	inputIndex := len(history) // 这一轮主人那句话在 messages 里的位置（请更强的模型重答时在它上面做标记）
 	var toolTrail []ChatMessage
 	specs := s.toolSpecs()
 	for round := 0; ; round++ {
@@ -276,8 +283,13 @@ func (s *Session) generateSentences(ctx context.Context, history []ChatMessage, 
 				switched = true
 				continue
 			}
+			if call.Name == askStrongerTool {
+				exchange = append(exchange, ChatMessage{Role: RoleTool, ToolName: call.Name, ToolCallID: call.ID,
+					Text: s.escalate(&messages[inputIndex])})
+				continue
+			}
 			if call.Name == lookAtCameraTool {
-				result, frameMessage := s.lookAtCamera(frame)
+				result, frameMessage := s.lookAtCamera(ctx, view)
 				exchange = append(exchange, ChatMessage{Role: RoleTool, ToolName: call.Name, ToolCallID: call.ID, Text: result})
 				frameMessages = append(frameMessages, frameMessage...)
 				continue

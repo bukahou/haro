@@ -129,17 +129,26 @@ systemd 用户服务从 `~/.config/haro/haro.env` 读取（`deploy/systemd/`）�
 - `openai`（默认）：任意 OpenAI 兼容的 `/chat/completions`（`HARO_CLOUD_LLM_URL`、`HARO_CLOUD_LLM_API_KEY`）。
 
 **按规则选模型**（可选，`HARO_STRONG_LLM_MODEL`，例如 `claude-sonnet-5-5`；和云端模型同一个接口与凭证）：
-选模型的规则写在代码里（`llm.RouterChatModel`），不让模型自己判断要不要换更强的。`HARO_STRONG_LLM_USE` 选用在哪些地方：
+换哪个模型写在代码里（`llm.RouterChatModel`）：看画面按规则、重答由前台模型认出主人在纠正后标记，不让模型凭自己有没有把握决定换不换。`HARO_STRONG_LLM_USE` 选用在哪些地方：
 
-- `vision`：这次请求里带摄像头画面（画面只在本轮输入里，下一轮自然回到云端模型）
-- `correction`：主人在纠正上一句（「不对」「错了」「不是这个」「再想想」……，`brain/correction.go`）
+- `vision`：看摄像头画面。`HARO_STRONG_LLM_VISION_MODE` 选怎么用：
+  - `expert`（默认）：**前台始终是云端模型**，它当幕后专家（`internal/vision`）。模型调用 `look_at_camera` 时，
+    画面和主人这一轮的原话交给专家（不带性格和对话记录，输入约 1.6k token）；主人问到画面上看不全的信息时专家自己联网查（最多 2 次）——
+    只有它看得到画面，才能按「画面比搜到的资料可靠」取舍。前台拿到专家的判断（文字）后用自己的口吻转述，判断留在历史里；
+    专家出错或超时时退回把画面直接交给前台。按 `vision` 用途单独记账。
+  - `takeover`：带画面的那次请求直接换它回答（画面只在本轮输入里，下一轮自然回到云端模型）
+- `correction`：主人纠正（说它答错了、让它重新想）或明说要想清楚时，前台模型调用内置工具 `ask_stronger_model`（`brain/escalation.go`），
+  这一轮剩下的请求交给它重答。「是不是在纠正」由模型认（任何语言、任何说法），不靠写死的词表；工具说明要求一认出就交、不争辩
+  （实测：只写「纠正时调用」时，Haiku 觉得自己没错就会争辩、不交）
 - `research`：后台调查由云端模型搜索、读网页，搜完把资料交给它写结论（不给工具）
 
-它出错或等太久（`HARO_STRONG_LLM_TIMEOUT`）时由云端模型接手。单价 `HARO_STRONG_LLM_PRICE_*` 必填（月度上限要靠它折算）。
+直接换它回答时，它出错或等太久（`HARO_STRONG_LLM_TIMEOUT`）由云端模型接手。单价 `HARO_STRONG_LLM_PRICE_*` 必填（月度上限要靠它折算）。
 Claude 各模型「关掉思考」的写法不同：`HARO_CLOUD_LLM_THINKING` / `HARO_STRONG_LLM_THINKING`，Haiku 5.5 用 `disabled`，
 Sonnet 5.5 只认 `between_tools`（两次工具调用之间会返回几句进度说明，haro 不回传；实测后续请求照样被接受）。
 
-真实接口的冒烟测试（花钱，默认不跑）：`HARO_ANTHROPIC_API_KEY=… go test -tags integration -run AnthropicLive -v ./internal/llm/`。
+真实接口的冒烟测试（花钱，默认不跑）：`HARO_ANTHROPIC_API_KEY=… go test -tags integration -run AnthropicLive -v ./internal/llm/`；
+看画面的专家：`go test -tags integration -run LiveExpert -v ./internal/vision/`（用法见该测试开头）；
+认不认得出纠正：`go test -tags integration -run LiveAskStronger -v ./internal/brain/`。
 看图小评测（花钱，默认不跑；样本放在仓库外）：`internal/llm/vision_eval_test.go`（`-tags eval`，先用 `HARO_EVAL_DRY_RUN=1` 看要花多少）。
 
 模型文件（识别、VAD、说完判断、唤醒词、声纹）不在仓库里，路径都由配置指定；服务端镜像里已经带着

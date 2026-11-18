@@ -77,7 +77,8 @@ func TestValidateStrongLLM(t *testing.T) {
 		t.Setenv(name, "")
 	}
 	base := Settings{CloudLLMAPI: CloudAPIAnthropic, CloudLLMModel: "claude-haiku-5-5", AnthropicAPIKey: "k",
-		CloudLLMEffort: "low", ResearchEffort: "medium", CloudLLMThinking: "disabled", StrongLLMThinking: "between_tools"}
+		CloudLLMEffort: "low", ResearchEffort: "medium", CloudLLMThinking: "disabled", StrongLLMThinking: "between_tools",
+		StrongLLMVisionMode: VisionByExpert}
 	if err := base.validateStrongLLM(); err != nil {
 		t.Fatalf("不设更强的模型应通过：%v", err)
 	}
@@ -90,6 +91,14 @@ func TestValidateStrongLLM(t *testing.T) {
 	if !strong.StrongLLMFor(StrongForVision) || base.StrongLLMFor(StrongForVision) {
 		t.Error("StrongLLMFor：设了模型且列在用途里才算")
 	}
+	takeover := strong
+	takeover.StrongLLMVisionMode = VisionByTakeover
+	noVision := strong
+	noVision.StrongLLMUse = []string{"correction"}
+	if !strong.VisionExpert() || strong.VisionTakeover() || !takeover.VisionTakeover() || takeover.VisionExpert() ||
+		noVision.VisionExpert() || noVision.VisionTakeover() || base.VisionExpert() {
+		t.Error("看画面的方式：用途里有 vision 时按 HARO_STRONG_LLM_VISION_MODE 二选一，没有 vision 或没设模型时都不算")
+	}
 	cases := []struct {
 		name   string
 		change func(*Settings)
@@ -100,6 +109,7 @@ func TestValidateStrongLLM(t *testing.T) {
 		{"力度不对", func(s *Settings) { s.StrongLLMEffort = "max" }, "HARO_STRONG_LLM_EFFORT"},
 		{"思考写法不对", func(s *Settings) { s.StrongLLMThinking = "off" }, "HARO_STRONG_LLM_THINKING"},
 		{"云端接口没配好", func(s *Settings) { s.AnthropicAPIKey = "" }, "HARO_STRONG_LLM_MODEL"},
+		{"看画面的方式不对", func(s *Settings) { s.StrongLLMVisionMode = "both" }, "HARO_STRONG_LLM_VISION_MODE"},
 	}
 	for _, c := range cases {
 		settings := strong
