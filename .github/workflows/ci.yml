@@ -7,6 +7,9 @@
 ##   build    终端三个平台（Linux x86_64 / arm64、macOS Apple 芯片），各在原生机器上编译、跑一次 -version，
 ##            再用安装脚本装一遍、升一遍、卸一遍（含「校验和不对必须拒装」的阳性对照）。
 ##            产物传成 artifact：release.yml 直接拿去发布 —— 发布的就是这里测过的那一份，不重新编译。
+##   image    服务端镜像：构建一次（不推送）+ 检查镜像里的程序版本 —— Dockerfile、基础镜像（Dependabot 的 PR）、
+##            容器里编译的问题，合并前就发现。和 release.yml 的 server 用同一个 action（.github/actions/server-image）；
+##            main 上（release 调用 ci 时）不跑：server 紧接着就用同一个 action 构建、扫描、推送，不重复建
 ## ============================================================
 name: ci
 
@@ -116,3 +119,26 @@ jobs:
           path: dist/${{ env.ASSET }}
           if-no-files-found: error
           retention-days: 7
+
+  image:
+    needs: version
+    if: github.ref != 'refs/heads/main' # release 调用 ci 时 github.ref 是 main：交给 release 的 server
+    runs-on: ubuntu-24.04
+    env:
+      TAG: ${{ needs.version.outputs.tag }}
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      # 有 Docker Hub 账号就登录：拉基础镜像走登录后的额度。Dependabot 的 PR 拿不到这个 secret，就匿名拉
+      - if: env.DOCKERHUB_USERNAME != ''
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: 服务端镜像（只构建，不推送）
+        uses: ./.github/actions/server-image
+        with:
+          image: docker.io/bukahou/haro-server
+          version: ${{ env.TAG }}

@@ -4,8 +4,9 @@
 ##   ① ci        调用 ci.yml：测试 + 终端三个平台的程序（测试不过就到此为止）
 ##   ② terminal  把 ① 编好、测过的程序发到 GitHub Release（标签 = 版本号），附 SHA256SUMS、install.sh、
 ##               来源证明（attestation）；设为 latest（安装脚本默认装它）；v* 的 Release 只留最近 20 个（C3）
-##   ③ server    模型（本仓库 Release models-v1，按 models.lock 校验）→ 构建服务端镜像 → Trivy 扫描
-##               （有可修的 CRITICAL 就不推，C8）→ 推 Docker Hub（版本号 + latest）→ 来源证明
+##   ③ server    模型（本仓库 Release models-v1，按 models.lock 校验）→ 构建服务端镜像（和 ci 的 image 是同一个
+##               action：.github/actions/server-image）→ Trivy 扫描（有可修的 CRITICAL 就不推，C8）
+##               → 推 Docker Hub（版本号 + latest）→ 来源证明
 ##   ④ deploy    ②③ 都成功后，改部署仓库里的镜像标签（bot 提交，C7）。
 ##               ⚠️ 生产是手动 SYNC：这里只改配置，线上不会自动换版本
 ##
@@ -114,38 +115,17 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      # 模型约 280 MB：按 models.lock 的内容缓存，没变就不重新下载（fetch-models.sh 仍会逐个校验 sha256）
-      - uses: actions/cache@v6
-        with:
-          path: ${{ runner.temp }}/models
-          key: models-${{ hashFiles('deploy/server/models.lock') }}
-      - name: 模型（本仓库 Release，按 models.lock 校验）
-        run: |
-          scripts/fetch-models.sh "$RUNNER_TEMP/models" || {
-            echo "::error::模型下载 / 校验失败。模型的 Release（models.lock 里 release 那一行）建好了吗？推 models-v* 标签会自动建（models.yml）"
-            exit 1
-          }
       # 先登录：拉基础镜像和 Trivy 镜像也走登录后的额度
       - uses: docker/login-action@v4
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - uses: docker/setup-buildx-action@v4
+      # 模型 → 构建并载入本机 docker（先不推）→ 检查镜像里的程序版本。和 ci 的 image 是同一个 action
       - name: 构建（先不推）
-        uses: docker/build-push-action@v7
+        uses: ./.github/actions/server-image
         with:
-          context: .
-          file: deploy/server/Dockerfile
-          build-contexts: models=${{ runner.temp }}/models
-          build-args: VERSION=${{ env.TAG }}
-          platforms: linux/amd64 # 只做 x86（v4 D6）
-          provenance: false # 单个 manifest；来源证明用下面的 attest（存在 GitHub）
-          load: true
-          tags: ${{ env.IMAGE }}:${{ env.TAG }}
-          cache-from: type=gha,scope=haro-server
-          cache-to: type=gha,scope=haro-server,mode=max
-      - name: 镜像里的程序版本
-        run: docker run --rm "${IMAGE}:${TAG}" -version | grep -F "haro-server ${TAG} "
+          image: ${{ env.IMAGE }}
+          version: ${{ env.TAG }}
       - name: Trivy 扫描（有可修的 CRITICAL 或疑似凭证就不推）
         run: |
           docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$RUNNER_TEMP:/out" \
@@ -166,21 +146,14 @@ jobs:
           jq -r '.Results[]? | .Target as $t | .Secrets[]? | "疑似凭证：\($t) \(.RuleID) 第 \(.StartLine) 行"' "$report"
           [ "$critical" -eq 0 ] || { echo "::error::有 ${critical} 个可修的 CRITICAL 漏洞：升级基础镜像 / 依赖后再发"; exit 1; }
           [ "$secrets" -eq 0 ] || { echo "::error::镜像里有 ${secrets} 处疑似凭证（公开镜像！）"; exit 1; }
+      # 参数和上面的构建相同 ⇒ 每一层都命中刚才的构建：推上去的就是刚才检查、扫描过的那一份
       - name: 推送（版本号 + latest）
         id: push
-        uses: docker/build-push-action@v7
+        uses: ./.github/actions/server-image
         with:
-          context: .
-          file: deploy/server/Dockerfile
-          build-contexts: models=${{ runner.temp }}/models
-          build-args: VERSION=${{ env.TAG }}
-          platforms: linux/amd64
-          provenance: false
-          push: true
-          tags: |
-            ${{ env.IMAGE }}:${{ env.TAG }}
-            ${{ env.IMAGE }}:latest
-          cache-from: type=gha,scope=haro-server
+          image: ${{ env.IMAGE }}
+          version: ${{ env.TAG }}
+          push: "true"
       - uses: actions/attest-build-provenance@v4
         with:
           subject-name: ${{ env.IMAGE }}

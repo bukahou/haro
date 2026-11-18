@@ -4,6 +4,7 @@ package config
 
 import (
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -14,8 +15,17 @@ import (
 // 服务端的来源。
 const (
 	LLMLocal = "local" // 本机 ollama
-	LLMCloud = "cloud" // OpenAI 兼容的云端接口（Bedrock 等）
+	LLMCloud = "cloud" // 云端（接口格式见 HARO_CLOUD_LLM_API）
 )
+
+// 云端模型的接口格式（v7）。
+const (
+	CloudAPIOpenAI    = "openai"    // OpenAI 兼容的 /chat/completions（Bedrock、OpenRouter、vLLM……）
+	CloudAPIAnthropic = "anthropic" // Claude API 的 Messages 接口（官方 Go SDK）
+)
+
+// claudeEfforts 是思考关掉时 Claude 接受的回答力度（xhigh / max 要开着思考）。
+var claudeEfforts = map[string]bool{"": true, "low": true, "medium": true, "high": true}
 
 // 轮流方式。
 const (
@@ -57,25 +67,36 @@ type Settings struct {
 	// 滚动摘要（v5 R4）：掉出最近 N 轮的对话压成摘要放进提示词；false = 直接丢掉（旧行为）
 	ConversationSummary bool `env:"HARO_CONVERSATION_SUMMARY" envDefault:"true"`
 
-	// 服务端：local（ollama）/ cloud（OpenAI 兼容接口，失败时这一轮退回 ollama）
-	LLMProvider     string        `env:"HARO_LLM_PROVIDER" envDefault:"local"`
-	CloudLLMURL     string        `env:"HARO_CLOUD_LLM_URL"`                          // OpenAI 兼容接口的根地址（…/v1）
-	CloudLLMModel   string        `env:"HARO_CLOUD_LLM_MODEL"`                        // 云端的模型 ID
-	CloudLLMAPIKey  string        `env:"HARO_CLOUD_LLM_API_KEY"`                      // 凭证：无默认值，只来自环境变量
+	// 服务端：local（ollama）/ cloud（云端，失败时这一轮退回 ollama）
+	LLMProvider string `env:"HARO_LLM_PROVIDER" envDefault:"local"`
+	// 云端的接口格式（v7）：openai（OpenAI 兼容）/ anthropic（Claude API）
+	CloudLLMAPI    string `env:"HARO_CLOUD_LLM_API" envDefault:"openai"`
+	CloudLLMURL    string `env:"HARO_CLOUD_LLM_URL"`     // openai：接口的根地址（…/v1）；anthropic：留空 = 官方地址
+	CloudLLMModel  string `env:"HARO_CLOUD_LLM_MODEL"`   // 云端的模型 ID（例如 claude-haiku-5-5）
+	CloudLLMAPIKey string `env:"HARO_CLOUD_LLM_API_KEY"` // openai 的凭证：无默认值，只来自环境变量
+	// anthropic 的凭证（v7 D3）：开发机放 key；集群里留空，由 SDK 走 Workload Identity Federation（ANTHROPIC_FEDERATION_* 等），
+	// 不放长期密钥。⚠️ 不用 ANTHROPIC_API_KEY 这个名字：Claude Code 也读它
+	AnthropicAPIKey string `env:"HARO_ANTHROPIC_API_KEY"`
+	// anthropic 的回答力度（思考是关掉的，只能 low / medium / high）：聊天和摘要求快，调查多花点力气
+	CloudLLMEffort  string        `env:"HARO_CLOUD_LLM_EFFORT" envDefault:"low"`
+	ResearchEffort  string        `env:"HARO_RESEARCH_EFFORT" envDefault:"medium"`
 	CloudLLMTimeout time.Duration `env:"HARO_CLOUD_LLM_TIMEOUT" envDefault:"4s"`      // 等云端开始响应的上限，超过就退回本地（正常 2 s 内开始响应）
 	CloudMaxTokens  int           `env:"HARO_CLOUD_LLM_MAX_TOKENS" envDefault:"800"`  // 每次最多输出多少 token：要能装下约 300 字的详细回答（2026-11-17 从 300 提高）
 	LLMFallback     bool          `env:"HARO_LLM_FALLBACK" envDefault:"true"`         // cloud 失败时退回本地 ollama
 	LLMCooldown     time.Duration `env:"HARO_LLM_FALLBACK_COOLDOWN" envDefault:"30s"` // cloud 失败后这么久内直接用本地（熔断）
 
 	// 费用（v5 R5）：用量账本与上限。价格、汇率都来自配置（云端价格会变，不写死在代码里）
-	UsageDB            string  `env:"HARO_USAGE_DB"`                             // 用量账本（SQLite 文件）；空 = 只在内存里，重启清零
-	USDToYen           float64 `env:"HARO_USD_JPY"`                              // 1 美元折多少日元；用到云端模型时必填
-	CloudLLMPriceIn    float64 `env:"HARO_CLOUD_LLM_PRICE_INPUT"`                // 云端模型每百万输入 token 的美元价；用到云端时必填
-	CloudLLMPriceOut   float64 `env:"HARO_CLOUD_LLM_PRICE_OUTPUT"`               // 同上，输出 token
-	ResearchDailyYen   float64 `env:"HARO_RESEARCH_DAILY_YEN" envDefault:"100"`  // 后台调查每天上限；0 = 不限
-	MonthlyYen         float64 `env:"HARO_MONTHLY_YEN"`                          // 每月总费用上限（大模型 + 搜索）；0 = 不限（未定）
-	SearchDailyCredits int     `env:"HARO_SEARCH_DAILY_CREDITS" envDefault:"30"` // 搜索积分每天上限（封在 Tavily 免费额度内）；0 = 不限
-	SearchCreditUSD    float64 `env:"HARO_SEARCH_CREDIT_USD"`                    // 每个搜索积分的美元价；0 = 免费额度内
+	UsageDB          string  `env:"HARO_USAGE_DB"`               // 用量账本（SQLite 文件）；空 = 只在内存里，重启清零
+	USDToYen         float64 `env:"HARO_USD_JPY"`                // 1 美元折多少日元；用到云端模型时必填
+	CloudLLMPriceIn  float64 `env:"HARO_CLOUD_LLM_PRICE_INPUT"`  // 云端模型每百万输入 token 的美元价；用到云端时必填
+	CloudLLMPriceOut float64 `env:"HARO_CLOUD_LLM_PRICE_OUTPUT"` // 同上，输出 token
+	// 提示词缓存（v7，Claude）：读缓存 / 写缓存每百万 token 的美元价；不设 = 按普通输入价算（记多不记少）
+	CloudLLMPriceCacheRead  float64 `env:"HARO_CLOUD_LLM_PRICE_CACHE_READ"`
+	CloudLLMPriceCacheWrite float64 `env:"HARO_CLOUD_LLM_PRICE_CACHE_WRITE"`
+	ResearchDailyYen        float64 `env:"HARO_RESEARCH_DAILY_YEN" envDefault:"100"`  // 后台调查每天上限；0 = 不限
+	MonthlyYen              float64 `env:"HARO_MONTHLY_YEN"`                          // 每月总费用上限（大模型 + 搜索）；0 = 不限（未定）
+	SearchDailyCredits      int     `env:"HARO_SEARCH_DAILY_CREDITS" envDefault:"30"` // 搜索积分每天上限（封在 Tavily 免费额度内）；0 = 不限
+	SearchCreditUSD         float64 `env:"HARO_SEARCH_CREDIT_USD"`                    // 每个搜索积分的美元价；0 = 免费额度内
 
 	// 语音识别
 	ASR          string `env:"HARO_ASR" envDefault:"local"` // local / openai / voice-api
@@ -247,11 +268,8 @@ func (settings Settings) validateBrain() error {
 	switch settings.LLMProvider {
 	case LLMLocal:
 	case LLMCloud:
-		if settings.CloudLLMURL == "" || settings.CloudLLMModel == "" {
-			return fmt.Errorf("HARO_LLM_PROVIDER=cloud 时必须设 HARO_CLOUD_LLM_URL 和 HARO_CLOUD_LLM_MODEL")
-		}
-		if settings.CloudLLMAPIKey == "" {
-			return fmt.Errorf("HARO_LLM_PROVIDER=cloud 时必须填 HARO_CLOUD_LLM_API_KEY（放在环境变量里；或临时用 HARO_LLM_PROVIDER=local）")
+		if err := settings.cloudLLMReady(); err != nil {
+			return fmt.Errorf("HARO_LLM_PROVIDER=cloud 时%w（或临时用 HARO_LLM_PROVIDER=local）", err)
 		}
 	default:
 		return fmt.Errorf("HARO_LLM_PROVIDER 只能是 %s 或 %s，现在是 %q", LLMLocal, LLMCloud, settings.LLMProvider)
@@ -302,8 +320,10 @@ func (settings Settings) validateBrain() error {
 	if settings.ResearchLLM != LLMLocal && settings.ResearchLLM != LLMCloud {
 		return fmt.Errorf("HARO_RESEARCH_LLM 只能是 %s 或 %s，现在是 %q", LLMLocal, LLMCloud, settings.ResearchLLM)
 	}
-	if settings.ResearchesWithCloud() && (settings.CloudLLMURL == "" || settings.CloudLLMModel == "" || settings.CloudLLMAPIKey == "") {
-		return fmt.Errorf("后台调查用云端模型（HARO_RESEARCH_LLM=cloud）时必须设 HARO_CLOUD_LLM_URL、HARO_CLOUD_LLM_MODEL、HARO_CLOUD_LLM_API_KEY（或改成 local）")
+	if settings.ResearchesWithCloud() {
+		if err := settings.cloudLLMReady(); err != nil {
+			return fmt.Errorf("后台调查用云端模型（HARO_RESEARCH_LLM=cloud）时%w（或改成 local）", err)
+		}
 	}
 	if settings.UsesCloudLLM() && (settings.USDToYen <= 0 || settings.CloudLLMPriceIn <= 0 || settings.CloudLLMPriceOut <= 0) {
 		return fmt.Errorf("用到云端模型时必须设 HARO_USD_JPY、HARO_CLOUD_LLM_PRICE_INPUT、HARO_CLOUD_LLM_PRICE_OUTPUT（费用上限要靠它们折算，v5 R5）")
@@ -318,6 +338,44 @@ func (settings Settings) validateBrain() error {
 		return fmt.Errorf("必须设 HARO_SERVER_LISTEN（haro-server 的监听地址）")
 	}
 	return nil
+}
+
+// cloudLLMReady 按接口格式检查云端模型的配置齐不齐；返回的说明接在「…时」后面。
+func (s Settings) cloudLLMReady() error {
+	switch s.CloudLLMAPI {
+	case CloudAPIOpenAI:
+		if s.CloudLLMURL == "" || s.CloudLLMModel == "" {
+			return fmt.Errorf("必须设 HARO_CLOUD_LLM_URL 和 HARO_CLOUD_LLM_MODEL")
+		}
+		if s.CloudLLMAPIKey == "" {
+			return fmt.Errorf("必须填 HARO_CLOUD_LLM_API_KEY（放在环境变量里）")
+		}
+	case CloudAPIAnthropic:
+		if s.CloudLLMModel == "" {
+			return fmt.Errorf("必须设 HARO_CLOUD_LLM_MODEL（例如 claude-haiku-5-5）")
+		}
+		if s.AnthropicAPIKey == "" && !anthropicAmbientCredentials() {
+			return fmt.Errorf("必须有 Claude 的凭证：开发机填 HARO_ANTHROPIC_API_KEY；集群里配 Workload Identity Federation（ANTHROPIC_FEDERATION_RULE_ID 等）")
+		}
+		if !claudeEfforts[s.CloudLLMEffort] || !claudeEfforts[s.ResearchEffort] {
+			return fmt.Errorf("HARO_CLOUD_LLM_EFFORT、HARO_RESEARCH_EFFORT 只能是 low、medium 或 high（思考是关掉的），现在是 %q、%q",
+				s.CloudLLMEffort, s.ResearchEffort)
+		}
+	default:
+		return fmt.Errorf("HARO_CLOUD_LLM_API 只能是 %s 或 %s，现在是 %q", CloudAPIOpenAI, CloudAPIAnthropic, s.CloudLLMAPI)
+	}
+	return nil
+}
+
+// anthropicAmbientCredentials 判断不填 HARO_ANTHROPIC_API_KEY 时，SDK 能不能自己找到凭证：
+// Workload Identity Federation（集群里），或 SDK 的标准变量 / 登录档案。
+func anthropicAmbientCredentials() bool {
+	for _, name := range []string{"ANTHROPIC_FEDERATION_RULE_ID", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_PROFILE"} {
+		if os.Getenv(name) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // UsesCloudLLM 判断会不会调用云端模型（主用云端，或本地为主、失败退回云端，或后台调查用云端）。

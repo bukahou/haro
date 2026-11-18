@@ -299,10 +299,13 @@ func (s *Session) generateSentences(ctx context.Context, history []ChatMessage, 
 		span.SetAttributes(
 			attribute.Int("haro.llm.prompt_tokens", usage.PromptTokens),
 			attribute.Int("haro.llm.output_tokens", usage.OutputTokens),
+			attribute.Int("haro.llm.cache_read_tokens", usage.CacheReadTokens),
+			attribute.Int("haro.llm.cache_write_tokens", usage.CacheWriteTokens),
 			attribute.Int("haro.llm.requests", usage.Requests),
 			attribute.Int("haro.llm.thinking_chars", usage.ThinkingChars),
 			attribute.Int64("haro.llm.load_ms", usage.LoadMillis))
 		s.logger.Info("模型用量", "requests", usage.Requests, "prompt_tokens", usage.PromptTokens, "output_tokens", usage.OutputTokens,
+			"cache_read_tokens", usage.CacheReadTokens, "cache_write_tokens", usage.CacheWriteTokens,
 			"visible_chars", utf8.RuneCountInString(answer.String()), "thinking_chars", usage.ThinkingChars)
 	}
 	s.logger.Info("阶段耗时", "stage", "brain.llm.stream", "elapsed", since(started))

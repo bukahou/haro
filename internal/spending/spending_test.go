@@ -2,6 +2,7 @@ package spending
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"io"
 	"iter"
@@ -69,10 +70,10 @@ func TestPricing(t *testing.T) {
 	pricing := Pricing{USDToYen: 150, SearchCreditUSD: 0.008,
 		Models: map[string]TokenPrice{"cloud": {InputUSDPerMillion: 0.5, OutputUSDPerMillion: 2}}}
 	// 100 万输入 + 10 万输出 = 0.5 + 0.2 = 0.7 美元 = 105 日元
-	if got := pricing.LLMYen("cloud", 1_000_000, 100_000); got < 104.99 || got > 105.01 {
+	if got := pricing.LLMYen("cloud", brain.ReplyUsage{PromptTokens: 1_000_000, OutputTokens: 100_000}); got < 104.99 || got > 105.01 {
 		t.Errorf("云端费用 = %v，应为 105", got)
 	}
-	if got := pricing.LLMYen("local-8b", 1_000_000, 100_000); got != 0 {
+	if got := pricing.LLMYen("local-8b", brain.ReplyUsage{PromptTokens: 1_000_000, OutputTokens: 100_000}); got != 0 {
 		t.Errorf("本地模型应按 0 算：%v", got)
 	}
 	if got := pricing.SearchYen(10); got < 11.99 || got > 12.01 {
@@ -163,6 +164,57 @@ func collectText(t *testing.T, model brain.ChatModel) (string, error) {
 		text.WriteString(delta.Text)
 	}
 	return text.String(), nil
+}
+
+// v7：提示词缓存的读、写各按各的价；没配缓存价时按普通输入价（记多不记少）。
+func TestPricingWithPromptCache(t *testing.T) {
+	usage := brain.ReplyUsage{PromptTokens: 1_000_000, CacheReadTokens: 600_000, CacheWriteTokens: 300_000, OutputTokens: 100_000}
+	priced := Pricing{USDToYen: 100, Models: map[string]TokenPrice{"claude": {InputUSDPerMillion: 0.10, OutputUSDPerMillion: 0.50,
+		CacheReadUSDPerMillion: 0.01, CacheWriteUSDPerMillion: 0.125}}}
+	// 没命中缓存 10 万 × 0.10 + 读 60 万 × 0.01 + 写 30 万 × 0.125 + 输出 10 万 × 0.50 = 0.01 + 0.006 + 0.0375 + 0.05 = 0.1035 美元
+	if got := priced.LLMYen("claude", usage); got < 10.349 || got > 10.351 {
+		t.Errorf("带缓存的费用 = %v，应为 10.35 日元", got)
+	}
+	unpriced := Pricing{USDToYen: 100, Models: map[string]TokenPrice{"claude": {InputUSDPerMillion: 0.10, OutputUSDPerMillion: 0.50}}}
+	// 没配缓存价：100 万输入全按 0.10 + 输出 0.05 = 0.15 美元
+	if got := unpriced.LLMYen("claude", usage); got < 14.99 || got > 15.01 {
+		t.Errorf("没配缓存价时应按普通输入价算 = %v，应为 15 日元", got)
+	}
+}
+
+// v7：v7 以前建的账本（没有缓存两列）打开时自动补列，旧记录照常合计，新记录能写进缓存用量。
+func TestLedgerUpgradesOldSchema(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "usage.db")
+	old, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := old.ExecContext(ctx, `CREATE TABLE charges (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL,
+		purpose TEXT NOT NULL, item TEXT NOT NULL, input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
+		credits INTEGER NOT NULL DEFAULT 0, yen REAL NOT NULL DEFAULT 0);
+		INSERT INTO charges (at, purpose, item, yen) VALUES (?, 'chat', 'llm:old', 7)`, time.Now().Unix()); err != nil {
+		t.Fatal(err)
+	}
+	old.Close()
+
+	ledger, err := OpenLedger(ctx, path)
+	if err != nil {
+		t.Fatalf("打开旧账本: %v", err)
+	}
+	if err := ledger.Record(ctx, Charge{Purpose: PurposeChat, Item: "llm:new", InputTokens: 10, CacheReadTokens: 6,
+		CacheWriteTokens: 3, Yen: 1}); err != nil {
+		t.Fatalf("写入带缓存用量的记录: %v", err)
+	}
+	if got, _ := ledger.Total(ctx, time.Now().Add(-time.Minute)); got.Yen != 8 {
+		t.Errorf("合计 = %v，应为 8（旧记录 7 + 新记录 1）", got.Yen)
+	}
+	ledger.Close()
+	reopened, err := OpenLedger(ctx, path) // 再打开一次：列已经有了，不能重复加
+	if err != nil {
+		t.Fatalf("再次打开: %v", err)
+	}
+	reopened.Close()
 }
 
 func TestMeteredAndBudgetedModels(t *testing.T) {

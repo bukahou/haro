@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/bukahou/haro/internal/brain"
 )
 
 // Pricing 是把用量折成日元的单价（来自配置：云端价格以美元计，汇率也由配置给，都不写死在代码里）。
@@ -22,15 +24,27 @@ type Pricing struct {
 type TokenPrice struct {
 	InputUSDPerMillion  float64
 	OutputUSDPerMillion float64
+	// 提示词缓存（v7）：读缓存、写缓存的单价；0 = 按普通输入价算（宁可记多，不让额度失守）
+	CacheReadUSDPerMillion  float64
+	CacheWriteUSDPerMillion float64
 }
 
-// LLMYen 算一次模型调用折多少日元。
-func (p Pricing) LLMYen(model string, inputTokens, outputTokens int) float64 {
+// LLMYen 算一次模型调用折多少日元：没命中缓存的输入、缓存读、缓存写、输出各按各的价。
+func (p Pricing) LLMYen(model string, usage brain.ReplyUsage) float64 {
 	price, ok := p.Models[model]
 	if !ok {
 		return 0
 	}
-	usd := (float64(inputTokens)*price.InputUSDPerMillion + float64(outputTokens)*price.OutputUSDPerMillion) / 1e6
+	cacheRead, cacheWrite := price.CacheReadUSDPerMillion, price.CacheWriteUSDPerMillion
+	if cacheRead <= 0 {
+		cacheRead = price.InputUSDPerMillion
+	}
+	if cacheWrite <= 0 {
+		cacheWrite = price.InputUSDPerMillion
+	}
+	uncached := max(usage.PromptTokens-usage.CacheReadTokens-usage.CacheWriteTokens, 0)
+	usd := (float64(uncached)*price.InputUSDPerMillion + float64(usage.CacheReadTokens)*cacheRead +
+		float64(usage.CacheWriteTokens)*cacheWrite + float64(usage.OutputTokens)*price.OutputUSDPerMillion) / 1e6
 	return usd * p.USDToYen
 }
 

@@ -274,8 +274,8 @@ func buildChatModel(settings config.Settings, httpClient *http.Client, ledger sp
 			settings.Model, purpose, pricing, ledger, logger)
 	}
 	newCloud := func(client *http.Client) brain.ChatModel {
-		return spending.NewMeteredChatModel(
-			llm.NewOpenAIChatModel(settings.CloudLLMURL, settings.CloudLLMModel, settings.CloudLLMAPIKey, maxTokens, client),
+		// 不在 SDK 里重试：失败时由退路接手，不让主人多等
+		return spending.NewMeteredChatModel(newCloudChatModel(settings, maxTokens, settings.CloudLLMEffort, 0, client),
 			settings.CloudLLMModel, purpose, pricing, ledger, logger)
 	}
 	var paid, free brain.ChatModel // paid：平时用的那套（可能花钱）；free：月度额度用完后退回的本地模型（R5 c）
@@ -299,11 +299,22 @@ func buildChatModel(settings config.Settings, httpClient *http.Client, ledger sp
 	return spending.NewBudgetedChatModel(paid, free, guard, logger)
 }
 
+// newCloudChatModel 按 HARO_CLOUD_LLM_API 创建云端模型（v7）：openai = OpenAI 兼容接口，anthropic = Claude API。
+// effort、retries 只对 anthropic 有效。
+func newCloudChatModel(settings config.Settings, maxTokens int, effort string, retries int, client *http.Client) brain.ChatModel {
+	if settings.CloudLLMAPI == config.CloudAPIAnthropic {
+		return llm.NewAnthropicChatModel(llm.AnthropicOptions{Model: settings.CloudLLMModel, MaxTokens: maxTokens,
+			Effort: effort, APIKey: settings.AnthropicAPIKey, BaseURL: settings.CloudLLMURL, MaxRetries: retries, HTTPClient: client})
+	}
+	return llm.NewOpenAIChatModel(settings.CloudLLMURL, settings.CloudLLMModel, settings.CloudLLMAPIKey, maxTokens, client)
+}
+
 // pricingOf 是把用量折成日元的单价（都来自配置）。
 func pricingOf(settings config.Settings) spending.Pricing {
 	return spending.Pricing{USDToYen: settings.USDToYen, SearchCreditUSD: settings.SearchCreditUSD,
 		Models: map[string]spending.TokenPrice{settings.CloudLLMModel: {
-			InputUSDPerMillion: settings.CloudLLMPriceIn, OutputUSDPerMillion: settings.CloudLLMPriceOut}}}
+			InputUSDPerMillion: settings.CloudLLMPriceIn, OutputUSDPerMillion: settings.CloudLLMPriceOut,
+			CacheReadUSDPerMillion: settings.CloudLLMPriceCacheRead, CacheWriteUSDPerMillion: settings.CloudLLMPriceCacheWrite}}}
 }
 
 // weatherHome 是家的位置（已在加载配置时校验过）：配置的坐标，或按公网 IP 定位；没设时为 nil。
@@ -361,8 +372,9 @@ func startResearch(ctx context.Context, settings config.Settings, httpClient *ht
 	pricing := pricingOf(settings)
 	var model brain.ChatModel
 	if settings.ResearchLLM == config.LLMCloud {
-		model = spending.NewMeteredChatModel(llm.NewOpenAIChatModel(settings.CloudLLMURL, settings.CloudLLMModel,
-			settings.CloudLLMAPIKey, researchMaxTokens, httpClient), settings.CloudLLMModel, spending.PurposeResearch, pricing, ledger, logger)
+		// 调查在后台、不急：限流 / 服务端一时出错时让 SDK 重试两次
+		model = spending.NewMeteredChatModel(newCloudChatModel(settings, researchMaxTokens, settings.ResearchEffort, 2, httpClient),
+			settings.CloudLLMModel, spending.PurposeResearch, pricing, ledger, logger)
 	} else {
 		model = spending.NewMeteredChatModel(llm.NewOllamaChatModel(settings.OllamaURL, settings.Model, settings.ContextSize,
 			settings.ModelKeepAlive, httpClient), settings.Model, spending.PurposeResearch, pricing, ledger, logger)

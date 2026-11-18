@@ -143,11 +143,15 @@ type Toolbox interface {
 
 // ReplyUsage 是一次回答的用量与诊断信息。
 type ReplyUsage struct {
-	PromptTokens  int
-	OutputTokens  int
-	ThinkingChars int   // 思考内容的字数（只统计，不朗读）；用来查「看不见的输出」
-	LoadMillis    int64 // 本次请求里加载模型花的时间
-	Requests      int   // 这次回答请求了模型几次（调工具时不止一次；add 累加时计数）
+	PromptTokens int // 输入的总数（含下面两项）
+	OutputTokens int
+	// 提示词缓存（v7，Claude）：命中缓存读进来的、这次写进缓存的输入 token。价格和普通输入不同（读约 0.1 倍、写约 1.25 倍），
+	// 记账时分开算；不报缓存的模型都是 0
+	CacheReadTokens  int
+	CacheWriteTokens int
+	ThinkingChars    int   // 思考内容的字数（只统计，不朗读）；用来查「看不见的输出」
+	LoadMillis       int64 // 本次请求里加载模型花的时间
+	Requests         int   // 这次回答请求了模型几次（调工具时不止一次；add 累加时计数）
 }
 
 // add 把一次模型请求的用量累加进来（v3 U-1）：调工具时一次回答要请求模型好几次，每次都要计费，
@@ -162,6 +166,8 @@ func (u *ReplyUsage) add(request *ReplyUsage) *ReplyUsage {
 	}
 	total.PromptTokens += request.PromptTokens
 	total.OutputTokens += request.OutputTokens
+	total.CacheReadTokens += request.CacheReadTokens
+	total.CacheWriteTokens += request.CacheWriteTokens
 	total.ThinkingChars += request.ThinkingChars
 	total.LoadMillis += request.LoadMillis
 	total.Requests++
