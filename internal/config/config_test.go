@@ -43,6 +43,22 @@ func TestCloudLLMReadyForAnthropic(t *testing.T) {
 	}
 }
 
+// 天气的备用来源只认 jma / none；家的位置写错照样报错。
+func TestValidateWeather(t *testing.T) {
+	for _, backup := range []string{WeatherBackupJMA, WeatherBackupNone} {
+		if err := (Settings{WeatherBackup: backup}).validateWeather(); err != nil {
+			t.Errorf("%s 应通过：%v", backup, err)
+		}
+	}
+	if err := (Settings{WeatherBackup: "met"}).validateWeather(); err == nil || !strings.Contains(err.Error(), "HARO_WEATHER_BACKUP") {
+		t.Errorf("不认识的备用来源应报错：%v", err)
+	}
+	if err := (Settings{WeatherBackup: WeatherBackupJMA, WeatherHome: "家"}).validateWeather(); err == nil ||
+		!strings.Contains(err.Error(), "HARO_WEATHER_HOME") {
+		t.Errorf("家的位置写错应报错：%v", err)
+	}
+}
+
 // OpenAI 兼容接口的检查不变：地址、模型、key 都要有。
 func TestCloudLLMReadyForOpenAI(t *testing.T) {
 	settings := Settings{CloudLLMAPI: CloudAPIOpenAI, CloudLLMURL: "https://example.com/v1", CloudLLMModel: "m", CloudLLMAPIKey: "k"}

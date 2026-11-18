@@ -159,6 +159,11 @@ type Settings struct {
 	WeatherIPLocateURL  string `env:"HARO_WEATHER_IP_LOCATE_URL" envDefault:"https://ipinfo.io/json"` // IP 定位服务（HTTPS，不用密钥）
 	WeatherForecastURL  string `env:"HARO_WEATHER_FORECAST_URL" envDefault:"https://api.open-meteo.com/v1/forecast"`
 	WeatherGeocodingURL string `env:"HARO_WEATHER_GEOCODING_URL" envDefault:"https://geocoding-api.open-meteo.com/v1/search"`
+	// Open-Meteo 查不到时的备用：jma = 日本气象厅网站的数据（只覆盖日本、按地区；地区按坐标自动找：
+	// 国土地理院的地址反查 + 气象厅的地区表，所以要查的坐标也会发给国土地理院）；none = 不用备用
+	WeatherBackup             string `env:"HARO_WEATHER_BACKUP" envDefault:"jma"`
+	WeatherJMAURL             string `env:"HARO_WEATHER_JMA_URL" envDefault:"https://www.jma.go.jp/bosai"`
+	WeatherReverseGeocoderURL string `env:"HARO_WEATHER_REVERSE_GEOCODER_URL" envDefault:"https://mreversegeocoder.gsi.go.jp/reverse-geocoder/LonLatToAddress"`
 	// 网络诊断：v3 起内置在主程序里（V-4），不再启动 haro-netdiag
 	NetdiagDNSName        string `env:"HARO_NETDIAG_DNS_NAME" envDefault:"www.cloudflare.com"`
 	NetdiagInternetTarget string `env:"HARO_NETDIAG_INTERNET_TARGET" envDefault:"1.1.1.1:443"`
@@ -314,7 +319,7 @@ func (settings Settings) validateBrain() error {
 	default:
 		return fmt.Errorf("HARO_TURN_MODE 只能是 %s 或 %s，现在是 %q", TurnHandsFree, TurnPushToTalk, settings.TurnMode)
 	}
-	if _, err := settings.WeatherHomePlace(); err != nil {
+	if err := settings.validateWeather(); err != nil {
 		return err
 	}
 	if settings.ResearchLLM != LLMLocal && settings.ResearchLLM != LLMCloud {
@@ -416,3 +421,20 @@ type WeatherHome struct {
 
 // WeatherHomeByIP 是 HARO_WEATHER_HOME 的特殊值：按公网 IP 定位。
 const WeatherHomeByIP = "ip"
+
+// HARO_WEATHER_BACKUP 的取值。
+const (
+	WeatherBackupJMA  = "jma"
+	WeatherBackupNone = "none"
+)
+
+// validateWeather 检查天气相关的配置：家的位置、备用来源。
+func (s Settings) validateWeather() error {
+	if _, err := s.WeatherHomePlace(); err != nil {
+		return err
+	}
+	if s.WeatherBackup != WeatherBackupJMA && s.WeatherBackup != WeatherBackupNone {
+		return fmt.Errorf("HARO_WEATHER_BACKUP 只能是 %s 或 %s，现在是 %q", WeatherBackupJMA, WeatherBackupNone, s.WeatherBackup)
+	}
+	return nil
+}

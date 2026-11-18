@@ -29,7 +29,7 @@ func TestRetriesOnceOnTimeout(t *testing.T) {
 	}))
 	defer server.Close()
 	client := NewClient(server.URL, server.URL, server.Client())
-	client.attemptTimeout = 100 * time.Millisecond
+	client.fetch.attemptTimeout = 100 * time.Millisecond
 
 	place, err := client.FindPlace(context.Background(), "测试", "ja")
 	if err != nil || place.Name != "测试市" || calls.Load() != 2 {

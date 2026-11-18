@@ -47,7 +47,7 @@ func TestWeatherTool(t *testing.T) {
 	client := weather.NewClient(server.URL+"/forecast", server.URL+"/search", server.Client())
 	home := weather.FixedHome{Place: weather.Place{Name: "家", Latitude: 10.5, Longitude: 20.5}}
 
-	box, _ := NewToolbox(ctx, nil, logger, WeatherTools(client, home, logger)...)
+	box, _ := NewToolbox(ctx, nil, logger, WeatherTools(client, client, home, logger)...)
 	result, err := box.Call(ctx, brain.ToolCall{Name: "get_weather"})
 	if err != nil || !strings.Contains(result, `"weather":"小雨"`) || !strings.Contains(result, `"rain_chance_percent":80`) {
 		t.Fatalf("查家里：%s %v", result, err)
@@ -63,7 +63,7 @@ func TestWeatherTool(t *testing.T) {
 		t.Error("找不到的地名应报错")
 	}
 
-	noHome, _ := NewToolbox(ctx, nil, logger, WeatherTools(client, nil, logger)...)
+	noHome, _ := NewToolbox(ctx, nil, logger, WeatherTools(client, client, nil, logger)...)
 	if _, err := noHome.Call(ctx, brain.ToolCall{Name: "get_weather"}); err == nil || !strings.Contains(err.Error(), "HARO_WEATHER_HOME") {
 		t.Errorf("没设家的位置又没说地点：%v", err)
 	}
