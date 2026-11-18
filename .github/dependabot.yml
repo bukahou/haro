@@ -37,7 +37,8 @@ updates:
       prefix: "deps(docker)"
 
   - package-ecosystem: github-actions
-    directory: /
+    # /：.github/workflows 里的 workflow；/.github/actions/*：仓库里自己的 action（服务端镜像的构建步骤里也用了别的 action）
+    directories: ["/", "/.github/actions/*"]
     target-branch: dev
     schedule:
       interval: weekly

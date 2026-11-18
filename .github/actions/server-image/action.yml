@@ -1,0 +1,67 @@
+## ============================================================
+## 服务端镜像（v6）—— ci.yml 的 image 和 release.yml 的 server 共用这一份构建步骤：
+## 合并前在 dev / PR 上建的，和发版时扫描、推送的，是同一种构建（构建参数只写在这里，两边不会改漏一边）
+## ============================================================
+##   push: "false"（默认）  模型（本仓库 Release，按 models.lock 校验）→ 构建并载入本机 docker → 检查镜像里的程序版本
+##   push: "true"           推送「版本号 + latest」。只能在同一个 job 里先用 "false" 建过（release 还要先扫描）之后调用：
+##                          参数相同 ⇒ 每一层都命中刚才的构建，推上去的就是刚才检查、扫描过的那一份
+## 调用前先 actions/checkout（本 action 在仓库里）；要登录 Docker Hub 也在调用前登录
+## ============================================================
+name: 服务端镜像
+description: 构建 haro-server 镜像并检查镜像里的程序版本；push 为 "true" 时推送
+inputs:
+  image:
+    description: 镜像名，例如 docker.io/bukahou/haro-server
+    required: true
+  version:
+    description: 版本号（= 镜像标签 = 程序里的 buildinfo.Version），例如 v0.5.0-1a2b3c4
+    required: true
+  push:
+    description: '"true" = 推送（必须先在同一个 job 里用 "false" 建过）'
+    required: false
+    default: "false"
+outputs:
+  digest:
+    description: 镜像的 digest（推送时就是 Docker Hub 上那一份）
+    value: ${{ steps.build.outputs.digest }}
+runs:
+  using: composite
+  steps:
+    # 模型约 280 MB：按 models.lock 的内容缓存，没变就不重新下载（fetch-models.sh 仍会逐个校验 sha256）
+    - if: inputs.push != 'true'
+      uses: actions/cache@v6
+      with:
+        path: ${{ runner.temp }}/models
+        key: models-${{ hashFiles('deploy/server/models.lock') }}
+    - if: inputs.push != 'true'
+      name: 模型（本仓库 Release，按 models.lock 校验）
+      shell: bash
+      run: |
+        scripts/fetch-models.sh "$RUNNER_TEMP/models" || {
+          echo "::error::模型下载 / 校验失败。模型的 Release（models.lock 里 release 那一行）建好了吗？推 models-v* 标签会自动建（models.yml）"
+          exit 1
+        }
+    - if: inputs.push != 'true'
+      uses: docker/setup-buildx-action@v4
+    - id: build
+      name: 构建（push 为 "true" 时推送）
+      uses: docker/build-push-action@v7
+      with:
+        context: .
+        file: deploy/server/Dockerfile
+        build-contexts: models=${{ runner.temp }}/models
+        build-args: VERSION=${{ inputs.version }}
+        platforms: linux/amd64 # 只做 x86（v4 D6）
+        provenance: false # 单个 manifest；来源证明由 release 用 attest 生成（存在 GitHub）
+        load: ${{ inputs.push != 'true' }}
+        push: ${{ inputs.push == 'true' }}
+        tags: ${{ inputs.image }}:${{ inputs.version }}${{ inputs.push == 'true' && format(',{0}:latest', inputs.image) || '' }}
+        cache-from: type=gha,scope=haro-server
+        cache-to: ${{ inputs.push != 'true' && 'type=gha,scope=haro-server,mode=max' || '' }}
+    - if: inputs.push != 'true'
+      name: 镜像里的程序版本
+      shell: bash
+      env:
+        IMAGE: ${{ inputs.image }}
+        VERSION: ${{ inputs.version }}
+      run: docker run --rm "${IMAGE}:${VERSION}" -version | grep -F "haro-server ${VERSION} "

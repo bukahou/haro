@@ -119,7 +119,9 @@ make version          # 这次构建的版本号
 - **版本号** = `v` + 仓库根目录的 `VERSION` + 提交号前 7 位，例如 `v0.5.0-1a2b3c4`。GitHub Release 的标签、
   服务端镜像的标签、程序里的版本（`haro -version`、启动日志）是同一个字符串。`VERSION` 只在阶段性的大改时调。
 - **终端和服务端握手时互报版本**（HTTP 头 `X-Haro-Version`）：版本不同时两边的日志都会提醒升级终端。
-- **合并到 `main` 就发版**（`.github/workflows/release.yml`；日常开发在 `dev`，推 `dev` 和开 PR 时跑 `ci.yml`）：
+- **合并前的检查**（`.github/workflows/ci.yml`；日常开发在 `dev`，推 `dev` 和开 PR 时跑）：测试、终端三个平台的编译和安装脚本，
+  再试建一次服务端镜像（不推送；和发版用同一份构建步骤 `.github/actions/server-image`）—— Dockerfile、基础镜像的问题合并前就能发现。
+- **合并到 `main` 就发版**（`.github/workflows/release.yml`）：
   1. 测试 + 终端三个平台（Linux x86_64 / arm64、macOS Apple 芯片）的程序，各在原生机器上编译，用安装脚本装、卸一遍；
   2. 程序发到 GitHub Release（附 `SHA256SUMS`、`install.sh`、来源证明），设为 latest；`v*` 的 Release 只留最近 20 个；
   3. 服务端镜像：模型从本仓库的 Release 下载并按 `models.lock` 校验 → 构建 → Trivy 扫描（有可修的 CRITICAL
