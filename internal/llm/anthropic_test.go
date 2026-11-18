@@ -74,8 +74,8 @@ func (s *claudeServer) count() int {
 }
 
 func testClaudeModel(server *claudeServer, effort string) *AnthropicChatModel {
-	return NewAnthropicChatModel(AnthropicOptions{Model: "claude-haiku-5-5", MaxTokens: 800, Effort: effort,
-		APIKey: "test-key", BaseURL: server.URL, HTTPClient: server.Client()})
+	return NewAnthropicChatModel(AnthropicOptions{API: NewClaudeAPI("test-key", server.URL, server.Client()),
+		Model: "claude-haiku-5-5", MaxTokens: 800, Effort: effort})
 }
 
 // 一次「先说一句、再调用工具」的回答：缓存读 5000、写 300、没命中 12，输出 42。
@@ -136,8 +136,8 @@ func TestAnthropicStreamsTextToolCallsAndCacheUsage(t *testing.T) {
 	if output, _ := body["output_config"].(map[string]any); output["effort"] != "low" {
 		t.Errorf("回答力度应为 low：%v", body["output_config"])
 	}
-	if cache, _ := body["cache_control"].(map[string]any); cache["type"] != "ephemeral" {
-		t.Errorf("请求级自动缓存没开：%v", body["cache_control"])
+	if _, set := body["cache_control"]; set {
+		t.Errorf("不该用请求级自动缓存（断点落在每轮都变的「现在的情况」后面）：%v", body["cache_control"])
 	}
 	system, _ := body["system"].([]any)
 	if len(system) != 1 {
