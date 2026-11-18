@@ -62,11 +62,24 @@ haro 是一个家用语音助手：家里每个房间放一台**终端**（麦�
 | `get_current_time` | 现在的时间 |
 | `save_note` / `search_notes` / `list_recent_notes` / `delete_note` | 记事本（SQLite）；删除前要口头确认 |
 | `check_network` / `network_interfaces` | 网络诊断（查的是服务端所在机器的网络） |
-| `get_weather` | 天气（Open-Meteo，不用密钥）；家的位置可以配坐标，或按公网 IP 推定 |
+| `get_weather` | 天气（Open-Meteo，不用密钥）；家的位置可以配坐标，或按公网 IP 推定。Open-Meteo 查不到时改用日本气象厅（见下） |
 | `look_at_camera` | 看终端摄像头的画面（终端有摄像头时才提供） |
 | `switch_persona` | 换性格（有两个以上性格时才提供） |
 | `web_search` | 联网搜一次（Tavily 远程 MCP）；设了密钥才提供 |
 | `start_research` / `research_status` / `cancel_research` | 后台调查（见下）；设了搜索密钥才提供 |
+
+### 天气的备用来源（`internal/weather`）
+
+Open-Meteo 连不上或报错时，日本境内的地点改查日本气象厅网站的数据（`HARO_WEATHER_BACKUP=jma`，默认开；`none` 关掉）：
+
+- 内容：短期预报（三天，天气是气象厅的日语原文）+ 周间预报（到第 7 天）+ 附近观测站的实况（最近的站缺测时用下一个）。
+  没有体感温度与降水量预报；交给模型的结果里注明来源。
+- 地点 → 预报地区按坐标自动找：国土地理院的地址反查（坐标 → 市町村）+ 气象厅的地区表（政令市的区归到所属的市；
+  一个市分成几块时取代表气温点最近的那块）。⇒ 要查的坐标也会发给国土地理院。家所在的地区在启动时找好并写进日志。
+- 气象厅的这些数据文件是网站自己用的，不是正式公开的接口，格式可能变 ⇒ 只做备用；地区表下载一次后在进程里缓存。
+- 连接（TCP、TLS 握手）各最多等 1.5 秒，建立不起来不重试，尽快交给备用；连上后卡住才重试一次。
+- 数据出处：天气 [Open-Meteo](https://open-meteo.com/)；备用 [気象庁](https://www.jma.go.jp/)（気象庁ホームページ）；
+  地址反查 [国土地理院](https://www.gsi.go.jp/)。冒烟测试：`go test -tags integration -run Live ./internal/weather/`
 
 ### 后台调查（`internal/research`）
 

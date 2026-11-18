@@ -111,10 +111,12 @@ func run(logger *slog.Logger) error {
 		defer store.Close()
 		checker := netdiag.NewChecker(settings.NetdiagDNSName, settings.NetdiagInternetTarget)
 		builtins := append(tools.NoteTools(store, logger), tools.NetworkDiagnostics(checker)...)
-		if settings.Weather { // 天气（v5 E2 / R7 c）：Open-Meteo，不用密钥
-			home := weatherHome(ctx, settings, httpClient, logger)
-			builtins = append(builtins, tools.WeatherTools(weather.NewClient(settings.WeatherForecastURL,
-				settings.WeatherGeocodingURL, httpClient), home, logger)...)
+		if settings.Weather { // 天气：Open-Meteo 为主，日本气象厅备用；都不用密钥
+			weatherHTTP := weather.NewHTTPClient() // 连接等得短：连不上就早点交给备用
+			home := weatherHome(ctx, settings, weatherHTTP, logger)
+			openMeteo := weather.NewClient(settings.WeatherForecastURL, settings.WeatherGeocodingURL, weatherHTTP)
+			forecaster := weatherForecaster(ctx, settings, openMeteo, home, weatherHTTP, logger)
+			builtins = append(builtins, tools.WeatherTools(openMeteo, forecaster, home, logger)...)
 			if home != nil {
 				briefers = append(briefers, weather.LocationNote{Home: home}) // 每轮告诉模型主人家大致在哪（城市级）
 			}
@@ -360,6 +362,37 @@ func weatherHome(ctx context.Context, settings config.Settings, httpClient *http
 		}
 		return weather.FixedHome{Place: weather.Place{Name: name, Latitude: home.Latitude, Longitude: home.Longitude}}
 	}
+}
+
+// weatherForecaster 是查天气用的来源：Open-Meteo 为主；HARO_WEATHER_BACKUP=jma 时查不到改用日本气象厅（只覆盖日本）。
+// 家所在的预报地区在后台先找好并写进日志：地区是按坐标自动找的，偏了能从日志看出来；第一次用备用时也不用再下载地区表。
+func weatherForecaster(ctx context.Context, settings config.Settings, primary *weather.Client, home weather.HomeLocator,
+	httpClient *http.Client, logger *slog.Logger) weather.Forecaster {
+	if settings.WeatherBackup != config.WeatherBackupJMA {
+		return primary
+	}
+	jma := weather.NewJMA(settings.WeatherJMAURL, settings.WeatherReverseGeocoderURL, httpClient)
+	if home != nil {
+		go func() {
+			locateCtx, cancel := context.WithTimeout(ctx, time.Minute)
+			defer cancel()
+			place, err := home.Home(locateCtx)
+			if err == nil {
+				var area weather.JMAArea
+				if area, err = jma.Locate(locateCtx, place); err == nil {
+					logger.Info("天气备用（日本气象厅）：家所在的预报地区", "area", area.Describe(),
+						"office", area.Office, "class10", area.Class10, "stations", area.Stations)
+					return
+				}
+			}
+			if errors.Is(err, weather.ErrNotCovered) {
+				logger.Info("天气备用（日本气象厅）：家不在日本，用不上")
+				return
+			}
+			logger.Warn("天气备用（日本气象厅）：没能先找好家所在的预报地区（用到时再找）", "err", err)
+		}()
+	}
+	return weather.WithBackup(primary, "Open-Meteo", jma, "日本气象厅", logger)
 }
 
 // connectWebSearch 连接联网搜索（v5 E3）；没设密钥或连不上时返回 nil：第三方服务出问题不影响服务端启动，只是没有联网搜索。

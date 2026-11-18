@@ -71,8 +71,8 @@ func (h *IPHome) locate(ctx context.Context) (Place, error) {
 		Country string `json:"country"`
 		Loc     string `json:"loc"` // "纬度,经度"
 	}
-	client := &Client{http: h.http, attemptTimeout: defaultAttemptTimeout}
-	if err := client.getJSON(ctx, h.url, &response); err != nil {
+	locator := fetcher{http: h.http, attemptTimeout: defaultAttemptTimeout, service: "定位服务"}
+	if err := locator.getJSON(ctx, h.url, &response); err != nil {
 		return Place{}, err
 	}
 	parts := strings.Split(response.Loc, ",")
