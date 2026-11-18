@@ -325,3 +325,92 @@ func TestResearchPromptHasToday(t *testing.T) {
 		t.Errorf("调查的提示词要有今天的日期：%.80s", prompt)
 	}
 }
+
+// writerModel 是写结论的模型：回固定的文字或错误，记下收到的消息。
+type writerModel struct {
+	mu       sync.Mutex
+	text     string
+	err      error
+	calls    int
+	lastMsgs []brain.ChatMessage
+	withTool bool
+}
+
+func (m *writerModel) StreamReply(_ context.Context, messages []brain.ChatMessage, specs []brain.ToolSpec) iter.Seq2[brain.ReplyDelta, error] {
+	m.mu.Lock()
+	m.calls++
+	m.lastMsgs, m.withTool = messages, len(specs) > 0
+	text, err := m.text, m.err
+	m.mu.Unlock()
+	return func(yield func(brain.ReplyDelta, error) bool) {
+		if err != nil {
+			yield(brain.ReplyDelta{}, err)
+			return
+		}
+		yield(brain.ReplyDelta{Text: text, Usage: &brain.ReplyUsage{PromptTokens: 2000, OutputTokens: 300}}, nil)
+	}
+}
+
+func (m *writerModel) Warmup(context.Context) error { return nil }
+
+// 调查模型搜完，结论交给写结论的模型重写：不带调查模型的草稿、不给工具；写结论的模型出错时用草稿。
+func TestResearchWriterWritesConclusion(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		writer *writerModel
+		want   string
+	}{
+		{"写结论的模型写成", &writerModel{text: "B 其实更划算。\n来源：https://example.com/b"}, "B 其实更划算。"},
+		{"写结论的模型出错：用草稿", &writerModel{err: errors.New("overloaded")}, "结论：A 比 B 便宜。"},
+	} {
+		model := &scriptedModel{replies: []brain.ReplyDelta{call("search_web", map[string]any{"query": "A B 价格"})}}
+		runner, store, _, _ := newTestRunner(t, model, DefaultLimits)
+		runner.WriteConclusionsWith(c.writer)
+		ctx, cancel := context.WithCancel(context.Background())
+		go runner.Run(ctx)
+		task, _, _ := runner.Start(ctx, "主人", "A 和 B 哪个便宜")
+		done := waitFinished(t, store, task.ID)
+		cancel()
+		if done.Status != StatusDone || done.Conclusion != c.want {
+			t.Errorf("%s：%+v", c.name, done)
+		}
+		c.writer.mu.Lock()
+		last := c.writer.lastMsgs[len(c.writer.lastMsgs)-1]
+		for _, message := range c.writer.lastMsgs {
+			if strings.Contains(message.Text, "A 比 B 便宜") {
+				t.Errorf("%s：交给写结论的模型的资料里不该有调查模型的草稿", c.name)
+			}
+		}
+		if c.writer.calls != 1 || c.writer.withTool || !strings.Contains(last.Text, "不要再搜索") {
+			t.Errorf("%s：写结论的模型应被问 1 次、不给工具：%d 次、工具 %v、最后一条 %q", c.name, c.writer.calls, c.writer.withTool, last.Text)
+		}
+		c.writer.mu.Unlock()
+	}
+}
+
+// 到上限时也由写结论的模型写；它出错时由调查模型写。
+func TestResearchWriterAtLimits(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		writer *writerModel
+		want   string
+	}{
+		{"写结论的模型写成", &writerModel{text: "查到一半：A 便宜。\n来源：https://example.com/a"}, "查到一半：A 便宜。"},
+		{"写结论的模型出错：调查模型写", &writerModel{err: errors.New("overloaded")}, "目前查到 A 便宜一些，B 没查完。"},
+	} {
+		search := call("search_web", map[string]any{"query": "没完没了"})
+		model := &scriptedModel{repeat: &search}
+		limits := DefaultLimits
+		limits.MaxSearches, limits.MaxRounds = 1, 2
+		runner, store, _, _ := newTestRunner(t, model, limits)
+		runner.WriteConclusionsWith(c.writer)
+		ctx, cancel := context.WithCancel(context.Background())
+		go runner.Run(ctx)
+		task, _, _ := runner.Start(ctx, "主人", "无底洞")
+		done := waitFinished(t, store, task.ID)
+		cancel()
+		if done.Status != StatusPartial || done.Conclusion != c.want {
+			t.Errorf("%s：%+v", c.name, done)
+		}
+	}
+}

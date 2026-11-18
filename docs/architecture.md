@@ -125,7 +125,19 @@ systemd 用户服务从 `~/.config/haro/haro.env` 读取（`deploy/systemd/`）�
   SDK 按「客户端 × HTTP 客户端」各存一份令牌，而集群的服务账号令牌只能换一次，多一份就会被拒（401）。
 - `openai`（默认）：任意 OpenAI 兼容的 `/chat/completions`（`HARO_CLOUD_LLM_URL`、`HARO_CLOUD_LLM_API_KEY`）。
 
+**按规则选模型**（可选，`HARO_STRONG_LLM_MODEL`，例如 `claude-sonnet-5-5`；和云端模型同一个接口与凭证）：
+选模型的规则写在代码里（`llm.RouterChatModel`），不让模型自己判断要不要换更强的。`HARO_STRONG_LLM_USE` 选用在哪些地方：
+
+- `vision`：这次请求里带摄像头画面（画面只在本轮输入里，下一轮自然回到云端模型）
+- `correction`：主人在纠正上一句（「不对」「错了」「不是这个」「再想想」……，`brain/correction.go`）
+- `research`：后台调查由云端模型搜索、读网页，搜完把资料交给它写结论（不给工具）
+
+它出错或等太久（`HARO_STRONG_LLM_TIMEOUT`）时由云端模型接手。单价 `HARO_STRONG_LLM_PRICE_*` 必填（月度上限要靠它折算）。
+Claude 各模型「关掉思考」的写法不同：`HARO_CLOUD_LLM_THINKING` / `HARO_STRONG_LLM_THINKING`，Haiku 5.5 用 `disabled`，
+Sonnet 5.5 只认 `between_tools`（两次工具调用之间会返回几句进度说明，haro 不回传；实测后续请求照样被接受）。
+
 真实接口的冒烟测试（花钱，默认不跑）：`HARO_ANTHROPIC_API_KEY=… go test -tags integration -run AnthropicLive -v ./internal/llm/`。
+看图小评测（花钱，默认不跑；样本放在仓库外）：`internal/llm/vision_eval_test.go`（`-tags eval`，先用 `HARO_EVAL_DRY_RUN=1` 看要花多少）。
 
 模型文件（识别、VAD、说完判断、唤醒词、声纹）不在仓库里，路径都由配置指定；服务端镜像里已经带着
 （清单、来源与许可证：`deploy/server/models.lock`、`deploy/server/MODELS.md`；本机下载：`scripts/fetch-models.sh ~/.local/share/haro`）。

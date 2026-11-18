@@ -70,3 +70,42 @@ func TestCloudLLMReadyForOpenAI(t *testing.T) {
 		t.Errorf("没有 key 应报错：%v", err)
 	}
 }
+
+// 更强的模型：不设就不检查；设了要有单价、用途合法、和云端模型同一个接口能用。
+func TestValidateStrongLLM(t *testing.T) {
+	for _, name := range []string{"ANTHROPIC_FEDERATION_RULE_ID", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_PROFILE"} {
+		t.Setenv(name, "")
+	}
+	base := Settings{CloudLLMAPI: CloudAPIAnthropic, CloudLLMModel: "claude-haiku-5-5", AnthropicAPIKey: "k",
+		CloudLLMEffort: "low", ResearchEffort: "medium", CloudLLMThinking: "disabled", StrongLLMThinking: "between_tools"}
+	if err := base.validateStrongLLM(); err != nil {
+		t.Fatalf("不设更强的模型应通过：%v", err)
+	}
+	strong := base
+	strong.StrongLLMModel, strong.StrongLLMUse, strong.StrongLLMEffort = "claude-sonnet-5-5", []string{"vision", "correction", "research"}, "low"
+	strong.USDToYen, strong.StrongLLMPriceIn, strong.StrongLLMPriceOut = 160, 2, 10
+	if err := strong.validateStrongLLM(); err != nil {
+		t.Fatalf("配齐了应通过：%v", err)
+	}
+	if !strong.StrongLLMFor(StrongForVision) || base.StrongLLMFor(StrongForVision) {
+		t.Error("StrongLLMFor：设了模型且列在用途里才算")
+	}
+	cases := []struct {
+		name   string
+		change func(*Settings)
+		want   string
+	}{
+		{"没设单价", func(s *Settings) { s.StrongLLMPriceIn = 0 }, "HARO_STRONG_LLM_PRICE_INPUT"},
+		{"不认识的用途", func(s *Settings) { s.StrongLLMUse = []string{"vision", "chat"} }, "HARO_STRONG_LLM_USE"},
+		{"力度不对", func(s *Settings) { s.StrongLLMEffort = "max" }, "HARO_STRONG_LLM_EFFORT"},
+		{"思考写法不对", func(s *Settings) { s.StrongLLMThinking = "off" }, "HARO_STRONG_LLM_THINKING"},
+		{"云端接口没配好", func(s *Settings) { s.AnthropicAPIKey = "" }, "HARO_STRONG_LLM_MODEL"},
+	}
+	for _, c := range cases {
+		settings := strong
+		c.change(&settings)
+		if err := settings.validateStrongLLM(); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s：应报错且提到 %q，实际 %v", c.name, c.want, err)
+		}
+	}
+}

@@ -22,8 +22,9 @@ const (
 const lookAtCameraTool = "look_at_camera"
 
 var lookAtCameraSpec = ToolSpec{Name: lookAtCameraTool,
-	Description: "看摄像头拍到的当前画面。只有主人问到看得见的东西时才用（例如：你能看到我吗、我旁边有什么、我手里拿着什么、我穿的什么）。",
-	Parameters:  json.RawMessage(`{"type":"object","properties":{}}`)}
+	Description: "看摄像头拍到的当前画面。只有主人问到看得见的东西时才用（例如：你能看到我吗、我旁边有什么、我手里拿着什么、我穿的什么）。" +
+		"看完先说看到了什么，再判断是什么；看不清就说看不清，请主人拿近一点或换个角度。",
+	Parameters: json.RawMessage(`{"type":"object","properties":{}}`)}
 
 // cameraFrameNote 是承载画面的那条消息的文字；frameRecalledNote 是它写进历史时的替身（历史里不存图片）。
 const (

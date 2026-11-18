@@ -43,6 +43,7 @@ type Budget interface {
 type Runner struct {
 	store    TaskStore
 	model    brain.ChatModel // 调查用的模型（R6：单独配置，默认云端），已按 research 用途记账
+	writer   brain.ChatModel // 写结论的模型（nil = 调查模型自己写）；见 WriteConclusionsWith
 	searcher tools.WebSearcher
 	meter    tools.SearchMeter // 按 research 用途查额度、记账
 	budget   Budget
@@ -70,6 +71,12 @@ func NewRunner(store TaskStore, model brain.ChatModel, searcher tools.WebSearche
 	return &Runner{store: store, model: model, searcher: searcher, meter: meter, budget: budget, limits: limits,
 		logger: logger.With("component", "research"), queue: make(chan int64, 64), ready: make(chan struct{}),
 		cancels: map[int64]context.CancelFunc{}}
+}
+
+// WriteConclusionsWith 让另一个模型写结论：调查模型（便宜的）负责搜索和读网页，搜完把全部资料交给 writer（更强的）
+// 写结论，不给工具。writer 出错时：查够了的用调查模型自己的草稿，到上限的由调查模型写。要在 Run 之前调用。
+func (r *Runner) WriteConclusionsWith(writer brain.ChatModel) {
+	r.writer = writer
 }
 
 // Run 处理队列，直到 ctx 取消。启动时把上次没查完的标成「被中断」（下次对话时告诉主人）。
@@ -265,6 +272,14 @@ func (r *Runner) investigate(ctx context.Context, question string) outcome {
 		}
 		if len(calls) == 0 { // 模型认为查够了，直接给出结论
 			result.status = StatusDone
+			if r.writer != nil { // 交给写结论的模型重写（不带调查模型的草稿，免得被它带偏）；写不成就用草稿
+				instruction := brain.ChatMessage{Role: brain.RoleUser, Text: "资料已经查够了。不要再搜索，根据上面查到的资料写结论。"}
+				if written, err := r.writeConclusion(ctx, append(messages, instruction), &result, r.writer); err == nil {
+					text = written
+				} else if ctx.Err() == nil {
+					r.logger.Warn("写结论的模型出错，用调查模型的草稿", "err", err)
+				}
+			}
 			result.conclusion, result.sources = splitSources(text)
 			if result.conclusion == "" {
 				result.status, result.reason = StatusFailed, "模型没有给出结论"
@@ -284,26 +299,50 @@ func (r *Runner) investigate(ctx context.Context, question string) outcome {
 	}
 
 	// 到上限：不再给工具，用已有材料写结论（写结论的时间单算；超出的这一点费用在额度上允许）
-	writeCtx, cancelWrite := context.WithTimeout(ctx, writeUpTimeout)
-	defer cancelWrite()
 	messages = append(messages, brain.ChatMessage{Role: brain.RoleUser,
 		Text: "调查到此为止（" + stop + "）。不要再搜索，根据上面已经查到的资料写结论；没查清的地方明确说没查完。"})
-	text, _, tokens, err := complete(writeCtx, r.model, messages, nil)
-	result.tokens += tokens
+	writers := []brain.ChatModel{r.model}
+	if r.writer != nil {
+		writers = []brain.ChatModel{r.writer, r.model} // 写结论的模型出错时由调查模型写
+	}
+	text, err := r.writeConclusion(ctx, messages, &result, writers...)
 	result.reason = stop
-	if err != nil || strings.TrimSpace(text) == "" {
+	if err != nil {
 		if ctx.Err() != nil {
 			return result
 		}
 		result.status = StatusFailed
-		if err != nil {
-			result.reason = stop + "；写结论时出错：" + err.Error()
-		}
+		result.reason = stop + "；写结论时出错：" + err.Error()
 		return result
 	}
 	result.status = StatusPartial
 	result.conclusion, result.sources = splitSources(text)
 	return result
+}
+
+// writeConclusion 依次让 writers 根据 messages 里的资料写结论（不给工具），第一个写成的为准；每个模型各有 writeUpTimeout。
+func (r *Runner) writeConclusion(ctx context.Context, messages []brain.ChatMessage, result *outcome, writers ...brain.ChatModel) (string, error) {
+	var lastErr error
+	for i, writer := range writers {
+		writeCtx, cancel := context.WithTimeout(ctx, writeUpTimeout)
+		text, _, tokens, err := complete(writeCtx, writer, messages, nil)
+		cancel()
+		result.tokens += tokens
+		if err == nil && strings.TrimSpace(text) == "" {
+			err = errors.New("没写出结论")
+		}
+		if err == nil {
+			return text, nil
+		}
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		lastErr = err
+		if i < len(writers)-1 {
+			r.logger.Warn("写结论的模型出错，换下一个写", "err", err)
+		}
+	}
+	return "", lastErr
 }
 
 // runTool 执行调查里的一次工具调用，返回给模型看的文字（出错也作为文字交给模型，让它换个办法）。
