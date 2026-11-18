@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"iter"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/anthropics/anthropic-sdk-go/v2"
 	"github.com/anthropics/anthropic-sdk-go/v2/option"
@@ -16,50 +18,77 @@ import (
 	"github.com/bukahou/haro/internal/brain"
 )
 
-// AnthropicChatModel 调用 Claude API 的 Messages 接口（官方 Go SDK，流式；v7 D2）。
+// ClaudeAPI 是全进程共用的一个 Claude API 客户端（凭证、令牌缓存、HTTP 连接都在里面）。
 //
-// 认证（v7 D3）：配了 APIKey 就用它；没配时交给 SDK 自己找凭证 —— 集群里是 Workload Identity Federation
+// 认证（v7 D3）：配了 key 就用它；没配时交给 SDK 自己找凭证 —— 集群里是 Workload Identity Federation
 // （ANTHROPIC_FEDERATION_RULE_ID 等环境变量 + 投射的服务账号令牌，SDK 换成短期令牌并自动续期），不放任何长期密钥。
 // ⚠️ 开发机上别用 ANTHROPIC_API_KEY 这个变量名放 key：Claude Code 也读它，开发机的 *.env 会进每个终端。
 //
+// ⛔ 全进程只能建一个，所有 Claude 模型共用，HTTP 客户端也只能是这一个（2026-11-18 集群实测）：
+// SDK 按「客户端 × HTTP 客户端」各建一份令牌缓存、各自去换令牌；集群令牌带 jti，同一张只能换一次 ⇒
+// 第二份缓存再去换就被拒（401）——当时主对话能用，摘要和后台调查全挂。
+type ClaudeAPI struct {
+	client anthropic.Client
+}
+
+// NewClaudeAPI 创建客户端（不发请求；凭证在第一次请求时才用到）。apiKey 为空 = 交给 SDK 的凭证链（集群里是 WIF）；
+// baseURL 为空 = https://api.anthropic.com；httpClient 全进程只用这一个（见类型说明），各用途的超时用请求自己的 context 控制。
+func NewClaudeAPI(apiKey, baseURL string, httpClient *http.Client) *ClaudeAPI {
+	var options []option.RequestOption
+	if httpClient != nil {
+		options = append(options, option.WithHTTPClient(httpClient))
+	}
+	if apiKey != "" {
+		options = append(options, option.WithAPIKey(apiKey))
+	}
+	if baseURL != "" {
+		options = append(options, option.WithBaseURL(baseURL))
+	}
+	return &ClaudeAPI{client: anthropic.NewClient(options...)}
+}
+
+// AnthropicChatModel 调用 Claude API 的 Messages 接口（官方 Go SDK，流式；v7 D2）。不同用途（聊天 / 摘要 / 调查）各一个，
+// 共用同一个 ClaudeAPI。
+//
 // 思考是关掉的：工具往来时，思考块（带签名）必须原样回传，而 brain.ChatMessage 带不回原始内容块；
 // 关掉也最快（聊天 4 秒内要开始回答）。回答花多少力气由 Effort 管。
-// 提示词缓存：系统提示词末尾一个断点（工具定义 + 系统提示词）+ 请求级自动断点（对话历史逐轮累积）。
+//
+// 提示词缓存两个断点：① 系统提示词末尾（工具定义 + 系统提示词）② 上一轮结束处（之前的对话）。
+// 不放在请求末尾：每轮附在主人这句话前面的「现在的情况」（时间、位置……）每轮都变、也不进历史，
+// 断点放末尾的话，下一轮从上一句主人的话开始就对不上，之前的对话每轮整段重写（2026-11-18 集群实测：缓存写占花费 8 成）。
 type AnthropicChatModel struct {
-	client    anthropic.Client
-	model     string
-	maxTokens int
-	effort    anthropic.OutputConfigEffort
+	api               *ClaudeAPI
+	model             string
+	maxTokens         int
+	effort            anthropic.OutputConfigEffort
+	maxRetries        int
+	firstTokenTimeout time.Duration
 }
 
 // AnthropicOptions 是创建 AnthropicChatModel 的参数。
 type AnthropicOptions struct {
-	Model     string // 例如 claude-haiku-5-5
-	MaxTokens int    // 每次最多输出多少 token
-	Effort    string // low / medium / high（思考关掉时只能用这三档）；空 = 模型默认
-	APIKey    string // 空 = 交给 SDK 的凭证链（集群里是 WIF）
-	BaseURL   string // 空 = https://api.anthropic.com
-	// MaxRetries 是 SDK 在 429 / 5xx / 断线时自己重试几次。当主模型时用 0：4 秒内没开始回答就退回本地，
+	API       *ClaudeAPI // 全进程共用的客户端（必填，见 ClaudeAPI）
+	Model     string     // 例如 claude-haiku-5-5
+	MaxTokens int        // 每次最多输出多少 token
+	Effort    string     // low / medium / high（思考关掉时只能用这三档）；空 = 模型默认
+	// MaxRetries 是 SDK 在 429 / 5xx / 断线时自己重试几次。当主模型时用 0：等不到就退回本地，
 	// 不要在这里多等；后台调查不急，可以重试。
 	MaxRetries int
-	HTTPClient *http.Client // 超时由调用方控制（主模型用等响应头最多 HARO_CLOUD_LLM_TIMEOUT 的客户端）
+	// FirstTokenTimeout 是等 Claude 开始回答（第一个流式事件）最多多久，超时就取消这次请求、交给退路；0 = 不限。
+	// 不用单独的 HTTP 客户端做「响应头超时」：多一个 HTTP 客户端就多一份令牌缓存（见 ClaudeAPI）。
+	FirstTokenTimeout time.Duration
 }
 
-// NewAnthropicChatModel 创建客户端（不发请求；凭证在第一次请求时才用到）。
+// NewAnthropicChatModel 创建模型（不发请求）。
 func NewAnthropicChatModel(options AnthropicOptions) *AnthropicChatModel {
-	requestOptions := []option.RequestOption{option.WithMaxRetries(options.MaxRetries)}
-	if options.HTTPClient != nil {
-		requestOptions = append(requestOptions, option.WithHTTPClient(options.HTTPClient))
-	}
-	if options.APIKey != "" {
-		requestOptions = append(requestOptions, option.WithAPIKey(options.APIKey))
-	}
-	if options.BaseURL != "" {
-		requestOptions = append(requestOptions, option.WithBaseURL(options.BaseURL))
-	}
-	return &AnthropicChatModel{client: anthropic.NewClient(requestOptions...), model: options.Model,
-		maxTokens: options.MaxTokens, effort: anthropic.OutputConfigEffort(options.Effort)}
+	return &AnthropicChatModel{api: options.API, model: options.Model, maxTokens: options.MaxTokens,
+		effort: anthropic.OutputConfigEffort(options.Effort), maxRetries: options.MaxRetries,
+		firstTokenTimeout: options.FirstTokenTimeout}
 }
+
+// errNoFirstToken 表示在 FirstTokenTimeout 内没等到 Claude 开始回答。它不包着 context.Canceled：
+// 退路（FallbackChatModel）把 context.Canceled 当成「主人打断了」而不切换。
+var errNoFirstToken = errors.New("没等到 Claude 开始回答")
 
 // Warmup 云端不需要预热。
 func (m *AnthropicChatModel) Warmup(context.Context) error { return nil }
@@ -86,10 +115,21 @@ func (m *AnthropicChatModel) StreamReply(ctx context.Context, messages []brain.C
 			yield(brain.ReplyDelta{}, err)
 			return
 		}
-		stream := m.client.Messages.NewStreaming(ctx, params)
+		requestCtx, cancel := context.WithCancelCause(ctx)
+		defer cancel(nil)
+		var watchdog *time.Timer
+		if m.firstTokenTimeout > 0 {
+			watchdog = time.AfterFunc(m.firstTokenTimeout, func() { cancel(errNoFirstToken) })
+			defer watchdog.Stop()
+		}
+		stream := m.api.client.Messages.NewStreaming(requestCtx, params, option.WithMaxRetries(m.maxRetries))
 		defer stream.Close() // 调用方提前 break 时关掉连接，即中止生成
 		var message anthropic.Message
 		for stream.Next() {
+			if watchdog != nil {
+				watchdog.Stop() // 开始回答了：后面不限时（整次请求的上限由 HTTP 客户端管）
+				watchdog = nil
+			}
 			event := stream.Current()
 			if err := message.Accumulate(event); err != nil {
 				yield(brain.ReplyDelta{}, fmt.Errorf("解析 Claude 的流式响应: %w", err))
@@ -106,6 +146,10 @@ func (m *AnthropicChatModel) StreamReply(ctx context.Context, messages []brain.C
 			}
 		}
 		if err := stream.Err(); err != nil {
+			if errors.Is(context.Cause(requestCtx), errNoFirstToken) {
+				yield(brain.ReplyDelta{}, fmt.Errorf("请求 Claude: %w（等了 %v）", errNoFirstToken, m.firstTokenTimeout))
+				return
+			}
 			yield(brain.ReplyDelta{}, fmt.Errorf("请求 Claude: %w", err))
 			return
 		}
@@ -131,17 +175,16 @@ func (m *AnthropicChatModel) request(messages []brain.ChatMessage, tools []brain
 		Model:     anthropic.Model(m.model),
 		MaxTokens: int64(m.maxTokens),
 		Thinking:  anthropic.ThinkingConfigParamUnion{OfDisabled: &anthropic.ThinkingConfigDisabledParam{}},
-		// 请求级自动缓存：断点落在最后一块，对话历史逐轮累积进缓存（下一轮只有新的部分按全价算）
-		CacheControl: anthropic.NewCacheControlEphemeralParam(),
 	}
 	if m.effort != "" {
 		params.OutputConfig = anthropic.OutputConfigParam{Effort: m.effort}
 	}
 	system, converted := toAnthropicMessages(messages)
 	if system != "" {
-		// 第二个断点：工具定义 + 系统提示词。对话窗口滑动（最早一轮掉出去）时它们照样命中缓存
+		// 断点 ①：工具定义 + 系统提示词。对话窗口滑动（最早一轮掉出去）时它们照样命中缓存
 		params.System = []anthropic.TextBlockParam{{Text: system, CacheControl: anthropic.NewCacheControlEphemeralParam()}}
 	}
+	markPreviousTurnForCache(converted) // 断点 ②
 	params.Messages = converted
 	if len(tools) == 0 {
 		// 这一轮不许调用工具（例如最后一轮逼模型直接回答），但历史里可能有工具往来：
@@ -243,6 +286,32 @@ func toAnthropicMessages(messages []brain.ChatMessage) (string, []anthropic.Mess
 		}
 	}
 	return strings.Join(system, "\n\n"), converted
+}
+
+// markPreviousTurnForCache 在「上一轮结束处」打缓存断点：这一轮主人说的话（最后一条不以工具结果开头的用户消息）
+// 前面那条消息的最后一块。这一轮的话附着「现在的情况」、每轮都变，放在断点之后；之前的对话下一轮原样再发，从缓存读。
+// 第一轮（前面没有对话）不打。
+func markPreviousTurnForCache(messages []anthropic.MessageParam) {
+	for index := len(messages) - 1; index > 0; index-- {
+		user := messages[index].OfUser
+		if user == nil || len(user.Content) == 0 || user.Content[0].OfToolResult != nil {
+			continue // 助手消息，或这一轮工具往来的结果
+		}
+		previous := messages[index-1]
+		var blocks []anthropic.ContentBlockParamUnion
+		switch {
+		case previous.OfAssistant != nil:
+			blocks = previous.OfAssistant.Content
+		case previous.OfUser != nil:
+			blocks = previous.OfUser.Content
+		}
+		if len(blocks) > 0 {
+			if cache := blocks[len(blocks)-1].GetCacheControl(); cache != nil {
+				*cache = anthropic.NewCacheControlEphemeralParam()
+			}
+		}
+		return
+	}
 }
 
 // answeredToolCalls 找出每条助手消息里「后面紧跟着结果」的工具调用：answered[助手消息下标][调用 ID]。

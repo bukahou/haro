@@ -28,7 +28,7 @@ func TestAnthropicLive(t *testing.T) {
 	if modelName == "" {
 		modelName = "claude-haiku-5-5"
 	}
-	model := NewAnthropicChatModel(AnthropicOptions{Model: modelName, MaxTokens: 300, Effort: "low", APIKey: key})
+	model := NewAnthropicChatModel(AnthropicOptions{API: NewClaudeAPI(key, "", nil), Model: modelName, MaxTokens: 300, Effort: "low"})
 
 	// 系统提示词要超过最小可缓存长度，才能看到缓存命中（haro 实际的提示词约 6 千 token）
 	var system strings.Builder
@@ -72,7 +72,7 @@ func TestAnthropicLiveNoToolsRound(t *testing.T) {
 	if modelName == "" {
 		modelName = "claude-haiku-5-5"
 	}
-	model := NewAnthropicChatModel(AnthropicOptions{Model: modelName, MaxTokens: 200, Effort: "low", APIKey: key})
+	model := NewAnthropicChatModel(AnthropicOptions{API: NewClaudeAPI(key, "", nil), Model: modelName, MaxTokens: 200, Effort: "low"})
 	history := []brain.ChatMessage{
 		{Role: brain.RoleSystem, Text: "你是家用语音助手 haro，用中文一句话回答。"},
 		{Role: brain.RoleUser, Text: "现在几点了？"},

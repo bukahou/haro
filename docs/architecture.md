@@ -108,6 +108,8 @@ systemd 用户服务从 `~/.config/haro/haro.env` 读取（`deploy/systemd/`）�
   凭证：`HARO_ANTHROPIC_API_KEY`；不填时交给 SDK 自己找——在 Kubernetes 里可以用 Workload Identity Federation
   （服务账号令牌换短期令牌，不放长期密钥），配法见 Anthropic 文档「Use WIF with Kubernetes」。
   不要用 `ANTHROPIC_API_KEY` 放 haro 的 key：开发机上 Claude Code 也读这个变量。
+  服务端全进程只建一个 Claude 客户端（`llm.ClaudeAPI`），聊天、摘要、调查共用，HTTP 客户端也只用一个：
+  SDK 按「客户端 × HTTP 客户端」各存一份令牌，而集群的服务账号令牌只能换一次，多一份就会被拒（401）。
 - `openai`（默认）：任意 OpenAI 兼容的 `/chat/completions`（`HARO_CLOUD_LLM_URL`、`HARO_CLOUD_LLM_API_KEY`）。
 
 真实接口的冒烟测试（花钱，默认不跑）：`HARO_ANTHROPIC_API_KEY=… go test -tags integration -run AnthropicLive -v ./internal/llm/`。

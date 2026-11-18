@@ -16,7 +16,7 @@
 # 常驻（v3 第 4 步：systemd 用户服务，跟着桌面会话启停；单元文件在 deploy/systemd/）
 #   make install-services    装上并启用（以后登录桌面就自动启动）
 #   make uninstall-services  停掉并卸下
-#   make deploy              构建后重启服务（换上新版本）
+#   make deploy              构建后重启这台机器上装了的服务（换上新版本）。服务端跑在集群里时（v7 起），开发机只装终端：只重启它
 #   开关：systemctl --user start|stop haro.service haro-server.service；日志：journalctl --user -u haro-server -f
 .PHONY: build run run-server run-terminal test check-darwin install-services uninstall-services deploy check-not-running check-no-manual-run image version
 
@@ -76,7 +76,10 @@ uninstall-services:
 	-systemctl --user disable --now $(SERVICES)
 
 deploy: check-no-manual-run build
-	systemctl --user restart $(SERVICES)
+	@for unit in $(SERVICES); do \
+		if systemctl --user cat $$unit >/dev/null 2>&1; then systemctl --user restart $$unit && echo "已重启 $$unit"; \
+		else echo "跳过 $$unit（这台机器没装；服务端在集群里时正常）"; fi; \
+	done
 
 # 构建服务端镜像（只在本机试，不推送：推送只走 CI，v6）。模型不在仓库里：用命名构建上下文 models 传进去，
 # 目录结构见 deploy/server/models.lock；没有模型时先 scripts/fetch-models.sh $(MODELS_DIR)。看镜像里有什么：
