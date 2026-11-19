@@ -2,7 +2,7 @@
 
 // 真实模型 + 内置工具的端到端对话（默认不跑；语音用文字代替）：
 //
-//	HARO_TEST_IMAGE=/path/frame.jpg go test -tags integration -run ConversationLive -v ./internal/tools/
+//	HARO_ANTHROPIC_API_KEY=… [HARO_TEST_IMAGE=/path/frame.jpg] go test -tags integration -run ConversationLive -v ./internal/tools/
 package tools
 
 import (
@@ -10,7 +10,6 @@ import (
 	"io"
 	"iter"
 	"log/slog"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -97,15 +96,17 @@ func TestConversationLive(t *testing.T) {
 	}
 }
 
-// testChatModel：HARO_LLM_PROVIDER=cloud 且填了 key 时走云端（OpenAI 兼容接口），否则走本机 ollama。
-// ⚠️ 走云端时若设了 HARO_TEST_IMAGE，画面会发到云端 —— 只在用户同意时设置。
+// testChatModel 是这个测试用的模型：Claude（HARO_ANTHROPIC_API_KEY；模型名 HARO_CLOUD_LLM_MODEL，不设用 Haiku）。没设密钥时跳过。
+// ⚠️ 设了 HARO_TEST_IMAGE 时画面会发到云端 —— 只在用户同意时设置。
 func testChatModel(t *testing.T) brain.ChatModel {
-	client := &http.Client{Timeout: 2 * time.Minute}
-	if os.Getenv("HARO_LLM_PROVIDER") == "cloud" && os.Getenv("HARO_CLOUD_LLM_API_KEY") != "" {
-		t.Logf("模型：云端 %s", os.Getenv("HARO_CLOUD_LLM_MODEL"))
-		return llm.NewOpenAIChatModel(os.Getenv("HARO_CLOUD_LLM_URL"), os.Getenv("HARO_CLOUD_LLM_MODEL"),
-			os.Getenv("HARO_CLOUD_LLM_API_KEY"), 300, client)
+	key := os.Getenv("HARO_ANTHROPIC_API_KEY")
+	if key == "" {
+		t.Skip("没设 HARO_ANTHROPIC_API_KEY")
 	}
-	t.Log("模型：本地 qwen3-vl:4b-instruct")
-	return llm.NewOllamaChatModel("http://127.0.0.1:11434", "qwen3-vl:4b-instruct", 4096, "30m", client)
+	model := os.Getenv("HARO_CLOUD_LLM_MODEL")
+	if model == "" {
+		model = "claude-haiku-5-5"
+	}
+	t.Logf("模型：%s", model)
+	return llm.NewAnthropicChatModel(llm.AnthropicOptions{API: llm.NewClaudeAPI(key, "", nil), Model: model, MaxTokens: 800})
 }

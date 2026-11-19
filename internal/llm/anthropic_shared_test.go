@@ -48,6 +48,7 @@ type workloadIdentityServer struct {
 	*httptest.Server
 	mu        sync.Mutex
 	exchanges int
+	rejected  int // 拿已经换过的身份令牌来换、被拒的次数
 	used      map[string]bool
 }
 
@@ -68,6 +69,9 @@ func newWorkloadIdentityServer(t *testing.T) *workloadIdentityServer {
 			server.mu.Unlock()
 			w.Header().Set("Content-Type", "application/json")
 			if reused {
+				server.mu.Lock()
+				server.rejected++
+				server.mu.Unlock()
 				w.WriteHeader(http.StatusUnauthorized)
 				fmt.Fprint(w, `{"type":"error","error":{"type":"authentication_error","message":"Authentication failed"}}`)
 				return
@@ -87,6 +91,12 @@ func newWorkloadIdentityServer(t *testing.T) *workloadIdentityServer {
 	}))
 	t.Cleanup(server.Close)
 	return server
+}
+
+func (s *workloadIdentityServer) rejectedCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.rejected
 }
 
 func (s *workloadIdentityServer) exchangeCount() int {
@@ -141,8 +151,8 @@ func TestClaudeAPISharedByModelsExchangesIdentityTokenOnce(t *testing.T) {
 	// 阳性对照：各建各的客户端（修之前的做法）⇒ 第二个客户端拿同一张身份令牌去换，被拒
 	separate := NewAnthropicChatModel(AnthropicOptions{API: NewClaudeAPI("", server.URL, server.Client()),
 		Model: "claude-haiku-5-5", MaxTokens: 100})
-	if _, err := replyText(t, separate); err == nil || !strings.Contains(err.Error(), "401") {
-		t.Errorf("另建的客户端应因令牌已换过而失败（401），实际 %v", err)
+	if _, err := replyText(t, separate); err == nil || server.rejectedCount() != 1 {
+		t.Errorf("另建的客户端拿同一张身份令牌去换应被拒（被拒 %d 次）并报错，实际 %v", server.rejectedCount(), err)
 	}
 }
 

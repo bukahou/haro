@@ -21,6 +21,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/jsonschema-go/jsonschema"
+
 	"github.com/bukahou/haro/internal/brain"
 )
 
@@ -172,9 +174,28 @@ func TestAnthropicLiveStrongModel(t *testing.T) {
 	if err := jpeg.Encode(&frame, picture, nil); err != nil {
 		t.Fatal(err)
 	}
-	look := []brain.ChatMessage{{Role: brain.RoleSystem, Text: "用中文一句话回答。"},
+	look := []brain.ChatMessage{{Role: brain.RoleSystem, Text: "只用 report_color 工具回答，不要说话。"},
 		{Role: brain.RoleUser, Text: "这张图是什么颜色？"}, {Role: brain.RoleUser, Text: "这是摄像头当前画面。", Image: frame.Bytes()}}
-	if text, _, _ := liveRound(t, model, look, nil, "带图片"); !strings.Contains(text, "红") {
-		t.Errorf("应认出红色：%q", text)
+	_, calls, _ := liveRound(t, model, look, []brain.ToolSpec{colorReportTool(t)}, "带图片")
+	if len(calls) != 1 || calls[0].Arguments["color"] != "red" {
+		t.Errorf("应经 report_color 报告红色：%+v", calls)
 	}
+}
+
+// colorReportTool 让模型用固定的几个值报告颜色（看图的结论是结构化的，不从文字里找词）。
+func colorReportTool(t *testing.T) brain.ToolSpec {
+	t.Helper()
+	type colorReport struct {
+		Color string `json:"color" jsonschema:"画面的主要颜色"`
+	}
+	schema, err := jsonschema.For[colorReport](nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	schema.Properties["color"].Enum = []any{"red", "green", "blue", "white", "black", "other"}
+	parameters, err := json.Marshal(schema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return brain.ToolSpec{Name: "report_color", Description: "报告画面的主要颜色。", Parameters: parameters}
 }

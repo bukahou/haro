@@ -5,75 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/bukahou/haro/internal/brain"
+	"github.com/bukahou/haro/internal/llm/llmtest"
 )
 
-// claudeServer 是假的 Claude API：按顺序推送 SSE 事件（event: 行取自每个事件的 type），并记下收到的请求体。
-type claudeServer struct {
-	*httptest.Server
-	mu       sync.Mutex
-	requests []map[string]any
-	headers  []http.Header
-}
-
-func newClaudeServer(t *testing.T, status int, events ...string) *claudeServer {
-	t.Helper()
-	server := &claudeServer{}
-	server.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var body map[string]any
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		server.mu.Lock()
-		server.requests = append(server.requests, body)
-		server.headers = append(server.headers, r.Header.Clone())
-		server.mu.Unlock()
-		if r.URL.Path != "/v1/messages" {
-			http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
-			return
-		}
-		if status != http.StatusOK {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(status)
-			fmt.Fprint(w, `{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`)
-			return
-		}
-		w.Header().Set("Content-Type", "text/event-stream")
-		for _, event := range events {
-			var head struct {
-				Type string `json:"type"`
-			}
-			if err := json.Unmarshal([]byte(event), &head); err != nil {
-				t.Errorf("测试事件不是合法 JSON: %v\n%s", err, event)
-			}
-			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", head.Type, event)
-		}
-	}))
-	t.Cleanup(server.Close)
-	return server
-}
-
-func (s *claudeServer) request(t *testing.T, index int) map[string]any {
-	t.Helper()
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if index >= len(s.requests) {
-		t.Fatalf("假服务只收到 %d 个请求", len(s.requests))
-	}
-	return s.requests[index]
-}
-
-func (s *claudeServer) count() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return len(s.requests)
-}
-
-func testClaudeModel(server *claudeServer, effort string) *AnthropicChatModel {
+func testClaudeModel(server *llmtest.Server, effort string) *AnthropicChatModel {
 	return NewAnthropicChatModel(AnthropicOptions{API: NewClaudeAPI("test-key", server.URL, server.Client()),
 		Model: "claude-haiku-5-5", MaxTokens: 800, Effort: effort})
 }
@@ -94,7 +33,7 @@ var textThenToolEvents = []string{
 }
 
 func TestAnthropicStreamsTextToolCallsAndCacheUsage(t *testing.T) {
-	server := newClaudeServer(t, http.StatusOK, textThenToolEvents...)
+	server := llmtest.NewClaudeServer(t, llmtest.Script{Events: textThenToolEvents})
 	model := testClaudeModel(server, "low")
 	var pieces []string
 	var calls []brain.ToolCall
@@ -126,7 +65,7 @@ func TestAnthropicStreamsTextToolCallsAndCacheUsage(t *testing.T) {
 		t.Errorf("用量 = %+v，应为 %+v（输入总数 = 没命中 + 缓存读 + 缓存写）", usage, want)
 	}
 
-	body := server.request(t, 0)
+	body := server.Request(0)
 	if body["model"] != "claude-haiku-5-5" || body["max_tokens"] != float64(800) || body["stream"] != true {
 		t.Errorf("模型 / 输出上限 / 流式不对：%v %v %v", body["model"], body["max_tokens"], body["stream"])
 	}
@@ -159,7 +98,7 @@ func TestAnthropicStreamsTextToolCallsAndCacheUsage(t *testing.T) {
 	if _, set := body["tool_choice"]; set {
 		t.Errorf("给了工具时不该限制调用：%v", body["tool_choice"])
 	}
-	header := server.headers[0]
+	header := server.Header(0)
 	if header.Get("X-Api-Key") != "test-key" && header.Get("Authorization") != "Bearer test-key" {
 		t.Errorf("没带上配置的 key：%v", header)
 	}
@@ -216,13 +155,12 @@ func TestAnthropicMessagesDropUnpairedToolBlocks(t *testing.T) {
 
 // 这一轮不给工具（最后一轮逼模型直接回答）但历史里有工具往来：按历史补上工具定义，并声明这一轮不许调用。
 func TestAnthropicNoToolsRoundKeepsHistoryValid(t *testing.T) {
-	server := newClaudeServer(t, http.StatusOK,
-		`{"type":"message_start","message":{"id":"msg_2","type":"message","role":"assistant","model":"claude-haiku-5-5","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":30,"output_tokens":1}}}`,
+	server := llmtest.NewClaudeServer(t, llmtest.Script{Events: []string{`{"type":"message_start","message":{"id":"msg_2","type":"message","role":"assistant","model":"claude-haiku-5-5","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":30,"output_tokens":1}}}`,
 		`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
 		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"晴天。"}}`,
 		`{"type":"content_block_stop","index":0}`,
 		`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":5}}`,
-		`{"type":"message_stop"}`)
+		`{"type":"message_stop"}`}})
 	model := testClaudeModel(server, "")
 	for _, err := range model.StreamReply(t.Context(), []brain.ChatMessage{
 		{Role: brain.RoleUser, Text: "天气"},
@@ -233,7 +171,7 @@ func TestAnthropicNoToolsRoundKeepsHistoryValid(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	body := server.request(t, 0)
+	body := server.Request(0)
 	tools, _ := body["tools"].([]any)
 	if len(tools) != 1 || tools[0].(map[string]any)["name"] != "get_weather" {
 		t.Fatalf("应按历史补上工具定义：%v", body["tools"])
@@ -252,10 +190,9 @@ func TestAnthropicNoToolsRoundKeepsHistoryValid(t *testing.T) {
 
 // 拒答：当作失败（退路接手），但用量照样带出来记账；没有退路时能念给主人。
 func TestAnthropicRefusalIsAnErrorWithUsage(t *testing.T) {
-	server := newClaudeServer(t, http.StatusOK,
-		`{"type":"message_start","message":{"id":"msg_3","type":"message","role":"assistant","model":"claude-haiku-5-5","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":50,"output_tokens":1}}}`,
+	server := llmtest.NewClaudeServer(t, llmtest.Script{Events: []string{`{"type":"message_start","message":{"id":"msg_3","type":"message","role":"assistant","model":"claude-haiku-5-5","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":50,"output_tokens":1}}}`,
 		`{"type":"message_delta","delta":{"stop_reason":"refusal","stop_sequence":null,"stop_details":{"type":"refusal","category":"cyber","explanation":"test"}},"usage":{"output_tokens":3}}`,
-		`{"type":"message_stop"}`)
+		`{"type":"message_stop"}`}})
 	model := testClaudeModel(server, "low")
 	var refusal *RefusalError
 	var usage *brain.ReplyUsage
@@ -281,7 +218,7 @@ func TestAnthropicRefusalIsAnErrorWithUsage(t *testing.T) {
 
 // 服务端过载：MaxRetries 为 0 时只请求一次就报错（聊天时由退路接手，不在 SDK 里多等），且什么都没产出。
 func TestAnthropicServerErrorFailsFastWithoutRetry(t *testing.T) {
-	server := newClaudeServer(t, 529)
+	server := llmtest.NewClaudeServer(t, llmtest.Script{Status: 529})
 	model := testClaudeModel(server, "low")
 	produced := false
 	var failure error
@@ -296,7 +233,7 @@ func TestAnthropicServerErrorFailsFastWithoutRetry(t *testing.T) {
 	if failure == nil || produced {
 		t.Fatalf("过载时应在产出任何内容之前报错：err=%v produced=%v", failure, produced)
 	}
-	if got := server.count(); got != 1 {
+	if got := server.Count(); got != 1 {
 		t.Errorf("MaxRetries=0 时只应请求 1 次，实际 %d 次", got)
 	}
 }
