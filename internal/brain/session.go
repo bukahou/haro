@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/bukahou/haro/internal/realtimeproto"
 )
@@ -304,12 +305,12 @@ func (s *Session) useConversationOf(person string) {
 // 为什么要保留工具往来：只保留最终回答时，历史里全是「记下了」「网络正常」，小模型照着学，
 // 就不再调用工具、直接说办好了（实测：同一段历史，只留回答时 4 次里 0 次调用 save_note，
 // 保留工具往来时 4 次都调用）。
-func (s *Session) rememberTurn(turn []ChatMessage) {
+func (s *Session) rememberTurn(at time.Time, messages []ChatMessage) {
 	s.mu.Lock()
 	s.answeredInResponse = true
 	conversation := s.conversation
 	s.mu.Unlock()
-	conversation.appendTurn(turn, s.opts.MaxHistoryTurn)
+	conversation.appendTurn(ConversationTurn{At: at, Messages: messages}, s.opts.MaxHistoryTurn)
 }
 
 // deviceLabel 是日志里的设备名：没有时写「没有」。

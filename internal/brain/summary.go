@@ -42,7 +42,7 @@ func (b *ConversationBook) maybeSummarize(c *Conversation) {
 		return
 	}
 	c.summarizing = true
-	previous, batch := c.summary, append([][]ChatMessage(nil), c.unsummarized...)
+	previous, batch := c.summary, append([]ConversationTurn(nil), c.unsummarized...)
 	c.mu.Unlock()
 
 	go func() {
@@ -65,13 +65,14 @@ func (b *ConversationBook) maybeSummarize(c *Conversation) {
 	}()
 }
 
-// summarizeTurns 把旧摘要和掉出窗口的几轮压成新摘要（只看用户与助手的话，不看工具往来）。
-func summarizeTurns(ctx context.Context, model ChatModel, previous string, turns [][]ChatMessage) (string, error) {
+// summarizeTurns 把旧摘要和掉出窗口的几轮压成新摘要（只看用户与助手的话，不看工具往来；每轮带上时间）。
+func summarizeTurns(ctx context.Context, model ChatModel, previous string, turns []ConversationTurn) (string, error) {
 	var transcript strings.Builder
 	for _, turn := range turns {
-		for _, message := range turn {
+		transcript.WriteString(turnTimeLabel(turn.At) + "\n")
+		for _, message := range turn.Messages {
 			switch {
-			case message.Role == RoleUser && message.Text != "":
+			case message.Role == RoleUser && message.Text != "" && !message.Synthetic:
 				transcript.WriteString("主人：" + message.Text + "\n")
 			case message.Role == RoleAssistant && message.Text != "":
 				transcript.WriteString("助手：" + message.Text + "\n")

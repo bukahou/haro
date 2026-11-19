@@ -1,6 +1,9 @@
 package brain
 
-import "strings"
+import (
+	"strings"
+	"time"
+)
 
 // 回合收尾：一轮里的进展随时记进 turnRecord（主人的话、每次工具往来和结果、最后说的话），
 // 不管这一轮怎么结束（说完、被打断、模型出错），都由 closeTurn 整理成一组完整的消息写进历史：
@@ -15,12 +18,14 @@ const (
 	turnCompleted   turnEnding = iota // 说完了
 	turnInterrupted                   // 被打断（主人又说话、终端取消）
 	turnFailed                        // 模型或合成出错
+	turnRestarted                     // 服务端在这一轮中途重启（只用来预先存一份，重启后接进历史）
 )
 
 // turnRecord 是这一轮到目前为止的进展。只在回答的那个 goroutine 里写，收尾时读。
 type turnRecord struct {
-	question string      // 主人的原话（不含每轮附带的情况说明）
-	rounds   []toolRound // 调用了工具的那几段（按顺序）
+	startedAt time.Time   // 主人这句话的时间（历史里每一轮标的时间）
+	question  string      // 主人的原话（不含每轮附带的情况说明）
+	rounds    []toolRound // 调用了工具的那几段（按顺序）
 	// final 是最后一段（不再调用工具时）说的话。段号：第 i 段工具往来是第 i 段，最后一段的段号 = 工具往来的段数
 	// （和说出口的句子上的段号对上：被打断时只算最后一段里听到的）
 	final strings.Builder
@@ -39,7 +44,9 @@ type toolRound struct {
 	frameShown bool              // 这一段把摄像头画面直接交给了模型（历史里只留一句「当时看了画面」）
 }
 
-func newTurnRecord(question string) *turnRecord { return &turnRecord{question: question} }
+func newTurnRecord(question string) *turnRecord {
+	return &turnRecord{startedAt: time.Now(), question: question}
+}
 
 // finalRound 是最后一段的段号（之前每段工具往来各占一个段号）。
 func (r *turnRecord) finalRound() int { return len(r.rounds) }
@@ -75,15 +82,20 @@ func (r *turnRecord) executedTools() int {
 const (
 	toolNotRunInterrupted = "（这一轮被主人打断，这个调用没有执行）"
 	toolNotRunFailed      = "（这一轮出错了，这个调用没有执行）"
+	toolNotRunRestarted   = "（服务端在这一轮中途重启了，这个调用没有执行）"
 	failedBeforeSpeaking  = "（这一轮出错了，没有说出回答）"
+	restartedUnfinished   = "（服务端在这一轮中途重启了，没有说完）"
 	nothingSaid           = "（这一轮没有说话）"
 )
 
 // messages 把这一轮整理成写进历史的一组消息：主人的话 → 每段工具往来（每个调用都有结果）→ 最后的回答。
 func (r *turnRecord) messages(ending turnEnding, answer string) []ChatMessage {
 	notRun := toolNotRunInterrupted
-	if ending == turnFailed {
+	switch ending {
+	case turnFailed:
 		notRun = toolNotRunFailed
+	case turnRestarted:
+		notRun = toolNotRunRestarted
 	}
 	turn := []ChatMessage{{Role: RoleUser, Text: r.question}}
 	for _, round := range r.rounds {
@@ -143,7 +155,7 @@ func (s *Session) closeTurn(record *turnRecord, ending turnEnding) bool {
 		s.takePendingConfirmation()
 		s.logger.Info("问确认时被打断：撤掉待确认的操作")
 	}
-	s.rememberTurn(record.messages(ending, answer))
+	s.rememberTurn(record.startedAt, record.messages(ending, answer))
 	if ending == turnCompleted { // 说完了才算把附上的结论、提醒告诉了主人；被打断、出错时下一轮再附上
 		for _, delivered := range record.delivered {
 			delivered()
@@ -154,6 +166,13 @@ func (s *Session) closeTurn(record *turnRecord, ending turnEnding) bool {
 			"tools_done", record.executedTools(), "answer", answer)
 	}
 	return true
+}
+
+// keepOpenTurn 这一轮做完了一个工具：先按「服务端重启、没说完」的样子存一份。之后正常收尾时被替换掉；
+// 万一服务端在这一轮中途重启，下次读到它照实接进历史（做过的工具不会丢）。
+func (s *Session) keepOpenTurn(record *turnRecord) {
+	s.currentConversation().keepOpenTurn(ConversationTurn{At: record.startedAt,
+		Messages: record.messages(turnRestarted, restartedUnfinished)})
 }
 
 func endingLabel(ending turnEnding) string {

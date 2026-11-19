@@ -302,6 +302,7 @@ func (s *Session) handleConfirmation(ctx context.Context, text string, pending [
 		for _, call := range pending {
 			result := s.callTool(ctx, call)
 			record.recordResult(round, call, result)
+			s.keepOpenTurn(record)
 			trail = append(trail, ChatMessage{Role: RoleTool, ToolName: call.Name, ToolCallID: call.ID, Text: result})
 		}
 		// 由模型根据执行结果回答：删了哪几条、哪些没找到、失败了为什么，固定的「删掉了」说不清这些。
@@ -310,7 +311,7 @@ func (s *Session) handleConfirmation(ctx context.Context, text string, pending [
 		answer, usage, err := s.speakAnswer(ctx, history, trail[len(trail)-1], cameraView{}, record)
 		return s.finishAnswer(ctx, record, answer, usage, err), true
 	case confirmNo:
-		s.rememberTurn([]ChatMessage{{Role: RoleUser, Text: text}, {Role: RoleAssistant, Text: "好的，不做了。"}})
+		s.rememberTurn(time.Now(), []ChatMessage{{Role: RoleUser, Text: text}, {Role: RoleAssistant, Text: "好的，不做了。"}})
 		return s.speakFixedReply(ctx, "好的，不做了。"), true
 	default:
 		s.logger.Info("用户没有确认，放弃待确认的操作")

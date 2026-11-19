@@ -48,7 +48,7 @@ func TestTurnRecordsEachPartOnce(t *testing.T) {
 		t.Fatalf("播出 %q", spoken)
 	}
 	k.say("谢谢")
-	history := model.LastRequest().Messages
+	history := withoutSynthetic(model.LastRequest().Messages)
 	want := []brain.ChatRole{brain.RoleUser, brain.RoleAssistant, brain.RoleTool, brain.RoleAssistant, brain.RoleUser}
 	if got := roles(history); !slices.Equal(got, want) {
 		t.Fatalf("历史的形状 %v，应为 %v", got, want)
@@ -70,7 +70,7 @@ func TestToolDoneThenInterruptedIsRemembered(t *testing.T) {
 		t.Fatalf("应是被打断：%+v", done)
 	}
 	k.say("刚才查到了吗？")
-	history := model.LastRequest().Messages
+	history := withoutSynthetic(model.LastRequest().Messages)
 	want := []brain.ChatRole{brain.RoleUser, brain.RoleAssistant, brain.RoleTool, brain.RoleAssistant, brain.RoleUser}
 	if got := roles(history); !slices.Equal(got, want) {
 		t.Fatalf("历史的形状 %v，应为 %v（被打断的那一轮要留下工具往来）", got, want)
@@ -116,7 +116,7 @@ func TestInterruptedDuringToolsLeavesNoDanglingCall(t *testing.T) {
 		t.Errorf("被打断后不应再执行后面的调用：%v", got)
 	}
 	k.say("算了")
-	history := model.LastRequest().Messages
+	history := withoutSynthetic(model.LastRequest().Messages)
 	var results []string
 	for _, msg := range history {
 		if msg.Role == brain.RoleTool {
@@ -137,7 +137,7 @@ func TestToolDoneThenModelFailsIsRemembered(t *testing.T) {
 		t.Fatalf("应是失败：%+v", done)
 	}
 	k.say("再说一遍")
-	history := model.LastRequest().Messages
+	history := withoutSynthetic(model.LastRequest().Messages)
 	if got := roles(history); len(got) != 5 || history[2].Text != "车停在C3的7号位" || history[3].Text != brain.FailedBeforeSpeaking {
 		t.Errorf("出错的那一轮应留下工具往来，回答记成出错：%v %+v", got, history)
 	}
@@ -172,5 +172,58 @@ func TestInterruptedConfirmationIsWithdrawn(t *testing.T) {
 	k.say("确认")
 	if got := toolbox.called(); len(got) != 0 {
 		t.Errorf("问确认时被打断，之后说「确认」也不应删除：%v", got)
+	}
+}
+
+// latestStore 是只记最新一份的内存存储。
+type latestStore struct {
+	mu      sync.Mutex
+	records map[string]brain.ConversationRecord
+}
+
+func (s *latestStore) LoadConversation(person string) (brain.ConversationRecord, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, ok := s.records[person]
+	return record, ok, nil
+}
+
+func (s *latestStore) SaveConversation(record brain.ConversationRecord) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.records == nil {
+		s.records = map[string]brain.ConversationRecord{}
+	}
+	s.records[record.Person] = record
+	return nil
+}
+
+func (s *latestStore) openTurn(person string) *brain.ConversationTurn {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.records[person].OpenTurn
+}
+
+// 工具一做完就先存一份这一轮（按「服务端重启、没说完」整理好）：模型还在生成时服务端重启，重启后能接上；这一轮收尾后清掉。
+func TestToolResultIsSavedBeforeTheTurnEnds(t *testing.T) {
+	store := &latestStore{}
+	model := braintest.NewModel(t, searchCarSpot, braintest.Reply{Chunks: []string{"查到了"}, Hang: true})
+	opts := brain.Options{MaxHistoryTurn: 6}
+	k := newTalker(t, brain.Components{Model: model, Synthesizer: fakeSynthesizer{}, Tools: &fakeToolbox{},
+		Conversations: brain.NewConversationBook(store, opts, quiet)}, opts)
+
+	interruptWhen(t, k, func() bool {
+		if len(model.Requests()) < 2 {
+			return false
+		}
+		open := store.openTurn(brain.SharedPerson)
+		if open == nil || !slices.ContainsFunc(open.Messages, func(msg brain.ChatMessage) bool { return msg.Text == "车停在C3的7号位" }) {
+			t.Errorf("模型还在生成时，存储里应已有这一轮（带工具结果）：%+v", open)
+		}
+		return true
+	}, 0)
+	braintest.Done(t, k.ask("我的车停在哪了？"))
+	if open := store.openTurn(brain.SharedPerson); open != nil {
+		t.Errorf("这一轮收尾后应清掉没收尾的记录：%+v", open)
 	}
 }

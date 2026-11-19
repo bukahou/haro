@@ -19,13 +19,22 @@ const SharedPerson = "_shared"
 
 // ConversationRecord 是存盘的一份对话。等确认的操作只在内存里（只保留一轮，重启就作废）。
 type ConversationRecord struct {
-	Person        string          `json:"person"`
-	PersonaID     string          `json:"persona_id,omitempty"`
-	History       [][]ChatMessage `json:"history"`
-	Summary       string          `json:"summary,omitempty"`      // 滚动摘要（v5 R4）：掉出窗口的对话压成的一段话
-	Unsummarized  [][]ChatMessage `json:"unsummarized,omitempty"` // 已经掉出窗口、还没压进摘要的几轮
-	ToolCallCount int             `json:"tool_call_count"`
-	UpdatedAt     time.Time       `json:"updated_at"`
+	Person        string
+	PersonaID     string
+	History       []ConversationTurn // 最近几轮
+	Summary       string             // 滚动摘要：掉出窗口的对话压成的一段话
+	Unsummarized  []ConversationTurn // 已经掉出窗口、还没压进摘要的几轮
+	ToolCallCount int
+	// OpenTurn 是还没收尾的一轮（做完了工具、还没说完）：已经整理成「服务端重启、没说完」的样子。
+	// 正常收尾时清掉；读到它说明上次服务端在这一轮中途重启，照实接进历史
+	OpenTurn  *ConversationTurn
+	UpdatedAt time.Time
+}
+
+// ConversationTurn 是历史里的一轮：主人说话的时间、这一轮的消息（主人的话、工具往来、回答）。
+type ConversationTurn struct {
+	At       time.Time     `json:"at,omitzero"` // 零值 = 不知道（开始记时间之前的旧记录）
+	Messages []ChatMessage `json:"messages"`
 }
 
 // ConversationStore 存取对话（Go interface，实现在 internal/conversationstore）。
@@ -57,11 +66,12 @@ func (b *ConversationBook) Conversation(person string) *Conversation {
 		person = SharedPerson
 	}
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	if conversation, ok := b.byPerson[person]; ok {
+		b.mu.Unlock()
 		return conversation
 	}
 	conversation := &Conversation{person: person, book: b}
+	recovered := false // 接上了上次中途重启没收尾的一轮：要写盘清掉那条记录
 	if b.store != nil {
 		record, ok, err := b.store.LoadConversation(person)
 		switch {
@@ -74,12 +84,22 @@ func (b *ConversationBook) Conversation(person string) *Conversation {
 			conversation.persona = findPersona(b.opts.Personas, record.PersonaID)
 			b.logger.Info("接上之前的对话", "person", person, "turns", len(record.History),
 				"since", record.UpdatedAt.Format(time.DateTime))
+			if record.OpenTurn != nil { // 上次在这一轮中途重启：做过的工具照实接进历史（模型才知道自己做过）
+				b.logger.Warn("上次服务端在一轮中途重启：这一轮照实接进历史", "person", person, "at", record.OpenTurn.At)
+				conversation.history = append(conversation.history, *record.OpenTurn)
+				conversation.trimLocked(b.opts.MaxHistoryTurn, b.summaryModel != nil) // 持有 b.mu：直接读，不经 summarizer()
+				recovered = true
+			}
 		}
 	}
 	if conversation.persona == nil {
 		conversation.persona = b.initialPersona()
 	}
 	b.byPerson[person] = conversation
+	b.mu.Unlock()
+	if recovered {
+		b.save(conversation)
+	}
 	return conversation
 }
 
@@ -96,10 +116,13 @@ func (b *ConversationBook) initialPersona() *Persona {
 }
 
 // save 把一份对话写盘（失败只记日志：内存里的对话照常用）。
+// 同一个人的保存一个接一个：在轮到时才取快照，后取的快照一定后写，旧的不会盖掉新的（摘要和新一轮同时保存时）。
 func (b *ConversationBook) save(conversation *Conversation) {
 	if b.store == nil {
 		return
 	}
+	conversation.saveMu.Lock()
+	defer conversation.saveMu.Unlock()
 	if err := b.store.SaveConversation(conversation.record()); err != nil {
 		b.logger.Warn("保存对话失败", "person", conversation.person, "err", err)
 	}
@@ -110,14 +133,17 @@ type Conversation struct {
 	person string
 	book   *ConversationBook
 
+	saveMu sync.Mutex // 同一个人的保存一个接一个（见 ConversationBook.save）
+
 	mu                  sync.Mutex
-	history             [][]ChatMessage // 每一轮一组消息：用户的话 + 工具往来 + 最终回答（不含图片）
-	persona             *Persona        // 当前性格（没有性格档案时为 nil）
-	pendingConfirmation []ToolCall      // 上一轮问了「确定要删掉吗」、等回答的操作（只保留一轮）
-	toolCallCount       int             // 用来生成对话内唯一的工具调用 ID
-	summary             string          // 滚动摘要（v5 R4）
-	unsummarized        [][]ChatMessage // 掉出窗口、还没压进摘要的几轮（照常带给模型，压完再去掉）
-	summarizing         bool            // 后台正在压缩
+	history             []ConversationTurn // 每一轮：说话的时间 + 用户的话、工具往来、最终回答（不含图片）
+	persona             *Persona           // 当前性格（没有性格档案时为 nil）
+	pendingConfirmation []ToolCall         // 上一轮问了「确定要删掉吗」、等回答的操作（只保留一轮）
+	toolCallCount       int                // 用来生成对话内唯一的工具调用 ID
+	summary             string             // 滚动摘要（v5 R4）
+	unsummarized        []ConversationTurn // 掉出窗口、还没压进摘要的几轮（照常带给模型，压完再去掉）
+	summarizing         bool               // 后台正在压缩
+	openTurn            *ConversationTurn  // 还没收尾的一轮（见 ConversationRecord.OpenTurn）
 }
 
 // Person 是这份对话属于谁。
@@ -127,25 +153,35 @@ func (c *Conversation) record() ConversationRecord {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	record := ConversationRecord{Person: c.person, History: c.history, ToolCallCount: c.toolCallCount,
-		Summary: c.summary, Unsummarized: c.unsummarized, UpdatedAt: time.Now()}
+		Summary: c.summary, Unsummarized: c.unsummarized, OpenTurn: c.openTurn, UpdatedAt: time.Now()}
 	if c.persona != nil {
 		record.PersonaID = c.persona.ID
 	}
 	return record
 }
 
-// messages 返回历史消息的副本（不含系统提示词）。
+// messages 返回历史消息的副本（不含系统提示词）。每一轮前面加一条时间标记（系统合成）：
+// 模型分得清哪句是什么时候说的（隔天的「明天」、几十分钟前说的「现在几点」）；标记由存下的时间算出，每次都一样，不影响提示词缓存。
 func (c *Conversation) messages() []ChatMessage {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	var messages []ChatMessage
-	for _, turn := range c.unsummarized { // 还没压进摘要的，先照常带着
-		messages = append(messages, turn...)
-	}
-	for _, turn := range c.history {
-		messages = append(messages, turn...)
+	for _, turns := range [][]ConversationTurn{c.unsummarized, c.history} { // 还没压进摘要的，先照常带着
+		for _, turn := range turns {
+			messages = append(messages, ChatMessage{Role: RoleUser, Text: turnTimeLabel(turn.At), Synthetic: true})
+			messages = append(messages, turn.Messages...)
+		}
 	}
 	return messages
+}
+
+// turnTimeLabel 是一轮前面的时间标记（本地时间，和每轮告诉模型的「现在」同一个时区）；不知道时间的写明不知道。
+func turnTimeLabel(at time.Time) string {
+	if at.IsZero() {
+		return "（这一轮的时间不详）"
+	}
+	at = at.Local()
+	return fmt.Sprintf("（%d 月 %d 日 %s）", at.Month(), at.Day(), at.Format("15:04"))
 }
 
 // currentSummary 是滚动摘要（没有时为空）。
@@ -155,11 +191,20 @@ func (c *Conversation) currentSummary() string {
 	return c.summary
 }
 
-// appendTurn 记下一轮（只留最近 maxTurns 轮）并写盘。
-func (c *Conversation) appendTurn(turn []ChatMessage, maxTurns int) {
+// appendTurn 记下一轮（只留最近 maxTurns 轮）并写盘；这一轮收尾了，「没收尾」的记录随之清掉。
+func (c *Conversation) appendTurn(turn ConversationTurn, maxTurns int) {
 	summarizing := c.book.summarizer() != nil // 先取：不在持有 Conversation.mu 时去锁对话簿
 	c.mu.Lock()
 	c.history = append(c.history, turn)
+	c.openTurn = nil
+	c.trimLocked(maxTurns, summarizing)
+	c.mu.Unlock()
+	c.book.save(c)
+	c.book.maybeSummarize(c)
+}
+
+// trimLocked 只留最近 maxTurns 轮；掉出窗口的在写摘要时攒着等压缩，否则丢掉。调用方持有 c.mu（或对话还没交出去）。
+func (c *Conversation) trimLocked(maxTurns int, summarizing bool) {
 	if maxTurns > 0 && len(c.history) > maxTurns {
 		dropped := c.history[:len(c.history)-maxTurns]
 		c.history = c.history[len(c.history)-maxTurns:]
@@ -170,9 +215,15 @@ func (c *Conversation) appendTurn(turn []ChatMessage, maxTurns int) {
 	if !summarizing {
 		c.unsummarized = nil // 关掉摘要后，以前攒下的不再带
 	}
+}
+
+// keepOpenTurn 记下还没收尾的这一轮（已经整理成「服务端重启、没说完」的样子）并写盘：做完了工具时调用，
+// 这一轮中途服务端重启的话，下次读到它照实接进历史。
+func (c *Conversation) keepOpenTurn(turn ConversationTurn) {
+	c.mu.Lock()
+	c.openTurn = &turn
 	c.mu.Unlock()
 	c.book.save(c)
-	c.book.maybeSummarize(c)
 }
 
 // replaceLastAnswer 把最近一轮的回答改成 text（被打断时只记听到的部分）并写盘；返回改没改（本来就是 text 时不改）。
@@ -180,7 +231,7 @@ func (c *Conversation) replaceLastAnswer(text string) bool {
 	c.mu.Lock()
 	changed := false
 	if n := len(c.history); n > 0 {
-		turn := c.history[n-1]
+		turn := c.history[n-1].Messages
 		if last := len(turn) - 1; last >= 0 && turn[last].Role == RoleAssistant && turn[last].Text != text {
 			turn[last].Text = text
 			changed = true

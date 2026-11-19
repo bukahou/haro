@@ -170,8 +170,22 @@ func run(logger *slog.Logger) error {
 	}
 	// 对话簿所有终端连接共用：换终端、重连、服务端重启都接得上
 	var conversationStore brain.ConversationStore
-	if settings.ConversationsDir != "" {
-		conversationStore = conversationstore.NewFileStore(settings.ConversationsDir)
+	if settings.ConversationsDB != "" {
+		store, err := conversationstore.OpenSQLite(ctx, settings.ConversationsDB)
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		if settings.ConversationsDir != "" { // 旧的对话文件：导入一次（出错就不启动，不带着空历史开始）
+			imported, err := conversationstore.ImportJSONDir(ctx, store, settings.ConversationsDir, logger)
+			if err != nil {
+				return fmt.Errorf("导入旧的对话文件: %w", err)
+			}
+			if imported > 0 {
+				logger.Info("旧的对话文件已导入对话库", "people", imported, "dir", settings.ConversationsDir)
+			}
+		}
+		conversationStore = store
 	}
 	components.Conversations = brain.NewConversationBook(conversationStore, options, logger)
 	if settings.ProfileDir != "" { // 主人资料：外部注入，改了文件下一轮就生效

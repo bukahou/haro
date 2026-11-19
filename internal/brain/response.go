@@ -346,6 +346,7 @@ func (s *Session) generateSentences(ctx context.Context, history []ChatMessage, 
 				result = s.callTool(ctx, call)
 			}
 			record.recordResult(toolRoundIndex, call, result)
+			s.keepOpenTurn(record) // 做完了一个工具：这一轮中途服务端重启的话，重启后照实接进历史
 			exchange = append(exchange, ChatMessage{Role: RoleTool, ToolName: call.Name, ToolCallID: call.ID, Text: result})
 		}
 		if ctx.Err() != nil {

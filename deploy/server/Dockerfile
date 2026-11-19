@@ -66,6 +66,7 @@ ENV LD_LIBRARY_PATH=/opt/haro/lib \
     HARO_NOTES_DB=/data/notes.db \
     HARO_USAGE_DB=/data/usage.db \
     HARO_RESEARCH_DB=/data/research.db \
+    HARO_CONVERSATIONS_DB=/data/conversations.db \
     HARO_CONVERSATIONS_DIR=/data/conversations \
     HARO_PERSONA_STATE=/data/persona
 

@@ -148,10 +148,10 @@ func TestToolExchangeIsKeptInHistory(t *testing.T) {
 	k.say("谢谢")
 
 	var roles []brain.ChatRole
-	for _, msg := range model.LastRequest().Messages {
+	for _, msg := range withoutSynthetic(model.LastRequest().Messages) {
 		roles = append(roles, msg.Role)
 	}
-	// user(车停在哪), assistant(tool_calls), tool(结果), assistant(回答), user(谢谢)（这个测试会话没有设系统提示词）
+	// user(车停在哪), assistant(tool_calls), tool(结果), assistant(回答), user(谢谢)（这个测试会话没有设系统提示词；时间标记不算）
 	want := []brain.ChatRole{brain.RoleUser, brain.RoleAssistant, brain.RoleTool, brain.RoleAssistant, brain.RoleUser}
 	if !slices.Equal(roles, want) {
 		t.Fatalf("第二轮的消息角色 %v，应为 %v（上一轮的工具往来要留在历史里）", roles, want)

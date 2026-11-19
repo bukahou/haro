@@ -185,7 +185,8 @@ type Settings struct {
 	PersonasDir      string        `env:"HARO_PERSONAS_DIR"`
 	PersonaDefault   string        `env:"HARO_PERSONA_DEFAULT" envDefault:"buddy"`  // 没记过当前性格时用哪个（ID）
 	PersonaState     string        `env:"HARO_PERSONA_STATE"`                       // 记住当前性格的文件；空 = 重启回到默认
-	ConversationsDir string        `env:"HARO_CONVERSATIONS_DIR"`                   // 对话跟人走：每人一个文件；空 = 只在内存里（服务端重启就没了）
+	ConversationsDB  string        `env:"HARO_CONVERSATIONS_DB"`                    // 对话库（SQLite 文件）：对话跟人走；空 = 只在内存里（服务端重启就没了）
+	ConversationsDir string        `env:"HARO_CONVERSATIONS_DIR"`                   // 旧版每人一个 JSON 文件的目录：设了就在启动时导入对话库（导入后改名 .imported 留底）
 	WakeArbitration  time.Duration `env:"HARO_WAKE_ARBITRATION" envDefault:"300ms"` // 多台终端同时听到唤醒词时等多久再选一台；0 = 不仲裁
 
 	// 切句
@@ -309,6 +310,9 @@ func (settings Settings) validateBrain() error {
 	}
 	if err := settings.validateStrongLLM(); err != nil {
 		return err
+	}
+	if settings.ConversationsDir != "" && settings.ConversationsDB == "" {
+		return fmt.Errorf("设了 HARO_CONVERSATIONS_DIR（旧的对话文件，只用来导入）就要设 HARO_CONVERSATIONS_DB（对话库）")
 	}
 	if settings.Tools && settings.NotesDB == "" {
 		return fmt.Errorf("HARO_TOOLS=true 时必须设 HARO_NOTES_DB（或设 HARO_TOOLS=false）")
