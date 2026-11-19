@@ -4,44 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
-	"iter"
-	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/bukahou/haro/internal/brain"
-	"github.com/bukahou/haro/internal/realtimeproto"
-	"github.com/bukahou/haro/internal/speech"
+	"github.com/bukahou/haro/internal/brain/braintest"
 )
-
-// scriptedToolModel：消息列表最后一条是用户的话时，按 script 返回工具调用；最后一条是工具结果时，把结果念出来。
-type scriptedToolModel struct {
-	mu        sync.Mutex
-	script    map[string]brain.ToolCall // 用户的话 → 要调用的工具
-	sawTools  []int                     // 每次调用时给了几个工具
-	lastInput []brain.ChatMessage
-}
-
-func (m *scriptedToolModel) StreamReply(_ context.Context, messages []brain.ChatMessage, tools []brain.ToolSpec) iter.Seq2[brain.ReplyDelta, error] {
-	m.mu.Lock()
-	m.sawTools = append(m.sawTools, len(tools))
-	m.lastInput = messages
-	m.mu.Unlock()
-	last := messages[len(messages)-1]
-	return func(yield func(brain.ReplyDelta, error) bool) {
-		switch {
-		case last.Role == brain.RoleTool:
-			yield(brain.ReplyDelta{Text: "查到了：" + last.Text + "。"}, nil)
-		case len(tools) > 0 && m.script[last.Text].Name != "":
-			yield(brain.ReplyDelta{ToolCalls: []brain.ToolCall{m.script[last.Text]}}, nil)
-		default:
-			yield(brain.ReplyDelta{Text: "好的。"}, nil)
-		}
-	}
-}
-func (m *scriptedToolModel) Warmup(context.Context) error { return nil }
 
 // fakeToolbox 记录调用；delete_note 需要确认。
 type fakeToolbox struct {
@@ -70,258 +40,146 @@ func (f *fakeToolbox) called() []string {
 	return append([]string(nil), f.calls...)
 }
 
-// askText 用按键模式的事件跑一轮，识别结果固定为 text，返回播出的文字。
-func askText(t *testing.T, session *brain.Session, recognizer *switchableRecognizer, text string) string {
+func newToolTalker(t *testing.T, model brain.ChatModel, toolbox brain.Toolbox) *talker {
 	t.Helper()
-	recognizer.set(text)
-	events := askOneTurn(t, context.Background(), session, nil)
-	var spoken strings.Builder
-	for _, event := range events {
-		if audio, ok := event.(realtimeproto.ResponseOutputAudioDelta); ok {
-			spoken.Write(audio.Audio.Data)
-		}
+	parts := brain.Components{Model: model, Synthesizer: fakeSynthesizer{}}
+	if toolbox != nil {
+		parts.Tools = toolbox
 	}
-	if done := events[len(events)-1].(realtimeproto.ResponseDone); done.Status != realtimeproto.StatusCompleted {
-		t.Fatalf("「%s」的回答没有完成：%+v", text, done)
-	}
-	return spoken.String()
+	return newTalker(t, parts, brain.Options{MaxHistoryTurn: 6})
 }
 
-type switchableRecognizer struct {
-	mu   sync.Mutex
-	text string
-}
-
-func (r *switchableRecognizer) set(text string) { r.mu.Lock(); r.text = text; r.mu.Unlock() }
-func (r *switchableRecognizer) Recognize(context.Context, realtimeproto.PCMAudio) (string, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.text, nil
-}
-
-func newToolSession(model brain.ChatModel, toolbox brain.Toolbox, recognizer brain.SpeechRecognizer) *brain.Session {
-	return brain.NewSession(brain.Components{
-		Recognizer: recognizer, Model: model, Synthesizer: fakeSynthesizer{}, Tools: toolbox,
-		NewSegmenter: func() brain.TextSegmenter { return speech.NewSentenceSegmenter(4, 40) },
-	}, brain.Options{MaxHistoryTurn: 6}, slog.New(slog.NewTextHandler(io.Discard, nil)))
-}
+var searchCarSpot = braintest.Call("search_notes", map[string]any{"query": "车停在哪"})
 
 func TestToolLoopReadOnlyTool(t *testing.T) {
-	model := &scriptedToolModel{script: map[string]brain.ToolCall{
-		"我的车停在哪了？": {Name: "search_notes", Arguments: map[string]any{"query": "车停在哪"}}}}
+	model := braintest.NewModel(t, searchCarSpot, braintest.Say("查到了：车停在C3的7号位。"))
 	toolbox := &fakeToolbox{}
-	recognizer := &switchableRecognizer{}
-	session := newToolSession(model, toolbox, recognizer)
-	defer session.Close()
+	k := newToolTalker(t, model, toolbox)
 
-	if spoken := askText(t, session, recognizer, "我的车停在哪了？"); spoken != "查到了：车停在C3的7号位。" {
+	if spoken := k.say("我的车停在哪了？"); spoken != "查到了：车停在C3的7号位。" {
 		t.Errorf("播出 %q", spoken)
 	}
-	if got := toolbox.called(); len(got) != 1 || got[0] != "search_notes" {
+	if got := toolbox.called(); !slices.Equal(got, []string{"search_notes"}) {
 		t.Errorf("工具调用 %v", got)
 	}
-	// 第二轮把工具结果交回模型：消息里应有 assistant(tool_calls) + tool(result)
-	model.mu.Lock()
-	defer model.mu.Unlock()
-	n := len(model.lastInput)
-	if n < 2 || model.lastInput[n-2].Role != brain.RoleAssistant || len(model.lastInput[n-2].ToolCalls) != 1 ||
-		model.lastInput[n-1].Role != brain.RoleTool || model.lastInput[n-1].ToolName != "search_notes" {
-		t.Errorf("工具往来没有正确交回模型：%+v", model.lastInput[max(n-2, 0):])
+	// 第二次请求把工具往来交回模型：最后是 assistant(tool_calls) + tool(result)
+	second := model.Requests()[1].Messages
+	n := len(second)
+	if n < 2 || second[n-2].Role != brain.RoleAssistant || len(second[n-2].ToolCalls) != 1 ||
+		second[n-1].Role != brain.RoleTool || second[n-1].ToolName != "search_notes" || second[n-1].Text != "车停在C3的7号位" {
+		t.Errorf("工具往来没有正确交回模型：%+v", second[max(n-2, 0):])
 	}
 }
 
-// meteredModel 在每次请求的最后报告用量（输入 100、输出 5）。
-type meteredModel struct{ *scriptedToolModel }
-
-func (m meteredModel) StreamReply(ctx context.Context, messages []brain.ChatMessage, tools []brain.ToolSpec) iter.Seq2[brain.ReplyDelta, error] {
-	return func(yield func(brain.ReplyDelta, error) bool) {
-		for delta, err := range m.scriptedToolModel.StreamReply(ctx, messages, tools) {
-			if !yield(delta, err) {
-				return
-			}
-		}
-		yield(brain.ReplyDelta{Usage: &brain.ReplyUsage{PromptTokens: 100, OutputTokens: 5}}, nil)
-	}
-}
-
-// 调工具时一次回答请求了模型两次：用量要两次加起来（v3 U-1），不能只算最后一次。
+// 调工具时一次回答请求了模型两次：用量要两次加起来，不能只算最后一次。
 func TestToolLoopUsageAddsUpAllRequests(t *testing.T) {
-	model := meteredModel{&scriptedToolModel{script: map[string]brain.ToolCall{
-		"我的车停在哪了？": {Name: "search_notes", Arguments: map[string]any{"query": "车停在哪"}}}}}
-	recognizer := &switchableRecognizer{}
-	session := newToolSession(model, &fakeToolbox{}, recognizer)
-	defer session.Close()
+	usage := &brain.ReplyUsage{PromptTokens: 100, OutputTokens: 5}
+	model := braintest.NewModel(t,
+		braintest.Reply{ToolCalls: searchCarSpot.ToolCalls, Usage: usage},
+		braintest.Reply{Chunks: []string{"查到了。"}, Usage: usage})
+	k := newToolTalker(t, model, &fakeToolbox{})
 
-	recognizer.set("我的车停在哪了？")
-	events := askOneTurn(t, context.Background(), session, nil)
-	done := events[len(events)-1].(realtimeproto.ResponseDone)
+	done := braintest.Done(t, k.ask("我的车停在哪了？"))
 	if done.Usage == nil || done.Usage.InputTokens != 200 || done.Usage.OutputTokens != 10 {
 		t.Errorf("用量应为两次请求之和（输入 200、输出 10）：%+v", done.Usage)
 	}
 }
 
 func TestToolLoopAsksConfirmationBeforeDestructiveTool(t *testing.T) {
-	model := &scriptedToolModel{script: map[string]brain.ToolCall{
-		"把那条删了": {Name: "delete_note", Arguments: map[string]any{"query": "车停车位"}}}}
+	deleteSpot := braintest.Call("delete_note", map[string]any{"query": "车停车位"})
+	model := braintest.NewModel(t,
+		deleteSpot, braintest.Say("删好了。"), // 要删 → 主人确认 → 根据执行结果回答
+		deleteSpot,                       // 要删 → 主人说算了：固定回答，不请求模型
+		deleteSpot, braintest.Say("好的。")) // 要删 → 主人说了别的：放弃删除，照常回答
 	toolbox := &fakeToolbox{}
-	recognizer := &switchableRecognizer{}
-	session := newToolSession(model, toolbox, recognizer)
-	defer session.Close()
+	k := newToolTalker(t, model, toolbox)
 
-	if spoken := askText(t, session, recognizer, "把那条删了"); !strings.Contains(spoken, "确定要删掉和「车停车位」有关的那条吗") {
+	if spoken := k.say("把那条删了"); !strings.Contains(spoken, "确定要删掉和「车停车位」有关的那条吗") {
 		t.Fatalf("应先问确认，播出 %q", spoken)
 	}
 	if len(toolbox.called()) != 0 {
 		t.Fatal("确认之前不应执行删除")
 	}
-	// 确认后由模型根据执行结果回答（v3 D-1）：替身模型会把工具结果念出来
-	if spoken := askText(t, session, recognizer, "确认"); !strings.Contains(spoken, `{"deleted":true}`) {
-		t.Errorf("确认后应根据删除结果回答，播出 %q", spoken)
+	if spoken := k.say("确认"); spoken != "删好了。" {
+		t.Errorf("确认后应由模型根据删除结果回答，播出 %q", spoken)
 	}
-	if got := toolbox.called(); len(got) != 1 || got[0] != "delete_note" {
+	if got := toolbox.called(); !slices.Equal(got, []string{"delete_note"}) {
 		t.Errorf("确认后应执行删除：%v", got)
 	}
+	if last := model.LastRequest().Last(); last.Role != brain.RoleTool || last.Text != `{"deleted":true}` {
+		t.Errorf("确认后交给模型的应是删除结果：%+v", last)
+	}
 
-	// 再问一次、这次说「算了」→ 不执行
-	askText(t, session, recognizer, "把那条删了")
-	if spoken := askText(t, session, recognizer, "算了"); spoken != "好的，不做了。" {
+	k.say("把那条删了")
+	if spoken := k.say("算了"); spoken != "好的，不做了。" {
 		t.Errorf("取消后播出 %q", spoken)
 	}
-	// 再问一次、这次说别的 → 放弃删除，照常回答
-	askText(t, session, recognizer, "把那条删了")
-	if spoken := askText(t, session, recognizer, "今天天气怎么样？"); spoken != "好的。" {
+	k.say("把那条删了")
+	if spoken := k.say("今天天气怎么样？"); spoken != "好的。" {
 		t.Errorf("说别的应照常回答，播出 %q", spoken)
 	}
 	if got := toolbox.called(); len(got) != 1 {
 		t.Errorf("取消和说别的都不应执行删除：%v", got)
 	}
+	if model.Remaining() != 0 {
+		t.Errorf("模型的请求次数不对：还剩 %d 条回答没用到", model.Remaining())
+	}
 }
 
+// 模型每一轮都要求调用工具：第 4 轮不再提供工具，逼它直接回答。
 func TestToolLoopStopsAfterMaxRounds(t *testing.T) {
-	// 模型每一轮都要求调用工具：第 4 轮应不再提供工具，逼它直接回答
-	model := &loopingModel{}
-	recognizer := &switchableRecognizer{}
-	session := newToolSession(model, &fakeToolbox{}, recognizer)
-	defer session.Close()
-	askText(t, session, recognizer, "查一下")
-	if got := model.rounds(); len(got) != 4 || got[3] != 0 {
-		t.Errorf("每轮提供的工具数 %v，应为 3 轮有工具 + 最后 1 轮没有", got)
+	search := braintest.Call("search_notes", nil)
+	model := braintest.NewModel(t, search, search, search, braintest.Say("没查到。"))
+	k := newToolTalker(t, model, &fakeToolbox{})
+	k.say("查一下")
+	var offered []int
+	for _, request := range model.Requests() {
+		offered = append(offered, len(request.Tools))
 	}
-}
-
-type loopingModel struct {
-	mu       sync.Mutex
-	sawTools []int
-}
-
-func (m *loopingModel) StreamReply(_ context.Context, _ []brain.ChatMessage, tools []brain.ToolSpec) iter.Seq2[brain.ReplyDelta, error] {
-	m.mu.Lock()
-	m.sawTools = append(m.sawTools, len(tools))
-	m.mu.Unlock()
-	return func(yield func(brain.ReplyDelta, error) bool) {
-		if len(tools) > 0 {
-			yield(brain.ReplyDelta{ToolCalls: []brain.ToolCall{{Name: "search_notes"}}}, nil)
-			return
-		}
-		yield(brain.ReplyDelta{Text: "没查到。"}, nil)
+	if len(offered) != 4 || offered[0] == 0 || offered[3] != 0 {
+		t.Errorf("每轮提供的工具数 %v，应为 3 轮有工具 + 最后 1 轮没有", offered)
 	}
-}
-func (m *loopingModel) Warmup(context.Context) error { return nil }
-func (m *loopingModel) rounds() []int {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return append([]int(nil), m.sawTools...)
 }
 
 func TestToolExchangeIsKeptInHistory(t *testing.T) {
-	model := &scriptedToolModel{script: map[string]brain.ToolCall{
-		"我的车停在哪了？": {Name: "search_notes", Arguments: map[string]any{"query": "车停在哪"}}}}
-	recognizer := &switchableRecognizer{}
-	session := newToolSession(model, &fakeToolbox{}, recognizer)
-	defer session.Close()
-	askText(t, session, recognizer, "我的车停在哪了？")
-	askText(t, session, recognizer, "谢谢")
+	model := braintest.NewModel(t, searchCarSpot, braintest.Say("在C3。"), braintest.Say("不客气。"))
+	k := newToolTalker(t, model, &fakeToolbox{})
+	k.say("我的车停在哪了？")
+	k.say("谢谢")
 
-	model.mu.Lock()
-	defer model.mu.Unlock()
 	var roles []brain.ChatRole
-	for _, msg := range model.lastInput {
+	for _, msg := range model.LastRequest().Messages {
 		roles = append(roles, msg.Role)
 	}
 	// user(车停在哪), assistant(tool_calls), tool(结果), assistant(回答), user(谢谢)（这个测试会话没有设系统提示词）
 	want := []brain.ChatRole{brain.RoleUser, brain.RoleAssistant, brain.RoleTool, brain.RoleAssistant, brain.RoleUser}
-	if len(roles) != len(want) {
+	if !slices.Equal(roles, want) {
 		t.Fatalf("第二轮的消息角色 %v，应为 %v（上一轮的工具往来要留在历史里）", roles, want)
 	}
-	for i := range want {
-		if roles[i] != want[i] {
-			t.Fatalf("第二轮的消息角色 %v，应为 %v", roles, want)
-		}
-	}
 }
 
-// cameraModel：用户问「我手里拿着什么」时调用 look_at_camera；收到画面后说出画面内容。
-type cameraModel struct {
-	mu   sync.Mutex
-	seen [][]brain.ChatMessage
-}
-
-func (m *cameraModel) StreamReply(_ context.Context, messages []brain.ChatMessage, tools []brain.ToolSpec) iter.Seq2[brain.ReplyDelta, error] {
-	m.mu.Lock()
-	m.seen = append(m.seen, messages)
-	m.mu.Unlock()
-	last := messages[len(messages)-1]
-	return func(yield func(brain.ReplyDelta, error) bool) {
-		switch {
-		case len(last.Image) > 0:
-			yield(brain.ReplyDelta{Text: "你拿着" + string(last.Image) + "。"}, nil)
-		case last.Role == brain.RoleTool && last.ToolName == "look_at_camera": // 专家看过了：前台拿到的是文字
-			yield(brain.ReplyDelta{Text: "转述专家的话。"}, nil)
-		case last.Text == "我手里拿着什么？" && len(tools) > 0:
-			yield(brain.ReplyDelta{ToolCalls: []brain.ToolCall{{Name: "look_at_camera"}}}, nil)
-		default:
-			yield(brain.ReplyDelta{Text: "哈哈。"}, nil)
-		}
-	}
-}
-func (m *cameraModel) Warmup(context.Context) error { return nil }
+var lookAtCamera = braintest.Call("look_at_camera", nil)
 
 func TestLookAtCameraOnDemand(t *testing.T) {
-	model := &cameraModel{}
-	recognizer := &switchableRecognizer{}
-	session := newToolSession(model, nil, recognizer) // 没有工具箱也能看画面
-	defer session.Close()
+	model := braintest.NewModel(t, lookAtCamera, braintest.Say("你拿着手机。"), braintest.Say("哈哈。"))
+	k := newToolTalker(t, model, nil) // 没有工具箱也能看画面
 
-	recognizer.set("我手里拿着什么？")
-	events := askOneTurn(t, context.Background(), session, []byte("手机"))
-	var spoken strings.Builder
-	for _, event := range events {
-		if audio, ok := event.(realtimeproto.ResponseOutputAudioDelta); ok {
-			spoken.Write(audio.Audio.Data)
-		}
+	if spoken := braintest.Spoken(k.askWithImage("我手里拿着什么？", []byte("手机"))); spoken != "你拿着手机。" {
+		t.Fatalf("播出 %q", spoken)
 	}
-	if spoken.String() != "你拿着手机。" {
-		t.Fatalf("应调用 look_at_camera 后根据画面回答，播出 %q", spoken.String())
+	if last := model.Requests()[1].Last(); last.Role != brain.RoleUser || string(last.Image) != "手机" {
+		t.Fatalf("调用 look_at_camera 后，下一次请求应带上画面：%+v", last)
 	}
 
-	recognizer.set("讲个笑话吧")
-	askOneTurn(t, context.Background(), session, []byte("手机"))
-	model.mu.Lock()
-	defer model.mu.Unlock()
-	last := model.seen[len(model.seen)-1]
+	k.askWithImage("讲个笑话吧", []byte("手机"))
+	last := model.LastRequest().Messages
 	for _, msg := range last {
 		if len(msg.Image) > 0 {
 			t.Fatalf("闲聊时不应带画面，历史里也不应留图片：%+v", msg)
 		}
 	}
 	// 历史里应留下「当时看了画面」的替身，而不是图片
-	found := false
-	for _, msg := range last {
-		if strings.Contains(msg.Text, "当时看了摄像头画面") {
-			found = true
-		}
-	}
-	if !found {
+	if !slices.ContainsFunc(last, func(msg brain.ChatMessage) bool { return strings.Contains(msg.Text, "当时看了摄像头画面") }) {
 		t.Error("历史里应留下「当时看了摄像头画面」")
 	}
 }
@@ -344,30 +202,24 @@ func (e *fakeExpert) ExamineFrame(_ context.Context, frame []byte, request strin
 	return "白色方块，看着像充电头。", nil
 }
 
-func newExpertSession(model brain.ChatModel, expert brain.FrameExpert, recognizer brain.SpeechRecognizer) *brain.Session {
-	return brain.NewSession(brain.Components{
-		Recognizer: recognizer, Model: model, Synthesizer: fakeSynthesizer{}, FrameExpert: expert,
-		NewSegmenter: func() brain.TextSegmenter { return speech.NewSentenceSegmenter(4, 40) },
-	}, brain.Options{MaxHistoryTurn: 6}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+func newExpertTalker(t *testing.T, model brain.ChatModel, expert brain.FrameExpert) *talker {
+	t.Helper()
+	return newTalker(t, brain.Components{Model: model, Synthesizer: fakeSynthesizer{}, FrameExpert: expert},
+		brain.Options{MaxHistoryTurn: 6})
 }
 
 // 有专家时：画面交给专家，前台只拿到专家的判断（文字），历史里留下这段判断。
 func TestLookAtCameraAsksExpert(t *testing.T) {
-	model, expert := &cameraModel{}, &fakeExpert{}
-	recognizer := &switchableRecognizer{}
-	session := newExpertSession(model, expert, recognizer)
-	defer session.Close()
+	model, expert := braintest.NewModel(t, lookAtCamera, braintest.Say("转述专家的话。")), &fakeExpert{}
+	k := newExpertTalker(t, model, expert)
 
-	recognizer.set("我手里拿着什么？")
-	if spoken := spokenText(askOneTurn(t, context.Background(), session, []byte("充电头"))); spoken != "转述专家的话。" {
-		t.Fatalf("应根据专家的判断回答，播出 %q", spoken)
+	if spoken := braintest.Spoken(k.askWithImage("我手里拿着什么？", []byte("充电头"))); spoken != "转述专家的话。" {
+		t.Fatalf("播出 %q", spoken)
 	}
 	if len(expert.frames) != 1 || expert.frames[0] != "充电头" || expert.requests[0] != "我手里拿着什么？" {
 		t.Fatalf("专家应拿到画面和主人的原话：%v %v", expert.frames, expert.requests)
 	}
-	model.mu.Lock()
-	defer model.mu.Unlock()
-	answered := model.seen[len(model.seen)-1]
+	answered := model.LastRequest().Messages
 	for _, msg := range answered {
 		if len(msg.Image) > 0 {
 			t.Fatalf("有专家时前台不应看到画面：%+v", msg)
@@ -381,35 +233,21 @@ func TestLookAtCameraAsksExpert(t *testing.T) {
 
 // 专家出错时：退回把画面直接交给前台。
 func TestLookAtCameraFallsBackWhenExpertFails(t *testing.T) {
-	model, expert := &cameraModel{}, &fakeExpert{err: errors.New("503")}
-	recognizer := &switchableRecognizer{}
-	session := newExpertSession(model, expert, recognizer)
-	defer session.Close()
+	model := braintest.NewModel(t, lookAtCamera, braintest.Say("你拿着手机。"))
+	k := newExpertTalker(t, model, &fakeExpert{err: errors.New("503")})
 
-	recognizer.set("我手里拿着什么？")
-	if spoken := spokenText(askOneTurn(t, context.Background(), session, []byte("手机"))); spoken != "你拿着手机。" {
-		t.Fatalf("专家出错时应由前台直接看画面，播出 %q", spoken)
+	k.askWithImage("我手里拿着什么？", []byte("手机"))
+	if last := model.LastRequest().Last(); last.Role != brain.RoleUser || string(last.Image) != "手机" {
+		t.Fatalf("专家出错时应把画面直接交给前台：%+v", last)
 	}
 }
 
-func spokenText(events []realtimeproto.ServerEvent) string {
-	var spoken strings.Builder
-	for _, event := range events {
-		if audio, ok := event.(realtimeproto.ResponseOutputAudioDelta); ok {
-			spoken.Write(audio.Audio.Data)
-		}
-	}
-	return spoken.String()
-}
-
-// 一次删多条：确认问句把每一条都列出来（v3 D-1）。
+// 一次删多条：确认问句把每一条都列出来。
 func TestConfirmationListsEveryTarget(t *testing.T) {
-	model := &scriptedToolModel{script: map[string]brain.ToolCall{
-		"把取快递和取干洗删了": {Name: "delete_note", Arguments: map[string]any{"queries": []any{"明天下午去取快递", "周三取干洗"}}}}}
-	recognizer := &switchableRecognizer{}
-	session := newToolSession(model, &fakeToolbox{}, recognizer)
-	defer session.Close()
-	if spoken := askText(t, session, recognizer, "把取快递和取干洗删了"); !strings.Contains(spoken, "「明天下午去取快递」「周三取干洗」有关的这几条吗") {
+	model := braintest.NewModel(t,
+		braintest.Call("delete_note", map[string]any{"queries": []any{"明天下午去取快递", "周三取干洗"}}))
+	k := newToolTalker(t, model, &fakeToolbox{})
+	if spoken := k.say("把取快递和取干洗删了"); !strings.Contains(spoken, "「明天下午去取快递」「周三取干洗」有关的这几条吗") {
 		t.Errorf("应列出每一条，播出 %q", spoken)
 	}
 }

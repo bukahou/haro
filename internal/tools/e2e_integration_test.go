@@ -14,28 +14,17 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/bukahou/haro/internal/brain"
+	"github.com/bukahou/haro/internal/brain/braintest"
 	"github.com/bukahou/haro/internal/llm"
 	"github.com/bukahou/haro/internal/netdiag"
 	"github.com/bukahou/haro/internal/notes"
 	"github.com/bukahou/haro/internal/realtimeproto"
 	"github.com/bukahou/haro/internal/speech"
 )
-
-type textRecognizer struct {
-	mu   sync.Mutex
-	text string
-}
-
-func (r *textRecognizer) Recognize(context.Context, realtimeproto.PCMAudio) (string, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.text, nil
-}
 
 type textSynthesizer struct{}
 
@@ -54,41 +43,38 @@ func TestConversationLive(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	// 与正式运行一致：记事本、网络诊断都内置（v5）
+	// 与正式运行一致：记事本、网络诊断都内置
 	builtins := append(NoteTools(store, logger), NetworkDiagnostics(netdiag.NewChecker("www.cloudflare.com", "1.1.1.1:443"))...)
 	box, err := NewToolbox(ctx, nil, logger, builtins...)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer box.Close()
-	recognizer := &textRecognizer{}
+	voice := braintest.NewVoice()
 	session := brain.NewSession(brain.Components{
-		Recognizer: recognizer, Synthesizer: textSynthesizer{}, Tools: box,
+		Streaming: voice, Synthesizer: textSynthesizer{}, Tools: box,
 		Model:        testChatModel(t),
 		NewSegmenter: func() brain.TextSegmenter { return speech.NewSentenceSegmenter(4, 40) },
 	}, brain.Options{MaxHistoryTurn: 6}, slog.New(slog.NewTextHandler(os.Stderr, nil)))
 	defer session.Close()
 	turns := []string{"帮我记一下，车停在C3的7号位。", "我的车停在哪了？", "现在几点了？", "家里网络正常吗？",
 		"我最近都记了些什么？", "把车停车位那条记录删了。", "确认", "你能看到我吗？"}
-	_ = session.Send(ctx, realtimeproto.SessionUpdate{Instructions: brain.DefaultInstructions})
+	stream := braintest.Open(t, session, voice, realtimeproto.SessionUpdate{Instructions: brain.DefaultInstructions})
 	if conversation := os.Getenv("HARO_TEST_CONVERSATION"); conversation != "" {
 		turns = strings.Split(conversation, "|")
 	}
 	image, _ := os.ReadFile(os.Getenv("HARO_TEST_IMAGE"))
 
 	for _, text := range turns {
-		recognizer.mu.Lock()
-		recognizer.text = text
-		recognizer.mu.Unlock()
+		utterance := braintest.Utterance{Text: text}
+		braintest.Speak(t, session, stream, utterance)
 		started := time.Now()
-		_ = session.Send(ctx, realtimeproto.InputAudioBufferAppend{Audio: realtimeproto.PCMAudio{
-			Format: realtimeproto.AudioFormat{SampleRate: 16000, Channels: 1}, Data: make([]byte, 3200)}})
-		_ = session.Send(ctx, realtimeproto.InputAudioBufferCommit{})
 		if len(image) > 0 {
 			_ = session.Send(ctx, realtimeproto.ConversationItemCreate{Item: realtimeproto.ConversationItem{Role: "user",
 				Content: []realtimeproto.ContentPart{{Type: "input_image", ImageJPEG: image}}}})
 		}
 		_ = session.Send(ctx, realtimeproto.ResponseCreate{})
+		braintest.Recognized(t, stream, utterance)
 		var spoken strings.Builder
 		var firstAudio time.Duration
 		for done := false; !done; {

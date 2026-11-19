@@ -4,17 +4,15 @@ package brain_test
 
 import (
 	"context"
-	"io"
 	"iter"
-	"log/slog"
 	"os"
 	"sync"
 	"testing"
 
 	"github.com/bukahou/haro/internal/brain"
+	"github.com/bukahou/haro/internal/brain/braintest"
 	"github.com/bukahou/haro/internal/llm"
 	"github.com/bukahou/haro/internal/realtimeproto"
-	"github.com/bukahou/haro/internal/speech"
 )
 
 // escalationProbe 包住真模型，记下这一轮有没有请更强的模型重答（本轮主人那句话被标上 Escalate）。
@@ -70,22 +68,17 @@ func TestLiveAskStronger(t *testing.T) {
 	}
 	for _, c := range cases {
 		probe := &escalationProbe{inner: model}
-		recognizer := &switchableRecognizer{}
-		session := brain.NewSession(brain.Components{Recognizer: recognizer, Model: probe, Synthesizer: fakeSynthesizer{},
-			NewSegmenter: func() brain.TextSegmenter { return speech.NewSentenceSegmenter(4, 40) }},
-			brain.Options{MaxHistoryTurn: 6, Instructions: brain.DefaultInstructions, Escalation: true},
-			slog.New(slog.NewTextHandler(io.Discard, nil)))
-		_ = session.Send(context.Background(), realtimeproto.SessionUpdate{NoCamera: true}) // 不让它去看画面
-		recognizer.set("日本的首都是哪里？")
-		askOneTurn(t, context.Background(), session, nil)
+		k := newTalker(t, brain.Components{Model: probe, Synthesizer: fakeSynthesizer{}},
+			brain.Options{MaxHistoryTurn: 6, Instructions: brain.DefaultInstructions, Escalation: true})
+		k.send(realtimeproto.SessionUpdate{NoCamera: true}) // 不让它去看画面
+		k.ask("日本的首都是哪里？")
 		probe.takeEscalated()
-		recognizer.set(c.reply)
-		spoken := spokenText(askOneTurn(t, context.Background(), session, nil))
+		spoken := braintest.Spoken(k.ask(c.reply))
 		got := probe.takeEscalated()
 		t.Logf("%q → 交给更强的模型=%v，回答：%s", c.reply, got, spoken)
 		if got != c.want {
 			t.Errorf("%q：应 %v，实际 %v", c.reply, c.want, got)
 		}
-		session.Close()
+		_ = k.session.Close()
 	}
 }

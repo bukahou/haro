@@ -13,11 +13,9 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/bukahou/haro/internal/brain"
 	"github.com/bukahou/haro/internal/brainclient"
 	"github.com/bukahou/haro/internal/brainserver"
 	"github.com/bukahou/haro/internal/buildinfo"
-	"github.com/bukahou/haro/internal/speech"
 )
 
 // lockedBuffer 是给 slog 写、给测试读的缓冲区（服务端在另一个 goroutine 里写日志）。
@@ -59,15 +57,10 @@ func pinVersion(t *testing.T, version string) {
 
 func newLoggedServer(logs *lockedBuffer) *httptest.Server {
 	logger := slog.New(slog.NewTextHandler(logs, nil))
-	return httptest.NewServer(brainserver.NewHandler(func() brainserver.Session {
-		return brain.NewSession(brain.Components{
-			Recognizer: fixedRecognizer{text: "你好"}, Model: slowModel{}, Synthesizer: chunkySynthesizer{},
-			NewSegmenter: func() brain.TextSegmenter { return speech.NewSentenceSegmenter(4, 40) },
-		}, brain.Options{MaxHistoryTurn: 6, Instructions: "你是测试助手"}, quiet)
-	}, logger))
+	return httptest.NewServer(brainserver.NewHandler(func() brainserver.Session { return newScriptedSession(false) }, logger))
 }
 
-// 服务端（v6 T6）：握手响应里报自己的版本；终端的版本不同（或旧终端没报）时在日志里提醒。
+// 服务端：握手响应里报自己的版本；终端的版本不同（或旧终端没报）时在日志里提醒。
 func TestServerReportsVersionAndWarnsOnMismatch(t *testing.T) {
 	pinVersion(t, "v0.5.0-aaaaaaa")
 	for _, c := range []struct {
@@ -103,7 +96,7 @@ func TestServerReportsVersionAndWarnsOnMismatch(t *testing.T) {
 	}
 }
 
-// 终端（v6 T6）：握手时报自己的版本和 User-Agent；服务端的版本不同时在日志里提醒。
+// 终端：握手时报自己的版本和 User-Agent；服务端的版本不同时在日志里提醒。
 func TestClientReportsVersionAndWarnsOnMismatch(t *testing.T) {
 	pinVersion(t, "v0.5.0-aaaaaaa")
 	received := make(chan http.Header, 1)
