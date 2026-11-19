@@ -168,6 +168,29 @@ func TestStreamLostAndRestoredNotices(t *testing.T) {
 	waitOpened(t, voice, 2)
 }
 
+// 服务端先起来、haro-asr 还没好：打开识别流失败时会话照常建立（不回错误），在后台接着连，连上之后照常对话。
+func TestStreamOpensLaterWhenRecognizerIsNotReady(t *testing.T) {
+	voice := braintest.NewVoice()
+	session := newReopenSession(t, voice, brain.ReopenTiming{Delay: time.Millisecond, MaxDelay: 2 * time.Millisecond,
+		LostNoticeAfter: time.Hour})
+	ctx := context.Background()
+	voice.FailNextOpen(errors.New("连不上 haro-asr（还在加载模型）"))
+	turn := realtimeproto.TurnDetection{Type: "server_vad"}
+	if err := session.Send(ctx, realtimeproto.SessionUpdate{TurnDetection: &turn}); err != nil {
+		t.Fatalf("识别服务暂时连不上时，session.update 不应失败：%v", err)
+	}
+	chunk := realtimeproto.PCMAudio{Format: testFormat, Data: make([]byte, 640)}
+	if err := session.Send(ctx, realtimeproto.InputAudioBufferAppend{Audio: chunk}); err != nil {
+		t.Fatalf("连上之前的音频应悄悄丢掉：%v", err)
+	}
+	time.Sleep(10 * time.Millisecond)
+	voice.FailNextOpen(nil)
+	stream := waitOpened(t, voice, 1)
+	if done := braintest.Done(t, braintest.Ask(t, session, stream, braintest.Utterance{Text: "你好"})); done.Status != realtimeproto.StatusCompleted {
+		t.Errorf("连上之后应照常对话：%+v", done)
+	}
+}
+
 // 会话结束时不再重开。
 func TestStreamNotReopenedAfterClose(t *testing.T) {
 	voice := braintest.NewVoice()

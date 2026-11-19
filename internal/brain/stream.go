@@ -17,28 +17,37 @@ import (
 var streamFormat = realtimeproto.TranscriptionFormat
 
 // openStream 打开流式转写会话并开始转发它的事件。调用方持有 s.mu。
+// 这次打不开（例如服务端先起来、haro-asr 还在加载模型）时不报错：记下设置，在后台按断开后重开的办法接着连，
+// 连上之前送来的音频丢掉；一直连不上时按重开的规则提示终端。
 func (s *Session) openStream(ctx context.Context, config StreamConfig) error {
 	if s.parts.Streaming == nil {
 		return realtimeproto.ProtocolErrorf(realtimeproto.CodeNoTranscriptionStream, "服务端没有配置流式识别，打不开识别流")
 	}
-	stream, err := s.parts.Streaming.OpenStream(ctx, config)
-	if err != nil {
-		return err
-	}
-	s.stream, s.streamConfig = stream, &config
+	s.streamConfig = &config
 	s.awake = false // 新的流从休眠开始（启用唤醒词时；不用唤醒词时这个状态不起作用）
 	s.pendingJobs = map[string]*transcriptionJob{}
 	if config.WakeWord && s.parts.WakeArbiter != nil { // 参加多终端唤醒仲裁
 		s.parts.WakeArbiter.join(s)
 	}
+	stream, err := s.parts.Streaming.OpenStream(ctx, config)
+	if err != nil {
+		s.logger.Warn("打不开识别流：在后台接着连", "err", err)
+		go s.runStream(nil)
+		return nil
+	}
+	s.stream = stream
 	go s.runStream(stream)
 	return nil
 }
 
-// runStream 转发识别流的事件；流意外断开时重开并接着转发，直到会话结束。
+// runStream 转发识别流的事件；流意外结束（或一开始就没打开）时重开并接着转发，直到会话结束。
 func (s *Session) runStream(stream RecognizerStream) {
+	if stream == nil {
+		stream = s.reopenStream()
+	}
 	for stream != nil {
 		s.pumpStreamEvents(stream)
+		s.logger.Warn("识别流断开了：开始重开")
 		stream = s.reopenStream()
 	}
 }
@@ -165,7 +174,6 @@ func (s *Session) reopenStream() RecognizerStream {
 		return nil
 	default:
 	}
-	s.logger.Warn("识别流断开了：开始重开")
 	s.mu.Lock()
 	config := *s.streamConfig
 	s.mu.Unlock()
