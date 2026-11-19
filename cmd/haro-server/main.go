@@ -96,7 +96,7 @@ func run(logger *slog.Logger) error {
 		logger.Warn("没设 HARO_USAGE_DB：用量只记在内存里，服务端重启后额度重新计算")
 	}
 	guard := spending.NewGuard(ledger, spending.Limits{ResearchDailyYen: settings.ResearchDailyYen,
-		LLMMonthlyYen: settings.MonthlyYen, SearchDailyCredits: settings.SearchDailyCredits, WarnRatio: 0.8}, logger)
+		MonthlyYen: settings.MonthlyYen, SearchDailyCredits: settings.SearchDailyCredits, WarnRatio: 0.8}, logger)
 	logger.Info("费用上限", "research_daily_yen", settings.ResearchDailyYen, "monthly_yen", settings.MonthlyYen,
 		"search_daily_credits", settings.SearchDailyCredits)
 	briefers := []brain.Briefer{brain.ClockBriefer{}, guard} // 每轮补充给模型的即时情况：现在几号几点、额度提醒、任务板
@@ -375,9 +375,9 @@ func newCloudChatModel(settings config.Settings, claude *llm.ClaudeAPI, model st
 	return llm.NewOpenAIChatModel(settings.CloudLLMURL, model, settings.CloudLLMAPIKey, maxTokens, client)
 }
 
-// pricingOf 是把用量折成日元的单价（都来自配置）：云端模型，以及设了的话更强的模型。
+// pricingOf 是把用量折成日元的单价（都来自配置）：云端模型、设了的话更强的模型；本地模型标成不花钱。
 func pricingOf(settings config.Settings) spending.Pricing {
-	models := map[string]spending.TokenPrice{settings.CloudLLMModel: {
+	models := map[string]spending.TokenPrice{settings.Model: {Free: true}, settings.CloudLLMModel: {
 		InputUSDPerMillion: settings.CloudLLMPriceIn, OutputUSDPerMillion: settings.CloudLLMPriceOut,
 		CacheReadUSDPerMillion: settings.CloudLLMPriceCacheRead, CacheWriteUSDPerMillion: settings.CloudLLMPriceCacheWrite}}
 	if settings.StrongLLMModel != "" {

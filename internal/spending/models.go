@@ -3,6 +3,7 @@ package spending
 import (
 	"context"
 	"errors"
+	"fmt"
 	"iter"
 	"log/slog"
 
@@ -21,8 +22,13 @@ type MeteredChatModel struct {
 }
 
 // NewMeteredChatModel 创建记账的模型。
+// 模型必须在价格表里（要花钱的有单价、本地的标了不花钱）：不在 = 组装时漏了，按 0 日元记的话额度就管不住它，
+// 所以直接让服务端起不来（价格配置缺了的情况，配置校验已经在这之前说明并退出）。
 func NewMeteredChatModel(inner brain.ChatModel, model string, purpose Purpose, pricing Pricing, ledger Ledger,
 	logger *slog.Logger) *MeteredChatModel {
+	if !pricing.Knows(model) {
+		panic(fmt.Sprintf("价格表里没有模型 %q（用途 %s）：组装时要把它加进价格表（要花钱的写单价，本地模型标 Free）", model, purpose))
+	}
 	return &MeteredChatModel{inner: inner, model: model, purpose: purpose, pricing: pricing, ledger: ledger, logger: logger}
 }
 
@@ -102,9 +108,9 @@ func (b *BudgetedChatModel) StreamReply(ctx context.Context, messages []brain.Ch
 	case errors.Is(err, ErrOverBudget):
 		b.logger.Warn("💴 月度额度已用完，又没有本地模型可退：不回答", "why", err)
 		return func(yield func(brain.ReplyDelta, error) bool) { yield(brain.ReplyDelta{}, err) }
-	default: // 账本读不出来：不因为记账故障让人用不了，照常回答
-		b.logger.Warn("读不出用量账本，这一轮不查额度", "err", err)
-		return b.paid.StreamReply(ctx, messages, tools)
+	default: // 账本读不出来（ErrLedgerUnavailable）：拿不到依据就不放行，告诉主人原因（否则账本一坏，花费就没有上限）
+		b.logger.Error("💴 读不出用量账本：这一轮不调用要花钱的模型", "err", err)
+		return func(yield func(brain.ReplyDelta, error) bool) { yield(brain.ReplyDelta{}, err) }
 	}
 }
 

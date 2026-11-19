@@ -14,7 +14,7 @@ import (
 // Pricing 是把用量折成日元的单价（来自配置：云端价格以美元计，汇率也由配置给，都不写死在代码里）。
 type Pricing struct {
 	USDToYen float64 // 1 美元折多少日元
-	// 每个模型每百万 token 的美元单价；不在表里的模型（本地 ollama）按 0 算
+	// 每个用到的模型都要在表里：要花钱的写单价，本地模型标 Free。不在表里 = 组装漏了（记账模型建不起来，见 Knows）
 	Models map[string]TokenPrice
 	// 搜索服务每个积分的美元单价（Tavily 免费额度内为 0；R5 默认把搜索封在免费额度内）
 	SearchCreditUSD float64
@@ -22,17 +22,24 @@ type Pricing struct {
 
 // TokenPrice 是每百万 token 的美元单价。
 type TokenPrice struct {
+	Free                bool // 不花钱（本地模型）：明确写出来，和「不在表里」分开
 	InputUSDPerMillion  float64
 	OutputUSDPerMillion float64
-	// 提示词缓存（v7）：读缓存、写缓存的单价；0 = 按普通输入价算（宁可记多，不让额度失守）
+	// 提示词缓存：读缓存、写缓存的单价；0 = 按普通输入价算（宁可记多，不让额度失守）
 	CacheReadUSDPerMillion  float64
 	CacheWriteUSDPerMillion float64
+}
+
+// Knows 判断这个模型在不在价格表里（要花钱的写了单价，或者标了不花钱）。
+func (p Pricing) Knows(model string) bool {
+	_, ok := p.Models[model]
+	return ok
 }
 
 // LLMYen 算一次模型调用折多少日元：没命中缓存的输入、缓存读、缓存写、输出各按各的价。
 func (p Pricing) LLMYen(model string, usage brain.ReplyUsage) float64 {
 	price, ok := p.Models[model]
-	if !ok {
+	if !ok || price.Free { // 不在表里的建不出记账模型（NewMeteredChatModel），走不到这里
 		return 0
 	}
 	cacheRead, cacheWrite := price.CacheReadUSDPerMillion, price.CacheWriteUSDPerMillion
@@ -53,10 +60,10 @@ func (p Pricing) SearchYen(credits int) float64 {
 	return float64(credits) * p.SearchCreditUSD * p.USDToYen
 }
 
-// Limits 是费用上限（R5）；0 = 不设上限。
+// Limits 是费用上限；0 = 不设上限。
 type Limits struct {
 	ResearchDailyYen   float64 // 后台调查每天最多花多少（默认 100 日元）
-	LLMMonthlyYen      float64 // 所有大模型调用每月最多花多少
+	MonthlyYen         float64 // 每月总费用上限：大模型 + 搜索，不分用途合计
 	SearchDailyCredits int     // 搜索积分每天最多用多少（默认封在 Tavily 免费额度内：每月 1,000 ≈ 每天 30）
 	WarnRatio          float64 // 月度用到这个比例时提醒一次（R5：0.8）
 }
@@ -73,6 +80,19 @@ func (e *budgetError) SpokenMessage() string { return e.message }
 
 func overBudget(format string, args ...any) error {
 	return &budgetError{message: fmt.Sprintf(format, args...)}
+}
+
+// ErrLedgerUnavailable 表示读不出用量账本（errors.Is 判断）：不知道花了多少，就不放行要花钱的调用。
+var ErrLedgerUnavailable = errors.New("读不出用量账本")
+
+// ledgerUnavailable 是读不出账本的具体错误：Is(ErrLedgerUnavailable)；SpokenMessage 念给主人听，让他知道为什么不回答。
+type ledgerUnavailable struct{ err error }
+
+func (e *ledgerUnavailable) Error() string        { return "读不出用量账本: " + e.err.Error() }
+func (e *ledgerUnavailable) Unwrap() error        { return e.err }
+func (e *ledgerUnavailable) Is(target error) bool { return target == ErrLedgerUnavailable }
+func (e *ledgerUnavailable) SpokenMessage() string {
+	return "我现在读不出费用账本，不知道这个月花了多少，为了不超出上限，先不回答了。"
 }
 
 // Guard 按账本决定还能不能花。时间按本地时区算「今天」「这个月」。
@@ -104,7 +124,7 @@ func (g *Guard) startOfMonth() time.Time {
 
 // AllowResearch 判断今天还能不能派后台调查（以及调查进行中每一轮之前再判一次）。
 func (g *Guard) AllowResearch(ctx context.Context) error {
-	if err := g.allowLLM(ctx); err != nil {
+	if err := g.allowMonthly(ctx); err != nil {
 		return err
 	}
 	if g.limits.ResearchDailyYen <= 0 {
@@ -135,30 +155,31 @@ func (g *Guard) AllowSearch(ctx context.Context, credits int) error {
 	return nil
 }
 
-// AllowPaidLLM 判断这个月还能不能调用要花钱的大模型；顺便在用到 WarnRatio 时准备一条提醒（每月一次）。
+// AllowPaidLLM 调用要花钱的大模型之前，看这个月的总费用（大模型 + 搜索）到没到上限；顺便在用到 WarnRatio 时准备一条提醒（每月一次）。
+// 账本读不出时返回 ErrLedgerUnavailable：拿不到依据就不放行（否则账本一坏，花费就没有上限）。
 func (g *Guard) AllowPaidLLM(ctx context.Context) error {
-	return g.allowLLM(ctx)
+	return g.allowMonthly(ctx)
 }
 
-func (g *Guard) allowLLM(ctx context.Context) error {
-	if g.limits.LLMMonthlyYen <= 0 {
+func (g *Guard) allowMonthly(ctx context.Context) error {
+	if g.limits.MonthlyYen <= 0 {
 		return nil
 	}
 	spent, err := g.ledger.Total(ctx, g.startOfMonth())
 	if err != nil {
-		return err
+		return &ledgerUnavailable{err: err}
 	}
-	if spent.Yen >= g.limits.LLMMonthlyYen {
-		return overBudget("这个月的大模型费用已经约 %.0f 日元，到上限 %.0f 日元了，这个月先不回答了。", spent.Yen, g.limits.LLMMonthlyYen)
+	if spent.Yen >= g.limits.MonthlyYen {
+		return overBudget("这个月的费用（大模型和搜索）已经约 %.0f 日元，到上限 %.0f 日元了，这个月先不回答了。", spent.Yen, g.limits.MonthlyYen)
 	}
-	if g.limits.WarnRatio > 0 && spent.Yen >= g.limits.LLMMonthlyYen*g.limits.WarnRatio {
+	if g.limits.WarnRatio > 0 && spent.Yen >= g.limits.MonthlyYen*g.limits.WarnRatio {
 		month := g.startOfMonth().Format("2006-01")
 		g.mu.Lock()
 		if g.warnedFor != month {
 			g.warnedFor = month
-			g.pendingMsg = fmt.Sprintf("这个月的大模型费用已经用到约 %.0f 日元（上限 %.0f 日元，%.0f%%）。超过上限后改用本地模型或暂停回答。",
-				spent.Yen, g.limits.LLMMonthlyYen, spent.Yen/g.limits.LLMMonthlyYen*100)
-			g.logger.Warn("💴 "+g.pendingMsg, "spent_yen", spent.Yen, "limit_yen", g.limits.LLMMonthlyYen)
+			g.pendingMsg = fmt.Sprintf("这个月的费用（大模型和搜索）已经用到约 %.0f 日元（上限 %.0f 日元，%.0f%%）。超过上限后改用本地模型或暂停回答。",
+				spent.Yen, g.limits.MonthlyYen, spent.Yen/g.limits.MonthlyYen*100)
+			g.logger.Warn("💴 "+g.pendingMsg, "spent_yen", spent.Yen, "limit_yen", g.limits.MonthlyYen)
 		}
 		g.mu.Unlock()
 	}

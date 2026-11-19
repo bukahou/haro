@@ -84,7 +84,7 @@ func TestPricing(t *testing.T) {
 func TestGuardLimits(t *testing.T) {
 	ctx := context.Background()
 	ledger := openTestLedger(t)
-	guard := NewGuard(ledger, Limits{ResearchDailyYen: 100, LLMMonthlyYen: 1000, SearchDailyCredits: 30, WarnRatio: 0.8}, quietLogger)
+	guard := NewGuard(ledger, Limits{ResearchDailyYen: 100, MonthlyYen: 1000, SearchDailyCredits: 30, WarnRatio: 0.8}, quietLogger)
 
 	if err := guard.AllowResearch(ctx); err != nil {
 		t.Fatalf("还没花钱，应允许调查：%v", err)
@@ -226,8 +226,8 @@ func TestLedgerUpgradesOldSchema(t *testing.T) {
 func TestMeteredAndBudgetedModels(t *testing.T) {
 	ctx := context.Background()
 	ledger := openTestLedger(t)
-	pricing := Pricing{USDToYen: 100, Models: map[string]TokenPrice{"cloud": {InputUSDPerMillion: 1}}}
-	guard := NewGuard(ledger, Limits{LLMMonthlyYen: 150}, quietLogger)
+	pricing := Pricing{USDToYen: 100, Models: map[string]TokenPrice{"cloud": {InputUSDPerMillion: 1}, "local": {Free: true}}}
+	guard := NewGuard(ledger, Limits{MonthlyYen: 150}, quietLogger)
 	cloud, local := &replyModel{text: "云端"}, &replyModel{text: "本地"}
 	model := NewBudgetedChatModel(
 		NewMeteredChatModel(cloud, "cloud", PurposeChat, pricing, ledger, quietLogger), // 每次 100 万 token = 1 美元 = 100 日元
@@ -268,5 +268,42 @@ func TestLedgerCheckWritable(t *testing.T) {
 			t.Errorf("检查不应改数据：%+v %v", totals, err)
 		}
 		ledger.Close()
+	}
+}
+
+// 模型不在价格表里：记账模型建不起来（服务端起不来），不会悄悄按 0 日元记、让额度管不住它。
+func TestMeteredRequiresPrice(t *testing.T) {
+	pricing := Pricing{USDToYen: 100, Models: map[string]TokenPrice{"cloud": {InputUSDPerMillion: 1}, "local": {Free: true}}}
+	for _, known := range []string{"cloud", "local"} {
+		NewMeteredChatModel(&replyModel{text: "好"}, known, PurposeChat, pricing, openTestLedger(t), quietLogger)
+	}
+	defer func() {
+		if recover() == nil {
+			t.Error("不在价格表里的模型应建不起来")
+		}
+	}()
+	NewMeteredChatModel(&replyModel{text: "好"}, "unknown", PurposeChat, pricing, openTestLedger(t), quietLogger)
+}
+
+// brokenLedger 读不出合计（库坏了、文件被锁住）。
+type brokenLedger struct{ Ledger }
+
+func (brokenLedger) Total(context.Context, time.Time, ...Purpose) (Totals, error) {
+	return Totals{}, errors.New("database disk image is malformed")
+}
+
+// 读不出账本：不知道这个月花了多少，就不调用要花钱的模型，并把原因念给主人（以前照常放行，账本一坏花费就没有上限）。
+func TestBudgetedRefusesWhenLedgerUnreadable(t *testing.T) {
+	ledger := openTestLedger(t)
+	guard := NewGuard(brokenLedger{ledger}, Limits{MonthlyYen: 3000}, quietLogger)
+	cloud := &replyModel{text: "云端"}
+	model := NewBudgetedChatModel(cloud, nil, guard, quietLogger)
+	_, err := collectText(t, model)
+	var spoken brain.SpokenError
+	if !errors.Is(err, ErrLedgerUnavailable) || !errors.As(err, &spoken) || spoken.SpokenMessage() == "" {
+		t.Errorf("应拒绝并给出念给主人的原因：%v", err)
+	}
+	if cloud.calls != 0 {
+		t.Errorf("读不出账本时不应调用要花钱的模型：调用了 %d 次", cloud.calls)
 	}
 }

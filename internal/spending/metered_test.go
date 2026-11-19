@@ -25,9 +25,11 @@ func (l *chargeLog) Record(_ context.Context, charge Charge) error {
 	l.charges = append(l.charges, charge)
 	return nil
 }
-func (l *chargeLog) Total(context.Context, time.Time, ...Purpose) (Totals, error) { return Totals{}, nil }
-func (l *chargeLog) CheckWritable(context.Context) error                        { return nil }
-func (l *chargeLog) Close() error                                               { return nil }
+func (l *chargeLog) Total(context.Context, time.Time, ...Purpose) (Totals, error) {
+	return Totals{}, nil
+}
+func (l *chargeLog) CheckWritable(context.Context) error { return nil }
+func (l *chargeLog) Close() error                        { return nil }
 
 func (l *chargeLog) recorded() []Charge {
 	l.mu.Lock()
