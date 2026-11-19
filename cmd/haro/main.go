@@ -166,6 +166,10 @@ func assistantOptions(settings config.Settings, sounds tones.Tones) assistant.Op
 		WakeWord:   assistant.WakeWordOptions{Phrase: settings.WakePhrase, IdleTimeout: settings.WakeIdle, SleepTone: sounds.Sleep},
 		BargeIn:    settings.BargeIn,
 		NoticeTone: sounds.Notice,
+		NoticeTones: map[string]realtimeproto.PCMAudio{ // 服务端那边听不见了：和服务端断开时同样的两声
+			realtimeproto.NoticeTranscriptionLost:     sounds.Offline,
+			realtimeproto.NoticeTranscriptionRestored: sounds.Online,
+		},
 	}
 }
 

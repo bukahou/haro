@@ -1,0 +1,23 @@
+# haro-asr：语音识别服务（VAD、说完判断、唤醒词、声纹），服务端按 HARO_ASR_URL 连它。
+# 用户服务，跟着桌面会话启停：登录后启动，锁屏 / 熄屏照常运行，退出登录时停止。
+# 安装：make install-server-services；开关：systemctl --user start|stop haro-asr.service；日志：journalctl --user -u haro-asr -f
+# ⚠️ ExecStart 里的仓库路径（%h/work/github/haro）按你放代码的位置改
+[Unit]
+Description=haro 语音识别（haro-asr）
+Documentation=file://%h/work/github/haro/docs/architecture.md
+PartOf=graphical-session.target
+After=graphical-session.target
+# 一分钟内连续失败 5 次就停下（配置错了时不无限重启刷日志）
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+# 配置（含凭证）放在 ~/.config/haro/haro.env（可以是指向别处的软链接）；.service 里不放任何凭证
+Environment=HARO_ENV_FILE=%h/.config/haro/haro.env
+ExecStart=%h/work/github/haro/deploy/systemd/run-with-env.sh bin/haro-asr
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=graphical-session.target

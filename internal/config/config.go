@@ -4,6 +4,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"slices"
 	"strconv"
@@ -28,15 +29,9 @@ const (
 // claudeEfforts 是思考关掉时 Claude 接受的回答力度（xhigh / max 要开着思考）。
 var claudeEfforts = map[string]bool{"": true, "low": true, "medium": true, "high": true}
 
-// 语音识别方式（都是流式转写，协议照 OpenAI Realtime 的转写会话）。
-const (
-	ASRLocal  = "local"  // haro 拉起 haro-asr 子进程（SenseVoice，CPU）
-	ASROpenAI = "openai" // 连 HARO_ASR_URL 上的转写服务（例如别处运行的 haro-asr）
-)
-
 // 语音合成引擎。
 const (
-	TTSPiper     = "piper"      // Piper：开发用（不支持情绪、只会中文）；不设 HARO_TTS_URL 时由 haro 拉起子进程
+	TTSPiper     = "piper"      // Piper 官方 HTTP 服务：开发用（不支持情绪、只会中文）
 	TTSGPTSoVITS = "gpt-sovits" // GPT-SoVITS api_v2（按情绪选参考录音，流式）
 )
 
@@ -130,41 +125,22 @@ type Settings struct {
 	SearchDailyCredits       int     `env:"HARO_SEARCH_DAILY_CREDITS" envDefault:"30"` // 搜索积分每天上限（封在 Tavily 免费额度内）；0 = 不限
 	SearchCreditUSD          float64 `env:"HARO_SEARCH_CREDIT_USD"`                    // 每个搜索积分的美元价；0 = 免费额度内
 
-	// 语音识别
-	ASR         string `env:"HARO_ASR" envDefault:"local"` // local / openai
-	ASRBinary   string `env:"HARO_ASR_BIN"`                // local：haro-asr 可执行文件（make build 生成 bin/haro-asr）
-	ASRModelDir string `env:"HARO_ASR_MODEL_DIR"`          // local：SenseVoice 模型目录
-	ASRThreads  int    `env:"HARO_ASR_THREADS" envDefault:"4"`
-	ASRPort     int    `env:"HARO_ASR_PORT" envDefault:"59126"`
-	ASRURL      string `env:"HARO_ASR_URL"` // openai：转写服务的根地址
+	// 语音识别：haro-asr 单独运行（模型等配置见 ASRSettings），服务端只认它的地址
+	ASRURL string `env:"HARO_ASR_URL"` // 流式转写服务的根地址（协议照 OpenAI Realtime 的转写会话），例如 http://127.0.0.1:59126
 
-	// 说完判断与 VAD
-	VADModel string `env:"HARO_VAD_MODEL"` // local：silero_vad.onnx 路径
-	// 说完判断：semantic_vad（默认，Smart Turn 判断语气）/ server_vad（只等静音 HARO_VAD_SILENCE）
+	// 说完判断与 VAD（每次打开识别流时随 session.update 交给 haro-asr）
+	// 说完判断：semantic_vad（默认，Smart Turn 判断语气；haro-asr 要配了 HARO_TURN_MODEL）/ server_vad（只等静音 HARO_VAD_SILENCE）
 	TurnDetection string        `env:"HARO_TURN_DETECTION" envDefault:"semantic_vad"`
 	TurnEagerness string        `env:"HARO_TURN_EAGERNESS" envDefault:"auto"` // semantic_vad：low 3s / auto 2s / high 1s 最长等待
-	TurnModel     string        `env:"HARO_TURN_MODEL"`                       // local + semantic_vad：smart-turn-v3.2-cpu.onnx 路径
 	VADThreshold  float64       `env:"HARO_VAD_THRESHOLD" envDefault:"0.5"`
 	VADSilence    time.Duration `env:"HARO_VAD_SILENCE" envDefault:"700ms"` // 静音持续多久算说完
 	VADPrefix     time.Duration `env:"HARO_VAD_PREFIX" envDefault:"300ms"`  // 识别时带上语音开始前的这段
 	EchoGuard     time.Duration `env:"HARO_ECHO_GUARD" envDefault:"300ms"`  // 播完后再静音这么久才恢复收音
 
 	// 唤醒词（唯一的对话方式）
-	WakePhrase    string        `env:"HARO_WAKE_PHRASE" envDefault:"哈罗哈罗"`   // 只用于提示；真正生效的是关键词文件
-	WakeWordsFile string        `env:"HARO_WAKE_WORDS_FILE"`                 // local：关键词文件（仓库 assets/wake-words.txt）
-	KWSModelDir   string        `env:"HARO_KWS_MODEL_DIR"`                   // local：sherpa-onnx 唤醒词模型目录
-	KWSThreshold  float64       `env:"HARO_KWS_THRESHOLD" envDefault:"0.25"` // 触发门槛（关键词文件里写了 #门槛 的以文件为准）
-	KWSScore      float64       `env:"HARO_KWS_SCORE" envDefault:"1.0"`      // 加分（关键词文件里写了 :加分 的以文件为准）
-	WakeIdle      time.Duration `env:"HARO_WAKE_IDLE" envDefault:"40s"`      // 对话窗口：回答播完后安静这么久就休眠（20 秒太快，接着问时已经睡了），休眠时说一声
-	BargeIn       bool          `env:"HARO_BARGE_IN" envDefault:"true"`      // 回答时喊唤醒词可以打断（需要唤醒词）
-
-	// 声纹：只有登记过的人能唤醒、才会被回答。不设模型 = 关闭；设了但还没人登记 = 不过滤
-	SpeakerModel     string  `env:"HARO_SPEAKER_MODEL"`                      // sherpa-onnx 说话人识别模型（CAM++）
-	VoiceprintsDir   string  `env:"HARO_VOICEPRINTS_DIR"`                    // 登记的声纹（终端 haro -enroll 经服务端登记生成；生物特征，只在本地）
-	SpeakerThreshold float64 `env:"HARO_SPEAKER_THRESHOLD" envDefault:"0.5"` // 相似度达到这个值才算认出来
-	// 唤醒词只有 1 秒多，声纹算不稳（真机：同一人同一位置，整句 0.73、唤醒词 0.25–0.38）：唤醒用低一些的门槛。
-	// 只过了这个门槛的唤醒，接着说的话仍要达到 HARO_SPEAKER_THRESHOLD 才回答
-	WakeSpeakerThreshold float64 `env:"HARO_WAKE_SPEAKER_THRESHOLD" envDefault:"0.2"`
+	WakePhrase string        `env:"HARO_WAKE_PHRASE" envDefault:"哈罗哈罗"` // 只用于提示；真正生效的是 haro-asr 的关键词文件
+	WakeIdle   time.Duration `env:"HARO_WAKE_IDLE" envDefault:"40s"`    // 对话窗口：回答播完后安静这么久就休眠（20 秒太快，接着问时已经睡了），休眠时说一声
+	BargeIn    bool          `env:"HARO_BARGE_IN" envDefault:"true"`    // 回答时喊唤醒词可以打断（需要唤醒词）
 
 	// 工具（见 docs/architecture.md）：自研工具内置在服务端里，MCP 只接第三方服务
 	Tools   bool   `env:"HARO_TOOLS" envDefault:"true"`
@@ -196,13 +172,10 @@ type Settings struct {
 	NetdiagDNSName        string `env:"HARO_NETDIAG_DNS_NAME" envDefault:"www.cloudflare.com"`
 	NetdiagInternetTarget string `env:"HARO_NETDIAG_INTERNET_TARGET" envDefault:"1.1.1.1:443"`
 
-	// 语音合成：HARO_TTS 选引擎。piper 且没设 HARO_TTS_URL 时，由 haro 把 Piper 官方 HTTP 服务作为子进程拉起
-	TTS         string        `env:"HARO_TTS" envDefault:"gpt-sovits"` // piper / gpt-sovits
-	PiperPython string        `env:"HARO_PIPER_PYTHON"`                // 装了 piper-tts 与 flask 的 venv 里的 python
-	PiperModel  string        `env:"HARO_PIPER_MODEL"`
-	PiperPort   int           `env:"HARO_PIPER_PORT" envDefault:"59125"`
-	TTSURL      string        `env:"HARO_TTS_URL"`                      // 外部语音合成服务地址（gpt-sovits 必填）
-	TTSTimeout  time.Duration `env:"HARO_TTS_TIMEOUT" envDefault:"30s"` // 单句合成（含边收边播）的超时
+	// 语音合成：HARO_TTS 选引擎；服务都单独运行，服务端只认地址
+	TTS        string        `env:"HARO_TTS" envDefault:"gpt-sovits"`  // piper / gpt-sovits
+	TTSURL     string        `env:"HARO_TTS_URL"`                      // 语音合成服务的根地址（必填）
+	TTSTimeout time.Duration `env:"HARO_TTS_TIMEOUT" envDefault:"30s"` // 单句合成（含边收边播）的超时
 	// gpt-sovits：参考录音在服务那台机器上的目录；声音文件（各情绪的参考录音名与文字）；流式档位（2 = 中等，R-2）
 	TTSRefDir        string `env:"HARO_TTS_REF_DIR"`
 	TTSVoiceFile     string `env:"HARO_TTS_VOICE_FILE"`
@@ -288,14 +261,14 @@ func (settings Settings) validateTerminal() error {
 
 // validateBrain 校验服务端的配置。判断说完、唤醒词要用到的模型由服务端（haro-asr）加载，所以也在这里看。
 func (settings Settings) validateBrain() error {
+	if err := requireHTTPURL("HARO_TTS_URL", settings.TTSURL, "语音合成服务的地址；Piper 也要自己先运行起来，例如 python -m piper.http_server"); err != nil {
+		return err
+	}
 	switch settings.TTS {
 	case TTSPiper:
-		if settings.TTSURL == "" && (settings.PiperPython == "" || settings.PiperModel == "") {
-			return fmt.Errorf("HARO_TTS=piper 且没有设 HARO_TTS_URL 时，必须设 HARO_PIPER_PYTHON 和 HARO_PIPER_MODEL")
-		}
 	case TTSGPTSoVITS:
-		if settings.TTSURL == "" || settings.TTSRefDir == "" || settings.TTSVoiceFile == "" {
-			return fmt.Errorf("HARO_TTS=gpt-sovits 时必须设 HARO_TTS_URL、HARO_TTS_REF_DIR 和 HARO_TTS_VOICE_FILE")
+		if settings.TTSRefDir == "" || settings.TTSVoiceFile == "" {
+			return fmt.Errorf("HARO_TTS=gpt-sovits 时必须设 HARO_TTS_REF_DIR 和 HARO_TTS_VOICE_FILE")
 		}
 		if settings.TTSStreamingMode < 0 || settings.TTSStreamingMode > 3 {
 			return fmt.Errorf("HARO_TTS_STREAMING_MODE 只能是 0–3，现在是 %d", settings.TTSStreamingMode)
@@ -312,30 +285,11 @@ func (settings Settings) validateBrain() error {
 	default:
 		return fmt.Errorf("HARO_LLM_PROVIDER 只能是 %s 或 %s，现在是 %q", LLMLocal, LLMCloud, settings.LLMProvider)
 	}
-	switch settings.ASR {
-	case ASRLocal:
-		if settings.ASRBinary == "" || settings.ASRModelDir == "" {
-			return fmt.Errorf("HARO_ASR=local 时必须设 HARO_ASR_BIN 和 HARO_ASR_MODEL_DIR")
-		}
-	case ASROpenAI:
-		if settings.ASRURL == "" {
-			return fmt.Errorf("HARO_ASR=openai 时必须设 HARO_ASR_URL")
-		}
-	default:
-		return fmt.Errorf("HARO_ASR 只能是 %s 或 %s，现在是 %q（整段转写的 voice-api 已删除）", ASRLocal, ASROpenAI, settings.ASR)
-	}
-	if settings.ASR == ASRLocal && settings.VADModel == "" {
-		return fmt.Errorf("HARO_ASR=local 时必须设 HARO_VAD_MODEL")
-	}
-	if settings.ASR == ASRLocal && (settings.KWSModelDir == "" || settings.WakeWordsFile == "") {
-		return fmt.Errorf("HARO_ASR=local 时必须设 HARO_KWS_MODEL_DIR 和 HARO_WAKE_WORDS_FILE（唤醒词）")
+	if err := requireHTTPURL("HARO_ASR_URL", settings.ASRURL, "语音识别服务 haro-asr 的地址；haro-asr 单独运行，见 ASRSettings"); err != nil {
+		return err
 	}
 	switch settings.TurnDetection {
-	case "server_vad":
-	case "semantic_vad":
-		if settings.ASR == ASRLocal && settings.TurnModel == "" {
-			return fmt.Errorf("HARO_TURN_DETECTION=semantic_vad 且 HARO_ASR=local 时必须设 HARO_TURN_MODEL（或改用 server_vad）")
-		}
+	case "server_vad", "semantic_vad":
 	default:
 		return fmt.Errorf("HARO_TURN_DETECTION 只能是 semantic_vad 或 server_vad，现在是 %q", settings.TurnDetection)
 	}
@@ -356,14 +310,23 @@ func (settings Settings) validateBrain() error {
 	if err := settings.validateStrongLLM(); err != nil {
 		return err
 	}
-	if settings.SpeakerModel != "" && settings.VoiceprintsDir == "" {
-		return fmt.Errorf("设了 HARO_SPEAKER_MODEL 时必须设 HARO_VOICEPRINTS_DIR（声纹放在哪）")
-	}
 	if settings.Tools && settings.NotesDB == "" {
 		return fmt.Errorf("HARO_TOOLS=true 时必须设 HARO_NOTES_DB（或设 HARO_TOOLS=false）")
 	}
 	if settings.ServerListen == "" {
 		return fmt.Errorf("必须设 HARO_SERVER_LISTEN（haro-server 的监听地址）")
+	}
+	return nil
+}
+
+// requireHTTPURL 检查必填的服务地址：解析得出、是 http / https、有主机名（按结构判断，不比字符串前缀）。
+func requireHTTPURL(name, value, what string) error {
+	if value == "" {
+		return fmt.Errorf("必须设 %s（%s）", name, what)
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+		return fmt.Errorf("%s 要是 http(s)://主机[:端口] 形式的地址，现在是 %q", name, value)
 	}
 	return nil
 }

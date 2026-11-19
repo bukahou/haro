@@ -6,7 +6,7 @@ haro 是一个家用语音助手：家里每个房间放一台**终端**（麦�
 ```
  终端 haro（每台机器一个）                          服务端 haro-server（家里一个）
  ┌───────────────────────────┐   WebSocket     ┌──────────────────────────────────────────┐
- │ 麦克风 → 上传音频          │ ─────────────▶ │ 语音识别 haro-asr（子进程）                 │
+ │ 麦克风 → 上传音频          │ ─────────────▶ │ 语音识别 haro-asr（单独的进程 / 容器）       │
  │ 音箱  ← 播放回答           │ ◀───────────── │   VAD · 说完判断 · 唤醒词 · 声纹            │
  │ 摄像头 → 画面（可选）       │  Realtime 事件 │ 对话（按人分开）→ 大模型 → 工具              │
  │ 看守：断线重连、设备随时重选 │                │ 语音合成（GPT-SoVITS / Piper）             │
@@ -19,7 +19,7 @@ haro 是一个家用语音助手：家里每个房间放一台**终端**（麦�
 |---|---|---|
 | `cmd/haro` | 终端。`haro -enroll <名字>` 登记声纹（录音经服务端登记） | cgo（音频库 miniaudio 随源码编译，不用装系统库）；摄像头在 macOS 上要 ffmpeg（Linux 不用） |
 | `cmd/haro-server` | 服务端 | 纯 Go |
-| `cmd/haro-asr` | 本地语音识别服务，由服务端作为子进程启动；也可以单独运行（流式转写，协议照 OpenAI Realtime 的转写会话） | cgo（sherpa-onnx） |
+| `cmd/haro-asr` | 本地语音识别服务（流式转写，协议照 OpenAI Realtime 的转写会话）。单独运行：集群里和服务端是同一个 Pod 的两个容器，开发机上各一个 systemd 用户单元；服务端按 `HARO_ASR_URL` 连它 | cgo（sherpa-onnx） |
 
 ## 终端和服务端之间的协议
 
@@ -44,13 +44,16 @@ haro 是一个家用语音助手：家里每个房间放一台**终端**（麦�
 
 | 接口 | 实现 |
 |---|---|
-| `SpeechRecognizer` / `StreamingRecognizer` | `internal/speech`：本地 haro-asr、OpenAI 兼容的转写服务 |
+| `StreamingRecognizer` | `internal/speech`：按 `HARO_ASR_URL` 连 haro-asr（或其他照 OpenAI Realtime 转写会话的服务） |
 | `ChatModel` | `internal/llm`：ollama（本地）、Claude API 或 OpenAI 兼容接口（云端）；主备切换（`FallbackChatModel`） |
 | `SpeechSynthesizer` | `internal/speech`：GPT-SoVITS（边合成边播放）、Piper |
 | `Toolbox` | `internal/tools`：内置工具 + 第三方 MCP 服务 |
 | `ConversationStore` | `internal/conversationstore`：每人一个文件 |
 | `Briefer` | 每轮补充给模型的即时情况：现在几号几点、主人家大致在哪（城市级）、额度提醒、后台调查的任务板 |
 
+- **坏了要出声**：服务端和 haro-asr 之间的识别流断了会自己重开（带退避），重开后把「醒着 / 正在播放」重新告诉它；
+  断开超过 10 秒才提示终端一次（`haro.notice` 的 `transcription_lost`，终端播「断开」那一声），重开后再提示一次（`transcription_restored`）。
+  存活检查 `/livez` 只看进程；就绪检查 `/readyz` 看识别、合成、模型凭证、账本，结果由后台定期检查（`internal/readiness`）。
 - **对话跟着人走**：开了声纹时，服务端认出是谁在说话，用这个人自己的对话历史；换终端、断线重连、服务端重启都接得上。
   只保留最近几轮；更早的对话在后台压成一段摘要，放进系统提示词（`internal/brain/summary.go`）。
 - **提示词的结构**（从前到后）：
@@ -171,8 +174,9 @@ Sonnet 5.5 只认 `between_tools`（两次工具调用之间会返回几句进�
 ```
 make build            # bin/haro、bin/haro-server、bin/haro-asr
 make test
-make run              # 前台同时跑服务端和终端
-make install-services # 装成 systemd 用户服务（跟着桌面会话启停：麦克风权限只给登录中的桌面会话）
+make run              # 前台同时跑 haro-asr、服务端和终端
+make install-terminal-service  # 把终端装成 systemd 用户服务（跟着桌面会话启停：麦克风权限只给登录中的桌面会话）
+make install-server-services   # 服务端跑在这台机器上时：haro-asr 和服务端各一个 systemd 用户服务
 make image            # 在本机试建服务端镜像（deploy/server/Dockerfile；模型用构建上下文 models 传进去；不推送）
 make version          # 这次构建的版本号
 ```

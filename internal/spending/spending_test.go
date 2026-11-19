@@ -243,3 +243,24 @@ func TestMeteredAndBudgetedModels(t *testing.T) {
 		t.Errorf("没有本地退路时应返回能念给主人的错误：%v", err)
 	}
 }
+
+// 就绪检查：账本写得进去时正常（内存账本和文件账本都是），检查不改数据。
+func TestLedgerCheckWritable(t *testing.T) {
+	ctx := context.Background()
+	for _, path := range []string{"", filepath.Join(t.TempDir(), "usage.db")} {
+		ledger, err := OpenLedger(ctx, path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := ledger.CheckWritable(ctx); err != nil {
+			t.Errorf("账本 %q 应写得进去：%v", path, err)
+		}
+		if err := ledger.Record(ctx, Charge{Purpose: PurposeChat, Item: "llm:test", Yen: 1}); err != nil {
+			t.Errorf("检查之后应还能照常记账（写锁已放掉）：%v", err)
+		}
+		if totals, err := ledger.Total(ctx, time.Time{}); err != nil || totals.Yen != 1 {
+			t.Errorf("检查不应改数据：%+v %v", totals, err)
+		}
+		ledger.Close()
+	}
+}

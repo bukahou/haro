@@ -1,5 +1,5 @@
 // haro-server：haro 的服务端（架构见 docs/architecture.md）。
-// 识别（haro-asr 子进程）→ 模型 → 工具 → 性格 → 语音合成（GPT-SoVITS 服务或 Piper），
+// 识别（haro-asr，单独运行）→ 模型 → 工具 → 性格 → 语音合成（GPT-SoVITS 服务或 Piper），
 // 经 WebSocket（Realtime 事件）为终端 haro 服务。一条连接一个会话。
 // 这里只做组装：读配置 → 创建各段实现 → 挂到 HTTP 服务上。
 package main
@@ -16,7 +16,6 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
-	"strconv"
 	"syscall"
 	"time"
 	_ "time/tzdata" // 内置时区数据：镜像里没有 /usr/share/zoneinfo 时 TZ（例如 Asia/Tokyo）照样生效（集群里默认是 UTC）
@@ -31,6 +30,7 @@ import (
 	"github.com/bukahou/haro/internal/notes"
 	"github.com/bukahou/haro/internal/persona"
 	"github.com/bukahou/haro/internal/profile"
+	"github.com/bukahou/haro/internal/readiness"
 	"github.com/bukahou/haro/internal/realtimeproto"
 	"github.com/bukahou/haro/internal/research"
 	"github.com/bukahou/haro/internal/speech"
@@ -79,17 +79,12 @@ func run(logger *slog.Logger) error {
 	// 集群令牌只能换一次 ⇒ 互相把令牌用掉）。不用 Claude 时为 nil
 	claude := newClaudeAPI(settings, httpClient)
 
-	synthesizer, stopSynthesizer, err := buildSynthesizer(ctx, settings, httpClient, logger)
+	synthesizer, err := buildSynthesizer(settings, httpClient, logger)
 	if err != nil {
 		return err
 	}
-	defer stopSynthesizer()
-
-	streaming, stopRecognizer, err := buildRecognizer(ctx, settings, logger)
-	if err != nil {
-		return err
-	}
-	defer stopRecognizer()
+	streaming := speech.NewRealtimeTranscriptionClient(settings.ASRURL)
+	logger.Info("语音识别：haro-asr", "url", settings.ASRURL)
 
 	// 用量账本与额度：先有刹车，再接搜索、后台调查
 	ledger, err := spending.OpenLedger(ctx, settings.UsageDB)
@@ -204,7 +199,17 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	server := &http.Server{Handler: brainHandler(settings, newSession, logger), ReadHeaderTimeout: 10 * time.Second}
+	checks, err := readinessChecks(settings, claude, ledger, httpClient)
+	if err != nil {
+		return err
+	}
+	monitor := readiness.NewMonitor(checks, readinessInterval, readinessTimeout, logger)
+	go monitor.Run(ctx)
+	handler, err := brainHandler(settings, newSession, monitor, logger)
+	if err != nil {
+		return err
+	}
+	server := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -219,54 +224,45 @@ func run(logger *slog.Logger) error {
 	return ctx.Err()
 }
 
-// buildRecognizer 按 HARO_ASR 选择流式识别：local 把 haro-asr 作为子进程拉起；openai 连 HARO_ASR_URL 上的转写服务。
-// 返回流式识别和清理函数。
-func buildRecognizer(ctx context.Context, settings config.Settings, logger *slog.Logger) (brain.StreamingRecognizer, func(), error) {
-	if settings.ASR == config.ASROpenAI {
-		return speech.NewRealtimeTranscriptionClient(settings.ASRURL), func() {}, nil
-	}
-	args := []string{"-listen", "127.0.0.1:" + strconv.Itoa(settings.ASRPort),
-		"-model-dir", settings.ASRModelDir, "-threads", strconv.Itoa(settings.ASRThreads)}
-	if settings.VADModel != "" {
-		args = append(args, "-vad-model", settings.VADModel)
-	}
-	if settings.TurnModel != "" {
-		args = append(args, "-turn-model", settings.TurnModel)
-	}
-	if settings.KWSModelDir != "" && settings.WakeWordsFile != "" {
-		args = append(args, "-kws-model-dir", settings.KWSModelDir, "-keywords-file", settings.WakeWordsFile,
-			"-kws-threshold", strconv.FormatFloat(settings.KWSThreshold, 'f', -1, 64),
-			"-kws-score", strconv.FormatFloat(settings.KWSScore, 'f', -1, 64))
-	}
-	if settings.SpeakerModel != "" { // 声纹
-		args = append(args, "-speaker-model", settings.SpeakerModel, "-voiceprints-dir", settings.VoiceprintsDir,
-			"-speaker-threshold", strconv.FormatFloat(settings.SpeakerThreshold, 'f', -1, 64),
-			"-wake-speaker-threshold", strconv.FormatFloat(settings.WakeSpeakerThreshold, 'f', -1, 64))
-	}
-	asr, err := speech.StartChildServer(ctx, speech.ChildServerSpec{
-		Name: "haro-asr", Command: settings.ASRBinary, Args: args,
-		BaseURL: localURL(settings.ASRPort), ReadyPath: "/health", ReadyTimeout: 30 * time.Second,
-		LogOutput: os.Stderr, // 说完判断的概率、识别结果都在 haro-asr 的日志里
-	})
+// brainHandler 是服务端的全部 HTTP 入口：对话（WebSocket）+ 远程登记声纹（转给 haro-asr）+ 存活 / 就绪检查。
+// 终端只认识服务端的地址；haro-asr 只监听本机（集群里在同一个 Pod）。
+func brainHandler(settings config.Settings, newSession brainserver.SessionFactory, monitor *readiness.Monitor,
+	logger *slog.Logger) (http.Handler, error) {
+	asrURL, err := url.Parse(settings.ASRURL)
 	if err != nil {
-		return nil, nil, err
+		return nil, fmt.Errorf("HARO_ASR_URL: %w", err)
 	}
-	logger.Info("haro-asr 识别服务已就绪", "url", asr.BaseURL, "threads", settings.ASRThreads, "vad", settings.VADModel != "")
-	return speech.NewRealtimeTranscriptionClient(asr.BaseURL), asr.Stop, nil
-}
-
-func localURL(port int) string { return "http://127.0.0.1:" + strconv.Itoa(port) }
-
-// brainHandler 是服务端对终端的全部 HTTP 入口：对话（WebSocket）+ 远程登记声纹（转给 haro-asr）。
-// 终端只认识服务端的地址；haro-asr 只监听本机（容器部署时在同一个容器里）。
-func brainHandler(settings config.Settings, newSession brainserver.SessionFactory, logger *slog.Logger) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/", brainserver.NewHandler(newSession, brainserver.Options{}, logger))
-	if settings.ASR == config.ASRLocal {
-		asrURL, _ := url.Parse(localURL(settings.ASRPort))
-		mux.Handle(realtimeproto.VoiceprintRoute, httputil.NewSingleHostReverseProxy(asrURL))
+	mux.Handle(realtimeproto.VoiceprintRoute, httputil.NewSingleHostReverseProxy(asrURL))
+	mux.HandleFunc("GET /livez", readiness.Alive)
+	mux.Handle("GET /readyz", monitor)
+	return mux, nil
+}
+
+// 就绪检查每 readinessInterval 一轮，每项最多等 readinessTimeout；k8s 的就绪探针只读结果。
+const (
+	readinessInterval = 30 * time.Second
+	readinessTimeout  = 5 * time.Second
+)
+
+// readinessChecks 是服务端的就绪检查：识别、合成连得上，云端模型的凭证能用，账本写得进去。
+func readinessChecks(settings config.Settings, claude *llm.ClaudeAPI, ledger spending.Ledger, httpClient *http.Client) ([]readiness.Check, error) {
+	asrReady, err := url.JoinPath(settings.ASRURL, "readyz")
+	if err != nil {
+		return nil, fmt.Errorf("HARO_ASR_URL: %w", err)
 	}
-	return mux
+	checks := []readiness.Check{
+		{Name: "asr", Probe: readiness.HTTPStatusOK(httpClient, asrReady)},
+		{Name: "tts", Probe: readiness.HTTPReachable(httpClient, settings.TTSURL)},
+		{Name: "ledger", Probe: ledger.CheckWritable},
+	}
+	if claude != nil && settings.UsesCloudLLM() {
+		checks = append(checks, readiness.Check{Name: "llm", Probe: func(ctx context.Context) error {
+			return claude.CheckCredentials(ctx, settings.CloudLLMModel)
+		}})
+	}
+	return checks, nil
 }
 
 // buildChatModel 按 HARO_LLM_PROVIDER 组装服务端用的模型，HARO_LLM_FALLBACK 时另一个当退路：
@@ -508,35 +504,20 @@ const summaryMaxTokens = 600
 // researchMaxTokens 是调查时每次请求的输出上限（结论比聊天长，聊天用 HARO_CLOUD_LLM_MAX_TOKENS）。
 const researchMaxTokens = 1000
 
-// buildSynthesizer 按 HARO_TTS 选择语音合成实现；piper 且没设地址时把 Piper 拉成子进程。
-// 返回的清理函数总是非 nil。
-func buildSynthesizer(ctx context.Context, settings config.Settings, httpClient *http.Client,
-	logger *slog.Logger) (brain.SpeechSynthesizer, func(), error) {
+// buildSynthesizer 按 HARO_TTS 选择语音合成实现（服务都单独运行，只按 HARO_TTS_URL 连）。
+func buildSynthesizer(settings config.Settings, httpClient *http.Client, logger *slog.Logger) (brain.SpeechSynthesizer, error) {
 	if settings.TTS == config.TTSGPTSoVITS {
 		voice, err := speech.LoadGPTSoVITSVoice(settings.TTSVoiceFile)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 		logger.Info("语音合成：GPT-SoVITS", "url", settings.TTSURL, "voice", voice.Name,
 			"emotions", len(voice.References), "streaming_mode", settings.TTSStreamingMode)
 		return speech.NewGPTSoVITSSynthesizer(settings.TTSURL, settings.TTSRefDir, voice, settings.TTSStreamingMode,
-			settings.TTSTimeout, httpClient), func() {}, nil
+			settings.TTSTimeout, httpClient), nil
 	}
-	ttsURL, stop := settings.TTSURL, func() {}
-	if ttsURL == "" {
-		piper, err := speech.StartChildServer(ctx, speech.ChildServerSpec{
-			Name: "piper", Command: settings.PiperPython,
-			Args: []string{"-m", "piper.http_server", "--host", "127.0.0.1",
-				"--port", strconv.Itoa(settings.PiperPort), "-m", settings.PiperModel},
-			BaseURL: localURL(settings.PiperPort), ReadyPath: "/info", ReadyTimeout: 30 * time.Second,
-		})
-		if err != nil {
-			return nil, nil, err
-		}
-		ttsURL, stop = piper.BaseURL, piper.Stop
-		logger.Info("Piper 合成服务已就绪", "url", ttsURL)
-	}
-	return speech.NewPiperHTTPSynthesizer(ttsURL, settings.TTSTimeout, httpClient), stop, nil
+	logger.Info("语音合成：Piper", "url", settings.TTSURL)
+	return speech.NewPiperHTTPSynthesizer(settings.TTSURL, settings.TTSTimeout, httpClient), nil
 }
 
 // buildBrainOptions 读取性格档案；没设 HARO_PERSONAS_DIR 时不分性格。

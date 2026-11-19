@@ -1,5 +1,6 @@
 # syntax=docker/dockerfile:1
-# haro-server 镜像（v4 第 4 步）：服务端（含记事本等内置工具，v5）+ haro-asr（cgo，sherpa-onnx），一个容器、一个 Pod。
+# haro-server 镜像：服务端（含记事本等内置工具）+ haro-asr（cgo，sherpa-onnx）。同一个镜像跑同一个 Pod 里的两个容器：
+# 默认入口是服务端；haro-asr 的容器把入口换成 /opt/haro/bin/haro-asr。两者经本机地址通信（HARO_ASR_LISTEN / HARO_ASR_URL）。
 #
 # 构建（在仓库根目录；模型不在仓库里，用命名构建上下文 models 传进来，目录结构见 deploy/server/models.lock）：
 #   发版：合并到 main 后由 GitHub Actions 构建并推送（.github/workflows/release.yml；模型从本仓库的 Release models-v1 下载并校验）
@@ -53,8 +54,8 @@ COPY --from=models speaker/3dspeaker_speech_campplus_sv_zh_en_16k-common_advance
 # 镜像内部的路径（和镜像一起变）；环境相关的配置（TTS 地址、大模型、性格目录……）由 K8s ConfigMap 给
 ENV LD_LIBRARY_PATH=/opt/haro/lib \
     HARO_SERVER_LISTEN=0.0.0.0:59130 \
-    HARO_ASR=local \
-    HARO_ASR_BIN=/opt/haro/bin/haro-asr \
+    HARO_ASR_LISTEN=127.0.0.1:59126 \
+    HARO_ASR_URL=http://127.0.0.1:59126 \
     HARO_ASR_MODEL_DIR=/opt/haro/models/sensevoice \
     HARO_VAD_MODEL=/opt/haro/models/silero_vad.onnx \
     HARO_TURN_MODEL=/opt/haro/models/smart-turn-v3.2-cpu.onnx \

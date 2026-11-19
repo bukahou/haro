@@ -133,8 +133,14 @@ type HaroNotice struct {
 	Kind string // NoticeResearchDone 等；终端不认识的种类也照样响一声
 }
 
-// NoticeResearchDone：后台调查结束了（查完、没查完或失败）。
-const NoticeResearchDone = "research_done"
+const (
+	// NoticeResearchDone：后台调查结束了（查完、没查完或失败）。
+	NoticeResearchDone = "research_done"
+	// NoticeTranscriptionLost：服务端和语音识别之间断开了一阵还没重开，这期间说的话听不见。
+	NoticeTranscriptionLost = "transcription_lost"
+	// NoticeTranscriptionRestored：语音识别重开了（只在提示过断开之后才发）。
+	NoticeTranscriptionRestored = "transcription_restored"
+)
 
 // InputAudioBufferSpeechStarted 表示 VAD 检测到用户开始说话。
 type InputAudioBufferSpeechStarted struct {
