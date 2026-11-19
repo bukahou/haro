@@ -52,6 +52,15 @@ func (s *Session) runStream(stream RecognizerStream) {
 	}
 }
 
+// takeJob 取出（并去掉）等这句话识别结果的任务；没有时返回 nil。
+func (s *Session) takeJob(item string) *transcriptionJob {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	job := s.pendingJobs[item]
+	delete(s.pendingJobs, item)
+	return job
+}
+
 // wakeArbitrationTimeout：输掉仲裁后让识别流回去休眠，最多等这么久。
 const wakeArbitrationTimeout = 2 * time.Second
 
@@ -114,16 +123,18 @@ func (s *Session) pumpStreamEvents(stream RecognizerStream) {
 				s.emit(realtimeproto.ErrorEventFor("", err))
 			}
 		case realtimeproto.InputAudioTranscriptionCompleted:
-			s.mu.Lock()
-			job := s.pendingJobs[e.ItemID]
-			delete(s.pendingJobs, e.ItemID)
-			s.mu.Unlock()
-			if job != nil {
+			if job := s.takeJob(e.ItemID); job != nil {
 				job.text = strings.TrimSpace(e.Transcript)
 				job.speaker, job.speakerChecked = e.Speaker, e.SpeakerChecked
 				s.logger.Info("阶段耗时", "stage", "brain.recognize", "elapsed", since(job.started))
 				close(job.done)
 			}
+		case realtimeproto.InputAudioTranscriptionFailed:
+			if job := s.takeJob(e.ItemID); job != nil {
+				job.err = realtimeproto.ProtocolErrorf(e.Code, "%s", e.Message)
+				close(job.done)
+			}
+			s.emit(e)
 		case realtimeproto.Error:
 			s.emit(e)
 		}

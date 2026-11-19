@@ -3,6 +3,7 @@ package brain
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"time"
@@ -56,10 +57,16 @@ func (s *Session) respond(ctx context.Context, job *transcriptionJob) (done real
 		s.logger.Info("一轮结束", "item", job.item, "status", done.Status, "reason", done.Reason, "tools", tools,
 			"camera", slices.Contains(tools, lookAtCameraTool), "elapsed", since(job.started))
 	}()
+	wait := time.NewTimer(transcriptionWaitTimeout)
+	defer wait.Stop()
 	select {
 	case <-job.done:
 	case <-ctx.Done():
 		return realtimeproto.ResponseDone{Status: realtimeproto.StatusCancelled}
+	case <-wait.C: // 识别服务既没给结果也没报失败（例如卡住了）：这一轮不再等
+		s.takeJob(job.item)
+		return s.failed(realtimeproto.ReasonTranscriptionFailed, "语音转文字",
+			fmt.Errorf("等了 %v 还没有识别结果", transcriptionWaitTimeout))
 	}
 	if job.err != nil {
 		return s.failed(realtimeproto.ReasonTranscriptionFailed, "语音转文字", job.err)
@@ -128,6 +135,10 @@ func (s *Session) finishAnswer(ctx context.Context, record *turnRecord, answer s
 	}
 	return done
 }
+
+// transcriptionWaitTimeout：判定说完之后等识别结果最多这么久。识别一句一般不到 0.1 秒；
+// 识别服务断开时等的回答立刻失败，这个期限只兜「它还连着却一直不给结果」的情况。
+var transcriptionWaitTimeout = 10 * time.Second
 
 // wakeAcknowledgement 是只叫了唤醒词时的回答。
 const wakeAcknowledgement = "我在。"

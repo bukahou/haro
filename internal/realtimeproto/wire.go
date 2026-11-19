@@ -78,6 +78,7 @@ const (
 	typeSpeechStarted          = "input_audio_buffer.speech_started"
 	typeSpeechStopped          = "input_audio_buffer.speech_stopped"
 	typeTranscriptionCompleted = "conversation.item.input_audio_transcription.completed"
+	typeTranscriptionFailed    = "conversation.item.input_audio_transcription.failed"
 	typeHaroWakeWordDetected   = "haro.wake_word.detected"
 	typeTranscriptDelta        = "response.output_audio_transcript.delta"
 	typeAudioDelta             = "response.output_audio.delta"
@@ -164,6 +165,13 @@ type wireTranscriptionCompleted struct {
 	ItemID     string                 `json:"item_id"`
 	Transcript string                 `json:"transcript"`
 	Haro       *wireTranscriptSpeaker `json:"haro,omitempty" jsonschema:"haro 扩展：声纹比对结果；没比对时不带"`
+}
+
+type wireTranscriptionFailed struct {
+	Type         string        `json:"type"`
+	ItemID       string        `json:"item_id" jsonschema:"识别失败的是哪一句话（和 speech_stopped 的 item_id 一致）"`
+	ContentIndex int           `json:"content_index"`
+	Error        wireErrorBody `json:"error"`
 }
 
 type wireTranscriptSpeaker struct {

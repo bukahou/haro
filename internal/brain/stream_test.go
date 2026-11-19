@@ -295,3 +295,38 @@ func TestAudioBeforeStreamIsRejected(t *testing.T) {
 		t.Error("识别流没打开时应拒绝音频")
 	}
 }
+
+// 识别服务报这句识别失败（带编号）：等这句结果的回答马上以 transcription_failed 结束，不一直等着。
+func TestTranscriptionFailureEndsTheTurn(t *testing.T) {
+	voice := braintest.NewVoice()
+	session := newStreamSession(t, voice, &fakeModel{tokens: []string{"不该调用模型。"}}, nil)
+	turn := realtimeproto.TurnDetection{Type: "server_vad"}
+	stream := braintest.Open(t, session, voice, realtimeproto.SessionUpdate{TurnDetection: &turn})
+
+	braintest.Speak(t, session, stream, braintest.Utterance{})
+	braintest.Expect[realtimeproto.ResponseCreated](t, session)
+	if err := stream.Emit(realtimeproto.InputAudioTranscriptionFailed{ItemID: stream.LastItemID(),
+		Code: realtimeproto.CodeTranscriptionFailed, Message: "识别失败"}); err != nil {
+		t.Fatal(err)
+	}
+	done := braintest.Done(t, braintest.CollectUntilDone(t, session))
+	if done.Status != realtimeproto.StatusFailed || done.Reason != realtimeproto.ReasonTranscriptionFailed {
+		t.Errorf("应以识别失败结束：%+v", done)
+	}
+}
+
+// 识别服务既不给结果也不报失败：等到期限就结束这一轮，不一直挂着。
+func TestTranscriptionWaitTimesOut(t *testing.T) {
+	defer brain.SetTranscriptionWaitTimeoutForTest(50 * time.Millisecond)()
+	voice := braintest.NewVoice()
+	session := newStreamSession(t, voice, &fakeModel{tokens: []string{"不该调用模型。"}}, nil)
+	turn := realtimeproto.TurnDetection{Type: "server_vad"}
+	stream := braintest.Open(t, session, voice, realtimeproto.SessionUpdate{TurnDetection: &turn})
+
+	braintest.Speak(t, session, stream, braintest.Utterance{})
+	braintest.Expect[realtimeproto.ResponseCreated](t, session)
+	done := braintest.Done(t, braintest.CollectUntilDone(t, session))
+	if done.Status != realtimeproto.StatusFailed || done.Reason != realtimeproto.ReasonTranscriptionFailed {
+		t.Errorf("等不到识别结果应结束这一轮：%+v", done)
+	}
+}

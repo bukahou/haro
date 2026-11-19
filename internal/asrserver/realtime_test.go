@@ -3,6 +3,7 @@ package asrserver
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -661,4 +662,49 @@ func transcriptionURL(t *testing.T, base string) string {
 		t.Fatal(err)
 	}
 	return address
+}
+
+type failingTranscriber struct{}
+
+func (failingTranscriber) Transcribe(context.Context, realtimeproto.PCMAudio) (Transcript, error) {
+	return Transcript{}, errors.New("模型出错")
+}
+
+// 识别失败：发带编号的 transcription.failed（和 speech_stopped 的编号一致），服务端据此结束等这句的回答。
+func TestRealtimeTranscriptionFailureNamesTheItem(t *testing.T) {
+	factory := func(realtimeproto.TurnDetection) (VoiceDetector, error) {
+		return &energyDetector{silenceSamples: 300 * 16}, nil
+	}
+	conn, ctx := dialRealtime(t, factory, failingTranscriber{}, nil)
+	turn := realtimeproto.TurnDetection{Type: "server_vad", SilenceDurationMs: 300}
+	if err := writeClientEvent(ctx, conn, transcriptionUpdate(turn, false)); err != nil {
+		t.Fatal(err)
+	}
+	for _, part := range []struct {
+		ms   int
+		loud bool
+	}{{200, false}, {500, true}, {400, false}} {
+		for sent := 0; sent < part.ms; sent += 20 {
+			if err := writeClientEvent(ctx, conn, audioChunk(pcmChunk(20, part.loud))); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	var events []realtimeproto.ServerEvent
+	for len(events) < 3 {
+		_, data, err := conn.Read(ctx)
+		if err != nil {
+			t.Fatalf("已收到 %v，读取出错 %v", events, err)
+		}
+		event, err := realtimeproto.DecodeServerEvent(data)
+		if err != nil || event == nil {
+			t.Fatalf("解析 %s: %v", data, err)
+		}
+		events = append(events, event)
+	}
+	stopped, ok1 := events[1].(realtimeproto.InputAudioBufferSpeechStopped)
+	failed, ok2 := events[2].(realtimeproto.InputAudioTranscriptionFailed)
+	if !ok1 || !ok2 || failed.ItemID != stopped.ItemID || failed.Code != realtimeproto.CodeTranscriptionFailed {
+		t.Errorf("识别失败应发带编号的 transcription.failed：%#v", events)
+	}
 }

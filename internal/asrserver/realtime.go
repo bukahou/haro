@@ -486,8 +486,10 @@ func (s *transcriptionSession) finishUtterance(ctx context.Context) error {
 	}
 	started := time.Now()
 	transcript, err := s.deps.Transcriber.Transcribe(ctx, audio)
-	if err != nil {
-		return writeEvent(ctx, s.conn, realtimeproto.Error{Code: realtimeproto.CodeTranscriptionFailed, Message: "识别失败: " + err.Error()})
+	if err != nil { // 带上是哪一句：服务端等这句结果的回答据此结束（只发不带编号的 error 时那一轮会一直等）
+		s.deps.Logger.Warn("识别失败", "item", current.itemID, "err", err)
+		return writeEvent(ctx, s.conn, realtimeproto.InputAudioTranscriptionFailed{ItemID: current.itemID,
+			Code: realtimeproto.CodeTranscriptionFailed, Message: "识别失败: " + err.Error()})
 	}
 	s.deps.Logger.Info("一句话的范围", "item", current.itemID, "start_ms", current.startSample/samplesPerMs,
 		"end_ms", current.endSample/samplesPerMs, "after_wake_ms", s.sinceWakeMs(current.startSample), "wake", current.wake)

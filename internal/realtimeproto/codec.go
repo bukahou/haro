@@ -41,6 +41,7 @@ var serverEvents = map[string]serverCodec{
 	typeSpeechStarted:          {wireSpeechStarted{}, decodeSpeechStarted},
 	typeSpeechStopped:          {wireSpeechStopped{}, decodeSpeechStopped},
 	typeTranscriptionCompleted: {wireTranscriptionCompleted{}, decodeTranscriptionCompleted},
+	typeTranscriptionFailed:    {wireTranscriptionFailed{}, decodeTranscriptionFailed},
 	typeHaroWakeWordDetected:   {wireWakeWordDetected{}, decodeWakeWordDetected},
 	typeTranscriptDelta:        {wireTranscriptDelta{}, decodeTranscriptDelta},
 	typeAudioDelta:             {wireAudioDelta{}, decodeAudioDelta},
@@ -276,6 +277,18 @@ func decodeTranscriptionCompleted(data []byte) (ServerEvent, error) {
 		completed.Speaker, completed.SpeakerChecked = wire.Haro.Speaker, wire.Haro.Checked
 	}
 	return completed, err
+}
+
+func (e InputAudioTranscriptionFailed) toWire() (any, error) {
+	code := cmp.Or(e.Code, CodeTranscriptionFailed)
+	return wireTranscriptionFailed{Type: typeTranscriptionFailed, ItemID: e.ItemID,
+		Error: wireErrorBody{Type: code.errorType(), Code: code, Message: e.Message}}, nil
+}
+
+func decodeTranscriptionFailed(data []byte) (ServerEvent, error) {
+	var wire wireTranscriptionFailed
+	err := json.Unmarshal(data, &wire)
+	return InputAudioTranscriptionFailed{ItemID: wire.ItemID, Code: wire.Error.Code, Message: wire.Error.Message}, err
 }
 
 func (e HaroWakeWordDetected) toWire() (any, error) {
