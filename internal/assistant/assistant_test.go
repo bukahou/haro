@@ -14,12 +14,6 @@ import (
 
 // 终端测试共用的替身硬件与模型（终端 + 真实的 brain.Session 的整条路径见 wake_word_test.go）。
 
-type fakeCamera struct{}
-
-func (fakeCamera) LatestFrame(context.Context) ([]byte, time.Time, error) {
-	return []byte("jpeg"), time.Now(), nil
-}
-
 type recordingSpeaker struct {
 	mu      sync.Mutex
 	opened  int

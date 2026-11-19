@@ -7,14 +7,13 @@ import (
 	"sync"
 
 	"github.com/coder/websocket"
-	"github.com/coder/websocket/wsjson"
 
 	"github.com/bukahou/haro/internal/brain"
 	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
 // RealtimeTranscriptionClient 连接 OpenAI Realtime 风格的转写会话（WebSocket，server_vad）。
-// 服务端可以是 haro-asr，也可以是其他实现了同一子集的服务（见 realtimeproto/transcription_wire.go）。
+// 服务端可以是 haro-asr，也可以是其他实现了同一子集的服务（事件定义见 realtimeproto）。
 type RealtimeTranscriptionClient struct {
 	BaseURL string // http(s)://host:port，会自动换成 ws(s)://
 }
@@ -31,14 +30,17 @@ func (c *RealtimeTranscriptionClient) OpenStream(ctx context.Context, config bra
 	if err != nil {
 		return nil, fmt.Errorf("连接转写服务 %s: %w", url, err)
 	}
-	conn.SetReadLimit(1 << 20)
-	if err := wsjson.Write(ctx, conn, realtimeproto.NewTranscriptionSessionUpdate(config.TurnDetection, config.WakeWord)); err != nil {
-		conn.CloseNow()
-		return nil, fmt.Errorf("发送 session.update: %w", err)
-	}
+	conn.SetReadLimit(realtimeproto.MaxMessageBytes)
 	streamCtx, cancel := context.WithCancel(context.Background())
 	stream := &realtimeTranscriptionStream{conn: conn, cancel: cancel,
 		events: make(chan realtimeproto.ServerEvent, 32)}
+	turn := config.TurnDetection
+	if err := stream.send(ctx, realtimeproto.SessionUpdate{Kind: realtimeproto.SessionTranscription, TurnDetection: &turn,
+		WakeWord: config.WakeWord, InputFormat: realtimeproto.TranscriptionFormat}); err != nil {
+		cancel()
+		conn.CloseNow()
+		return nil, fmt.Errorf("发送 session.update: %w", err)
+	}
 	go stream.readEvents(streamCtx)
 	return stream, nil
 }
@@ -50,30 +52,33 @@ type realtimeTranscriptionStream struct {
 	writeMu sync.Mutex
 }
 
-func (s *realtimeTranscriptionStream) SendAudio(ctx context.Context, pcm []byte) error {
+// send 把一个事件编码后发给转写服务（写入串行）。
+func (s *realtimeTranscriptionStream) send(ctx context.Context, event realtimeproto.ClientEvent) error {
+	data, err := realtimeproto.EncodeClientEvent(event)
+	if err != nil {
+		return err
+	}
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	return wsjson.Write(ctx, s.conn, realtimeproto.NewWireAudioAppend(pcm))
+	return s.conn.Write(ctx, websocket.MessageText, data)
+}
+
+func (s *realtimeTranscriptionStream) SendAudio(ctx context.Context, pcm []byte) error {
+	return s.send(ctx, realtimeproto.InputAudioBufferAppend{Audio: realtimeproto.PCMAudio{Format: realtimeproto.TranscriptionFormat, Data: pcm}})
 }
 
 func (s *realtimeTranscriptionStream) SetAwake(ctx context.Context, awake bool) error {
-	eventType := "haro.wake_word.sleep"
 	if awake {
-		eventType = "haro.wake_word.wake"
+		return s.send(ctx, realtimeproto.HaroWakeWordWake{})
 	}
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-	return wsjson.Write(ctx, s.conn, map[string]string{"type": eventType})
+	return s.send(ctx, realtimeproto.HaroWakeWordSleep{})
 }
 
 func (s *realtimeTranscriptionStream) SetPlayback(ctx context.Context, playing bool) error {
-	eventType := "haro.playback.stopped"
 	if playing {
-		eventType = "haro.playback.started"
+		return s.send(ctx, realtimeproto.HaroPlaybackStarted{})
 	}
-	s.writeMu.Lock()
-	defer s.writeMu.Unlock()
-	return wsjson.Write(ctx, s.conn, map[string]string{"type": eventType})
+	return s.send(ctx, realtimeproto.HaroPlaybackStopped{})
 }
 
 func (s *realtimeTranscriptionStream) Events() <-chan realtimeproto.ServerEvent { return s.events }
@@ -90,7 +95,7 @@ func (s *realtimeTranscriptionStream) readEvents(ctx context.Context) {
 		if err != nil {
 			return
 		}
-		event, err := realtimeproto.DecodeServerWireEvent(data)
+		event, err := realtimeproto.DecodeServerEvent(data)
 		if err != nil || event == nil { // 解析失败或不认识的事件：跳过
 			continue
 		}

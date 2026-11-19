@@ -1,0 +1,34 @@
+package realtimeproto
+
+// 声纹登记接口（haro-asr 提供的 HTTP 接口，haro-server 原样转发）：终端录几句话发过去，
+// haro-asr 算向量、存进声纹目录、立刻生效。请求和响应的结构只在这里定义，两端共用。
+//
+//	POST VoiceprintPath + {名字}   请求体 VoiceprintEnrollment；成功 200 + VoiceprintEnrollmentResult，失败 4xx/5xx + HTTPError
+
+// VoiceprintPath 是声纹登记接口的路径前缀，后面接要登记的名字（路径转义）。
+const VoiceprintPath = "/v1/voiceprints/"
+
+// VoiceprintRoute 是服务端注册路由用的写法（Go ServeMux 的模式）。
+const VoiceprintRoute = "POST " + VoiceprintPath + "{name}"
+
+// VoiceprintEnrollment 是登记请求。
+type VoiceprintEnrollment struct {
+	Append bool     `json:"append"` // 补录：加进这个人原来的声纹
+	Clips  []string `json:"clips"`  // 每句一段 base64 的 PCM（TranscriptionFormat：16 kHz 单声道）
+}
+
+// VoiceprintEnrollmentResult 是登记结果（给人看的诊断数字）。
+type VoiceprintEnrollmentResult struct {
+	Name           string           `json:"name"`
+	Sentences      int              `json:"sentences"`                  // 存下后一共几句
+	Pairwise       []VoiceprintPair `json:"pairwise"`                   // 这次几句之间的相似度
+	BestVsExisting *float64         `json:"best_vs_existing,omitempty"` // 补录时：新录的和原来的最高相似度
+	Speakers       []string         `json:"speakers"`                   // 登记后一共认得哪些人
+}
+
+// VoiceprintPair 是两句之间的相似度（句子从 1 数起）。
+type VoiceprintPair struct {
+	A     int     `json:"a"`
+	B     int     `json:"b"`
+	Score float64 `json:"score"`
+}

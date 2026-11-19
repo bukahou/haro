@@ -36,6 +36,7 @@ import (
 	"github.com/bukahou/haro/internal/speech"
 	"github.com/bukahou/haro/internal/spending"
 	"github.com/bukahou/haro/internal/telemetry"
+	"github.com/bukahou/haro/internal/terminaltools"
 	"github.com/bukahou/haro/internal/tools"
 	"github.com/bukahou/haro/internal/vision"
 	"github.com/bukahou/haro/internal/weather"
@@ -191,7 +192,13 @@ func run(logger *slog.Logger) error {
 	if settings.WakeArbitration > 0 { // 多台终端同时听到唤醒词：只让最合适的那台回答
 		components.WakeArbiter = brain.NewWakeArbiter(settings.WakeArbitration)
 	}
-	newSession := func() brainserver.Session { return brain.NewSession(components, options, logger) }
+	newSession := func(terminal brainserver.Terminal) brainserver.Session {
+		parts := components
+		if terminal.DeviceTools != nil { // haro 终端：它的摄像头经 MCP 用（普通 Realtime 客户端没有）
+			parts.Camera = terminaltools.ConnectCamera(terminal.DeviceTools, buildinfo.Version, logger)
+		}
+		return brain.NewSession(parts, options, logger)
+	}
 
 	listener, err := net.Listen("tcp", settings.ServerListen)
 	if err != nil {
@@ -254,10 +261,10 @@ func localURL(port int) string { return "http://127.0.0.1:" + strconv.Itoa(port)
 // 终端只认识服务端的地址；haro-asr 只监听本机（容器部署时在同一个容器里）。
 func brainHandler(settings config.Settings, newSession brainserver.SessionFactory, logger *slog.Logger) http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle("/", brainserver.NewHandler(newSession, logger))
+	mux.Handle("/", brainserver.NewHandler(newSession, brainserver.Options{}, logger))
 	if settings.ASR == config.ASRLocal {
 		asrURL, _ := url.Parse(localURL(settings.ASRPort))
-		mux.Handle("POST /v1/voiceprints/{name}", httputil.NewSingleHostReverseProxy(asrURL))
+		mux.Handle(realtimeproto.VoiceprintRoute, httputil.NewSingleHostReverseProxy(asrURL))
 	}
 	return mux
 }

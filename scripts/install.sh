@@ -1,5 +1,5 @@
 #!/bin/sh
-# haro 终端的安装脚本（v6 T3：装在自己的用户目录里，不需要 root）。再跑一次 = 升级到最新。
+# haro 终端的安装脚本（装在自己的用户目录里，不需要 root）。再跑一次 = 升级到最新。
 #
 #   curl -fsSL https://github.com/bukahou/haro/releases/latest/download/install.sh | sh -s -- --server-url http://服务端地址:59130
 #
@@ -188,7 +188,7 @@ HARO_SERVER_URL="$server_url"
 # 麦克风 / 音箱：空 = 跟系统默认（麦克风会跳过蓝牙的）。设备名见启动日志里 🎤 / 🔊 那两行
 #HARO_AUDIO_SOURCE=""
 #HARO_AUDIO_SINK=""
-# 摄像头：空 = 自动找（要装 ffmpeg）；none = 不用摄像头
+# 摄像头：空 = 自动找（macOS 上要装 ffmpeg）；none = 不用摄像头
 #HARO_CAMERA_DEVICE=""
 EOF
 	say "已写配置：$env_file"
@@ -199,7 +199,9 @@ probe_url=${current:-$server_url} # 配置文件已有时，终端实际用的�
 if [ -n "$probe_url" ] && ! curl -fsS --max-time 3 -o /dev/null "${probe_url%/}/health" 2>/dev/null; then
 	warn "现在连不上服务端 ${probe_url%/}/health：确认地址对不对、服务端在不在运行（终端启动后会自己一直重连）"
 fi
-command -v ffmpeg >/dev/null 2>&1 || warn "没找到 ffmpeg：摄像头用不了（其他功能不受影响）。要用摄像头请先装 ffmpeg"
+if [ "$os" = Darwin ] && ! command -v ffmpeg >/dev/null 2>&1; then
+	warn "没找到 ffmpeg：macOS 上摄像头要用它（其他功能不受影响）。要用摄像头请先装 ffmpeg"
+fi
 case ":$PATH:" in
 *":$bin_dir:"*) ;;
 *) say "提示：$bin_dir 不在 PATH 里，手动运行时请写全路径 $binary" ;;

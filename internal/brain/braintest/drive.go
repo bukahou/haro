@@ -35,19 +35,14 @@ type Utterance struct {
 	Speaker        string // 声纹认出的人
 	SpeakerChecked bool   // 比对过声纹；为 true 且 Speaker 为空表示不是登记的人
 	Wake           bool   // 这句话之前叫了唤醒词
-	Image          []byte // 终端随这句话带上的画面（JPEG）
 }
 
-// Ask 让主人说一句话并请求回答：识别流先报「开始说 / 说完了」，终端（带上画面）请求回答，识别结果随后到达。
+// Ask 让主人说一句话：识别流先报「开始说 / 说完了」，服务端随即自己开始回答（response.created），识别结果随后到达。
 // 说话前转发给终端的事件（唤醒、开始说、说完了）由 Ask 消费掉；返回从识别结果开始、到 response.done 为止的事件。
 func Ask(t testing.TB, session *brain.Session, stream *Stream, u Utterance) []realtimeproto.ServerEvent {
 	t.Helper()
 	Speak(t, session, stream, u)
-	if len(u.Image) > 0 {
-		send(t, session, realtimeproto.ConversationItemCreate{Item: realtimeproto.ConversationItem{Role: "user",
-			Content: []realtimeproto.ContentPart{{Type: "input_image", ImageJPEG: u.Image}}}})
-	}
-	send(t, session, realtimeproto.ResponseCreate{})
+	Expect[realtimeproto.ResponseCreated](t, session)
 	Recognized(t, stream, u)
 	return CollectUntilDone(t, session)
 }

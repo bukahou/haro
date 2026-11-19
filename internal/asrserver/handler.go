@@ -45,7 +45,7 @@ func NewHandler(deps Dependencies) http.Handler {
 	mux.HandleFunc("GET /v1/realtime", func(w http.ResponseWriter, r *http.Request) {
 		handleRealtimeTranscription(w, r, deps)
 	})
-	mux.HandleFunc("POST /v1/voiceprints/{name}", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc(realtimeproto.VoiceprintRoute, func(w http.ResponseWriter, r *http.Request) {
 		handleEnrollment(w, r, deps.Speakers) // 远程登记声纹
 	})
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
@@ -62,9 +62,5 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 
 // writeError 按 OpenAI 的错误格式返回。
 func writeError(w http.ResponseWriter, status int, message string) {
-	errorType := "invalid_request_error"
-	if status >= 500 {
-		errorType = "server_error"
-	}
-	writeJSON(w, status, map[string]any{"error": map[string]string{"message": message, "type": errorType}})
+	writeJSON(w, status, realtimeproto.NewHTTPError(status, "", message))
 }

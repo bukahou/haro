@@ -50,29 +50,28 @@ func TestConversationLive(t *testing.T) {
 	}
 	defer box.Close()
 	voice := braintest.NewVoice()
-	session := brain.NewSession(brain.Components{
+	parts := brain.Components{
 		Streaming: voice, Synthesizer: textSynthesizer{}, Tools: box,
 		Model:        testChatModel(t),
 		NewSegmenter: func() brain.TextSegmenter { return speech.NewSentenceSegmenter(4, 40) },
-	}, brain.Options{MaxHistoryTurn: 6}, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	}
+	if image, _ := os.ReadFile(os.Getenv("HARO_TEST_IMAGE")); len(image) > 0 { // 终端的摄像头每次拍到这张
+		parts.Camera = braintest.NewCamera(image)
+	}
+	session := brain.NewSession(parts, brain.Options{MaxHistoryTurn: 6, Instructions: brain.DefaultInstructions}, slog.New(slog.NewTextHandler(os.Stderr, nil)))
 	defer session.Close()
 	turns := []string{"帮我记一下，车停在C3的7号位。", "我的车停在哪了？", "现在几点了？", "家里网络正常吗？",
 		"我最近都记了些什么？", "把车停车位那条记录删了。", "确认", "你能看到我吗？"}
-	stream := braintest.Open(t, session, voice, realtimeproto.SessionUpdate{Instructions: brain.DefaultInstructions})
+	stream := braintest.Open(t, session, voice, realtimeproto.SessionUpdate{})
 	if conversation := os.Getenv("HARO_TEST_CONVERSATION"); conversation != "" {
 		turns = strings.Split(conversation, "|")
 	}
-	image, _ := os.ReadFile(os.Getenv("HARO_TEST_IMAGE"))
 
 	for _, text := range turns {
 		utterance := braintest.Utterance{Text: text}
 		braintest.Speak(t, session, stream, utterance)
 		started := time.Now()
-		if len(image) > 0 {
-			_ = session.Send(ctx, realtimeproto.ConversationItemCreate{Item: realtimeproto.ConversationItem{Role: "user",
-				Content: []realtimeproto.ContentPart{{Type: "input_image", ImageJPEG: image}}}})
-		}
-		_ = session.Send(ctx, realtimeproto.ResponseCreate{})
+		braintest.Expect[realtimeproto.ResponseCreated](t, session)
 		braintest.Recognized(t, stream, utterance)
 		var spoken strings.Builder
 		var firstAudio time.Duration

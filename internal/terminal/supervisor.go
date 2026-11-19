@@ -1,12 +1,12 @@
-// Package terminal 是终端的看守（v4 第 1 步，D3「终端永不崩溃」）：按状态机把终端一直跑下去，
-// 除非收到关机信号，否则不退出。
+// Package terminal 是终端的看守：按状态机把终端一直跑下去，除非收到关机信号，否则不退出。
 //
 //	连服务端（断了就按 1→2→4…→30 秒的间隔重连）
 //	  → 等麦克风（没有就待机，每 2 秒查一次）
-//	  → 运行对话（assistant）；同时每 2 秒按选择规则重新选一次设备（1-C）
+//	  → 运行对话（assistant）；同时每 2 秒按选择规则重新选一次设备
 //
-// 运行中任何一处出错（服务端断了、麦克风没了、该换麦克风了），都关掉这条连接、退回「连服务端」重来（1-A）。
-// 服务端断开超过 10 秒，用本地提示音说一声；恢复时再说一声（1-B：断开时终端听不出唤醒词，只能主动说）。
+// 运行中任何一处出错（服务端断了、麦克风没了、该换麦克风了），都关掉这条连接、退回「连服务端」重来。
+// 服务端断开超过 10 秒，用本地提示音说一声；恢复时再说一声（断开时终端听不出唤醒词，只能主动说）。
+// 协议版本和服务端不兼容时重连没用：提示一次，之后隔很久才再试，等人把两端升到同一版本。
 package terminal
 
 import (
@@ -14,6 +14,8 @@ import (
 	"errors"
 	"log/slog"
 	"time"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/bukahou/haro/internal/assistant"
 	"github.com/bukahou/haro/internal/realtimeproto"
@@ -24,6 +26,8 @@ type Connection interface {
 	assistant.BrainSession
 	Done() <-chan struct{} // 连接断了时关闭
 	Close() error
+	// DeviceTools 是这条连接上的 MCP 通道：终端经它把设备能力（拍一帧等）提供给服务端。
+	DeviceTools() mcp.Transport
 }
 
 // Devices 是某一刻的设备情况。
@@ -48,6 +52,7 @@ type Parts struct {
 	MicrophoneOverride string                                         // 配置指定的麦克风 ID（HARO_AUDIO_SOURCE）；空 = 按规则选
 	SpeakerOverride    string                                         // 配置指定的音箱 ID（HARO_AUDIO_SINK）；空 = 跟系统默认
 	CameraName         func() string                                  // 现在能用的摄像头名字；空 = 没有（nil = 这台终端不用摄像头）
+	Tools              DeviceTools                                    // 经 MCP 提供给服务端的设备能力；nil = 不提供
 	NewSession         func(conn Connection, devices Devices) Session // 用这条连接和这组设备创建一次对话运行
 	ToneSink           assistant.AudioSink                            // 播提示音用（跟系统默认）
 	Offline            realtimeproto.PCMAudio                         // 「我和服务端断开了……」
@@ -60,11 +65,13 @@ type Timing struct {
 	Poll          time.Duration // 多久查一次设备
 	BackoffMin    time.Duration // 重连间隔：从这么久开始翻倍
 	BackoffMax    time.Duration // 重连间隔上限
+	// IncompatibleRetry 是协议版本不兼容时多久再试一次（要等人升级，频繁重试没用）；零值 = DefaultTiming 的
+	IncompatibleRetry time.Duration
 }
 
-// DefaultTiming 是 v4 第 1 步裁定的时间（1-B：10 秒；1-C：2 秒；E-1：1→30 秒）。
+// DefaultTiming 是看守的默认时间。
 var DefaultTiming = Timing{OfflineNotice: 10 * time.Second, Poll: 2 * time.Second,
-	BackoffMin: time.Second, BackoffMax: 30 * time.Second}
+	BackoffMin: time.Second, BackoffMax: 30 * time.Second, IncompatibleRetry: 5 * time.Minute}
 
 // Supervisor 是终端的看守。
 type Supervisor struct {
@@ -75,6 +82,9 @@ type Supervisor struct {
 
 // NewSupervisor 创建看守。
 func NewSupervisor(parts Parts, timing Timing, logger *slog.Logger) *Supervisor {
+	if timing.IncompatibleRetry == 0 {
+		timing.IncompatibleRetry = DefaultTiming.IncompatibleRetry
+	}
 	return &Supervisor{parts: parts, timing: timing, logger: logger}
 }
 
@@ -130,6 +140,20 @@ func (s *Supervisor) connect(ctx context.Context, offline *offlineState) (Connec
 		if offline.since.IsZero() { // 不是因为断线才来重连的（例如刚换完麦克风）：从现在开始算
 			offline.since = time.Now()
 		}
+		if errors.Is(err, realtimeproto.ErrIncompatibleProtocol) {
+			s.logger.Error("和服务端的协议版本不兼容：把终端和服务端升到同一版本", "err", err,
+				"retry_in", s.timing.IncompatibleRetry)
+			if !offline.announced {
+				offline.announced = true
+				s.playTone(ctx, s.parts.Offline, "协议版本不兼容")
+			}
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(s.timing.IncompatibleRetry):
+			}
+			continue
+		}
 		s.logger.Warn("连不上服务端", "err", err, "retry_in", backoff)
 		retryAt := time.Now().Add(backoff)
 		for time.Now().Before(retryAt) {
@@ -137,7 +161,7 @@ func (s *Supervisor) connect(ctx context.Context, offline *offlineState) (Connec
 			if !offline.announced {
 				if untilNotice := time.Until(offline.since.Add(s.timing.OfflineNotice)); untilNotice <= 0 {
 					// 到提示时间先立刻再连一次：服务端可能正好在两次重试之间起来了（make deploy 时服务端启动要好几秒，
-					// 而重试间隔在翻倍，下一次可能要等到 15 秒以后）；还连不上才提示（1-B：躲开这类重启）
+					// 而重试间隔在翻倍，下一次可能要等到 15 秒以后）；还连不上才提示（躲开这类重启）
 					if conn, err := s.parts.Dial(ctx); err == nil {
 						return conn, nil
 					}
@@ -170,6 +194,14 @@ func (s *Supervisor) serve(ctx context.Context, conn Connection) error {
 	session := s.parts.NewSession(conn, devices)
 	runCtx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
+	if s.parts.Tools != nil {
+		s.parts.Tools.SetCameraAvailable(devices.Camera != "")
+		go func() { // 设备能力（MCP）跟这条连接同生共死
+			if err := s.parts.Tools.Serve(runCtx, conn.DeviceTools()); err != nil && runCtx.Err() == nil && !isDone(conn) {
+				s.logger.Warn("设备能力（MCP）的会话结束了", "err", err)
+			}
+		}()
+	}
 	go s.watch(runCtx, cancel, conn, session, devices)
 	err = session.Run(runCtx)
 	cause := context.Cause(runCtx)
@@ -227,7 +259,7 @@ func (s *Supervisor) waitForMicrophone(ctx context.Context, conn Connection) (De
 }
 
 // watch 在对话运行期间看着连接和设备：服务端断了就结束；该换麦克风时（不在回答中）结束、重来；
-// 音箱、摄像头有无变化时告诉服务端（没有音箱就不合成语音；没有摄像头就不给模型看画面的工具）。
+// 音箱有无变化时告诉服务端（没有音箱就不合成语音）；摄像头有无变化时增删「拍一帧」工具（服务端随之给不给模型看画面）。
 func (s *Supervisor) watch(ctx context.Context, stop context.CancelCauseFunc, conn Connection, session Session, current Devices) {
 	ticker := time.NewTicker(s.timing.Poll)
 	defer ticker.Stop()
@@ -257,9 +289,16 @@ func (s *Supervisor) watch(ctx context.Context, stop context.CancelCauseFunc, co
 			}
 			changed = true
 		}
-		if latest.Camera != current.Camera { // 摄像头自己会记日志（只在状态变化时），这里只告诉服务端
+		if latest.Camera != current.Camera {
 			current.Camera = latest.Camera
-			changed = true
+			if current.Camera != "" {
+				s.logger.Info("📷 摄像头能用了", "device", current.Camera)
+			} else {
+				s.logger.Warn("📷 摄像头现在用不了")
+			}
+			if s.parts.Tools != nil {
+				s.parts.Tools.SetCameraAvailable(current.Camera != "")
+			}
 		}
 		if changed {
 			if err := conn.Send(ctx, report(current)); err != nil {
@@ -311,7 +350,7 @@ func (s *Supervisor) scan() Devices {
 
 // report 把设备情况转成发给服务端的事件。
 func report(devices Devices) realtimeproto.HaroTerminalDevices {
-	event := realtimeproto.HaroTerminalDevices{Camera: devices.Camera}
+	var event realtimeproto.HaroTerminalDevices
 	if devices.HasMicrophone {
 		event.Microphone = devices.Microphone.Name
 	}

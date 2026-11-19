@@ -1,4 +1,4 @@
-// Package platform 是终端的平台层门面（v4 第 5 步）：本机的麦克风、音箱、摄像头只从这里列出、打开。
+// Package platform 是终端的平台层门面：本机的麦克风、音箱、摄像头只从这里列出、打开。
 // 外面只看到 OpenLocalDevices 和 LocalDevices；用的是哪个操作系统的做法，在编译时自动选定（osdiff），不需要配置。
 //
 //	platform（门面）
@@ -77,17 +77,40 @@ func (d *LocalDevices) OpenSpeaker(id string) assistant.AudioSink {
 	return audio.NewMiniaudioSpeaker(d.audio, id)
 }
 
-// OpenCamera 打开摄像头：常驻模式在后台运行 ffmpeg 直到 ctx 取消；按需模式每轮现抓。
-// 取帧失败后用 pick（服务层的选择规则）重新找摄像头，再按本系统的做法拼 ffmpeg 输入参数。
-func (d *LocalDevices) OpenCamera(ctx context.Context, startup terminal.Choice, pick terminal.CameraPicker,
-	options terminal.CameraOptions) terminal.Camera {
+// OpenCamera 准备好摄像头（这时并不打开它，要看的时候才打开）。底层按 options.Backend 选：
+//   - mediadevices：每次拍之前按选择规则重新找摄像头，启动时没插的之后插上也能用；
+//   - ffmpeg（备用）：启动时没有摄像头就不用（返回 nil, nil），有的话取帧失败后重新找。
+func (d *LocalDevices) OpenCamera(startup terminal.Choice, pick terminal.CameraPicker,
+	options terminal.CameraOptions) (terminal.Camera, error) {
+	backend := options.Backend
+	if backend == terminal.CameraAuto {
+		backend = terminal.CameraFFmpeg
+		if camera.MediaDevicesSupported {
+			backend = terminal.CameraMediaDevices
+		}
+	}
+	if backend == terminal.CameraMediaDevices {
+		find := func(ctx context.Context) (string, string, bool) {
+			choice, ok := pick(ctx)
+			return choice.ID, choice.Name, ok
+		}
+		capturer, err := camera.NewMediaDevicesCamera(find, startup.Name, options.CaptureSize, options.OutputWidth, d.logger)
+		if err != nil {
+			return nil, err
+		}
+		d.logger.Info("📷 拍照方式：mediadevices（要看时才打开，预热到曝光稳定再取帧）")
+		return capturer, nil
+	}
+	if startup.ID == "" {
+		return nil, nil
+	}
 	var requested string // 上次向摄像头要的（设备、格式、分辨率）：变了才写日志，重试时不刷屏
 	locate := func(ctx context.Context) ([]string, string, bool) {
 		choice, ok := pick(ctx)
 		if !ok {
 			return nil, "", false
 		}
-		capture := d.os.CameraInput(ctx, choice.ID, options.CaptureSize)
+		capture := d.os.CameraInput(ctx, choice.ID, options.CaptureSize.String())
 		if now := choice.ID + " " + capture.Format + " " + capture.Size; now != requested {
 			requested = now
 			format := capture.Format
@@ -95,17 +118,12 @@ func (d *LocalDevices) OpenCamera(ctx context.Context, startup terminal.Choice, 
 				format = "由驱动定"
 			}
 			d.logger.Info("📷 向摄像头要画面", "device", choice.Name, "format", format, "size", capture.Size,
-				"wanted", options.CaptureSize)
+				"wanted", options.CaptureSize.String())
 		}
 		return capture.Input, choice.Name, true
 	}
-	if !options.Continuous {
-		return camera.NewOnDemandCamera(locate, startup.Name, options.OutputWidth, d.logger)
-	}
-	continuous := camera.NewContinuousCamera(locate, startup.Name, options.OutputWidth, options.FPS,
-		options.MaxAge, d.logger)
-	go continuous.Run(ctx)
-	return continuous
+	d.logger.Info("📷 拍照方式：ffmpeg（要看时才打开，不预热）")
+	return camera.NewFFmpegCamera(locate, startup.Name, options.OutputWidth, d.logger), nil
 }
 
 // describe 把 miniaudio 列出的设备转成服务层的描述（接口类型由各系统认）。

@@ -3,11 +3,12 @@
 ## ============================================================
 ##   ① ci        调用 ci.yml：测试 + 终端三个平台的程序（测试不过就到此为止）
 ##   ② terminal  把 ① 编好、测过的程序发到 GitHub Release（标签 = 版本号），附 SHA256SUMS、install.sh、
-##               来源证明（attestation）；设为 latest（安装脚本默认装它）；v* 的 Release 只留最近 20 个
+##               来源证明（attestation）；先不设为 latest；v* 的 Release 只留最近 20 个
 ##   ③ server    模型（本仓库 Release models-v1，按 models.lock 校验）→ 构建服务端镜像（和 ci 的 image 是同一个
 ##               action：.github/actions/server-image）→ Trivy 扫描（有可修的 CRITICAL 就不推）
 ##               → 推 Docker Hub（版本号 + latest）→ 来源证明
-##   ④ deploy    ②③ 都成功后，改部署仓库里的镜像标签（bot 提交）。
+##   ④ deploy    ②③ 都成功后，改部署仓库里的镜像标签（bot 提交），再把这次的终端 Release 设为 latest
+##               （安装脚本默认装 latest：服务端镜像没出来时不让新终端先装上——协议不兼容的版本会连不上旧服务端）。
 ##               部署仓库开着 Argo CD 自动同步：标签一改，几分钟内线上就换成新版本
 ##
 ## 版本号 = Release 标签 = 镜像标签 = 程序里的 buildinfo.Version，例如 v0.5.0-1a2b3c4。
@@ -91,7 +92,7 @@ jobs:
             # 重跑同一次提交（例如后面某一步失败后 Re-run）：换上这次的文件
             gh release upload "$TAG" dist/* --clobber
           else
-            gh release create "$TAG" dist/* --title "$TAG" --target "$GITHUB_SHA" --notes-file notes.md --latest
+            gh release create "$TAG" dist/* --title "$TAG" --target "$GITHUB_SHA" --notes-file notes.md --latest=false
           fi
       - name: v* 的 Release 只留最近 20 个
         run: |
@@ -163,6 +164,8 @@ jobs:
   deploy:
     needs: [ci, terminal, server]
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write # 把终端的 Release 设为 latest
     env:
       TAG: ${{ needs.ci.outputs.tag }}
     steps:
@@ -194,6 +197,11 @@ jobs:
             git pull -q --rebase
           done
           exit 1
+      - name: 终端的 Release 设为 latest（服务端镜像已经推上去、部署标签已改）
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release edit "$TAG" --latest
       - name: Summary
         run: |
           {

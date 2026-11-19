@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
@@ -28,14 +27,12 @@ var (
 type Components struct {
 	Manual     ManualToggle // 回车手动唤醒 / 休眠
 	Microphone Microphone
-	Camera     FrameSource // 可为 nil：这个终端没有摄像头，不取画面，并在会话里声明
 	Speaker    AudioSink
 	Brain      BrainSession
 }
 
 // Options 是终端行为的可调参数。
 type Options struct {
-	Instructions  string                      // 系统提示词，启动时经 session.update 交给服务端；空 = 用服务端自己的
 	TurnDetection realtimeproto.TurnDetection // 服务端怎么判断说完
 	EchoGuard     time.Duration               // 不能打断时：播完后再静音这么久才恢复上传，防止把自己的回音当成用户说话
 	WakeWord      WakeWordOptions             // 叫唤醒词才听，对话窗口结束自动休眠
@@ -73,8 +70,7 @@ func NewAssistant(parts Components, opts Options, logger *slog.Logger) *Assistan
 // Run 打开服务端会话（服务端判断说完、启用唤醒门），然后按唤醒词轮流说话，直到 ctx 取消或出错。
 func (a *Assistant) Run(ctx context.Context) error {
 	turn := a.opts.TurnDetection
-	update := realtimeproto.SessionUpdate{Instructions: a.opts.Instructions, TurnDetection: &turn, WakeWord: true,
-		NoCamera: a.parts.Camera == nil}
+	update := realtimeproto.SessionUpdate{TurnDetection: &turn, WakeWord: true}
 	if err := a.parts.Brain.Send(ctx, update); err != nil {
 		return fmt.Errorf("初始化服务端会话: %w", err)
 	}
@@ -88,20 +84,4 @@ func fail(span trace.Span, step string, err error) error {
 		span.SetStatus(codes.Error, wrapped.Error())
 	}
 	return wrapped
-}
-
-// attachFrame 把「说完那一刻」的画面交给服务端。没有摄像头时什么都不做；取帧失败只记日志，本轮不带画面。
-// 只有交给服务端失败时返回错误。
-func (a *Assistant) attachFrame(ctx context.Context, span trace.Span) error {
-	if a.parts.Camera == nil {
-		return nil
-	}
-	frame, takenAt, err := a.parts.Camera.LatestFrame(ctx)
-	if err != nil {
-		a.logger.Warn("取帧失败，本轮不带画面", "err", err)
-		return nil
-	}
-	span.SetAttributes(attribute.Int64("haro.frame_age_ms", time.Since(takenAt).Milliseconds()))
-	return a.parts.Brain.Send(ctx, realtimeproto.ConversationItemCreate{Item: realtimeproto.ConversationItem{Role: "user",
-		Content: []realtimeproto.ContentPart{{Type: "input_image", ImageJPEG: frame}}}})
 }

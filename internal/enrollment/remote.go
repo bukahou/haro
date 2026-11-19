@@ -1,4 +1,4 @@
-// Package enrollment 是终端一侧的远程登记声纹（v4 C-3，`haro -enroll 名字`）：在终端这台机器上录几句话，
+// Package enrollment 是终端一侧的远程登记声纹（`haro -enroll 名字`）：在终端这台机器上录几句话，
 // 发给服务端（服务端转给 haro-asr 算向量、存进服务端的数据目录、立刻生效）。终端不需要说话人识别模型。
 //
 // ⚠️ 录音经与对话同一个 WebSocket 接口发给服务端（没有加密和鉴权，只在可信网络里用）；声纹只存在服务端那边。
@@ -21,6 +21,7 @@ import (
 
 	"github.com/bukahou/haro/internal/assistant"
 	"github.com/bukahou/haro/internal/buildinfo"
+	"github.com/bukahou/haro/internal/realtimeproto"
 	"github.com/bukahou/haro/internal/voiceprint"
 )
 
@@ -98,53 +99,36 @@ func recordFor(ctx context.Context, recorder assistant.AudioRecorder, seconds ti
 	return audio.Data, err
 }
 
-// result 与 haro-asr 的 EnrollmentResult 对应（终端不依赖 haro-asr 的包）。
-type result struct {
-	Name           string   `json:"name"`
-	Sentences      int      `json:"sentences"`
-	Pairwise       []pair   `json:"pairwise"`
-	BestVsExisting *float64 `json:"best_vs_existing"`
-	Speakers       []string `json:"speakers"`
-}
-
-type pair struct {
-	A, B  int
-	Score float64
-}
-
-func upload(ctx context.Context, opts Options, clips []string) (result, error) {
-	body, err := json.Marshal(map[string]any{"append": opts.Append, "clips": clips})
+func upload(ctx context.Context, opts Options, clips []string) (realtimeproto.VoiceprintEnrollmentResult, error) {
+	var none realtimeproto.VoiceprintEnrollmentResult
+	body, err := json.Marshal(realtimeproto.VoiceprintEnrollment{Append: opts.Append, Clips: clips})
 	if err != nil {
-		return result{}, err
+		return none, err
 	}
-	endpoint := strings.TrimRight(opts.ServerURL, "/") + "/v1/voiceprints/" + url.PathEscape(opts.Name)
+	endpoint := strings.TrimRight(opts.ServerURL, "/") + realtimeproto.VoiceprintPath + url.PathEscape(opts.Name)
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return result{}, err
+		return none, err
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("User-Agent", buildinfo.UserAgent())
 	request.Header.Set(buildinfo.Header, buildinfo.Version)
 	response, err := opts.Client.Do(request)
 	if err != nil {
-		return result{}, fmt.Errorf("连不上服务端 %s: %w", opts.ServerURL, err)
+		return none, fmt.Errorf("连不上服务端 %s: %w", opts.ServerURL, err)
 	}
 	defer response.Body.Close()
 	data, _ := io.ReadAll(io.LimitReader(response.Body, 1<<20))
 	if response.StatusCode != http.StatusOK {
-		var failure struct {
-			Error struct {
-				Message string `json:"message"`
-			} `json:"error"`
-		}
+		var failure realtimeproto.HTTPError
 		if json.Unmarshal(data, &failure) == nil && failure.Error.Message != "" {
-			return result{}, fmt.Errorf("登记失败：%s", failure.Error.Message)
+			return none, fmt.Errorf("登记失败：%s", failure.Error.Message)
 		}
-		return result{}, fmt.Errorf("登记失败：HTTP %d %s", response.StatusCode, strings.TrimSpace(string(data)))
+		return none, fmt.Errorf("登记失败：HTTP %d %s", response.StatusCode, strings.TrimSpace(string(data)))
 	}
-	var parsed result
+	var parsed realtimeproto.VoiceprintEnrollmentResult
 	if err := json.Unmarshal(data, &parsed); err != nil {
-		return result{}, fmt.Errorf("解析登记结果: %w", err)
+		return none, fmt.Errorf("解析登记结果: %w", err)
 	}
 	return parsed, nil
 }

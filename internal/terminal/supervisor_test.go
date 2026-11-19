@@ -2,7 +2,9 @@ package terminal
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"sync"
@@ -10,7 +12,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
 	"github.com/bukahou/haro/internal/assistant"
+	"github.com/bukahou/haro/internal/mcpbridge"
 	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
@@ -23,9 +28,41 @@ type fakeConn struct {
 	once    sync.Once
 	mu      sync.Mutex
 	devices []realtimeproto.HaroTerminalDevices
+	tools   *mcpbridge.Transport
 }
 
-func newFakeConn() *fakeConn { return &fakeConn{done: make(chan struct{})} }
+func newFakeConn() *fakeConn {
+	return &fakeConn{done: make(chan struct{}),
+		tools: mcpbridge.NewTransport(func(context.Context, json.RawMessage) error { return nil })}
+}
+
+func (c *fakeConn) DeviceTools() mcp.Transport { return c.tools }
+
+// fakeTools 记下「拍一帧」的增删；Serve 一直跑到连接结束。
+type fakeTools struct {
+	mu        sync.Mutex
+	available []bool
+	serves    atomic.Int32
+}
+
+func (f *fakeTools) Serve(ctx context.Context, _ mcp.Transport) error {
+	f.serves.Add(1)
+	<-ctx.Done()
+	return nil
+}
+
+func (f *fakeTools) SetCameraAvailable(available bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.available = append(f.available, available)
+}
+
+// lastCamera 是最后一次设的摄像头能不能用。
+func (f *fakeTools) lastCamera() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.available) > 0 && f.available[len(f.available)-1]
+}
 
 func (c *fakeConn) Send(_ context.Context, event realtimeproto.ClientEvent) error {
 	if isDone(c) {
@@ -89,15 +126,18 @@ func (f *fakeStream) Played() time.Duration { return 0 }
 
 // rig 是一套可操控的假部件。
 type rig struct {
-	brainUp    atomic.Bool
-	microphone atomic.Value // string：空 = 没有麦克风
-	speaker    atomic.Bool
-	camera     atomic.Value // string：空 = 摄像头现在不可用
-	mu         sync.Mutex
-	conns      []*fakeConn
-	sessions   []Devices
-	fail       chan error
-	sink       fakeSink
+	brainUp      atomic.Bool
+	incompatible atomic.Bool  // 服务端的协议版本和终端不兼容
+	dials        atomic.Int32 // 连了几次服务端
+	microphone   atomic.Value // string：空 = 没有麦克风
+	speaker      atomic.Bool
+	camera       atomic.Value // string：空 = 摄像头现在不可用
+	mu           sync.Mutex
+	conns        []*fakeConn
+	sessions     []Devices
+	fail         chan error
+	sink         fakeSink
+	tools        fakeTools
 }
 
 func newRig() *rig {
@@ -112,6 +152,10 @@ func newRig() *rig {
 func (r *rig) parts() Parts {
 	return Parts{
 		Dial: func(context.Context) (Connection, error) {
+			r.dials.Add(1)
+			if r.incompatible.Load() {
+				return nil, fmt.Errorf("%w：服务端只支持更新的版本", realtimeproto.ErrIncompatibleProtocol)
+			}
 			if !r.brainUp.Load() {
 				return nil, errors.New("连不上")
 			}
@@ -123,6 +167,7 @@ func (r *rig) parts() Parts {
 		},
 		Catalog:    rigCatalog{r},
 		CameraName: func() string { return r.camera.Load().(string) },
+		Tools:      &r.tools,
 		NewSession: func(_ Connection, devices Devices) Session {
 			r.mu.Lock()
 			r.sessions = append(r.sessions, devices)
@@ -277,26 +322,41 @@ func TestSupervisorReportsSpeakerChanges(t *testing.T) {
 }
 
 // 摄像头被拔掉 / 插回来，都告诉服务端（v4 第 5 步 b：没有摄像头时服务端不给模型看画面的工具），且不重来。
-func TestSupervisorReportsCameraChanges(t *testing.T) {
+// 摄像头插拔：增删「拍一帧」工具（服务端随之给不给模型看画面），对话不重来。
+func TestSupervisorOffersCameraToolWhileCameraIsAvailable(t *testing.T) {
 	r := newRig()
 	stop := startSupervisor(t, r)
 	eventually(t, "运行", func() bool { return r.sessionCount() == 1 })
-	conn := r.lastConn()
-	if reports := conn.reports(); len(reports) == 0 || reports[0].Camera != "EMEET" {
-		t.Fatalf("一开始应报告摄像头：%+v", reports)
+	eventually(t, "连接上跑起设备能力的会话", func() bool { return r.tools.serves.Load() == 1 })
+	if !r.tools.lastCamera() {
+		t.Fatal("一开始有摄像头：应提供「拍一帧」")
 	}
 	r.camera.Store("")
-	eventually(t, "报告摄像头没了", func() bool {
-		reports := conn.reports()
-		return reports[len(reports)-1].Camera == ""
-	})
+	eventually(t, "摄像头没了：去掉「拍一帧」", func() bool { return !r.tools.lastCamera() })
 	r.camera.Store("EMEET")
-	eventually(t, "报告摄像头回来了", func() bool {
-		reports := conn.reports()
-		return reports[len(reports)-1].Camera == "EMEET"
-	})
-	if r.sessionCount() != 1 {
+	eventually(t, "摄像头回来了：加回「拍一帧」", r.tools.lastCamera)
+	if r.sessionCount() != 1 || r.tools.serves.Load() != 1 {
 		t.Error("摄像头变化不该重来")
 	}
 	_ = stop()
+}
+
+// 协议版本和服务端不兼容：重连没用。马上提示一次，之后隔 IncompatibleRetry 才再试（不按平常的间隔频繁重连）；
+// 两端升到同一版本后照常连上，并提示「回来了」。
+func TestSupervisorBacksOffOnIncompatibleProtocol(t *testing.T) {
+	r := newRig()
+	r.incompatible.Store(true)
+	timing := testTiming
+	timing.IncompatibleRetry = 400 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go NewSupervisor(r.parts(), timing, slog.New(slog.NewTextHandler(io.Discard, nil))).Run(ctx)
+	eventually(t, "提示一次", func() bool { return r.sink.count() == 1 })
+	time.Sleep(200 * time.Millisecond) // 平常的重连间隔是 10–20 ms，这段时间里会连十几次
+	if n := r.dials.Load(); n != 1 {
+		t.Fatalf("不兼容时不该频繁重连：连了 %d 次", n)
+	}
+	r.incompatible.Store(false)
+	eventually(t, "隔一段时间再试，连上并运行", func() bool { return r.sessionCount() == 1 })
+	eventually(t, "提示「回来了」", func() bool { return r.sink.count() == 2 })
 }

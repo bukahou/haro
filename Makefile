@@ -3,30 +3,30 @@
 #                     音频库 miniaudio 随源码编译，不用装系统库，v4 D10）
 #                     与 bin/haro-asr（cgo，依赖 sherpa-onnx 原生库；由 haro-server 作为子进程拉起，路径由 HARO_ASR_BIN 指定）
 #                     登记声纹用终端的 bin/haro -enroll <名字>（经服务端登记）
-#   make run          构建后同时运行服务端（后台）和终端（前台）；Ctrl+C 两个一起停（v3 第 3 步：拆成两个程序）
+#   make run          构建后同时运行服务端（后台）和终端（前台）；Ctrl+C 两个一起停
 #   make run-server    只运行服务端
 #   make run-terminal 只运行终端（服务端要已经在跑）
 #   make test         全部测试
 #   make check-darwin 在 Linux 上检查 Mac 版能否满足平台层契约（GOOS=darwin 类型检查纯 Go 部分；含 cgo 的音频只能在 Mac 上编）
 #   make version      打印这次构建的版本号
 #
-# 发版（v6）：合并到 main 后由 GitHub Actions 自动完成（.github/workflows/release.yml）——终端各平台程序进 GitHub Release，
+# 发版：合并到 main 后由 GitHub Actions 自动完成（.github/workflows/release.yml）——终端各平台程序进 GitHub Release，
 #   服务端镜像推 Docker Hub，再改部署仓库里的镜像标签。本机不推送镜像。
 #
-# 常驻（v3 第 4 步：systemd 用户服务，跟着桌面会话启停；单元文件在 deploy/systemd/）
+# 常驻（systemd 用户服务，跟着桌面会话启停；单元文件在 deploy/systemd/）
 #   make install-services    装上并启用（以后登录桌面就自动启动）
 #   make uninstall-services  停掉并卸下
-#   make deploy              构建后重启这台机器上装了的服务（换上新版本）。服务端跑在集群里时（v7 起），开发机只装终端：只重启它
+#   make deploy              构建后重启这台机器上装了的服务（换上新版本）。服务端跑在集群里时，开发机只装终端：只重启它
 #   开关：systemctl --user start|stop haro.service haro-server.service；日志：journalctl --user -u haro-server -f
 .PHONY: build run run-server run-terminal test check-darwin install-services uninstall-services deploy check-not-running check-no-manual-run image version
 
 SERVICES := haro-server.service haro.service
 
-# 版本号（v6）：v + VERSION 文件 + 提交号（和 GitHub Release、镜像的标签同一个字符串）；有没提交的改动时加 -dirty
+# 版本号：v + VERSION 文件 + 提交号（和 GitHub Release、镜像的标签同一个字符串）；有没提交的改动时加 -dirty
 VERSION  := v$(shell cat VERSION)-$(shell git rev-parse --short=7 HEAD)$(shell git diff --quiet HEAD || echo -dirty)
 LDFLAGS  := -X github.com/bukahou/haro/internal/buildinfo.Version=$(VERSION)
 
-# 服务端镜像（v4 第 4 步，deploy/server/Dockerfile）：标签 = 版本号；有没提交的改动时拒绝（镜像要能对上源码）
+# 服务端镜像（deploy/server/Dockerfile）：标签 = 版本号；有没提交的改动时拒绝（镜像要能对上源码）
 IMAGE      ?= bukahou/haro-server
 IMAGE_TAG  ?= $(VERSION)
 MODELS_DIR ?= $(HOME)/.local/share/haro
@@ -35,7 +35,7 @@ version:
 	@echo $(VERSION)
 
 build:
-	go build -ldflags '$(LDFLAGS)' -o bin/haro ./cmd/haro            # cgo：终端音频用 miniaudio（v4 D10）
+	go build -ldflags '$(LDFLAGS)' -o bin/haro ./cmd/haro            # cgo：终端音频用 miniaudio
 	CGO_ENABLED=0 go build -ldflags '$(LDFLAGS)' -o bin/haro-server ./cmd/haro-server
 	go build -ldflags '$(LDFLAGS)' -o bin/haro-asr ./cmd/haro-asr
 
@@ -60,10 +60,10 @@ test:
 	go test ./...
 
 # 反过来：装服务 / 换版本前，手动跑的（make run）要先停，否则服务抢不到端口和摄像头
-# 平台层（v4 第 5 步）：Mac / Windows 版的「各系统不同的部分」和服务层在 Linux 上也能做类型检查
+# 平台层：Mac / Windows 版的「各系统不同的部分」和服务层在 Linux 上也能做类型检查
 check-darwin:
-	GOOS=darwin CGO_ENABLED=0 go vet ./internal/platform/osdiff/ ./internal/terminal/
-	GOOS=windows CGO_ENABLED=0 go vet ./internal/platform/osdiff/ ./internal/terminal/
+	GOOS=darwin CGO_ENABLED=0 go vet ./internal/platform/osdiff/ ./internal/platform/camera/ ./internal/terminal/
+	GOOS=windows CGO_ENABLED=0 go vet ./internal/platform/osdiff/ ./internal/platform/camera/ ./internal/terminal/
 
 check-no-manual-run:
 	@if pgrep -u "$$USER" -x haro-server >/dev/null && ! systemctl --user is-active --quiet haro-server.service; then \

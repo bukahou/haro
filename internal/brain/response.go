@@ -29,8 +29,9 @@ type transcriptionJob struct {
 	speakerChecked bool
 }
 
-// runResponse 执行一次回答，结束时恰好发出一个 ResponseDone。
-func (s *Session) runResponse(ctx context.Context, job *transcriptionJob, image []byte) {
+// runResponse 执行一次回答：开始时发 response.created，结束时恰好发出一个 response.done。
+func (s *Session) runResponse(ctx context.Context, job *transcriptionJob) {
+	s.emit(realtimeproto.ResponseCreated{})
 	s.mu.Lock()
 	s.spoken, s.truncateAtMs, s.answeredInResponse, s.responseItem = nil, -1, false, job.item // 新的回答：重新记播出的句子
 	s.mu.Unlock()
@@ -42,13 +43,13 @@ func (s *Session) runResponse(ctx context.Context, job *transcriptionJob, image 
 		s.truncateLastAnswerLocked()
 		s.mu.Unlock()
 	}()
-	done := s.respond(ctx, job, image)
+	done := s.respond(ctx, job)
 	s.emit(done)
 }
 
-func (s *Session) respond(ctx context.Context, job *transcriptionJob, image []byte) (done realtimeproto.ResponseDone) {
+func (s *Session) respond(ctx context.Context, job *transcriptionJob) (done realtimeproto.ResponseDone) {
 	if job == nil {
-		return realtimeproto.ResponseDone{Status: realtimeproto.StatusIncomplete, Reason: "no_input_audio"}
+		return realtimeproto.ResponseDone{Status: realtimeproto.StatusIncomplete, Reason: realtimeproto.ReasonNoInputAudio}
 	}
 	var tools []string // 这一轮调用了哪些工具（按调用顺序）
 	defer func() {
@@ -61,13 +62,13 @@ func (s *Session) respond(ctx context.Context, job *transcriptionJob, image []by
 		return realtimeproto.ResponseDone{Status: realtimeproto.StatusCancelled}
 	}
 	if job.err != nil {
-		return s.failed("语音转文字", job.err)
+		return s.failed(realtimeproto.ReasonTranscriptionFailed, "语音转文字", job.err)
 	}
 	s.emit(realtimeproto.InputAudioTranscriptionCompleted{Transcript: job.text, Speaker: job.speaker,
 		SpeakerChecked: job.speakerChecked})
 	if job.speakerChecked && job.speaker == "" { // 不是登记的人说的：不回答
 		s.logger.Info("不是登记的人说的，不回答", "text", job.text)
-		return realtimeproto.ResponseDone{Status: realtimeproto.StatusIncomplete, Reason: "unknown_speaker"}
+		return realtimeproto.ResponseDone{Status: realtimeproto.StatusIncomplete, Reason: realtimeproto.ReasonUnknownSpeaker}
 	}
 	if job.speakerChecked { // 对话跟人走：认出是谁就接这个人的对话
 		s.useConversationOf(job.speaker)
@@ -82,7 +83,7 @@ func (s *Session) respond(ctx context.Context, job *transcriptionJob, image []by
 		if justWoken { // 只叫了唤醒词：不走大模型，直接回一句
 			return s.speakFixedReply(ctx, wakeAcknowledgement)
 		}
-		return realtimeproto.ResponseDone{Status: realtimeproto.StatusIncomplete, Reason: "empty_transcript"}
+		return realtimeproto.ResponseDone{Status: realtimeproto.StatusIncomplete, Reason: realtimeproto.ReasonEmptyTranscript}
 	}
 	if pending := s.takePendingConfirmation(); pending != nil { // 上一轮问了「确定要删掉吗」
 		if done, handled := s.handleConfirmation(ctx, job.text, pending); handled {
@@ -92,7 +93,7 @@ func (s *Session) respond(ctx context.Context, job *transcriptionJob, image []by
 
 	// 画面不直接附在这句话上：模型需要看时调用 look_at_camera，闲聊时手里就没有画面
 	input := s.userTurn(job.text) // 带上现在的情况；历史里只存原话（remember 用 job.text）
-	answer, toolTrail, usage, err := s.speakAnswer(ctx, s.historyWithInstructions(), input, cameraView{frame: image, request: job.text})
+	answer, toolTrail, usage, err := s.speakAnswer(ctx, s.historyWithInstructions(), input, cameraView{request: job.text})
 	if ctx.Err() != nil {
 		s.rememberInterrupted(job.text) // 被打断：只记用户听到的部分
 		return realtimeproto.ResponseDone{Status: realtimeproto.StatusCancelled}
@@ -103,7 +104,7 @@ func (s *Session) respond(ctx context.Context, job *transcriptionJob, image []by
 			s.logger.Warn("模型不可用，告诉主人原因", "err", err)
 			return s.speakFixedReply(ctx, spoken.SpokenMessage())
 		}
-		return s.failed("生成回答", err)
+		return s.failed(realtimeproto.ReasonGenerationFailed, "生成回答", err)
 	}
 	for _, msg := range toolTrail {
 		for _, call := range msg.ToolCalls {
@@ -129,7 +130,7 @@ func (s *Session) speakFixedReply(ctx context.Context, text string) realtimeprot
 		if ctx.Err() != nil {
 			return realtimeproto.ResponseDone{Status: realtimeproto.StatusCancelled}
 		}
-		return s.failed("语音合成", err)
+		return s.failed(realtimeproto.ReasonSynthesisFailed, "语音合成", err)
 	}
 	return realtimeproto.ResponseDone{Status: realtimeproto.StatusCompleted}
 }
@@ -144,14 +145,18 @@ func hasSpokenText(text string) bool {
 	return false
 }
 
-func (s *Session) failed(step string, err error) realtimeproto.ResponseDone {
-	s.emit(realtimeproto.Error{Message: step + ": " + err.Error()})
-	return realtimeproto.ResponseDone{Status: realtimeproto.StatusFailed, Reason: step}
+// failed 结束一次出错的回答：先发错误（给人看的说明带上是哪一步），再发 status=failed、带原因码的 response.done。
+func (s *Session) failed(reason realtimeproto.ResponseReason, step string, err error) realtimeproto.ResponseDone {
+	code := realtimeproto.CodeServerError
+	if reason == realtimeproto.ReasonTranscriptionFailed {
+		code = realtimeproto.CodeTranscriptionFailed
+	}
+	s.emit(realtimeproto.Error{Code: code, Message: step + ": " + err.Error()})
+	return realtimeproto.ResponseDone{Status: realtimeproto.StatusFailed, Reason: reason}
 }
 
-// cameraView 是这一轮能看的画面，以及主人这一轮的原话（看画面的专家要知道主人问的是什么）。
+// cameraView 是看画面时要带上的这一轮信息：主人这一轮的原话（看画面的专家要知道主人问的是什么）。
 type cameraView struct {
-	frame   []byte
 	request string
 }
 

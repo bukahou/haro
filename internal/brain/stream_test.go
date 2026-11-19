@@ -31,7 +31,7 @@ func TestSessionHandsFreeTurn(t *testing.T) {
 	ctx := context.Background()
 
 	turn := realtimeproto.TurnDetection{Type: "server_vad", SilenceDurationMs: 700}
-	stream := braintest.Open(t, session, voice, realtimeproto.SessionUpdate{Instructions: "测试", TurnDetection: &turn})
+	stream := braintest.Open(t, session, voice, realtimeproto.SessionUpdate{TurnDetection: &turn})
 	if voice.Config().TurnDetection.SilenceDurationMs != 700 {
 		t.Errorf("转写会话收到的配置 %+v", voice.Config())
 	}
@@ -47,17 +47,10 @@ func TestSessionHandsFreeTurn(t *testing.T) {
 	if err := session.Send(ctx, realtimeproto.InputAudioBufferAppend{Audio: wrong}); err == nil {
 		t.Error("格式不对的音频应被拒绝")
 	}
-	if err := session.Send(ctx, realtimeproto.InputAudioBufferCommit{}); err == nil {
-		t.Error("手动提交应被拒绝（由服务端判断说完）")
-	}
 
-	// VAD：开始 → 结束；终端带画面请求回答；识别结果随后才到
+	// VAD：开始 → 结束；服务端判定说完时自己开始回答（不等终端请求）；识别结果随后才到
 	braintest.Speak(t, session, stream, braintest.Utterance{})
-	_ = session.Send(ctx, realtimeproto.ConversationItemCreate{Item: realtimeproto.ConversationItem{Role: "user",
-		Content: []realtimeproto.ContentPart{{Type: "input_image", ImageJPEG: []byte("jpeg")}}}})
-	if err := session.Send(ctx, realtimeproto.ResponseCreate{}); err != nil {
-		t.Fatal(err)
-	}
+	braintest.Expect[realtimeproto.ResponseCreated](t, session)
 	time.Sleep(20 * time.Millisecond) // 回答应在等识别结果
 	braintest.Recognized(t, stream, braintest.Utterance{Text: " 我旁边有什么？ "})
 
@@ -71,7 +64,7 @@ func TestSessionHandsFreeTurn(t *testing.T) {
 
 	// 连接断开：等识别结果的回答应失败，而不是卡住
 	braintest.Speak(t, session, stream, braintest.Utterance{})
-	_ = session.Send(ctx, realtimeproto.ResponseCreate{})
+	braintest.Expect[realtimeproto.ResponseCreated](t, session)
 	_ = stream.Close()
 	events = braintest.CollectUntilDone(t, session)
 	if done := braintest.Done(t, events); done.Status != realtimeproto.StatusFailed {

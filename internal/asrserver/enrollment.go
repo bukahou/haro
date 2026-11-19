@@ -9,36 +9,16 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/bukahou/haro/internal/realtimeproto"
 	"github.com/bukahou/haro/internal/voiceprint"
 )
 
 // 远程登记声纹：终端录几句话发过来，这里算向量、存进声纹目录、立刻生效（不用重启）。
 // 声纹存在服务端那边的数据目录里，终端不能直接写。
 //
-//	POST /v1/voiceprints/{name}   {"append": false, "clips": ["<base64 pcm16 16kHz 单声道>", …]}
+// 请求和响应的结构见 realtimeproto.VoiceprintEnrollment。
 //
 // ⚠️ 声纹属于生物特征数据：只存在这台机器的声纹目录（0600），不进任何备份。
-
-// EnrollmentRequest 是登记请求。
-type EnrollmentRequest struct {
-	Append bool     `json:"append"` // 补录：加进这个人原来的声纹
-	Clips  []string `json:"clips"`  // 每句一段 base64 的 pcm16（16 kHz 单声道）
-}
-
-// EnrollmentResult 是登记结果（给人看的诊断数字）。
-type EnrollmentResult struct {
-	Name           string       `json:"name"`
-	Sentences      int          `json:"sentences"`                  // 存下后一共几句
-	Pairwise       []PairResult `json:"pairwise"`                   // 这次几句之间的相似度
-	BestVsExisting *float64     `json:"best_vs_existing,omitempty"` // 补录时：新录的和原来的最高相似度
-	Speakers       []string     `json:"speakers"`                   // 登记后一共认得哪些人
-}
-
-// PairResult 是两句之间的相似度（句子从 1 数起）。
-type PairResult struct {
-	A, B  int
-	Score float64
-}
 
 // maxUploadBytes 是一次登记声纹请求体的上限：几句话的 base64 音频远到不了这么大。
 const maxUploadBytes = 32 << 20
@@ -52,7 +32,7 @@ func handleEnrollment(w http.ResponseWriter, r *http.Request, speakers *SpeakerC
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBytes)
-	var request EnrollmentRequest
+	var request realtimeproto.VoiceprintEnrollment
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 		writeError(w, http.StatusBadRequest, "无法解析请求: "+err.Error())
 		return
@@ -86,8 +66,8 @@ func handleEnrollment(w http.ResponseWriter, r *http.Request, speakers *SpeakerC
 type badEnrollment struct{ error }
 
 // enroll 算向量、存盘、重新加载所有声纹（立刻生效）。
-func (c *SpeakerCheck) enroll(name string, clips [][]float32, appendMode bool) (EnrollmentResult, error) {
-	result := EnrollmentResult{Name: name}
+func (c *SpeakerCheck) enroll(name string, clips [][]float32, appendMode bool) (realtimeproto.VoiceprintEnrollmentResult, error) {
+	result := realtimeproto.VoiceprintEnrollmentResult{Name: name}
 	embeddings := make([][]float32, 0, len(clips))
 	for i, clip := range clips {
 		embedding, err := c.Embedder.Embed(clip)
@@ -98,7 +78,7 @@ func (c *SpeakerCheck) enroll(name string, clips [][]float32, appendMode bool) (
 	}
 	for i := range embeddings {
 		for j := i + 1; j < len(embeddings); j++ {
-			result.Pairwise = append(result.Pairwise, PairResult{A: i + 1, B: j + 1,
+			result.Pairwise = append(result.Pairwise, realtimeproto.VoiceprintPair{A: i + 1, B: j + 1,
 				Score: voiceprint.Cosine(embeddings[i], embeddings[j])})
 		}
 	}

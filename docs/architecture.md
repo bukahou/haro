@@ -17,14 +17,26 @@ haro 是一个家用语音助手：家里每个房间放一台**终端**（麦�
 
 | 程序 | 作用 | 编译 |
 |---|---|---|
-| `cmd/haro` | 终端。`haro -enroll <名字>` 登记声纹（录音经服务端登记） | cgo（音频库 miniaudio 随源码编译，不用装系统库）；摄像头需要 ffmpeg |
+| `cmd/haro` | 终端。`haro -enroll <名字>` 登记声纹（录音经服务端登记） | cgo（音频库 miniaudio 随源码编译，不用装系统库）；摄像头在 macOS 上要 ffmpeg（Linux 不用） |
 | `cmd/haro-server` | 服务端 | 纯 Go |
 | `cmd/haro-asr` | 本地语音识别服务，由服务端作为子进程启动；也可以单独运行（流式转写，协议照 OpenAI Realtime 的转写会话） | cgo（sherpa-onnx） |
 
 ## 终端和服务端之间的协议
 
 兼容 OpenAI Realtime API 的事件协议（WebSocket），只用其中的一个子集；haro 自己的扩展事件以 `haro.` 开头
-（例如终端上报现在用的麦克风、音箱、摄像头）。见 `internal/realtimeproto`。
+（例如终端上报现在用的麦克风和音箱）。服务端和 haro-asr 之间的转写会话用同一份定义。见 `internal/realtimeproto`：
+
+- 线上的 JSON 结构只定义一处（`wire.go`），编解码只有一处（`codec.go`）；
+- 由它生成 JSON Schema（`haro.realtime.v2.schema.json`），测试比对两者，结构改了而文件没更新就失败；
+- 错误事件带稳定的错误码（`errors.go`），调用方按码判断，不看说明文字。
+- 握手时用 WebSocket 子协议协商版本（`haro.realtime.v2`）：报了不认识的 haro 版本、或者旧版终端没报版本，服务端拒绝握手，
+  响应里给错误码和它支持的版本；什么都不报的当普通 Realtime 客户端（只用标准事件）。终端被拒后提示一次，隔几分钟才再试；
+- 两端各自每 10 秒 ping 一次，5 秒内等不到 pong 就断开（`internal/heartbeat`），终端的看守随即重连。
+- 终端的设备能力（现在是「拍一帧」）走 MCP：终端是 MCP 服务端，服务端是 MCP 客户端，消息装在 `haro.mcp.message` 事件里，
+  跑在同一条连接上（`internal/mcpbridge`；工具的名字、参数、结果、错误码只在 `internal/terminaltools` 定义一处）。
+  模型调用 `look_at_camera` 时，服务端才让终端打开摄像头拍一帧，摄像头平时关着；摄像头插拔时终端增删这个工具，服务端随之给不给模型看画面。
+- 一轮对话由服务端开始：语音前端判定说完时，服务端马上开始回答（先发标准的 `response.created`），识别和准备回答同时进行；
+  终端不上传画面、也不发 `response.create`，只负责播放（`create_response` 设成 false 的普通 Realtime 客户端照旧自己请求）。
 
 ## 服务端（`internal/brain` 与周边）
 
@@ -63,7 +75,7 @@ haro 是一个家用语音助手：家里每个房间放一台**终端**（麦�
 | `save_note` / `search_notes` / `list_recent_notes` / `delete_note` | 记事本（SQLite）；删除前要口头确认 |
 | `check_network` / `network_interfaces` | 网络诊断（查的是服务端所在机器的网络） |
 | `get_weather` | 天气（Open-Meteo，不用密钥）；家的位置可以配坐标，或按公网 IP 推定。Open-Meteo 查不到时改用日本气象厅（见下） |
-| `look_at_camera` | 看终端摄像头的画面（终端有摄像头时才提供） |
+| `look_at_camera` | 看终端摄像头的画面：调用时才经 MCP 让终端拍一帧（终端的工具清单里有「拍一帧」时才提供） |
 | `switch_persona` | 换性格（有两个以上性格时才提供） |
 | `web_search` | 联网搜一次（Tavily 远程 MCP）；设了密钥才提供 |
 | `start_research` / `research_status` / `cancel_research` | 后台调查（见下）；设了搜索密钥才提供 |
@@ -103,7 +115,7 @@ Open-Meteo 连不上或报错时，日本境内的地点改查日本气象厅网
 
 - **服务层** `internal/terminal`、`internal/assistant`：看守（连服务端 → 等麦克风 → 运行，出错就退回去重来）、
   选设备的规则（只看设备的接口类型：有别的麦克风时不用蓝牙麦克风，因为蓝牙耳机当麦克风会切到通话模式、音质下降）。
-- **平台层** `internal/platform`：门面 `OpenLocalDevices`；`audio`（miniaudio）、`camera`（ffmpeg 取帧）、
+- **平台层** `internal/platform`：门面 `OpenLocalDevices`；`audio`（miniaudio）、`camera`（要看时才打开摄像头拍一帧：Linux 用 pion/mediadevices，预热到曝光稳定再取；ffmpeg 是备用，macOS 现在用它）、
   `osdiff`（各操作系统的差异：设备的接口类型怎么认、摄像头怎么找、向摄像头要什么格式和分辨率；按编译标签自动选，`make check-darwin` 在 Linux 上检查 macOS 版能否编译）。
 - 摄像头画面和具体摄像头无关：`HARO_CAMERA_SIZE` 是想要的分辨率，Linux 上先列出摄像头支持的格式（同一摄像头各格式能出的分辨率不同，
   驱动遇到要不到的会悄悄换），能出就明确要它，出不了就要宽度够的里面最小的；`HARO_FRAME_WIDTH`（默认 1280）是送给模型的**最大**宽度，

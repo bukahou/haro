@@ -103,12 +103,6 @@ func (k *talker) ask(text string) []realtimeproto.ServerEvent {
 	return braintest.Ask(k.t, k.session, k.stream, braintest.Utterance{Text: text})
 }
 
-// askWithImage 同 ask，终端随这句话带上画面。
-func (k *talker) askWithImage(text string, image []byte) []realtimeproto.ServerEvent {
-	k.t.Helper()
-	return braintest.Ask(k.t, k.session, k.stream, braintest.Utterance{Text: text, Image: image})
-}
-
 // say 让主人说 text，要求回答正常完成，返回播出的文字。
 func (k *talker) say(text string) string {
 	k.t.Helper()
@@ -129,10 +123,10 @@ func (k *talker) send(event realtimeproto.ClientEvent) {
 
 func TestSessionStreamsSentencesInOrder(t *testing.T) {
 	model := &fakeModel{tokens: []string{"我看到你", "坐在电脑前面，", "旁边有", "一个杯子。", "还有键盘。"}, delay: 5 * time.Millisecond}
-	k := newTestTalker(t, model, fakeSynthesizer{})
-	k.send(realtimeproto.SessionUpdate{Instructions: "你是测试助手"})
+	k := newTalker(t, brain.Components{Model: model, Synthesizer: fakeSynthesizer{}},
+		brain.Options{MaxHistoryTurn: 6, Instructions: "你是测试助手"})
 
-	events := k.askWithImage("你能看到我吗", []byte("jpeg"))
+	events := k.ask("你能看到我吗")
 
 	wantTypes := []string{
 		"conversation.item.input_audio_transcription.completed",
@@ -210,12 +204,42 @@ func TestSessionCancel(t *testing.T) {
 	}
 }
 
+// 判定说完时服务端已经自己开始回答：这时客户端再请求回答，按「已有进行中的回答」拒绝。
 func TestSessionRejectsConcurrentResponse(t *testing.T) {
 	k := newTestTalker(t, &fakeModel{tokens: []string{"慢慢说。"}, delay: 200 * time.Millisecond}, fakeSynthesizer{})
 	braintest.Speak(t, k.session, k.stream, braintest.Utterance{Text: "你好"})
-	k.send(realtimeproto.ResponseCreate{})
-	if err := k.session.Send(context.Background(), realtimeproto.ResponseCreate{}); err == nil {
-		t.Error("进行中的回答未结束时，第二个 response.create 应被拒绝")
+	braintest.Expect[realtimeproto.ResponseCreated](t, k.session)
+	err := k.session.Send(context.Background(), realtimeproto.ResponseCreate{})
+	if protocolErr, ok := errors.AsType[*realtimeproto.ProtocolError](err); !ok || protocolErr.Code != realtimeproto.CodeResponseInProgress {
+		t.Errorf("进行中的回答未结束时，response.create 应以 response_in_progress 拒绝：%v", err)
+	}
+}
+
+// create_response 为 false 的客户端（标准 Realtime 用法）：判定说完时不自动回答，等它发 response.create。
+func TestSessionWaitsForResponseCreateWhenAsked(t *testing.T) {
+	model := braintest.NewModel(t, braintest.Say("好的。"))
+	voice := braintest.NewVoice()
+	session := brain.NewSession(brain.Components{Model: model, Synthesizer: fakeSynthesizer{}, Streaming: voice,
+		NewSegmenter: func() brain.TextSegmenter { return speech.NewSentenceSegmenter(4, 40) }},
+		brain.Options{MaxHistoryTurn: 6}, quiet)
+	defer session.Close()
+	manual := false
+	stream := braintest.Open(t, session, voice, realtimeproto.SessionUpdate{
+		TurnDetection: &realtimeproto.TurnDetection{Type: "server_vad", CreateResponse: &manual}})
+
+	braintest.Speak(t, session, stream, braintest.Utterance{Text: "你好"})
+	select {
+	case event := <-session.Events():
+		t.Fatalf("没请求回答时不该开始回答，收到 %s", event.Type())
+	case <-time.After(100 * time.Millisecond):
+	}
+	if err := session.Send(context.Background(), realtimeproto.ResponseCreate{}); err != nil {
+		t.Fatal(err)
+	}
+	braintest.Expect[realtimeproto.ResponseCreated](t, session)
+	braintest.Recognized(t, stream, braintest.Utterance{Text: "你好"})
+	if done := braintest.Done(t, braintest.CollectUntilDone(t, session)); done.Status != realtimeproto.StatusCompleted {
+		t.Errorf("请求回答后应正常回答：%+v", done)
 	}
 }
 

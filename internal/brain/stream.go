@@ -11,12 +11,12 @@ import (
 )
 
 // streamFormat 是识别流要求的音频格式（与转写会话一致）。
-var streamFormat = realtimeproto.AudioFormat{SampleRate: realtimeproto.TranscriptionSampleRate, Channels: 1}
+var streamFormat = realtimeproto.TranscriptionFormat
 
 // openStream 打开流式转写会话并开始转发它的事件。调用方持有 s.mu。
 func (s *Session) openStream(ctx context.Context, config StreamConfig) error {
 	if s.parts.Streaming == nil {
-		return errors.New("没有配置流式识别，无法打开识别流")
+		return realtimeproto.ProtocolErrorf(realtimeproto.CodeNoTranscriptionStream, "服务端没有配置流式识别，打不开识别流")
 	}
 	stream, err := s.parts.Streaming.OpenStream(ctx, config)
 	if err != nil {
@@ -57,7 +57,7 @@ func (s *Session) winWake(stream RecognizerStream, wake realtimeproto.HaroWakeWo
 }
 
 // pumpStreamEvents 把转写会话的事件翻译给终端：
-// speech_stopped 时登记一个识别任务（终端随后带上画面请求回答，回答会等这个任务完成），
+// speech_stopped 时登记一个识别任务，并（默认）马上开始回答——回答会等这个任务完成，识别和准备回答同时进行；
 // 识别结果到达时完成它。
 func (s *Session) pumpStreamEvents(stream RecognizerStream) {
 	for event := range stream.Events() {
@@ -79,6 +79,16 @@ func (s *Session) pumpStreamEvents(stream RecognizerStream) {
 			s.transcription = job
 			s.mu.Unlock()
 			s.emit(e)
+			s.mu.Lock()
+			var err error
+			if s.autoRespond {
+				err = s.startResponseLocked()
+			}
+			s.mu.Unlock()
+			if err != nil {
+				s.logger.Warn("判定说完时没能开始回答", "item", e.ItemID, "err", err)
+				s.emit(realtimeproto.ErrorEventFor("", err))
+			}
 		case realtimeproto.InputAudioTranscriptionCompleted:
 			s.mu.Lock()
 			job := s.pendingJobs[e.ItemID]
@@ -108,6 +118,6 @@ func (s *Session) pumpStreamEvents(stream RecognizerStream) {
 	select {
 	case <-s.closed: // 正常关闭，不报错
 	default:
-		s.emit(realtimeproto.Error{Message: "转写服务连接断开，听不到了"})
+		s.emit(realtimeproto.Error{Code: realtimeproto.CodeTranscriptionFailed, Message: "转写服务连接断开，听不到了"})
 	}
 }
