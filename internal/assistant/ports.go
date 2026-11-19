@@ -27,7 +27,7 @@ type Recording interface {
 
 // FrameSource 提供摄像头画面。
 type FrameSource interface {
-	// LatestFrame 返回最近一帧（JPEG）与拍摄时刻。常驻实现不等待；按需实现会现抓。
+	// LatestFrame 现拍一帧（JPEG），返回画面和拍摄时刻。
 	LatestFrame(ctx context.Context) ([]byte, time.Time, error)
 }
 

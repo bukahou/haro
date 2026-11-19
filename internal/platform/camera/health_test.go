@@ -9,7 +9,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-	"time"
+
+	"github.com/bukahou/haro/internal/terminal"
 )
 
 // syncBuffer 是并发安全的日志缓冲。
@@ -54,39 +55,15 @@ func TestHealthLogsOnlyTransitions(t *testing.T) {
 	}
 }
 
-// 常驻模式：找不到摄像头时一直重试找（拔掉期间），但只记一条日志。
-func TestContinuousCameraKeepsLookingQuietly(t *testing.T) {
+// ffmpeg 备用：没有摄像头时每次取帧都先重新找（插回来就能接上），不可用只记一条。
+func TestFFmpegCameraRelocatesEveryTimeWhileMissing(t *testing.T) {
 	var logs syncBuffer
 	var calls atomic.Int32
 	locate := func(context.Context) ([]string, string, bool) { calls.Add(1); return nil, "", false }
-	c := NewContinuousCamera(locate, "EMEET", 640, 2, 3*time.Second, testLogger(&logs))
-	c.retryMin, c.retryMax = time.Millisecond, 2*time.Millisecond
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() { c.Run(ctx); close(done) }()
-	deadline := time.Now().Add(2 * time.Second)
-	for calls.Load() < 5 && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
-	cancel()
-	<-done
-	if calls.Load() < 5 {
-		t.Fatalf("应反复重新找摄像头：%d 次", calls.Load())
-	}
-	if n := logs.count("摄像头不可用"); n != 1 || c.CurrentName() != "" {
-		t.Errorf("应只记一条（记了 %d 条），且报告不可用：%q", n, c.CurrentName())
-	}
-}
-
-// 按需模式：没有摄像头时每次取帧都先重新找（插回来就能接上），不可用只记一条。
-func TestOnDemandCameraRelocatesEveryTimeWhileMissing(t *testing.T) {
-	var logs syncBuffer
-	var calls atomic.Int32
-	locate := func(context.Context) ([]string, string, bool) { calls.Add(1); return nil, "", false }
-	c := NewOnDemandCamera(locate, "EMEET", 640, testLogger(&logs))
+	c := NewFFmpegCamera(locate, "EMEET", 640, testLogger(&logs))
 	for range 3 {
-		if _, _, err := c.LatestFrame(context.Background()); !errors.Is(err, errNoCamera) {
-			t.Fatalf("没有摄像头时应报 errNoCamera：%v", err)
+		if _, err := c.Capture(context.Background(), 0); !errors.Is(err, terminal.ErrNoCamera) {
+			t.Fatalf("没有摄像头时应报 ErrNoCamera：%v", err)
 		}
 	}
 	if calls.Load() != 3 || logs.count("摄像头不可用") != 1 || c.CurrentName() != "" {

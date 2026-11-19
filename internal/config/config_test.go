@@ -126,16 +126,45 @@ func TestRemovedSettings(t *testing.T) {
 		return func(name string) (string, bool) { value, ok := env[name]; return value, ok }
 	}
 	notes, err := checkRemovedSettings(lookup(map[string]string{"HARO_TURN_MODE": "hands-free", "HARO_WAKE_WORD": "true",
-		"HARO_MIN_SPEECH": "700ms"}))
-	if err != nil || len(notes) != 3 {
+		"HARO_MIN_SPEECH": "700ms", "HARO_CAMERA_MODE": "on-demand", "HARO_CAMERA_FPS": "2", "HARO_FRAME_MAX_AGE": "3s"}))
+	if err != nil || len(notes) != 6 {
 		t.Errorf("和现在一致的写法只提醒：notes=%v err=%v", notes, err)
 	}
-	for _, env := range []map[string]string{{"HARO_TURN_MODE": "push-to-talk"}, {"HARO_WAKE_WORD": "false"}} {
+	for _, env := range []map[string]string{{"HARO_TURN_MODE": "push-to-talk"}, {"HARO_WAKE_WORD": "false"},
+		{"HARO_CAMERA_MODE": "continuous"}} {
 		if _, err := checkRemovedSettings(lookup(env)); err == nil {
 			t.Errorf("%v 要求已删除的行为，应启动失败", env)
 		}
 	}
 	if notes, err := checkRemovedSettings(lookup(nil)); err != nil || len(notes) != 0 {
 		t.Errorf("没写时什么都不说：notes=%v err=%v", notes, err)
+	}
+}
+
+// 分辨率写成「宽x高」；写错时报错（启动失败），不悄悄换成默认值。
+func TestFrameSizeParsing(t *testing.T) {
+	var size FrameSize
+	if err := size.UnmarshalText([]byte("1280x720")); err != nil || size != (FrameSize{Width: 1280, Height: 720}) {
+		t.Errorf("1280x720 应解析成 1280、720：%+v %v", size, err)
+	}
+	for _, bad := range []string{"1280", "1280*720", "x720", "0x720", "1280x-1", "宽x高"} {
+		if err := new(FrameSize).UnmarshalText([]byte(bad)); err == nil {
+			t.Errorf("%q 应报错", bad)
+		}
+	}
+}
+
+// 拍照底层只认三个值；写错时启动失败。
+func TestCameraBackendIsValidated(t *testing.T) {
+	settings := Settings{TurnDetection: "server_vad", ServerURL: "http://127.0.0.1:59130"}
+	for _, backend := range []string{CameraBackendAuto, CameraBackendMediaDevices, CameraBackendFFmpeg} {
+		settings.CameraBackend = backend
+		if err := settings.validateTerminal(); err != nil {
+			t.Errorf("%s 应该可以：%v", backend, err)
+		}
+	}
+	settings.CameraBackend = "v4l2"
+	if err := settings.validateTerminal(); err == nil {
+		t.Error("不认识的拍照底层应报错")
 	}
 }

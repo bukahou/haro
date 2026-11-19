@@ -40,11 +40,27 @@ const (
 	TTSGPTSoVITS = "gpt-sovits" // GPT-SoVITS api_v2（按情绪选参考录音，流式）
 )
 
-// 摄像头取帧方式。
+// 拍照用哪套底层（都是要看的时候才打开摄像头）。
 const (
-	CameraContinuous = "continuous" // ffmpeg 常驻，随时有最新一帧（摄像头一直开着）
-	CameraOnDemand   = "on-demand"  // 每轮说完时现抓（约 0.8 秒，与识别并行）
+	CameraBackendAuto         = "auto"         // 按系统选：Linux 用 mediadevices，其余用 ffmpeg
+	CameraBackendMediaDevices = "mediadevices" // pion/mediadevices，预热到曝光稳定再取帧（目前只有 Linux）
+	CameraBackendFFmpeg       = "ffmpeg"       // ffmpeg 抓一帧（备用；不预热）
 )
+
+// FrameSize 是「宽x高」写法的分辨率配置（例如 1280x720）。
+type FrameSize struct{ Width, Height int }
+
+// UnmarshalText 解析「宽x高」；写错时报错（启动失败），不悄悄换成默认值。
+func (s *FrameSize) UnmarshalText(text []byte) error {
+	widthText, heightText, found := strings.Cut(string(text), "x")
+	width, widthErr := strconv.Atoi(widthText)
+	height, heightErr := strconv.Atoi(heightText)
+	if !found || widthErr != nil || heightErr != nil || width <= 0 || height <= 0 {
+		return fmt.Errorf("分辨率要写成「宽x高」，例如 1280x720，现在是 %q", text)
+	}
+	s.Width, s.Height = width, height
+	return nil
+}
 
 // Settings 是 haro 的运行配置。
 type Settings struct {
@@ -209,14 +225,13 @@ type Settings struct {
 	AudioSink    string `env:"HARO_AUDIO_SINK"`    // 空 = 跟系统默认（蓝牙重连后自动接回）
 	CameraDevice string `env:"HARO_CAMERA_DEVICE"` // 空 = 自动找；none = 不用摄像头
 	// 终端的提示音（服务端连不上 / 回来了）：目录里放 offline.wav、online.wav（16 bit PCM）；不设 = 内置的不含人声的提示音
-	TonesDir   string `env:"HARO_TONES_DIR"`
-	CameraMode string `env:"HARO_CAMERA_MODE" envDefault:"continuous"`
-	// 想向摄像头要的分辨率；Linux 上摄像头没有它时，改要宽度够的里面最小的（都不够宽就要最大的）
-	CameraSize string `env:"HARO_CAMERA_SIZE" envDefault:"1280x720"`
-	CameraFPS  int    `env:"HARO_CAMERA_FPS" envDefault:"2"`
+	TonesDir string `env:"HARO_TONES_DIR"`
+	// 拍照用哪套底层：auto / mediadevices / ffmpeg
+	CameraBackend string `env:"HARO_CAMERA_BACKEND" envDefault:"auto"`
+	// 想向摄像头要的分辨率；摄像头没有它时，改要宽度够的里面最小的（都不够宽就要最大的）
+	CameraSize FrameSize `env:"HARO_CAMERA_SIZE" envDefault:"1280x720"`
 	// 送给模型的画面最大宽度：画面更宽就缩到这么宽，更窄就原样送（不放大）。1280×720 约 1,200 token，640×480 约 400
-	FrameWidth  int           `env:"HARO_FRAME_WIDTH" envDefault:"1280"`
-	FrameMaxAge time.Duration `env:"HARO_FRAME_MAX_AGE" envDefault:"3s"`
+	FrameWidth int `env:"HARO_FRAME_WIDTH" envDefault:"1280"`
 
 	// 终端 ↔ 服务端：默认都在本机，服务端只监听本机；终端在别的机器上时改监听地址（只在可信网络里）
 	ServerListen string `env:"HARO_SERVER_LISTEN" envDefault:"127.0.0.1:59130"`     // haro-server 监听地址
@@ -259,8 +274,11 @@ func (settings Settings) validateTerminal() error {
 	if settings.TurnDetection != "server_vad" && settings.TurnDetection != "semantic_vad" {
 		return fmt.Errorf("HARO_TURN_DETECTION 只能是 semantic_vad 或 server_vad，现在是 %q", settings.TurnDetection)
 	}
-	if settings.CameraMode != CameraContinuous && settings.CameraMode != CameraOnDemand {
-		return fmt.Errorf("HARO_CAMERA_MODE 只能是 %s 或 %s，现在是 %q", CameraContinuous, CameraOnDemand, settings.CameraMode)
+	switch settings.CameraBackend {
+	case CameraBackendAuto, CameraBackendMediaDevices, CameraBackendFFmpeg:
+	default:
+		return fmt.Errorf("HARO_CAMERA_BACKEND 只能是 %s、%s 或 %s，现在是 %q", CameraBackendAuto, CameraBackendMediaDevices,
+			CameraBackendFFmpeg, settings.CameraBackend)
 	}
 	if settings.ServerURL == "" {
 		return fmt.Errorf("必须设 HARO_SERVER_URL（haro-server 的地址）")

@@ -17,7 +17,7 @@ haro 是一个家用语音助手：家里每个房间放一台**终端**（麦�
 
 | 程序 | 作用 | 编译 |
 |---|---|---|
-| `cmd/haro` | 终端。`haro -enroll <名字>` 登记声纹（录音经服务端登记） | cgo（音频库 miniaudio 随源码编译，不用装系统库）；摄像头需要 ffmpeg |
+| `cmd/haro` | 终端。`haro -enroll <名字>` 登记声纹（录音经服务端登记） | cgo（音频库 miniaudio 随源码编译，不用装系统库）；摄像头在 macOS 上要 ffmpeg（Linux 不用） |
 | `cmd/haro-server` | 服务端 | 纯 Go |
 | `cmd/haro-asr` | 本地语音识别服务，由服务端作为子进程启动；也可以单独运行（流式转写，协议照 OpenAI Realtime 的转写会话） | cgo（sherpa-onnx） |
 
@@ -110,7 +110,7 @@ Open-Meteo 连不上或报错时，日本境内的地点改查日本气象厅网
 
 - **服务层** `internal/terminal`、`internal/assistant`：看守（连服务端 → 等麦克风 → 运行，出错就退回去重来）、
   选设备的规则（只看设备的接口类型：有别的麦克风时不用蓝牙麦克风，因为蓝牙耳机当麦克风会切到通话模式、音质下降）。
-- **平台层** `internal/platform`：门面 `OpenLocalDevices`；`audio`（miniaudio）、`camera`（ffmpeg 取帧）、
+- **平台层** `internal/platform`：门面 `OpenLocalDevices`；`audio`（miniaudio）、`camera`（要看时才打开摄像头拍一帧：Linux 用 pion/mediadevices，预热到曝光稳定再取；ffmpeg 是备用，macOS 现在用它）、
   `osdiff`（各操作系统的差异：设备的接口类型怎么认、摄像头怎么找、向摄像头要什么格式和分辨率；按编译标签自动选，`make check-darwin` 在 Linux 上检查 macOS 版能否编译）。
 - 摄像头画面和具体摄像头无关：`HARO_CAMERA_SIZE` 是想要的分辨率，Linux 上先列出摄像头支持的格式（同一摄像头各格式能出的分辨率不同，
   驱动遇到要不到的会悄悄换），能出就明确要它，出不了就要宽度够的里面最小的；`HARO_FRAME_WIDTH`（默认 1280）是送给模型的**最大**宽度，

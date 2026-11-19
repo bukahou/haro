@@ -78,7 +78,10 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 	defer local.Close()
-	camera := openCamera(ctx, settings, local, logger)
+	camera, err := openCamera(ctx, settings, local, logger)
+	if err != nil {
+		return err
+	}
 	sounds, err := tones.Load(settings.TonesDir) // 不设 = 内置的不含人声的提示音
 	if err != nil {
 		return err
@@ -86,7 +89,7 @@ func run(logger *slog.Logger) error {
 	keyboard := trigger.NewKeyboardTrigger(os.Stdin)
 	options := assistantOptions(settings, sounds)
 	logger.Info("haro 启动", "version", buildinfo.Version, "server", settings.ServerURL,
-		"turn_detection", settings.TurnDetection, "barge_in", options.BargeIn, "camera_mode", settings.CameraMode)
+		"turn_detection", settings.TurnDetection, "barge_in", options.BargeIn, "camera_backend", settings.CameraBackend)
 	for _, note := range settings.RemovedSettingNotes {
 		logger.Warn(note)
 	}
@@ -110,7 +113,7 @@ func run(logger *slog.Logger) error {
 			return assistant.NewAssistant(assistant.Components{
 				Manual:     keyboard,
 				Microphone: local.OpenMicrophone(devices.Microphone.ID),
-				Camera:     camera, // nil = 没有摄像头（会告诉服务端）
+				Camera:     frameSourceOf(camera), // nil = 没有摄像头（会告诉服务端）
 				Speaker:    local.OpenSpeaker(devices.Speaker.ID),
 				Brain:      conn,
 			}, options, logger)
@@ -166,24 +169,57 @@ func assistantOptions(settings config.Settings, sounds tones.Tones) assistant.Op
 	}
 }
 
-// openCamera 选摄像头并打开；启动时没有摄像头就不用（之后插上要重启终端），返回 nil。
-// 启动时有、之后被拔掉或换了设备号，由平台层按同一套规则重新找。列不出摄像头也不退出。
+// openCamera 选摄像头并准备好（这时不打开，要看的时候才打开）。HARO_CAMERA_DEVICE=none 时不用摄像头，返回 nil。
+// 列不出摄像头不退出；要的拍照方式这个系统上不支持时返回错误（配置写错了，启动失败）。
 func openCamera(ctx context.Context, settings config.Settings, local *platform.LocalDevices,
-	logger *slog.Logger) terminal.Camera {
+	logger *slog.Logger) (terminal.Camera, error) {
+	if settings.CameraDevice == terminal.CameraNone {
+		logger.Info("📷 不用摄像头", "why", "配置关闭（HARO_CAMERA_DEVICE=none）")
+		return nil, nil
+	}
 	cameras, err := local.Cameras(ctx)
 	if err != nil {
-		logger.Warn("列不出摄像头：当作没有", "err", err)
+		logger.Warn("列不出摄像头：当作现在没有", "err", err)
 	}
 	choice := terminal.ChooseCamera(cameras, settings.CameraDevice)
 	if choice.ID == "" {
-		logger.Info("📷 不用摄像头", "why", choice.Reason)
+		logger.Info("📷 现在没有摄像头", "why", choice.Reason)
+	} else {
+		logger.Info("📷 摄像头", "device", choice.Name, "id", choice.ID, "why", choice.Reason)
+	}
+	return local.OpenCamera(choice, terminal.PickCameraFrom(local, settings.CameraDevice), terminal.CameraOptions{
+		Backend:     cameraBackend(settings.CameraBackend),
+		CaptureSize: terminal.FrameSize{Width: settings.CameraSize.Width, Height: settings.CameraSize.Height},
+		OutputWidth: settings.FrameWidth,
+	})
+}
+
+// cameraBackend 把配置值换成平台层的选项。
+func cameraBackend(value string) terminal.CameraBackend {
+	switch value {
+	case config.CameraBackendMediaDevices:
+		return terminal.CameraMediaDevices
+	case config.CameraBackendFFmpeg:
+		return terminal.CameraFFmpeg
+	default:
+		return terminal.CameraAuto
+	}
+}
+
+// frameSource 把摄像头接到对话取画面的接口上。
+type frameSource struct{ camera terminal.Camera }
+
+func (f frameSource) LatestFrame(ctx context.Context) ([]byte, time.Time, error) {
+	frame, err := f.camera.Capture(ctx, 0)
+	return frame.JPEG, frame.TakenAt, err
+}
+
+// frameSourceOf 没有摄像头时返回 nil（不能把 nil 包进接口）。
+func frameSourceOf(camera terminal.Camera) assistant.FrameSource {
+	if camera == nil {
 		return nil
 	}
-	logger.Info("📷 摄像头", "device", choice.Name, "id", choice.ID, "why", choice.Reason)
-	return local.OpenCamera(ctx, choice, terminal.PickCameraFrom(local, settings.CameraDevice), terminal.CameraOptions{
-		Continuous: settings.CameraMode == config.CameraContinuous, CaptureSize: settings.CameraSize,
-		OutputWidth: settings.FrameWidth, FPS: settings.CameraFPS, MaxAge: settings.FrameMaxAge,
-	})
+	return frameSource{camera: camera}
 }
 
 // cameraName 让看守随时知道摄像头能不能用；没有摄像头时为 nil。

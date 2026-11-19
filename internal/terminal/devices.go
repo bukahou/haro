@@ -2,13 +2,15 @@ package terminal
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/bukahou/haro/internal/assistant"
 )
 
-// 服务层需要的设备能力（v4 第 5 步「底层分层」）：服务层只定义「需要什么」，平台层（internal/platform）去实现。
-// 服务层不认识任何操作系统：设备 ID 对这里不透明，只原样传回平台层；选设备的规则只看 Bus（P-3）。
+// 服务层需要的设备能力：服务层只定义「需要什么」，平台层（internal/platform）去实现。
+// 服务层不认识任何操作系统：设备 ID 对这里不透明，只原样传回平台层；选设备的规则只看 Bus。
 
 // Bus 是设备的接口类型。
 type Bus int
@@ -41,7 +43,7 @@ type Device struct {
 	Bus     Bus
 }
 
-// DeviceCatalog 列出本机设备（看守每 2 秒列一次麦克风和音箱；摄像头只在启动时、以及取帧失败后才列，P-1）。
+// DeviceCatalog 列出本机设备（看守每 2 秒列一次麦克风和音箱；摄像头在启动时和每次拍照前列）。
 type DeviceCatalog interface {
 	Microphones() ([]Device, error)
 	Speakers() ([]Device, error)
@@ -53,28 +55,56 @@ type DeviceOpener interface {
 	OpenMicrophone(id string) assistant.Microphone
 	OpenRecorder(id string) assistant.AudioRecorder // 登记声纹用
 	OpenSpeaker(id string) assistant.AudioSink      // id 为空 = 跟随系统默认
-	// OpenCamera 打开启动时选中的摄像头；取帧失败后用 pick 重新找（拔掉再插上、换了设备号都能接上）。
-	// 常驻模式在后台一直取帧，直到 ctx 取消。
-	OpenCamera(ctx context.Context, startup Choice, pick CameraPicker, options CameraOptions) Camera
+	// OpenCamera 准备好摄像头（这时并不打开它）；每次拍之前都用 pick 重新找（拔掉再插上、换了设备号都能接上）。
+	// 要的拍照方式这个系统上不支持时返回错误。
+	OpenCamera(startup Choice, pick CameraPicker, options CameraOptions) (Camera, error)
 }
 
-// Camera 是打开的摄像头：能取帧，也能说出现在能不能用（看守据此告诉服务端，没有摄像头时服务端不给模型看画面的工具）。
+// Camera 是终端的摄像头：要看的时候才打开、拍一帧、马上关上（灯只在拍的时候亮）。
+// 能不能用由 CurrentName 告诉看守，看守再告诉服务端（没有摄像头时服务端不给模型看画面的工具）。
 type Camera interface {
-	assistant.FrameSource
+	// Capture 拍一帧：画面比 maxWidth 宽就缩小（0 = 用 CameraOptions.OutputWidth），更窄就原样。
+	Capture(ctx context.Context, maxWidth int) (Frame, error)
 	CurrentName() string // 现在能用的摄像头名字；不可用时为空
+}
+
+// 拍照失败的几种情况（拍照方按它们决定怎么告诉服务端；其他错误都算「拍照失败」）。
+var (
+	ErrNoCamera   = errors.New("现在没有摄像头")
+	ErrCameraBusy = errors.New("摄像头被别的程序占用")
+)
+
+// Frame 是拍到的一帧。
+type Frame struct {
+	JPEG          []byte
+	TakenAt       time.Time
+	Width, Height int
+	Device        string // 摄像头的名字
 }
 
 // CameraPicker 按选择规则找现在要用的摄像头；ok=false 表示现在没有。
 type CameraPicker func(ctx context.Context) (choice Choice, ok bool)
 
-// CameraOptions 是取帧方式（来自 HARO_CAMERA_* 配置）。
+// CameraBackend 是拍照用哪套底层。
+type CameraBackend int
+
+const (
+	CameraAuto         CameraBackend = iota // 按系统选：支持 mediadevices 的系统用它，其余用 ffmpeg
+	CameraMediaDevices                      // pion/mediadevices：预热到曝光稳定再取帧
+	CameraFFmpeg                            // ffmpeg 抓一帧（备用；不预热）
+)
+
+// CameraOptions 是拍照的设置（来自 HARO_CAMERA_* 配置）。
 type CameraOptions struct {
-	Continuous  bool          // true = 常驻（随时有最新一帧）；false = 每轮说完时现抓
-	CaptureSize string        // 想要的摄像头分辨率，例如 1280x720（摄像头没有时各系统可以改要别的）
-	OutputWidth int           // 送给模型的最大宽度（画面更窄就原样送），高度按比例
-	FPS         int           // 常驻模式的输出帧率
-	MaxAge      time.Duration // 常驻模式：超过这么久没有新帧，视为摄像头出问题
+	Backend     CameraBackend
+	CaptureSize FrameSize // 想向摄像头要的分辨率（摄像头没有时改要宽度够的里面最小的）
+	OutputWidth int       // 默认的最大宽度：Capture 的 maxWidth 为 0 时用它
 }
+
+// FrameSize 是画面的宽高（像素）。
+type FrameSize struct{ Width, Height int }
+
+func (s FrameSize) String() string { return fmt.Sprintf("%dx%d", s.Width, s.Height) }
 
 // Choice 是选中的设备。
 type Choice struct {
