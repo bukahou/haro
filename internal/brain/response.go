@@ -99,7 +99,7 @@ func (s *Session) respond(ctx context.Context, job *transcriptionJob) (done real
 	}
 
 	// 画面不直接附在这句话上：模型需要看时调用 look_at_camera，闲聊时手里就没有画面
-	input := s.userTurn(job.text) // 带上现在的情况；历史里只存原话
+	situation, input := s.userTurn(job.text) // 现在的情况单独成一条、不进历史；历史里只存原话
 	record := newTurnRecord(job.text)
 	defer func() {
 		for _, round := range record.rounds {
@@ -108,7 +108,8 @@ func (s *Session) respond(ctx context.Context, job *transcriptionJob) (done real
 			}
 		}
 	}()
-	answer, usage, err := s.speakAnswer(ctx, s.historyWithInstructions(), input, cameraView{request: job.text}, record)
+	history := append(s.historyWithInstructions(), situation...)
+	answer, usage, err := s.speakAnswer(ctx, history, input, cameraView{request: job.text}, record)
 	return s.finishAnswer(ctx, record, answer, usage, err)
 }
 
@@ -329,6 +330,7 @@ func (s *Session) generateSentences(ctx context.Context, history []ChatMessage, 
 				switched = true
 			case askStrongerTool:
 				result = s.escalate(&messages[inputIndex])
+				record.rememberAs(toolRoundIndex, call, escalatedRecord)
 			case lookAtCameraTool:
 				look := s.lookAtCamera(ctx, view)
 				direct := look.speakDirectly(calls)
@@ -336,6 +338,7 @@ func (s *Session) generateSentences(ctx context.Context, history []ChatMessage, 
 					directAnswer = look.report.Spoken
 				}
 				result = look.toolResult(direct)
+				record.rememberAs(toolRoundIndex, call, look.historyResult(direct))
 				frames := look.frameMessages()
 				frameMessages = append(frameMessages, frames...)
 				record.rounds[toolRoundIndex].frameShown = len(frames) > 0

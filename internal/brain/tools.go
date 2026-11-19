@@ -76,6 +76,7 @@ func expertReport(report FrameReport, spokenDirectly bool) string {
 
 var (
 	expertSaidNote   = "看图更准的专家看了当前画面，已经直接把这句告诉主人：\n"
+	expertRecordNote = "看图更准的专家看了当前画面，它的结论："
 	expertSpokenNote = "看图更准的专家看了当前画面，替你写好了说给主人听的话。照这句说（不用提专家；可以带上你的口吻，" +
 		"但不加内容、不说得更长；调用前说过的话不要再说一遍）：\n"
 	expertDetailsHeading = "\n\n专家看到的细节和依据（主人追问时用，不要念出来；它已经按需要联网核对过，不要再为画面里的东西另外去搜）：\n"
@@ -147,12 +148,26 @@ func (look cameraLook) speakDirectly(calls []ToolCall) bool {
 	return len(calls) == 1 && look.report != nil && look.report.Spoken != ""
 }
 
-// toolResult 是交给模型（并存进历史）的工具结果。
+// toolResult 是交给模型的工具结果。
 func (look cameraLook) toolResult(spokenDirectly bool) string {
 	if look.report != nil {
 		return expertReport(*look.report, spokenDirectly)
 	}
 	return look.result
+}
+
+// historyResult 是历史里这次看画面记成的样子：专家的结论和细节（主人追问时用），不带「照这句说」这类只对这一轮的要求。
+func (look cameraLook) historyResult(spokenDirectly bool) string {
+	switch {
+	case look.report == nil:
+		return look.result
+	case spokenDirectly:
+		return expertReport(*look.report, true) // 已经是记录：告诉了主人什么 + 细节
+	case look.report.Spoken == "":
+		return expertRecordNote + look.report.Details
+	default:
+		return expertRecordNote + "「" + look.report.Spoken + "」" + expertDetailsHeading + look.report.Details
+	}
 }
 
 // needsConfirmation 判断这批调用里有没有要用户口头确认的（MCP destructiveHint）。
@@ -289,7 +304,8 @@ func (s *Session) handleConfirmation(ctx context.Context, text string, pending [
 			trail = append(trail, ChatMessage{Role: RoleTool, ToolName: call.Name, ToolCallID: call.ID, Text: result})
 		}
 		// 由模型根据执行结果回答：删了哪几条、哪些没找到、失败了为什么，固定的「删掉了」说不清这些。
-		history := append(s.historyWithInstructions(), s.userTurn(text))
+		situation, input := s.userTurn(text)
+		history := append(append(s.historyWithInstructions(), situation...), input)
 		history = append(history, trail[:len(trail)-1]...)
 		answer, usage, err := s.speakAnswer(ctx, history, trail[len(trail)-1], cameraView{}, record)
 		return s.finishAnswer(ctx, record, answer, usage, err), true

@@ -11,7 +11,7 @@ var (
 	FailedBeforeSpeaking      = failedBeforeSpeaking
 	InterruptedBeforeSpeaking = interruptedBeforeSpeaking
 	ExpertReport              = expertReport
-	UserSaysHeading           = userSaysHeading
+	EscalatedRecord           = escalatedRecord
 	CaptureFailedNote         = captureFailedNote
 )
 
@@ -20,4 +20,9 @@ func SetTranscriptionWaitTimeoutForTest(timeout time.Duration) (restore func()) 
 	previous := transcriptionWaitTimeout
 	transcriptionWaitTimeout = timeout
 	return func() { transcriptionWaitTimeout = previous }
+}
+
+// ExpertHistoryRecord 是看画面那次在历史里记成的样子。
+func ExpertHistoryRecord(report FrameReport, spokenDirectly bool) string {
+	return cameraLook{report: &report}.historyResult(spokenDirectly)
 }

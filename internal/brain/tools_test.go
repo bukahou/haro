@@ -265,6 +265,14 @@ func TestLookAtCameraWithOtherToolsLetsModelSpeak(t *testing.T) {
 	}) {
 		t.Errorf("前台应拿到照着说的那句：%+v", model.LastRequest().Messages)
 	}
+	// 历史里不带「照这句说」这类只对这一轮的要求：记成专家的结论和细节
+	model.Then(braintest.Say("好的。"))
+	k.say("谢谢")
+	if !slices.ContainsFunc(model.LastRequest().Messages, func(msg brain.ChatMessage) bool {
+		return msg.Role == brain.RoleTool && msg.ToolName == "look_at_camera" && msg.Text == brain.ExpertHistoryRecord(conclusion, false)
+	}) {
+		t.Errorf("历史里的看画面结果应记成专家的结论和细节：%+v", model.LastRequest().Messages)
+	}
 }
 
 // 专家没单独交那句：前台拿到细节自己压短。

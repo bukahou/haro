@@ -60,3 +60,18 @@ func TestRouterChoosesModelByRule(t *testing.T) {
 		t.Errorf("没配纠正用的模型时，纠正也用默认模型：交给了 %q", text)
 	}
 }
+
+// 找「本轮主人那句话」时跳过系统合成的消息（例如排在后面的情况说明）和承载画面的消息。
+func TestEscalatedSkipsSyntheticMessages(t *testing.T) {
+	messages := []brain.ChatMessage{
+		{Role: brain.RoleUser, Text: "不对，再想想", Escalate: true},
+		{Role: brain.RoleUser, Text: "现在的情况", Synthetic: true},
+		{Role: brain.RoleUser, Image: []byte("画面")},
+	}
+	if !escalated(messages) {
+		t.Error("应看到主人那句话上的标记")
+	}
+	if escalated(messages[1:]) {
+		t.Error("只有系统合成的和画面时，不算标了")
+	}
+}

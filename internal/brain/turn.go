@@ -33,6 +33,7 @@ type toolRound struct {
 	text       string
 	calls      []ToolCall
 	results    map[string]string // 按调用编号；没有 = 没执行完
+	remembered map[string]string // 历史里换一种说法的结果（只对这一轮有用的要求不存进历史，换成中性的记录）
 	frameShown bool              // 这一段把摄像头画面直接交给了模型（历史里只留一句「当时看了画面」）
 }
 
@@ -49,6 +50,14 @@ func (r *turnRecord) beginRound(text string, calls []ToolCall) int {
 
 func (r *turnRecord) recordResult(round int, call ToolCall, result string) {
 	r.rounds[round].results[call.ID] = result
+}
+
+// rememberAs 让这个调用的结果在历史里记成 text（交给模型的仍是 recordResult 那份）。
+func (r *turnRecord) rememberAs(round int, call ToolCall, text string) {
+	if r.rounds[round].remembered == nil {
+		r.rounds[round].remembered = map[string]string{}
+	}
+	r.rounds[round].remembered[call.ID] = text
 }
 
 // executedTools 是这一轮做完了几个工具调用。
@@ -79,13 +88,16 @@ func (r *turnRecord) messages(ending turnEnding, answer string) []ChatMessage {
 		turn = append(turn, ChatMessage{Role: RoleAssistant, Text: round.text, ToolCalls: round.calls})
 		for _, call := range round.calls {
 			result, ok := round.results[call.ID]
-			if !ok {
+			switch remembered, replaced := round.remembered[call.ID]; {
+			case !ok:
 				result = notRun
+			case replaced:
+				result = remembered
 			}
 			turn = append(turn, ChatMessage{Role: RoleTool, ToolName: call.Name, ToolCallID: call.ID, Text: result})
 		}
 		if round.frameShown {
-			turn = append(turn, ChatMessage{Role: RoleUser, Text: frameRecalledNote})
+			turn = append(turn, ChatMessage{Role: RoleUser, Text: frameRecalledNote, Synthetic: true})
 		}
 	}
 	return append(turn, ChatMessage{Role: RoleAssistant, Text: answer})

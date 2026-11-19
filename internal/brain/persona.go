@@ -130,20 +130,18 @@ func (s *Session) systemPrompt() string {
 	return prompt
 }
 
-// userSaysHeading 把每轮附带的即时情况和主人这句话隔开。
-const userSaysHeading = "【主人说】"
-
 // userTurn 是这一轮交给模型的「主人的话」：前面附上现在的情况（时间、位置、谁在说话、额度、任务板）。
 //
 // 为什么不放进系统提示词：这些每轮都变，而系统提示词在最前面——放在那里，每轮的开头都不一样，
 // 支持提示词缓存的模型（按开头复用）就永远命中不了，本地模型也得从头处理整段历史。
 // 放在最后一条消息里，系统提示词和历史保持不变；历史里只存主人的原话，不存这段附注。
-func (s *Session) userTurn(text string) ChatMessage {
-	briefing := s.briefing(s.currentConversation().Person())
-	if briefing == "" {
-		return ChatMessage{Role: RoleUser, Text: text}
+// 情况说明单独成一条（标 Synthetic），不和主人的话拼在一起：最后一条始终是主人的原话。
+func (s *Session) userTurn(text string) (situation []ChatMessage, input ChatMessage) {
+	input = ChatMessage{Role: RoleUser, Text: text}
+	if briefing := s.briefing(s.currentConversation().Person()); briefing != "" {
+		situation = []ChatMessage{{Role: RoleUser, Text: briefing, Synthetic: true}}
 	}
-	return ChatMessage{Role: RoleUser, Text: briefing + "\n" + userSaysHeading + "\n" + text}
+	return situation, input
 }
 
 // briefing 汇总这一轮要补充的情况：谁在说话 + 各 Briefer。

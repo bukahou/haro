@@ -134,6 +134,9 @@ type ChatMessage struct {
 	ToolCallID string     `json:"tool_call_id,omitempty"` // tool：对应哪一次调用（ToolCall.ID）
 	// Escalate：这一句交给更强的模型重答（前台模型调用了 ask_stronger_model），选模型的包装层据此换模型。只标在本轮输入上，不存盘
 	Escalate bool `json:"-"`
+	// Synthetic：用户角色里系统合成的消息，不是主人说的话（每轮附带的「现在的情况」、历史里「当时看了画面」的替身）。
+	// 怎么交给模型由各适配层决定；找「本轮主人那句话」时跳过它
+	Synthetic bool `json:"synthetic,omitempty"`
 }
 
 // ReplyDelta 是模型流式输出的一段。

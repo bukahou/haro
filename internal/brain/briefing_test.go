@@ -27,9 +27,11 @@ func TestBriefingGoesBeforeTheUserTurn(t *testing.T) {
 	if strings.Contains(firstSystem, "80%") || model.history[0].Role != brain.RoleSystem {
 		t.Errorf("系统提示词里不该有即时情况：%q", firstSystem)
 	}
-	if model.lastInput.Role != brain.RoleUser || !strings.Contains(model.lastInput.Text, "用到 80% 了") ||
-		!strings.HasSuffix(model.lastInput.Text, "\n"+brain.UserSaysHeading+"\n你好") {
-		t.Errorf("主人这句话前面应附上即时情况：%q", model.lastInput.Text)
+	// 主人这句话是最后一条、原话；即时情况单独在它前面一条（标成系统合成，不是主人说的）
+	situation := model.history[len(model.history)-1]
+	if model.lastInput.Role != brain.RoleUser || model.lastInput.Text != "你好" || model.lastInput.Synthetic ||
+		situation.Role != brain.RoleUser || !situation.Synthetic || !strings.Contains(situation.Text, "用到 80% 了") {
+		t.Errorf("即时情况应单独一条、标成系统合成，后面是主人的原话：%+v / %+v", situation, model.lastInput)
 	}
 
 	k.ask("你好") // 第二轮：系统提示词不变，历史里的上一句是原话

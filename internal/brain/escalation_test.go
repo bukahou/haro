@@ -65,3 +65,20 @@ func TestAskStrongerModelOnlyWhenConfigured(t *testing.T) {
 		t.Errorf("没配更强的模型时不应提供：%v", model.LastRequest().ToolNames())
 	}
 }
+
+// 交接说明只给这一轮接手的模型看；历史里记成中性的记录，否则之后的轮次会把「不要再调用这个工具」当成规矩，主人再纠正时就不交接了。
+func TestEscalationNoteIsNotRememberedVerbatim(t *testing.T) {
+	model := braintest.NewModel(t, askStronger, braintest.Say("更强的模型重答。"), braintest.Say("前台回答。"))
+	k := newEscalationTalker(t, model, true)
+
+	k.say("不对，那是耳机盒")
+	if got := model.Requests()[1].Last().Text; got != brain.EscalatedNote {
+		t.Fatalf("这一轮接手的模型应看到交接说明：%q", got)
+	}
+	k.say("好了谢谢")
+	for _, msg := range model.LastRequest().Messages {
+		if msg.Role == brain.RoleTool && msg.ToolName == "ask_stronger_model" && msg.Text != brain.EscalatedRecord {
+			t.Errorf("历史里的交接应记成中性记录：%q", msg.Text)
+		}
+	}
+}
