@@ -31,6 +31,20 @@ type ClaudeAPI struct {
 	client anthropic.Client
 }
 
+// CheckCredentials 确认凭证现在能用、连得上 Claude（就绪检查用）：数一次 token，不调用模型、不花钱
+// （数 token 是免费的，限流与生成分开算）。集群里用 WIF 时，令牌过期了这一步会顺带换新令牌。
+func (a *ClaudeAPI) CheckCredentials(ctx context.Context, model string) error {
+	_, err := a.client.Messages.CountTokens(ctx, anthropic.MessageCountTokensParams{
+		Model:    anthropic.Model(model),
+		Messages: []anthropic.MessageParam{anthropic.NewUserMessage(anthropic.NewTextBlock("ping"))},
+	}, option.WithMaxRetries(0))
+	var apiErr *anthropic.Error
+	if errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusUnauthorized || apiErr.StatusCode == http.StatusForbidden) {
+		return fmt.Errorf("Claude 认证失败（%d）: %w", apiErr.StatusCode, err)
+	}
+	return err
+}
+
 // NewClaudeAPI 创建客户端（不发请求；凭证在第一次请求时才用到）。apiKey 为空 = 交给 SDK 的凭证链（集群里是 WIF）；
 // baseURL 为空 = https://api.anthropic.com；httpClient 全进程只用这一个（见类型说明），各用途的超时用请求自己的 context 控制。
 func NewClaudeAPI(apiKey, baseURL string, httpClient *http.Client) *ClaudeAPI {

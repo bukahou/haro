@@ -54,6 +54,8 @@ type Ledger interface {
 	Record(ctx context.Context, charge Charge) error
 	// Total 合计 since 之后的花费；purposes 为空 = 所有用途。
 	Total(ctx context.Context, since time.Time, purposes ...Purpose) (Totals, error)
+	// CheckWritable 确认账本现在写得进去（就绪检查用）：不改任何数据。
+	CheckWritable(ctx context.Context) error
 	Close() error
 }
 
@@ -157,6 +159,21 @@ func (l *sqliteLedger) Total(ctx context.Context, since time.Time, purposes ...P
 	var totals Totals
 	err := l.db.QueryRowContext(ctx, query, args...).Scan(&totals.Yen, &totals.Credits)
 	return totals, err
+}
+
+// CheckWritable 开一个写事务（拿到写锁）再回滚：磁盘只读、库文件被锁住时会出错，数据不变。
+func (l *sqliteLedger) CheckWritable(ctx context.Context) error {
+	conn, err := l.db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return fmt.Errorf("账本写不进去: %w", err)
+	}
+	// 回滚不受 ctx 影响：拿到写锁后一定要放掉
+	_, err = conn.ExecContext(context.WithoutCancel(ctx), "ROLLBACK")
+	return err
 }
 
 func (l *sqliteLedger) Close() error { return l.db.Close() }

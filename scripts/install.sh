@@ -196,8 +196,8 @@ fi
 
 # 服务端连得上吗（只提醒，不影响安装）
 probe_url=${current:-$server_url} # 配置文件已有时，终端实际用的是文件里的地址
-if [ -n "$probe_url" ] && ! curl -fsS --max-time 3 -o /dev/null "${probe_url%/}/health" 2>/dev/null; then
-	warn "现在连不上服务端 ${probe_url%/}/health：确认地址对不对、服务端在不在运行（终端启动后会自己一直重连）"
+if [ -n "$probe_url" ] && ! curl -fsS --max-time 3 -o /dev/null "${probe_url%/}/livez" 2>/dev/null; then
+	warn "现在连不上服务端 ${probe_url%/}/livez：确认地址对不对、服务端在不在运行（终端启动后会自己一直重连）"
 fi
 if [ "$os" = Darwin ] && ! command -v ffmpeg >/dev/null 2>&1; then
 	warn "没找到 ffmpeg：macOS 上摄像头要用它（其他功能不受影响）。要用摄像头请先装 ffmpeg"

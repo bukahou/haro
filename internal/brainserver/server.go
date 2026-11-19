@@ -1,6 +1,7 @@
 // Package brainserver 把服务端挂到 WebSocket 上：
 //   - GET /v1/realtime：对话会话（Realtime 事件，定义见 realtimeproto）
-//   - GET /health
+//
+// 存活 / 就绪检查（/livez、/readyz）由组装处挂在同一个 HTTP 服务上（见 internal/readiness）。
 //
 // 一条连接一个会话（与 OpenAI Realtime 一致）：连接断了，这次的对话历史就没了（性格记在文件里，不受影响）。
 // 本包只管协议和连接，会话由外部注入（haro-server 注入 brain.Session）。
@@ -62,10 +63,6 @@ func NewHandler(newSession SessionFactory, opts Options, logger *slog.Logger) ht
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET "+realtimeproto.ConversationPath, func(w http.ResponseWriter, r *http.Request) {
 		serveConversation(w, r, newSession, opts, logger)
-	})
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"status":"ok"}`)
 	})
 	return mux
 }

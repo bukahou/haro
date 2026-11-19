@@ -30,6 +30,7 @@ import (
 	"github.com/bukahou/haro/internal/notes"
 	"github.com/bukahou/haro/internal/persona"
 	"github.com/bukahou/haro/internal/profile"
+	"github.com/bukahou/haro/internal/readiness"
 	"github.com/bukahou/haro/internal/realtimeproto"
 	"github.com/bukahou/haro/internal/research"
 	"github.com/bukahou/haro/internal/speech"
@@ -198,7 +199,13 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	handler, err := brainHandler(settings, newSession, logger)
+	checks, err := readinessChecks(settings, claude, ledger, httpClient)
+	if err != nil {
+		return err
+	}
+	monitor := readiness.NewMonitor(checks, readinessInterval, readinessTimeout, logger)
+	go monitor.Run(ctx)
+	handler, err := brainHandler(settings, newSession, monitor, logger)
 	if err != nil {
 		return err
 	}
@@ -217,9 +224,10 @@ func run(logger *slog.Logger) error {
 	return ctx.Err()
 }
 
-// brainHandler 是服务端对终端的全部 HTTP 入口：对话（WebSocket）+ 远程登记声纹（转给 haro-asr）。
+// brainHandler 是服务端的全部 HTTP 入口：对话（WebSocket）+ 远程登记声纹（转给 haro-asr）+ 存活 / 就绪检查。
 // 终端只认识服务端的地址；haro-asr 只监听本机（集群里在同一个 Pod）。
-func brainHandler(settings config.Settings, newSession brainserver.SessionFactory, logger *slog.Logger) (http.Handler, error) {
+func brainHandler(settings config.Settings, newSession brainserver.SessionFactory, monitor *readiness.Monitor,
+	logger *slog.Logger) (http.Handler, error) {
 	asrURL, err := url.Parse(settings.ASRURL)
 	if err != nil {
 		return nil, fmt.Errorf("HARO_ASR_URL: %w", err)
@@ -227,7 +235,34 @@ func brainHandler(settings config.Settings, newSession brainserver.SessionFactor
 	mux := http.NewServeMux()
 	mux.Handle("/", brainserver.NewHandler(newSession, brainserver.Options{}, logger))
 	mux.Handle(realtimeproto.VoiceprintRoute, httputil.NewSingleHostReverseProxy(asrURL))
+	mux.HandleFunc("GET /livez", readiness.Alive)
+	mux.Handle("GET /readyz", monitor)
 	return mux, nil
+}
+
+// 就绪检查每 readinessInterval 一轮，每项最多等 readinessTimeout；k8s 的就绪探针只读结果。
+const (
+	readinessInterval = 30 * time.Second
+	readinessTimeout  = 5 * time.Second
+)
+
+// readinessChecks 是服务端的就绪检查：识别、合成连得上，云端模型的凭证能用，账本写得进去。
+func readinessChecks(settings config.Settings, claude *llm.ClaudeAPI, ledger spending.Ledger, httpClient *http.Client) ([]readiness.Check, error) {
+	asrReady, err := url.JoinPath(settings.ASRURL, "readyz")
+	if err != nil {
+		return nil, fmt.Errorf("HARO_ASR_URL: %w", err)
+	}
+	checks := []readiness.Check{
+		{Name: "asr", Probe: readiness.HTTPStatusOK(httpClient, asrReady)},
+		{Name: "tts", Probe: readiness.HTTPReachable(httpClient, settings.TTSURL)},
+		{Name: "ledger", Probe: ledger.CheckWritable},
+	}
+	if claude != nil && settings.UsesCloudLLM() {
+		checks = append(checks, readiness.Check{Name: "llm", Probe: func(ctx context.Context) error {
+			return claude.CheckCredentials(ctx, settings.CloudLLMModel)
+		}})
+	}
+	return checks, nil
 }
 
 // buildChatModel 按 HARO_LLM_PROVIDER 组装服务端用的模型，HARO_LLM_FALLBACK 时另一个当退路：

@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/bukahou/haro/internal/readiness"
 	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
@@ -48,9 +49,9 @@ func NewHandler(deps Dependencies) http.Handler {
 	mux.HandleFunc(realtimeproto.VoiceprintRoute, func(w http.ResponseWriter, r *http.Request) {
 		handleEnrollment(w, r, deps.Speakers) // 远程登记声纹
 	})
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-	})
+	// 模型在开始监听之前就加载好了：能响应就能接转写会话，存活和就绪是同一件事
+	mux.HandleFunc("GET /livez", readiness.Alive)
+	mux.HandleFunc("GET /readyz", readiness.Alive)
 	return mux
 }
 

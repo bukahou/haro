@@ -16,6 +16,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/anthropics/anthropic-sdk-go/v2"
+
 	"github.com/bukahou/haro/internal/brain"
 )
 
@@ -238,5 +240,39 @@ func TestAnthropicMarksPreviousTurnForCache(t *testing.T) {
 		case c.marked != "" && (len(marked) != 1 || !strings.Contains(marked[0], c.marked)):
 			t.Errorf("%s：断点应只打在「%s」那一块，实际 %v", c.name, c.marked, marked)
 		}
+	}
+}
+
+// 就绪检查数一次 token：成功 = 凭证能用；401 / 403 按状态码认出是认证失败（不看说明文字）。
+func TestClaudeCheckCredentials(t *testing.T) {
+	status := http.StatusOK
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		if status == http.StatusOK {
+			_, _ = io.WriteString(w, `{"input_tokens":3}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}`)
+	}))
+	defer server.Close()
+	api := NewClaudeAPI("test-key", server.URL, server.Client())
+
+	if err := api.CheckCredentials(context.Background(), "claude-haiku-5-5"); err != nil {
+		t.Fatalf("数 token 成功应算正常：%v", err)
+	}
+	if len(paths) != 1 || paths[0] != "/v1/messages/count_tokens" {
+		t.Errorf("只应请求数 token 的接口（不调用模型）：%v", paths)
+	}
+	status = http.StatusUnauthorized
+	err := api.CheckCredentials(context.Background(), "claude-haiku-5-5")
+	var apiErr *anthropic.Error
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusUnauthorized {
+		t.Errorf("认证失败应保留带状态码的错误：%v", err)
+	}
+	if len(paths) != 2 {
+		t.Errorf("就绪检查不重试：请求了 %d 次", len(paths))
 	}
 }
