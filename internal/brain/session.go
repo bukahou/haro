@@ -77,6 +77,7 @@ type Session struct {
 
 	conversation       *Conversation   // 这一轮说话的人的对话（跟人走，不跟连接走）
 	spoken             []spokenSegment // 最近一次回答已经发给终端的句子（打断时按「听到多少」截断历史）
+	answerRound        int             // 记进历史的最终回答是这次回答的第几段（之后才收到的截断只改这一段）
 	truncateAtMs       int64           // 终端说用户只听到了前这么多毫秒；-1 = 没有截断
 	answeredInResponse bool            // 这次回答已经记进历史（截断时只改这次的，不碰上一轮）
 	responseItem       string          // 这次回答的是哪一句话（编号，打断的日志用）
@@ -298,21 +299,12 @@ func (s *Session) useConversationOf(person string) {
 	}
 }
 
-// remember 记下一轮：用户的话、这一轮的工具往来（调用了什么、结果是什么）、最终回答。图片不进历史。
+// rememberTurn 把整理好的一轮（closeTurn 的结果：主人的话、工具往来、最终回答）写进这个人的历史。
 //
 // 为什么要保留工具往来：只保留最终回答时，历史里全是「记下了」「网络正常」，小模型照着学，
 // 就不再调用工具、直接说办好了（实测：同一段历史，只留回答时 4 次里 0 次调用 save_note，
 // 保留工具往来时 4 次都调用）。
-func (s *Session) remember(question string, toolTrail []ChatMessage, answer string) {
-	turn := make([]ChatMessage, 0, len(toolTrail)+2)
-	turn = append(turn, ChatMessage{Role: RoleUser, Text: question})
-	for _, msg := range toolTrail {
-		if len(msg.Image) > 0 { // 图片不进历史：只留一句「当时看了画面」
-			msg = ChatMessage{Role: msg.Role, Text: frameRecalledNote}
-		}
-		turn = append(turn, msg)
-	}
-	turn = append(turn, ChatMessage{Role: RoleAssistant, Text: answer})
+func (s *Session) rememberTurn(turn []ChatMessage) {
 	s.mu.Lock()
 	s.answeredInResponse = true
 	conversation := s.conversation

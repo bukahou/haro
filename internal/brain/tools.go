@@ -279,29 +279,22 @@ func (s *Session) setPendingConfirmation(calls []ToolCall) {
 func (s *Session) handleConfirmation(ctx context.Context, text string, pending []ToolCall) (realtimeproto.ResponseDone, bool) {
 	switch classifyConfirmation(text) {
 	case confirmYes:
-		trail := []ChatMessage{{Role: RoleAssistant, ToolCalls: pending}} // 真正执行的操作也记进历史
+		// 真正执行的操作也记进这一轮（之后被打断、出错，历史里照样有它）
+		record := newTurnRecord(text)
+		round := record.beginRound("", pending)
+		trail := []ChatMessage{{Role: RoleAssistant, ToolCalls: pending}}
 		for _, call := range pending {
-			trail = append(trail, ChatMessage{Role: RoleTool, ToolName: call.Name, ToolCallID: call.ID,
-				Text: s.callTool(ctx, call)})
+			result := s.callTool(ctx, call)
+			record.recordResult(round, call, result)
+			trail = append(trail, ChatMessage{Role: RoleTool, ToolName: call.Name, ToolCallID: call.ID, Text: result})
 		}
 		// 由模型根据执行结果回答：删了哪几条、哪些没找到、失败了为什么，固定的「删掉了」说不清这些。
 		history := append(s.historyWithInstructions(), s.userTurn(text))
 		history = append(history, trail[:len(trail)-1]...)
-		answer, moreTrail, usage, err := s.speakAnswer(ctx, history, trail[len(trail)-1], cameraView{})
-		if ctx.Err() != nil {
-			return realtimeproto.ResponseDone{Status: realtimeproto.StatusCancelled}, true
-		}
-		if err != nil {
-			return s.failed(realtimeproto.ReasonGenerationFailed, "生成回答", err), true
-		}
-		s.remember(text, append(trail, moreTrail...), answer)
-		done := realtimeproto.ResponseDone{Status: realtimeproto.StatusCompleted}
-		if usage != nil {
-			done.Usage = &realtimeproto.Usage{InputTokens: usage.PromptTokens, OutputTokens: usage.OutputTokens}
-		}
-		return done, true
+		answer, usage, err := s.speakAnswer(ctx, history, trail[len(trail)-1], cameraView{}, record)
+		return s.finishAnswer(ctx, record, answer, usage, err), true
 	case confirmNo:
-		s.remember(text, nil, "好的，不做了。")
+		s.rememberTurn([]ChatMessage{{Role: RoleUser, Text: text}, {Role: RoleAssistant, Text: "好的，不做了。"}})
 		return s.speakFixedReply(ctx, "好的，不做了。"), true
 	default:
 		s.logger.Info("用户没有确认，放弃待确认的操作")

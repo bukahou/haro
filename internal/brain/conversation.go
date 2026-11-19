@@ -175,13 +175,13 @@ func (c *Conversation) appendTurn(turn []ChatMessage, maxTurns int) {
 	c.book.maybeSummarize(c)
 }
 
-// replaceLastAnswer 把最近一轮的回答改成 text（被打断时只记听到的部分）并写盘；返回改没改。
+// replaceLastAnswer 把最近一轮的回答改成 text（被打断时只记听到的部分）并写盘；返回改没改（本来就是 text 时不改）。
 func (c *Conversation) replaceLastAnswer(text string) bool {
 	c.mu.Lock()
 	changed := false
 	if n := len(c.history); n > 0 {
 		turn := c.history[n-1]
-		if last := len(turn) - 1; last >= 0 && turn[last].Role == RoleAssistant {
+		if last := len(turn) - 1; last >= 0 && turn[last].Role == RoleAssistant && turn[last].Text != text {
 			turn[last].Text = text
 			changed = true
 		}
