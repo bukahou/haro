@@ -12,13 +12,14 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/bukahou/haro/internal/brain"
 	"github.com/bukahou/haro/internal/llm"
 	"github.com/bukahou/haro/internal/tools"
 )
 
 // 真接口看一张评测样本（花钱：Sonnet 一两次请求，约 ¥1；给了 Tavily 密钥时可能再搜 1–2 次）：
 //
-//	HARO_ANTHROPIC_API_KEY=… HARO_EVAL_DIR=<样本目录> [HARO_EVAL_SAMPLE=05] [HARO_EVAL_REQUEST=这是什么？] [HARO_TAVILY_API_KEY=…] \
+//	HARO_ANTHROPIC_API_KEY=… HARO_EVAL_DIR=<样本目录> [HARO_EVAL_SAMPLE=05] [HARO_EVAL_REQUEST=这是什么？] [HARO_EVAL_STYLE=<性格说明>] [HARO_TAVILY_API_KEY=…] \
 //	  go test -tags integration -run LiveExpert -v ./internal/vision/
 func TestLiveExpert(t *testing.T) {
 	key, dir := os.Getenv("HARO_ANTHROPIC_API_KEY"), os.Getenv("HARO_EVAL_DIR")
@@ -52,7 +53,7 @@ func TestLiveExpert(t *testing.T) {
 	if request == "" {
 		request = "这是什么？"
 	}
-	report, err := NewExpert(model, "claude-sonnet-5-5", search, logger).ExamineFrame(ctx, frame, request)
+	report, err := NewExpert(model, "claude-sonnet-5-5", search, logger).ExamineFrame(ctx, brain.FrameQuestion{Frame: frame, Request: request, Style: os.Getenv("HARO_EVAL_STYLE")})
 	if err != nil {
 		t.Fatal(err)
 	}

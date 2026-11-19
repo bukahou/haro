@@ -162,7 +162,7 @@ func examineAsExpert(expert *vision.Expert, model *usageTotal, frame []byte) (st
 	defer cancel()
 	model.reset()
 	started := time.Now()
-	report, err := expert.ExamineFrame(ctx, frame, "这是什么？")
+	report, err := expert.ExamineFrame(ctx, brain.FrameQuestion{Frame: frame, Request: "这是什么？"})
 	answer := report.Spoken
 	if answer == "" {
 		answer = report.Details
