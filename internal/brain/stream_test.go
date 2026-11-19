@@ -2,6 +2,7 @@ package brain_test
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"testing"
 	"time"
@@ -62,16 +63,121 @@ func TestSessionHandsFreeTurn(t *testing.T) {
 		t.Errorf("模型收到 %+v", model.lastInput)
 	}
 
-	// 连接断开：等识别结果的回答应失败，而不是卡住
+	// 连接断开：等识别结果的回答应失败，而不是卡住（识别流随后自己重开，见 TestStreamReopensAfterDisconnect）
 	braintest.Speak(t, session, stream, braintest.Utterance{})
 	braintest.Expect[realtimeproto.ResponseCreated](t, session)
 	_ = stream.Close()
 	events = braintest.CollectUntilDone(t, session)
-	if done := braintest.Done(t, events); done.Status != realtimeproto.StatusFailed {
+	if done := braintest.Done(t, events); done.Status != realtimeproto.StatusFailed || done.Reason != realtimeproto.ReasonTranscriptionFailed {
 		t.Errorf("断开后 response.done = %+v", done)
 	}
-	if !slices.Contains(braintest.Types(events), "error") {
-		t.Errorf("断开后应有 error 事件：%v", braintest.Types(events))
+}
+
+func newReopenSession(t *testing.T, voice *braintest.Voice, timing brain.ReopenTiming) *brain.Session {
+	t.Helper()
+	parts := brain.Components{Model: &fakeModel{tokens: []string{"好的。"}}, Synthesizer: fakeSynthesizer{}, Streaming: voice,
+		NewSegmenter: func() brain.TextSegmenter { return speech.NewSentenceSegmenter(4, 40) }}
+	session := brain.NewSession(parts, brain.Options{MaxHistoryTurn: 6, StreamReopen: timing}, quiet)
+	t.Cleanup(func() { _ = session.Close() })
+	return session
+}
+
+// waitOpened 等识别流被打开到第 n 条。
+func waitOpened(t *testing.T, voice *braintest.Voice, n int) *braintest.Stream {
+	t.Helper()
+	deadline := time.Now().Add(braintest.EventTimeout)
+	for voice.Opened() < n {
+		if time.Now().After(deadline) {
+			t.Fatalf("应重开识别流：打开了 %d 条，等 %d 条", voice.Opened(), n)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return voice.Stream()
+}
+
+// 识别流断开：按原来的设置自己重开，把会话记着的「醒着 / 正在播放」告诉新的流，之后照常对话。
+// 断开期间送来的音频丢掉、不逐块回错误；断开很快恢复时不提示终端。
+func TestStreamReopensAfterDisconnect(t *testing.T) {
+	voice := braintest.NewVoice()
+	session := newReopenSession(t, voice, brain.ReopenTiming{Delay: time.Millisecond, MaxDelay: 5 * time.Millisecond,
+		LostNoticeAfter: time.Hour})
+	ctx := context.Background()
+	turn := realtimeproto.TurnDetection{Type: "server_vad", SilenceDurationMs: 600}
+	first := braintest.Open(t, session, voice, realtimeproto.SessionUpdate{TurnDetection: &turn, WakeWord: true})
+	_ = session.Send(ctx, realtimeproto.HaroWakeWordWake{})
+	_ = session.Send(ctx, realtimeproto.HaroPlaybackStarted{})
+
+	voice.FailNextOpen(errors.New("连不上 haro-asr"))
+	_ = first.Close()
+	chunk := realtimeproto.PCMAudio{Format: testFormat, Data: make([]byte, 640)}
+	time.Sleep(20 * time.Millisecond) // 让它重试几次
+	for range 3 {
+		if err := session.Send(ctx, realtimeproto.InputAudioBufferAppend{Audio: chunk}); err != nil {
+			t.Fatalf("断开期间的音频应悄悄丢掉：%v", err)
+		}
+	}
+	_ = session.Send(ctx, realtimeproto.HaroPlaybackStopped{}) // 断开期间的状态变化也要记下
+	voice.FailNextOpen(nil)
+
+	second := waitOpened(t, voice, 2)
+	if voice.Config().TurnDetection.SilenceDurationMs != 600 || !voice.Config().WakeWord {
+		t.Errorf("应按原来的设置重开：%+v", voice.Config())
+	}
+	deadline := time.Now().Add(braintest.EventTimeout)
+	for len(second.AwakeCalls()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := second.AwakeCalls(); !slices.Equal(got, []bool{true}) {
+		t.Errorf("重开后应恢复醒着：%v", got)
+	}
+	if got := second.PlaybackCalls(); len(got) != 0 {
+		t.Errorf("断开期间播放已经停了，重开后不应再说在播放：%v", got)
+	}
+	if len(second.Audio()) != 0 {
+		t.Errorf("断开期间的音频不应补发：%d 块", len(second.Audio()))
+	}
+
+	if done := braintest.Done(t, braintest.Ask(t, session, second, braintest.Utterance{Text: "你好"})); done.Status != realtimeproto.StatusCompleted {
+		t.Errorf("重开后应照常对话：%+v", done)
+	}
+	select {
+	case event := <-session.Events():
+		t.Errorf("断开很快恢复时不应再有别的事件（提示、错误）：%+v", event)
+	default:
+	}
+}
+
+// 断开超过 LostNoticeAfter 还没重开：提示终端一次「听不见了」（不重复），重开后再提示一次「恢复了」。
+func TestStreamLostAndRestoredNotices(t *testing.T) {
+	voice := braintest.NewVoice()
+	session := newReopenSession(t, voice, brain.ReopenTiming{Delay: time.Millisecond, MaxDelay: 2 * time.Millisecond,
+		LostNoticeAfter: 20 * time.Millisecond})
+	turn := realtimeproto.TurnDetection{Type: "server_vad"}
+	first := braintest.Open(t, session, voice, realtimeproto.SessionUpdate{TurnDetection: &turn})
+
+	voice.FailNextOpen(errors.New("连不上 haro-asr"))
+	_ = first.Close()
+	if notice := braintest.Expect[realtimeproto.HaroNotice](t, session); notice.Kind != realtimeproto.NoticeTranscriptionLost {
+		t.Fatalf("断开太久应提示听不见：%+v", notice)
+	}
+	time.Sleep(50 * time.Millisecond) // 继续重试失败：不应再提示
+	voice.FailNextOpen(nil)
+	if notice := braintest.Expect[realtimeproto.HaroNotice](t, session); notice.Kind != realtimeproto.NoticeTranscriptionRestored {
+		t.Fatalf("重开后应提示恢复（中间不应有重复的断开提示）：%+v", notice)
+	}
+	waitOpened(t, voice, 2)
+}
+
+// 会话结束时不再重开。
+func TestStreamNotReopenedAfterClose(t *testing.T) {
+	voice := braintest.NewVoice()
+	session := newReopenSession(t, voice, brain.ReopenTiming{Delay: time.Millisecond, MaxDelay: time.Millisecond, LostNoticeAfter: time.Hour})
+	turn := realtimeproto.TurnDetection{Type: "server_vad"}
+	braintest.Open(t, session, voice, realtimeproto.SessionUpdate{TurnDetection: &turn})
+	_ = session.Close()
+	time.Sleep(20 * time.Millisecond)
+	if voice.Opened() != 1 {
+		t.Errorf("会话结束后不应重开识别流：打开了 %d 条", voice.Opened())
 	}
 }
 

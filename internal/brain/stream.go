@@ -7,6 +7,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/failsafe-go/failsafe-go"
+	"github.com/failsafe-go/failsafe-go/retrypolicy"
+
 	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
@@ -22,13 +25,22 @@ func (s *Session) openStream(ctx context.Context, config StreamConfig) error {
 	if err != nil {
 		return err
 	}
-	s.stream = stream
+	s.stream, s.streamConfig = stream, &config
+	s.awake = false // 新的流从休眠开始（启用唤醒词时；不用唤醒词时这个状态不起作用）
 	s.pendingJobs = map[string]*transcriptionJob{}
 	if config.WakeWord && s.parts.WakeArbiter != nil { // 参加多终端唤醒仲裁
 		s.parts.WakeArbiter.join(s)
 	}
-	go s.pumpStreamEvents(stream)
+	go s.runStream(stream)
 	return nil
+}
+
+// runStream 转发识别流的事件；流意外断开时重开并接着转发，直到会话结束。
+func (s *Session) runStream(stream RecognizerStream) {
+	for stream != nil {
+		s.pumpStreamEvents(stream)
+		stream = s.reopenStream()
+	}
 }
 
 // wakeArbitrationTimeout：输掉仲裁后让识别流回去休眠，最多等这么久。
@@ -48,6 +60,9 @@ func (s *Session) winWake(stream RecognizerStream, wake realtimeproto.HaroWakeWo
 	}
 	s.logger.Info("几台终端同时听到唤醒词：另一台更合适，这台不回答",
 		"score", fmt.Sprintf("%.2f", wake.Score), "level", fmt.Sprintf("%.4f", wake.Level))
+	s.mu.Lock()
+	s.awake = false
+	s.mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), wakeArbitrationTimeout)
 	defer cancel()
 	if err := stream.SetAwake(ctx, false); err != nil {
@@ -67,7 +82,7 @@ func (s *Session) pumpStreamEvents(stream RecognizerStream) {
 				continue
 			}
 			s.mu.Lock()
-			s.wakePending = true
+			s.wakePending, s.awake = true, true // 识别流听到唤醒词时自己开了唤醒门
 			s.mu.Unlock()
 			s.emit(e)
 		case realtimeproto.InputAudioBufferSpeechStarted:
@@ -105,19 +120,105 @@ func (s *Session) pumpStreamEvents(stream RecognizerStream) {
 		}
 	}
 
-	// 连接断开：让还在等识别结果的回答失败，而不是一直卡住。
+	// 识别流结束：让还在等识别结果的回答失败，而不是一直卡住
 	s.mu.Lock()
 	jobs := s.pendingJobs
 	s.pendingJobs = map[string]*transcriptionJob{}
-	s.stream = nil
+	if s.stream == stream {
+		s.stream = nil
+	}
 	s.mu.Unlock()
 	for _, job := range jobs {
 		job.err = errors.New("转写服务连接断开")
 		close(job.done)
 	}
-	select {
-	case <-s.closed: // 正常关闭，不报错
-	default:
-		s.emit(realtimeproto.Error{Code: realtimeproto.CodeTranscriptionFailed, Message: "转写服务连接断开，听不到了"})
+	_ = stream.Close()
+}
+
+// ReopenTiming 是识别流意外断开后重开的节奏（Options.StreamReopen；零值 = DefaultReopenTiming）。
+type ReopenTiming struct {
+	Delay, MaxDelay time.Duration // 重试间隔：从 Delay 开始翻倍，最长 MaxDelay
+	LostNoticeAfter time.Duration // 断开超过这么久还没重开，才提示终端一次（一闪而过的断开不打扰）
+}
+
+// DefaultReopenTiming：haro-asr 在本机（同一个 Pod），重试间隔不用拉得很长；
+// 提示的门槛和终端「服务端断开超过 10 秒才说一声」一致。
+var DefaultReopenTiming = ReopenTiming{Delay: 500 * time.Millisecond, MaxDelay: 5 * time.Second, LostNoticeAfter: 10 * time.Second}
+
+func (t ReopenTiming) orDefault() ReopenTiming {
+	if t == (ReopenTiming{}) {
+		return DefaultReopenTiming
 	}
+	return t
+}
+
+const (
+	streamOpenTimeout    = 5 * time.Second // 每次尝试重开最多等这么久（连上、发完设置）
+	streamRestoreTimeout = 3 * time.Second // 重开后把醒着 / 正在播放告诉新的流，最多等这么久
+)
+
+// reopenStream 按打开时的设置重开识别流；重开后把会话里记着的「醒着 / 正在播放」告诉新的流。会话结束时返回 nil。
+// 断开超过 LostNoticeAfter 时提示终端一次「听不见了」，重开后再提示一次「恢复了」。
+func (s *Session) reopenStream() RecognizerStream {
+	select {
+	case <-s.closed: // 会话结束（正常关闭）
+		return nil
+	default:
+	}
+	s.logger.Warn("识别流断开了：开始重开")
+	s.mu.Lock()
+	config := *s.streamConfig
+	s.mu.Unlock()
+	timing := s.opts.StreamReopen.orDefault()
+	lostAt, lostNotified := time.Now(), false
+	policy := retrypolicy.NewBuilder[RecognizerStream]().
+		WithBackoff(timing.Delay, timing.MaxDelay).
+		WithJitterFactor(0.1).
+		WithMaxRetries(-1).
+		OnRetry(func(event failsafe.ExecutionEvent[RecognizerStream]) {
+			s.logger.Warn("重开识别流失败，稍后再试", "attempt", event.Attempts(), "err", event.LastError())
+			if !lostNotified && time.Since(lostAt) >= timing.LostNoticeAfter {
+				lostNotified = true
+				s.logger.Warn("识别流断开太久：提示终端现在听不见", "since", since(lostAt))
+				s.emit(realtimeproto.HaroNotice{Kind: realtimeproto.NoticeTranscriptionLost})
+			}
+		}).Build()
+	stream, err := failsafe.With(policy).WithContext(s.lifetime).Get(func() (RecognizerStream, error) {
+		ctx, cancel := context.WithTimeout(s.lifetime, streamOpenTimeout)
+		defer cancel()
+		return s.parts.Streaming.OpenStream(ctx, config)
+	})
+	if err != nil { // 只有会话结束才会走到这里（一直重试）
+		return nil
+	}
+	s.mu.Lock()
+	select {
+	case <-s.closed:
+		s.mu.Unlock()
+		_ = stream.Close()
+		return nil
+	default:
+	}
+	s.stream = stream
+	awake, playing, dropped := s.awake, s.playing, s.droppedAudio
+	s.droppedAudio = 0
+	s.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(s.lifetime, streamRestoreTimeout)
+	if awake {
+		if err := stream.SetAwake(ctx, true); err != nil {
+			s.logger.Warn("重开后恢复唤醒状态失败", "err", err)
+		}
+	}
+	if playing {
+		if err := stream.SetPlayback(ctx, true); err != nil {
+			s.logger.Warn("重开后恢复播放状态失败", "err", err)
+		}
+	}
+	cancel()
+	s.logger.Info("识别流已重开", "down_for", since(lostAt), "dropped_audio_chunks", dropped, "awake", awake, "playing", playing)
+	if lostNotified {
+		s.emit(realtimeproto.HaroNotice{Kind: realtimeproto.NoticeTranscriptionRestored})
+	}
+	return stream
 }

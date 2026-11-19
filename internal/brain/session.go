@@ -33,6 +33,8 @@ type Components struct {
 type Options struct {
 	MaxHistoryTurn int // 保留最近几轮（一问一答算一轮）的文字历史
 
+	StreamReopen ReopenTiming // 识别流断开后重开的节奏；零值 = DefaultReopenTiming
+
 	// Instructions 是基础提示词（身份、能力、底线），只由服务端持有：客户端不能经 session.update 替换。
 	Instructions string
 
@@ -64,10 +66,14 @@ type Session struct {
 	cancelResponse context.CancelFunc // 非 nil 表示有进行中的回答
 	autoRespond    bool               // 判定说完时自己开始回答（turn_detection 的 create_response，默认是）
 
-	stream      RecognizerStream             // 识别流：音频转发给它，由它判断说完；nil = 还没打开或已断开
-	pendingJobs map[string]*transcriptionJob // 已判定说完、等待识别结果的语音段（按 item_id）
-	wakePending bool                         // 刚听到唤醒词：接下来这句如果是空的，就回「我在。」
-	playing     bool                         // 终端正在播放回答（打断自己的唤醒在仲裁里最优先）
+	stream       RecognizerStream             // 识别流：音频转发给它，由它判断说完；nil = 还没打开或断开了正在重开
+	streamConfig *StreamConfig                // 打开识别流用的设置；nil = 还没打开过（断开后按它重开）
+	pendingJobs  map[string]*transcriptionJob // 已判定说完、等待识别结果的语音段（按 item_id）
+	wakePending  bool                         // 刚听到唤醒词：接下来这句如果是空的，就回「我在。」
+	// 醒着 / 正在播放只在这里存一份，识别流是它的跟随者：断开重开后按这两个状态重新告诉新的流
+	awake        bool // 唤醒门开着（听到唤醒词、或终端手动唤醒之后，直到终端说休眠）
+	playing      bool // 终端正在播放回答（只听唤醒词；打断自己的唤醒在仲裁里最优先）
+	droppedAudio int  // 识别流断开期间收到、只能丢掉的音频块数（重开时记一次日志）
 
 	conversation       *Conversation   // 这一轮说话的人的对话（跟人走，不跟连接走）
 	spoken             []spokenSegment // 最近一次回答已经发给终端的句子（打断时按「听到多少」截断历史）
@@ -118,9 +124,9 @@ func (s *Session) Close() error {
 		if s.cancelResponse != nil {
 			s.cancelResponse()
 		}
+		close(s.closed) // 在锁里关：重开识别流时持锁查 closed，关掉之后不会再挂上新的流
 		stream := s.stream
 		s.mu.Unlock()
-		close(s.closed)
 		if s.parts.WakeArbiter != nil {
 			s.parts.WakeArbiter.leave(s)
 		}
@@ -141,16 +147,14 @@ func (s *Session) Send(ctx context.Context, event realtimeproto.ClientEvent) err
 	// 音频与唤醒门控制直接转发给识别流，不持锁做网络写入。
 	switch e := event.(type) {
 	case realtimeproto.HaroPlaybackStarted, realtimeproto.HaroPlaybackStopped:
-		s.mu.Lock()
-		stream := s.stream
-		s.mu.Unlock()
-		if stream == nil { // 识别流还没打开或已断开：没有要通知的
-			return nil
-		}
 		_, playing := event.(realtimeproto.HaroPlaybackStarted)
 		s.mu.Lock()
 		s.playing = playing
+		stream := s.stream
 		s.mu.Unlock()
+		if stream == nil { // 识别流还没打开或正在重开：重开后按记下的状态告诉新的流
+			return nil
+		}
 		return stream.SetPlayback(ctx, playing)
 	case realtimeproto.ConversationItemTruncate:
 		s.truncate(e.AudioEndMs)
@@ -162,27 +166,45 @@ func (s *Session) Send(ctx context.Context, event realtimeproto.ClientEvent) err
 		s.logger.Info("终端设备", "microphone", deviceLabel(e.Microphone), "speaker", deviceLabel(e.Speaker))
 		return nil
 	case realtimeproto.HaroWakeWordSleep, realtimeproto.HaroWakeWordWake:
-		s.mu.Lock()
-		stream := s.stream
-		s.mu.Unlock()
-		if stream == nil {
-			return realtimeproto.ProtocolErrorf(realtimeproto.CodeNoTranscriptionStream, "没有流式转写会话，无法切换唤醒状态")
-		}
 		_, awake := event.(realtimeproto.HaroWakeWordWake)
+		s.mu.Lock()
+		stream, opened := s.stream, s.streamConfig != nil
+		if opened {
+			s.awake = awake
+		}
+		s.mu.Unlock()
+		switch {
+		case !opened:
+			return realtimeproto.ProtocolErrorf(realtimeproto.CodeNoTranscriptionStream, "没有流式转写会话，无法切换唤醒状态")
+		case stream == nil: // 正在重开：重开后按记下的状态告诉新的流
+			return nil
+		}
 		return stream.SetAwake(ctx, awake)
 	}
 	if audio, ok := event.(realtimeproto.InputAudioBufferAppend); ok {
-		s.mu.Lock()
-		stream := s.stream
-		s.mu.Unlock()
-		if stream == nil {
-			return errNoStream
-		}
 		if audio.Audio.Format != streamFormat {
 			return realtimeproto.ProtocolErrorf(realtimeproto.CodeUnsupportedAudioFormat, "只接受 %+v 的音频，收到 %+v",
 				streamFormat, audio.Audio.Format)
 		}
-		return stream.SendAudio(ctx, audio.Audio.Data)
+		s.mu.Lock()
+		stream, opened := s.stream, s.streamConfig != nil
+		if opened && stream == nil {
+			s.droppedAudio++
+		}
+		s.mu.Unlock()
+		switch {
+		case !opened:
+			return errNoStream
+		case stream == nil: // 识别流断开、正在重开：这段音频没处送，丢掉（不逐块回错误）
+			return nil
+		}
+		if err := stream.SendAudio(ctx, audio.Audio.Data); err != nil && ctx.Err() == nil {
+			// 流刚断：转发事件的循环马上会发现并开始重开，这一块算丢掉
+			s.mu.Lock()
+			s.droppedAudio++
+			s.mu.Unlock()
+		}
+		return nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -191,7 +213,7 @@ func (s *Session) Send(ctx context.Context, event realtimeproto.ClientEvent) err
 		if e.TurnDetection != nil {
 			s.autoRespond = e.TurnDetection.CreateResponse == nil || *e.TurnDetection.CreateResponse
 		}
-		if e.TurnDetection != nil && s.stream == nil {
+		if e.TurnDetection != nil && s.streamConfig == nil {
 			if err := s.openStream(ctx, StreamConfig{TurnDetection: *e.TurnDetection, WakeWord: e.WakeWord}); err != nil {
 				return err
 			}

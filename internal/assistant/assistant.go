@@ -40,6 +40,8 @@ type Options struct {
 	BargeIn bool
 	// NoticeTone 是服务端发来提示（haro.notice，例如后台调查查完了）时播的一声；空 = 只写日志
 	NoticeTone realtimeproto.PCMAudio
+	// NoticeTones 是有专门提示音的提示种类（例如语音识别断开 / 恢复，和服务端断开 / 回来用同样的两声）
+	NoticeTones map[string]realtimeproto.PCMAudio
 }
 
 // WakeWordOptions 是唤醒词模式的参数。

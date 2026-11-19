@@ -100,8 +100,11 @@ func (a *Assistant) handleWakeEvent(ctx context.Context, window *conversationWin
 }
 
 func (a *Assistant) sleep(ctx context.Context, window *conversationWindow, reason string) {
-	if err := a.parts.Brain.Send(ctx, realtimeproto.HaroWakeWordSleep{}); err != nil && !errors.Is(err, context.Canceled) {
-		a.logger.Error("通知休眠失败", "err", err)
+	if err := a.parts.Brain.Send(ctx, realtimeproto.HaroWakeWordSleep{}); err != nil {
+		if !errors.Is(err, context.Canceled) {
+			a.logger.Error("通知休眠失败：过一个对话窗口再试", "err", err)
+		}
+		window.restart() // 这次的计时已经用掉了：重新计时，否则窗口永远不再到期
 		return
 	}
 	window.sleep()
@@ -109,10 +112,15 @@ func (a *Assistant) sleep(ctx context.Context, window *conversationWindow, reaso
 	a.playSleepTone(ctx)
 }
 
-// playNotice 服务端有事告诉主人（例如后台调查查完了）：响一声。醒着、睡着都响；主人叫醒后服务端会先说是什么事。
+// playNotice 服务端有事告诉主人（例如后台调查查完了、语音识别断开了）：响一声。醒着、睡着都响。
+// 有专门提示音的种类（NoticeTones）播那一声，其余（包括不认识的）播通用的提示音。
 func (a *Assistant) playNotice(ctx context.Context, notice realtimeproto.HaroNotice) {
 	a.logger.Info("🔔 服务端提示", "kind", notice.Kind)
-	a.playClip(ctx, a.opts.NoticeTone, "提示音")
+	tone, ok := a.opts.NoticeTones[notice.Kind]
+	if !ok {
+		tone = a.opts.NoticeTone
+	}
+	a.playClip(ctx, tone, "提示音")
 }
 
 // playSleepTone 休眠时说一声：不出声的话，人不知道它已经睡了，接着说话会没反应。

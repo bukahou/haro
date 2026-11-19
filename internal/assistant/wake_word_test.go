@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -60,11 +61,13 @@ func (b blockingManual) WaitForToggle(ctx context.Context) error {
 }
 
 // wakeStream 是替身转写会话：收到第 10 块音频时报告「唤醒 + 一句话」；记录 SetAwake，以及之后收到的全零音频块（半双工静音）。
+// failSleeps 是前几次休眠要失败（模拟通知休眠失败）。
 type wakeStream struct {
 	mu          sync.Mutex
 	chunks      int
 	silentAfter int
 	awakeCalls  []bool
+	failSleeps  int
 	events      chan realtimeproto.ServerEvent
 	closeOnce   sync.Once
 }
@@ -89,6 +92,10 @@ func (w *wakeStream) SetAwake(_ context.Context, awake bool) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.awakeCalls = append(w.awakeCalls, awake)
+	if !awake && w.failSleeps > 0 {
+		w.failSleeps--
+		return errors.New("通知休眠失败")
+	}
 	return nil
 }
 func (w *wakeStream) Events() <-chan realtimeproto.ServerEvent { return w.events }
@@ -108,6 +115,12 @@ func (w *wakeStream) sleepRequested() bool {
 	return len(w.awakeCalls) > 0 && !w.awakeCalls[len(w.awakeCalls)-1]
 }
 
+func (w *wakeStream) sleepCalls() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return len(w.awakeCalls) - len(slices.DeleteFunc(slices.Clone(w.awakeCalls), func(awake bool) bool { return !awake }))
+}
+
 type wakeStreaming struct {
 	stream    *wakeStream
 	gotConfig brain.StreamConfig
@@ -120,7 +133,8 @@ func (w *wakeStreaming) OpenStream(_ context.Context, config brain.StreamConfig)
 
 func TestWakeWordConversation(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	streaming := &wakeStreaming{stream: &wakeStream{events: make(chan realtimeproto.ServerEvent, 8)}}
+	// 第一次通知休眠失败：过一个对话窗口再试（不能停在「醒着且永不到期」）
+	streaming := &wakeStreaming{stream: &wakeStream{events: make(chan realtimeproto.ServerEvent, 8), failSleeps: 1}}
 	notices := brain.NewNoticeHub()
 	session := brain.NewSession(brain.Components{
 		Streaming: streaming, Model: stubModel{}, Synthesizer: echoSynthesizer{}, Notices: notices,
@@ -135,6 +149,8 @@ func TestWakeWordConversation(t *testing.T) {
 		Manual: manual, Microphone: loudMicrophone{}, Speaker: speaker, Brain: session,
 	}, assistant.Options{TurnDetection: turn, EchoGuard: 10 * time.Millisecond,
 		NoticeTone: realtimeproto.PCMAudio{Format: realtimeproto.AudioFormat{SampleRate: 16000, Channels: 1}, Data: []byte("[叮咚]")},
+		NoticeTones: map[string]realtimeproto.PCMAudio{realtimeproto.NoticeTranscriptionLost: {
+			Format: realtimeproto.AudioFormat{SampleRate: 16000, Channels: 1}, Data: []byte("[断开]")}},
 		WakeWord: assistant.WakeWordOptions{Phrase: "哈罗哈罗", IdleTimeout: 150 * time.Millisecond,
 			SleepTone: realtimeproto.PCMAudio{Format: realtimeproto.AudioFormat{SampleRate: 16000, Channels: 1}, Data: []byte("[我去睡觉了]")}}}, logger)
 
@@ -163,6 +179,10 @@ func TestWakeWordConversation(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
+	if calls := streaming.stream.sleepCalls(); calls != 2 {
+		t.Errorf("第一次通知休眠失败后应再试一次：通知了 %d 次", calls)
+	}
+
 	// 不能打断时（半双工）：从请求回答到播完后的 EchoGuard 期间都应上传静音
 	if streaming.stream.silentChunks() == 0 {
 		t.Error("回答期间应上传静音（半双工），但一块静音都没收到")
@@ -173,6 +193,14 @@ func TestWakeWordConversation(t *testing.T) {
 	for _, audio, _ := speaker.snapshot(); audio != want+"[叮咚]"; _, audio, _ = speaker.snapshot() {
 		if time.Now().After(deadline) {
 			t.Fatalf("收到提示应响一声：播出 %q", audio)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// 有专门提示音的种类（服务端听不见了）：播那一声
+	notices.Notify(brain.SharedPerson, realtimeproto.HaroNotice{Kind: realtimeproto.NoticeTranscriptionLost})
+	for _, audio, _ := speaker.snapshot(); audio != want+"[叮咚][断开]"; _, audio, _ = speaker.snapshot() {
+		if time.Now().After(deadline) {
+			t.Fatalf("服务端听不见了应播断开的提示音：播出 %q", audio)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
