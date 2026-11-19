@@ -27,6 +27,12 @@ var removedSettings = []removedSetting{
 		removed: "摄像头常驻模式已删除，只在要看的时候才打开"},
 	{name: "HARO_CAMERA_FPS", removed: "常驻模式已删除，这个帧率不再使用"},
 	{name: "HARO_FRAME_MAX_AGE", removed: "常驻模式已删除，不再有「最新一帧」的时效"},
+	{name: "HARO_ASR", removed: "服务端不再拉起 haro-asr：haro-asr 单独运行，服务端只按 HARO_ASR_URL 连"},
+	{name: "HARO_ASR_BIN", removed: "服务端不再拉起 haro-asr，不用知道它在哪"},
+	{name: "HARO_ASR_PORT", removed: "haro-asr 的监听地址改由 HARO_ASR_LISTEN 设，服务端按 HARO_ASR_URL 连"},
+	{name: "HARO_PIPER_PYTHON", removed: "服务端不再拉起 Piper：Piper 单独运行，服务端只按 HARO_TTS_URL 连"},
+	{name: "HARO_PIPER_MODEL", removed: "服务端不再拉起 Piper，模型由运行 Piper 的命令指定"},
+	{name: "HARO_PIPER_PORT", removed: "服务端不再拉起 Piper，按 HARO_TTS_URL 连"},
 }
 
 // checkRemovedSettings 检查环境里还写着的已删除配置项：返回给人看的提醒；值要求已删除的行为时返回错误。

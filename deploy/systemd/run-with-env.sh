@@ -7,6 +7,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 : "${HARO_ENV_FILE:?未设置 HARO_ENV_FILE（haro.env 的位置，在 .service 里设）}"
+# 不写 export 的行也要传给程序 ⇒ 读的时候自动导出
+set -a
 # shellcheck source=/dev/null
 source "$HARO_ENV_FILE"
+set +a
 exec "$@"

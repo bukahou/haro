@@ -136,6 +136,12 @@ func TestRemovedSettings(t *testing.T) {
 			t.Errorf("%v 要求已删除的行为，应启动失败", env)
 		}
 	}
+	// 服务端不再拉起子进程：这些项写着什么值都只是多余（服务端按 HARO_ASR_URL、HARO_TTS_URL 连）
+	notes, err = checkRemovedSettings(lookup(map[string]string{"HARO_ASR": "local", "HARO_ASR_BIN": "bin/haro-asr",
+		"HARO_ASR_PORT": "59126", "HARO_PIPER_PYTHON": "python3", "HARO_PIPER_MODEL": "zh.onnx", "HARO_PIPER_PORT": "59125"}))
+	if err != nil || len(notes) != 6 {
+		t.Errorf("拉起子进程用的配置项只提醒：notes=%v err=%v", notes, err)
+	}
 	if notes, err := checkRemovedSettings(lookup(nil)); err != nil || len(notes) != 0 {
 		t.Errorf("没写时什么都不说：notes=%v err=%v", notes, err)
 	}

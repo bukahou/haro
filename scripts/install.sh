@@ -12,7 +12,7 @@
 # 做的事：下载这台机器对应的终端程序（Linux x86_64 / arm64、macOS Apple 芯片）→ 按 SHA256SUMS 校验 →
 #   装到 ~/.local/bin/haro → 第一次装时写配置 ~/.config/haro/haro.env →
 #   装成开机自启并（重新）启动：Linux 是 systemd 用户服务 haro.service（跟着桌面会话启停），macOS 是 LaunchAgent。
-# 不是这个脚本装的服务文件（例如开发时 make install-services 装的）不会被改动或删除。
+# 不是这个脚本装的服务文件（例如开发时 make install-terminal-service 装的）不会被改动或删除。
 # 环境变量 HARO_RELEASE_BASE_URL：换掉下载地址（测试用，可以是 file://；指向放着压缩包和 SHA256SUMS 的目录）。
 set -eu
 
@@ -84,7 +84,7 @@ uninstall() {
 			if user_systemd_ready; then systemctl --user daemon-reload || true; fi
 			say "已卸下开机自启：$unit_file"
 		else
-			warn "$unit_file 不是安装脚本装的（例如开发时 make install-services 装的），没有动它"
+			warn "$unit_file 不是安装脚本装的（例如开发时 make install-terminal-service 装的），没有动它"
 		fi
 	fi
 	if [ "$os" = Darwin ] && [ -e "$plist_file" ]; then
@@ -210,7 +210,7 @@ esac
 # ---- 开机自启 ----
 install_systemd_unit() {
 	if [ -e "$unit_file" ] && ! owned "$unit_file"; then
-		warn "$unit_file 已存在而且不是安装脚本装的（例如开发时 make install-services 装的）：没有改它，开机自启没装"
+		warn "$unit_file 已存在而且不是安装脚本装的（例如开发时 make install-terminal-service 装的）：没有改它，开机自启没装"
 		return 0
 	fi
 	if ! user_systemd_ready; then

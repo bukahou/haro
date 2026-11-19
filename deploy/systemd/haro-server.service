@@ -1,10 +1,13 @@
-# haro 服务端（v3 第 4 步）：对话、语音识别（haro-asr 子进程）、记事本（内置，v5）、语音合成（GPT-SoVITS 服务或 Piper）。
-# 用户服务，跟着桌面会话启停：登录后启动，锁屏 / 熄屏照常运行，退出登录时停止（4-1）。
-# 安装：make install-services；开关：systemctl --user start|stop haro-server.service；日志：journalctl --user -u haro-server -f
+# haro 服务端：对话、工具、记事本（内置）；语音识别连 haro-asr（haro-asr.service），语音合成连 GPT-SoVITS 服务或 Piper。
+# 用户服务，跟着桌面会话启停：登录后启动，锁屏 / 熄屏照常运行，退出登录时停止。
+# haro-asr 晚到或重启时服务端不退出，识别流自己重连。
+# 安装：make install-server-services；开关：systemctl --user start|stop haro-server.service；日志：journalctl --user -u haro-server -f
 # ⚠️ ExecStart 里的仓库路径（%h/work/github/haro）按你放代码的位置改
 [Unit]
 Description=haro 服务端
 Documentation=file://%h/work/github/haro/docs/architecture.md
+Wants=haro-asr.service
+After=haro-asr.service
 PartOf=graphical-session.target
 After=graphical-session.target
 # 一分钟内连续失败 5 次就停下（配置错了时不无限重启刷日志）
