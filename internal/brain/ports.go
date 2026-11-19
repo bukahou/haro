@@ -1,7 +1,7 @@
 // Package brain 是 haro 的服务端：识别 → 模型流式回答 → 按句切分 → 合成。
 //
 // 对外只暴露 Session（经 realtimeproto 事件与终端交互）；本文件定义服务端依赖的各段能力（Go interface），
-// 实现在 speech / llm 包，由 cmd/haro 组装注入。v3 服务端与终端分机部署时，本包不改，只在外面套 WebSocket。
+// 实现在 speech / llm 等包，由 cmd/haro-server 组装注入；和终端之间的 WebSocket 在本包外面。
 package brain
 
 import (
@@ -178,7 +178,7 @@ func (u *ReplyUsage) add(request *ReplyUsage) *ReplyUsage {
 	return &total
 }
 
-// StreamingRecognizer 打开流式转写会话（server_vad，v2 免按键）：持续送音频，收「说话开始 / 结束 / 识别结果」事件。
+// StreamingRecognizer 打开流式转写会话（server_vad）：持续送音频，收「说话开始 / 结束 / 识别结果」事件。
 type StreamingRecognizer interface {
 	OpenStream(ctx context.Context, config StreamConfig) (RecognizerStream, error)
 }

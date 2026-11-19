@@ -2,7 +2,7 @@ package brain
 
 import "strings"
 
-// 打断后的历史（v3 I-2，与 Realtime 的 conversation.item.truncate 一致）：用户只听到了回答的前一部分，
+// 打断后的历史（与 Realtime 的 conversation.item.truncate 一致）：用户只听到了回答的前一部分，
 // 历史里就只记这一部分——否则模型会以为用户听完了整段回答。
 //
 // 服务端记下这次回答每一句在播放时间轴上的起止（按发给终端的音频累计）；终端被打断时报告「播了多少毫秒」，
@@ -54,21 +54,21 @@ func (s *Session) truncateLastAnswerLocked() {
 	}
 	heard := heardText(s.spoken, s.truncateAtMs)
 	if s.conversation.replaceLastAnswer(heard) {
-		s.logger.Info("被打断：历史改为只记听到的部分", "played_ms", s.truncateAtMs, "heard", heard)
+		s.logger.Info("被打断：历史改为只记听到的部分", "item", s.responseItem, "played_ms", s.truncateAtMs, "heard", heard)
 	}
 }
 
 // rememberInterrupted 回答还在生成时被打断：按截断点记这一轮。没收到截断（例如 Ctrl+C 取消）时和原来一样不记。
 func (s *Session) rememberInterrupted(question string) {
 	s.mu.Lock()
-	at := s.truncateAtMs
+	at, item := s.truncateAtMs, s.responseItem
 	heard := heardText(s.spoken, at)
 	s.mu.Unlock()
 	if at < 0 {
 		return
 	}
 	s.remember(question, nil, heard)
-	s.logger.Info("被打断：历史只记听到的部分", "played_ms", at, "heard", heard)
+	s.logger.Info("被打断：历史只记听到的部分", "item", item, "played_ms", at, "heard", heard)
 }
 
 // interruptedBeforeSpeaking 是还没说出一个字就被打断时，历史里这一轮的回答。

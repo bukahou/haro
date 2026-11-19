@@ -32,7 +32,7 @@ type transcriptionJob struct {
 // runResponse 执行一次回答，结束时恰好发出一个 ResponseDone。
 func (s *Session) runResponse(ctx context.Context, job *transcriptionJob, image []byte) {
 	s.mu.Lock()
-	s.spoken, s.truncateAtMs, s.answeredInResponse = nil, -1, false // 新的回答：重新记播出的句子
+	s.spoken, s.truncateAtMs, s.answeredInResponse, s.responseItem = nil, -1, false, job.item // 新的回答：重新记播出的句子
 	s.mu.Unlock()
 	defer func() {
 		s.mu.Lock()

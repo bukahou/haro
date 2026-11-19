@@ -15,7 +15,7 @@ type Components struct {
 	Streaming    StreamingRecognizer // 流式识别：服务端判断说完、唤醒词都靠它
 	Model        ChatModel
 	Synthesizer  SpeechSynthesizer
-	Tools        Toolbox              // 可选：v2.5 工具（内置 + MCP）
+	Tools        Toolbox              // 可选：工具（内置 + MCP）
 	FrameExpert  FrameExpert          // 可选：看画面的幕后专家；nil = 画面直接交给前台模型
 	NewSegmenter func() TextSegmenter // 每次回答新建一个
 	// Conversations 是所有终端连接共用的对话簿；nil = 每条连接自己一份、只在内存里
@@ -34,7 +34,7 @@ type Components struct {
 type Options struct {
 	MaxHistoryTurn int // 保留最近几轮（一问一答算一轮）的文字历史
 
-	// Instructions 是默认的基础提示词（身份、能力、底线）。v3 起由服务端持有，终端不再发；
+	// Instructions 是默认的基础提示词（身份、能力、底线），由服务端持有，终端不用发；
 	// 终端在 session.update 里带了 instructions 时以终端的为准（与 Realtime 一致）。
 	Instructions string
 
@@ -67,12 +67,13 @@ type Session struct {
 	stream      RecognizerStream             // 识别流：音频转发给它，由它判断说完；nil = 还没打开或已断开
 	pendingJobs map[string]*transcriptionJob // 已判定说完、等待识别结果的语音段（按 item_id）
 	wakePending bool                         // 刚听到唤醒词：接下来这句如果是空的，就回「我在。」
-	playing     bool                         // 终端正在播放回答（打断自己的唤醒在仲裁里最优先，v4 D2）
+	playing     bool                         // 终端正在播放回答（打断自己的唤醒在仲裁里最优先）
 
 	conversation       *Conversation   // 这一轮说话的人的对话（跟人走，不跟连接走）
-	spoken             []spokenSegment // 最近一次回答已经发给终端的句子（打断时按「听到多少」截断历史，v3 I-2）
+	spoken             []spokenSegment // 最近一次回答已经发给终端的句子（打断时按「听到多少」截断历史）
 	truncateAtMs       int64           // 终端说用户只听到了前这么多毫秒；-1 = 没有截断
 	answeredInResponse bool            // 这次回答已经记进历史（截断时只改这次的，不碰上一轮）
+	responseItem       string          // 这次回答的是哪一句话（编号，打断的日志用）
 	noCamera           bool            // 终端声明没有摄像头（session.update）：不提供看画面工具
 	cameraGone         bool            // 终端报告摄像头现在不可用（设备报告）：同上
 	noSpeaker          bool            // 终端说现在没有音箱：不合成语音，只发文字
@@ -86,7 +87,7 @@ var (
 )
 
 // NewSession 创建会话。
-// parts.Conversations 为 nil 时这条会话自己建一个只在内存里的对话簿（和 v3 一样：断开就没了）。
+// parts.Conversations 为 nil 时这条会话自己建一个只在内存里的对话簿（断开就没了）。
 func NewSession(parts Components, opts Options, logger *slog.Logger) *Session {
 	if parts.Conversations == nil {
 		parts.Conversations = NewConversationBook(nil, opts, logger)

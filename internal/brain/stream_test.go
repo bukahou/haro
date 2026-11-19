@@ -82,11 +82,11 @@ func TestSessionHandsFreeTurn(t *testing.T) {
 	}
 }
 
-func TestSessionHandsFreeWithoutStreaming(t *testing.T) {
+func TestServerVADRejectedWithoutStreaming(t *testing.T) {
 	session := newStreamSession(t, nil, &fakeModel{}, nil)
 	turn := realtimeproto.TurnDetection{Type: "server_vad"}
 	if err := session.Send(context.Background(), realtimeproto.SessionUpdate{TurnDetection: &turn}); err == nil {
-		t.Error("没有配置流式识别时应拒绝免按键模式")
+		t.Error("没有配置流式识别时应拒绝 server_vad")
 	}
 }
 
