@@ -1,12 +1,12 @@
-// Package terminal 是终端的看守（v4 第 1 步，D3「终端永不崩溃」）：按状态机把终端一直跑下去，
-// 除非收到关机信号，否则不退出。
+// Package terminal 是终端的看守：按状态机把终端一直跑下去，除非收到关机信号，否则不退出。
 //
 //	连服务端（断了就按 1→2→4…→30 秒的间隔重连）
 //	  → 等麦克风（没有就待机，每 2 秒查一次）
-//	  → 运行对话（assistant）；同时每 2 秒按选择规则重新选一次设备（1-C）
+//	  → 运行对话（assistant）；同时每 2 秒按选择规则重新选一次设备
 //
-// 运行中任何一处出错（服务端断了、麦克风没了、该换麦克风了），都关掉这条连接、退回「连服务端」重来（1-A）。
-// 服务端断开超过 10 秒，用本地提示音说一声；恢复时再说一声（1-B：断开时终端听不出唤醒词，只能主动说）。
+// 运行中任何一处出错（服务端断了、麦克风没了、该换麦克风了），都关掉这条连接、退回「连服务端」重来。
+// 服务端断开超过 10 秒，用本地提示音说一声；恢复时再说一声（断开时终端听不出唤醒词，只能主动说）。
+// 协议版本和服务端不兼容时重连没用：提示一次，之后隔很久才再试，等人把两端升到同一版本。
 package terminal
 
 import (
@@ -60,11 +60,13 @@ type Timing struct {
 	Poll          time.Duration // 多久查一次设备
 	BackoffMin    time.Duration // 重连间隔：从这么久开始翻倍
 	BackoffMax    time.Duration // 重连间隔上限
+	// IncompatibleRetry 是协议版本不兼容时多久再试一次（要等人升级，频繁重试没用）；零值 = DefaultTiming 的
+	IncompatibleRetry time.Duration
 }
 
-// DefaultTiming 是 v4 第 1 步裁定的时间（1-B：10 秒；1-C：2 秒；E-1：1→30 秒）。
+// DefaultTiming 是看守的默认时间。
 var DefaultTiming = Timing{OfflineNotice: 10 * time.Second, Poll: 2 * time.Second,
-	BackoffMin: time.Second, BackoffMax: 30 * time.Second}
+	BackoffMin: time.Second, BackoffMax: 30 * time.Second, IncompatibleRetry: 5 * time.Minute}
 
 // Supervisor 是终端的看守。
 type Supervisor struct {
@@ -75,6 +77,9 @@ type Supervisor struct {
 
 // NewSupervisor 创建看守。
 func NewSupervisor(parts Parts, timing Timing, logger *slog.Logger) *Supervisor {
+	if timing.IncompatibleRetry == 0 {
+		timing.IncompatibleRetry = DefaultTiming.IncompatibleRetry
+	}
 	return &Supervisor{parts: parts, timing: timing, logger: logger}
 }
 
@@ -130,6 +135,20 @@ func (s *Supervisor) connect(ctx context.Context, offline *offlineState) (Connec
 		if offline.since.IsZero() { // 不是因为断线才来重连的（例如刚换完麦克风）：从现在开始算
 			offline.since = time.Now()
 		}
+		if errors.Is(err, realtimeproto.ErrIncompatibleProtocol) {
+			s.logger.Error("和服务端的协议版本不兼容：把终端和服务端升到同一版本", "err", err,
+				"retry_in", s.timing.IncompatibleRetry)
+			if !offline.announced {
+				offline.announced = true
+				s.playTone(ctx, s.parts.Offline, "协议版本不兼容")
+			}
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(s.timing.IncompatibleRetry):
+			}
+			continue
+		}
 		s.logger.Warn("连不上服务端", "err", err, "retry_in", backoff)
 		retryAt := time.Now().Add(backoff)
 		for time.Now().Before(retryAt) {
@@ -137,7 +156,7 @@ func (s *Supervisor) connect(ctx context.Context, offline *offlineState) (Connec
 			if !offline.announced {
 				if untilNotice := time.Until(offline.since.Add(s.timing.OfflineNotice)); untilNotice <= 0 {
 					// 到提示时间先立刻再连一次：服务端可能正好在两次重试之间起来了（make deploy 时服务端启动要好几秒，
-					// 而重试间隔在翻倍，下一次可能要等到 15 秒以后）；还连不上才提示（1-B：躲开这类重启）
+					// 而重试间隔在翻倍，下一次可能要等到 15 秒以后）；还连不上才提示（躲开这类重启）
 					if conn, err := s.parts.Dial(ctx); err == nil {
 						return conn, nil
 					}

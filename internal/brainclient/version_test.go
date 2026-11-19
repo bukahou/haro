@@ -16,6 +16,7 @@ import (
 	"github.com/bukahou/haro/internal/brainclient"
 	"github.com/bukahou/haro/internal/brainserver"
 	"github.com/bukahou/haro/internal/buildinfo"
+	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
 // lockedBuffer 是给 slog 写、给测试读的缓冲区（服务端在另一个 goroutine 里写日志）。
@@ -57,7 +58,7 @@ func pinVersion(t *testing.T, version string) {
 
 func newLoggedServer(logs *lockedBuffer) *httptest.Server {
 	logger := slog.New(slog.NewTextHandler(logs, nil))
-	return httptest.NewServer(brainserver.NewHandler(func() brainserver.Session { return newScriptedSession(false) }, logger))
+	return httptest.NewServer(brainserver.NewHandler(func() brainserver.Session { return newScriptedSession(false) }, brainserver.Options{}, logger))
 }
 
 // 服务端：握手响应里报自己的版本；终端的版本不同（或旧终端没报）时在日志里提醒。
@@ -69,7 +70,7 @@ func TestServerReportsVersionAndWarnsOnMismatch(t *testing.T) {
 	}{
 		{"同版本", "v0.5.0-aaaaaaa", false},
 		{"终端较旧", "v0.5.0-bbbbbbb", true},
-		{"旧终端没报版本", "", true},
+		{"终端没报构建版本", "", true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			var logs lockedBuffer
@@ -80,7 +81,7 @@ func TestServerReportsVersionAndWarnsOnMismatch(t *testing.T) {
 				header.Set(buildinfo.Header, c.terminal)
 			}
 			conn, response, err := websocket.Dial(context.Background(), "ws"+strings.TrimPrefix(server.URL, "http")+"/v1/realtime",
-				&websocket.DialOptions{HTTPHeader: header})
+				&websocket.DialOptions{Subprotocols: []string{realtimeproto.ProtocolV2}, HTTPHeader: header})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -103,7 +104,7 @@ func TestClientReportsVersionAndWarnsOnMismatch(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		received <- r.Header.Clone()
 		w.Header().Set(buildinfo.Header, "v0.5.1-ccccccc")
-		conn, err := websocket.Accept(w, r, nil)
+		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{Subprotocols: []string{realtimeproto.ProtocolV2}})
 		if err != nil {
 			return
 		}
@@ -113,7 +114,7 @@ func TestClientReportsVersionAndWarnsOnMismatch(t *testing.T) {
 	defer server.Close()
 
 	var logs lockedBuffer
-	client, err := brainclient.Dial(context.Background(), server.URL, mic16k, time.Second, slog.New(slog.NewTextHandler(&logs, nil)))
+	client, err := brainclient.Dial(context.Background(), brainclient.DialOptions{BaseURL: server.URL, InputFormat: mic16k}, slog.New(slog.NewTextHandler(&logs, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}

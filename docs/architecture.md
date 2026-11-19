@@ -29,6 +29,9 @@ haro 是一个家用语音助手：家里每个房间放一台**终端**（麦�
 - 线上的 JSON 结构只定义一处（`wire.go`），编解码只有一处（`codec.go`）；
 - 由它生成 JSON Schema（`haro.realtime.v2.schema.json`），测试比对两者，结构改了而文件没更新就失败；
 - 错误事件带稳定的错误码（`errors.go`），调用方按码判断，不看说明文字。
+- 握手时用 WebSocket 子协议协商版本（`haro.realtime.v2`）：报了不认识的 haro 版本、或者旧版终端没报版本，服务端拒绝握手，
+  响应里给错误码和它支持的版本；什么都不报的当普通 Realtime 客户端（只用标准事件）。终端被拒后提示一次，隔几分钟才再试；
+- 两端各自每 10 秒 ping 一次，5 秒内等不到 pong 就断开（`internal/heartbeat`），终端的看守随即重连。
 
 ## 服务端（`internal/brain` 与周边）
 

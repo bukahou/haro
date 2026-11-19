@@ -59,6 +59,33 @@ func ErrorEventFor(eventType string, err error) Error {
 	return Error{Code: code, Message: message}
 }
 
+// ErrIncompatibleProtocol 表示两端的协议版本不兼容（握手被拒，或者对端没有选我们的版本）：
+// 重连没用，要把终端和服务端升到同一版本。
+var ErrIncompatibleProtocol = errors.New("协议版本和对端不兼容")
+
+// HTTPError 是 HTTP 接口出错时的响应体，形状同 Realtime 错误事件里的 error。
+type HTTPError struct {
+	Error HTTPErrorDetail `json:"error"`
+}
+
+// HTTPErrorDetail 是出错的说明。
+type HTTPErrorDetail struct {
+	Type    string    `json:"type"`           // invalid_request_error 或 server_error
+	Code    ErrorCode `json:"code,omitempty"` // 稳定的错误码（有的话）：调用方按它判断
+	Message string    `json:"message"`        // 给人看的说明
+	// SupportedProtocols 是服务端支持的协议版本（握手时版本不合被拒才带）。
+	SupportedProtocols []string `json:"supported_protocols,omitempty"`
+}
+
+// NewHTTPError 按 HTTP 状态码构造出错的响应体：5xx 是服务端自己的问题，其余是请求的问题。
+func NewHTTPError(status int, code ErrorCode, message string) HTTPError {
+	errorType := "invalid_request_error"
+	if status >= 500 {
+		errorType = "server_error"
+	}
+	return HTTPError{Error: HTTPErrorDetail{Type: errorType, Code: code, Message: message}}
+}
+
 // ResponseReason 是回答没有正常完成的原因（response.done 的 status_details.reason）。
 type ResponseReason string
 

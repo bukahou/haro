@@ -94,7 +94,7 @@ func run(logger *slog.Logger) error {
 	// 看守：连服务端 → 等麦克风 → 运行；出什么错都退回去重来，只有关机信号才退出
 	supervisor := terminal.NewSupervisor(terminal.Parts{
 		Dial: func(ctx context.Context) (terminal.Connection, error) {
-			return brainclient.Dial(ctx, settings.ServerURL, microphoneFormat, 0, logger)
+			return brainclient.Dial(ctx, brainclient.DialOptions{BaseURL: settings.ServerURL, InputFormat: microphoneFormat}, logger)
 		},
 		Catalog:            local,
 		MicrophoneOverride: settings.AudioSource,

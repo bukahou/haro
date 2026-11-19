@@ -3,6 +3,7 @@ package terminal
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"sync"
@@ -89,15 +90,17 @@ func (f *fakeStream) Played() time.Duration { return 0 }
 
 // rig 是一套可操控的假部件。
 type rig struct {
-	brainUp    atomic.Bool
-	microphone atomic.Value // string：空 = 没有麦克风
-	speaker    atomic.Bool
-	camera     atomic.Value // string：空 = 摄像头现在不可用
-	mu         sync.Mutex
-	conns      []*fakeConn
-	sessions   []Devices
-	fail       chan error
-	sink       fakeSink
+	brainUp      atomic.Bool
+	incompatible atomic.Bool  // 服务端的协议版本和终端不兼容
+	dials        atomic.Int32 // 连了几次服务端
+	microphone   atomic.Value // string：空 = 没有麦克风
+	speaker      atomic.Bool
+	camera       atomic.Value // string：空 = 摄像头现在不可用
+	mu           sync.Mutex
+	conns        []*fakeConn
+	sessions     []Devices
+	fail         chan error
+	sink         fakeSink
 }
 
 func newRig() *rig {
@@ -112,6 +115,10 @@ func newRig() *rig {
 func (r *rig) parts() Parts {
 	return Parts{
 		Dial: func(context.Context) (Connection, error) {
+			r.dials.Add(1)
+			if r.incompatible.Load() {
+				return nil, fmt.Errorf("%w：服务端只支持更新的版本", realtimeproto.ErrIncompatibleProtocol)
+			}
 			if !r.brainUp.Load() {
 				return nil, errors.New("连不上")
 			}
@@ -299,4 +306,24 @@ func TestSupervisorReportsCameraChanges(t *testing.T) {
 		t.Error("摄像头变化不该重来")
 	}
 	_ = stop()
+}
+
+// 协议版本和服务端不兼容：重连没用。马上提示一次，之后隔 IncompatibleRetry 才再试（不按平常的间隔频繁重连）；
+// 两端升到同一版本后照常连上，并提示「回来了」。
+func TestSupervisorBacksOffOnIncompatibleProtocol(t *testing.T) {
+	r := newRig()
+	r.incompatible.Store(true)
+	timing := testTiming
+	timing.IncompatibleRetry = 400 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go NewSupervisor(r.parts(), timing, slog.New(slog.NewTextHandler(io.Discard, nil))).Run(ctx)
+	eventually(t, "提示一次", func() bool { return r.sink.count() == 1 })
+	time.Sleep(200 * time.Millisecond) // 平常的重连间隔是 10–20 ms，这段时间里会连十几次
+	if n := r.dials.Load(); n != 1 {
+		t.Fatalf("不兼容时不该频繁重连：连了 %d 次", n)
+	}
+	r.incompatible.Store(false)
+	eventually(t, "隔一段时间再试，连上并运行", func() bool { return r.sessionCount() == 1 })
+	eventually(t, "提示「回来了」", func() bool { return r.sink.count() == 2 })
 }

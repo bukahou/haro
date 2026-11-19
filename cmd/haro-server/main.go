@@ -254,7 +254,7 @@ func localURL(port int) string { return "http://127.0.0.1:" + strconv.Itoa(port)
 // 终端只认识服务端的地址；haro-asr 只监听本机（容器部署时在同一个容器里）。
 func brainHandler(settings config.Settings, newSession brainserver.SessionFactory, logger *slog.Logger) http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle("/", brainserver.NewHandler(newSession, logger))
+	mux.Handle("/", brainserver.NewHandler(newSession, brainserver.Options{}, logger))
 	if settings.ASR == config.ASRLocal {
 		asrURL, _ := url.Parse(localURL(settings.ASRPort))
 		mux.Handle(realtimeproto.VoiceprintRoute, httputil.NewSingleHostReverseProxy(asrURL))

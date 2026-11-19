@@ -2,6 +2,7 @@ package brainclient_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -13,8 +14,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
+
 	"github.com/bukahou/haro/internal/brainclient"
 	"github.com/bukahou/haro/internal/brainserver"
+	"github.com/bukahou/haro/internal/heartbeat"
 	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
@@ -80,7 +84,7 @@ func (s *scriptedSession) receivedEvents() []realtimeproto.ClientEvent {
 
 // newServer 起一个只接这条假会话的服务端（每个测试只连一次）。
 func newServer(session *scriptedSession) *httptest.Server {
-	return httptest.NewServer(brainserver.NewHandler(func() brainserver.Session { return session }, quiet))
+	return httptest.NewServer(brainserver.NewHandler(func() brainserver.Session { return session }, brainserver.Options{}, quiet))
 }
 
 // askOverWebSocket 发出一轮的客户端事件：打开会话（服务端判断说完）、送一段音频、带上画面、请求回答。
@@ -132,7 +136,7 @@ func TestConversationOverWebSocket(t *testing.T) {
 	)
 	server := newServer(session)
 	defer server.Close()
-	client, err := brainclient.Dial(context.Background(), server.URL, mic16k, time.Second, quiet)
+	client, err := brainclient.Dial(context.Background(), brainclient.DialOptions{BaseURL: server.URL, InputFormat: mic16k}, quiet)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,7 +223,7 @@ func TestDisconnectDuringResponse(t *testing.T) {
 	go httpServer.Serve(listener)
 	defer httpServer.Close()
 
-	client, err := brainclient.Dial(context.Background(), "http://"+raw.Addr().String(), mic16k, time.Second, quiet)
+	client, err := brainclient.Dial(context.Background(), brainclient.DialOptions{BaseURL: "http://" + raw.Addr().String(), InputFormat: mic16k}, quiet)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -249,18 +253,73 @@ func TestDisconnectDuringResponse(t *testing.T) {
 	}
 }
 
-// 服务端一直没起来：等满 wait 后给出明确的错误。
-func TestDialGivesUpAfterWait(t *testing.T) {
+// 服务端没起来：只连一次，马上返回 ErrUnreachable（重试由看守负责）。
+func TestDialReportsUnreachable(t *testing.T) {
 	server := newServer(newScriptedSession(false))
 	url := server.URL
 	server.Close() // 地址存在但没人监听
-	started := time.Now()
-	_, err := brainclient.Dial(context.Background(), url, mic16k, 1500*time.Millisecond, quiet)
-	if !errors.Is(err, brainclient.ErrUnreachable) {
+	_, err := brainclient.Dial(context.Background(), brainclient.DialOptions{BaseURL: url, InputFormat: mic16k}, quiet)
+	if !errors.Is(err, brainclient.ErrUnreachable) || errors.Is(err, realtimeproto.ErrIncompatibleProtocol) {
 		t.Fatalf("应返回 ErrUnreachable，得到 %v", err)
 	}
-	if elapsed := time.Since(started); elapsed < time.Second {
-		t.Errorf("应该重试到等待时间用完，只等了 %s", elapsed)
+}
+
+// 协议版本不兼容：服务端拒绝握手（例如它只认更新的版本），或者服务端是旧版、没有选 haro 的子协议。
+// 两种都返回 ErrIncompatibleProtocol，看守据此不再频繁重连。
+func TestDialDetectsIncompatibleProtocol(t *testing.T) {
+	rejecting := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body := realtimeproto.NewHTTPError(http.StatusBadRequest, realtimeproto.CodeUnsupportedProtocolVersion, "只支持 v9")
+		body.Error.SupportedProtocols = []string{"haro.realtime.v9"}
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(body)
+	}))
+	defer rejecting.Close()
+	oldServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil) // 旧版服务端不认子协议
+		if err != nil {
+			return
+		}
+		defer conn.CloseNow()
+		_, _, _ = conn.Read(r.Context())
+	}))
+	defer oldServer.Close()
+	for name, url := range map[string]string{"服务端拒绝": rejecting.URL, "旧版服务端": oldServer.URL} {
+		_, err := brainclient.Dial(context.Background(), brainclient.DialOptions{BaseURL: url, InputFormat: mic16k}, quiet)
+		if !errors.Is(err, realtimeproto.ErrIncompatibleProtocol) {
+			t.Errorf("%s：应返回 ErrIncompatibleProtocol，得到 %v", name, err)
+		}
+	}
+}
+
+// 服务端掉线（连接还在、但不再回应）：终端靠心跳发现，补发 error 并关闭 Done()。
+func TestSilentServerIsDetected(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{Subprotocols: []string{realtimeproto.ProtocolV2}})
+		if err != nil {
+			return
+		}
+		defer conn.CloseNow()
+		<-r.Context().Done() // 不读连接：WebSocket 库只在读的时候回 pong
+	}))
+	defer server.Close()
+	client, err := brainclient.Dial(context.Background(), brainclient.DialOptions{BaseURL: server.URL, InputFormat: mic16k,
+		Heartbeat: heartbeat.Timing{Interval: 20 * time.Millisecond, Timeout: 50 * time.Millisecond}}, quiet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	select {
+	case <-client.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("服务端不回应心跳时，终端应在间隔 + 超时后断开")
+	}
+	select {
+	case event := <-client.Events():
+		if _, ok := event.(realtimeproto.Error); !ok {
+			t.Errorf("断开时应补发 error，收到 %#v", event)
+		}
+	case <-time.After(time.Second):
+		t.Error("断开时应补发 error")
 	}
 }
 
@@ -268,7 +327,7 @@ func TestDialGivesUpAfterWait(t *testing.T) {
 func TestRejectsMismatchedAudioFormat(t *testing.T) {
 	server := newServer(newScriptedSession(false))
 	defer server.Close()
-	client, err := brainclient.Dial(context.Background(), server.URL, mic16k, time.Second, quiet)
+	client, err := brainclient.Dial(context.Background(), brainclient.DialOptions{BaseURL: server.URL, InputFormat: mic16k}, quiet)
 	if err != nil {
 		t.Fatal(err)
 	}
