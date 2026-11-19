@@ -304,7 +304,7 @@ func buildChatModel(settings config.Settings, claude *llm.ClaudeAPI, httpClient 
 	if purpose == spending.PurposeSummary && maxTokens < summaryMaxTokens {
 		maxTokens = summaryMaxTokens // 摘要最长 300 字，聊天的输出上限可能不够
 	}
-	// 每个具体模型都记账（本地模型不在价目表里，按 0 日元记 token）
+	// 每个具体模型都记账（本地模型在价格表里标了不花钱，照样记 token）
 	newLocal := func(client *http.Client) brain.ChatModel {
 		return spending.NewMeteredChatModel(
 			llm.NewOllamaChatModel(settings.OllamaURL, settings.Model, settings.ContextSize, settings.ModelKeepAlive, client),
