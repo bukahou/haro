@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"iter"
 	"log/slog"
 	"net"
 	"net/http"
@@ -14,11 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bukahou/haro/internal/brain"
 	"github.com/bukahou/haro/internal/brainclient"
 	"github.com/bukahou/haro/internal/brainserver"
 	"github.com/bukahou/haro/internal/realtimeproto"
-	"github.com/bukahou/haro/internal/speech"
 )
 
 var (
@@ -27,61 +24,73 @@ var (
 	quiet    = slog.New(slog.NewTextHandler(io.Discard, nil))
 )
 
-type fixedRecognizer struct{ text string }
-
-func (r fixedRecognizer) Recognize(context.Context, realtimeproto.PCMAudio) (string, error) {
-	return r.text, nil
-}
-
-// slowModel 先吐 tokens；hang 为 true 时吐完不结束（模拟还在生成），直到 ctx 取消。
-type slowModel struct {
-	tokens []string
+// scriptedSession 是假的服务端会话：记下收到的事件；收到 response.create 就按顺序发出 reply，
+// 再发 response.done；hang 时发完 reply 不结束，直到会话关闭（模拟还在生成）。
+type scriptedSession struct {
+	reply  []realtimeproto.ServerEvent
 	hang   bool
+	events chan realtimeproto.ServerEvent
+	closed chan struct{}
+	once   sync.Once
+
+	mu       sync.Mutex
+	received []realtimeproto.ClientEvent
 }
 
-func (m slowModel) StreamReply(ctx context.Context, _ []brain.ChatMessage, _ []brain.ToolSpec) iter.Seq2[brain.ReplyDelta, error] {
-	return func(yield func(brain.ReplyDelta, error) bool) {
-		for _, token := range m.tokens {
-			if !yield(brain.ReplyDelta{Text: token}, nil) {
-				return
-			}
-		}
-		if m.hang {
-			<-ctx.Done()
-			yield(brain.ReplyDelta{}, ctx.Err())
+func newScriptedSession(hang bool, reply ...realtimeproto.ServerEvent) *scriptedSession {
+	return &scriptedSession{reply: reply, hang: hang, events: make(chan realtimeproto.ServerEvent, 64),
+		closed: make(chan struct{})}
+}
+
+func (s *scriptedSession) Send(_ context.Context, event realtimeproto.ClientEvent) error {
+	s.mu.Lock()
+	s.received = append(s.received, event)
+	s.mu.Unlock()
+	if _, ok := event.(realtimeproto.ResponseCreate); ok {
+		go s.respond()
+	}
+	return nil
+}
+
+func (s *scriptedSession) respond() {
+	events := append([]realtimeproto.ServerEvent(nil), s.reply...)
+	if !s.hang {
+		events = append(events, realtimeproto.ResponseDone{Status: realtimeproto.StatusCompleted})
+	}
+	for _, event := range events {
+		select {
+		case s.events <- event:
+		case <-s.closed:
+			return
 		}
 	}
 }
-func (slowModel) Warmup(context.Context) error { return nil }
 
-// chunkySynthesizer 每句分两段产出 32 kHz 的声音（像 GPT-SoVITS 流式那样）。
-type chunkySynthesizer struct{}
-
-func (chunkySynthesizer) Synthesize(_ context.Context, u brain.Utterance) iter.Seq2[realtimeproto.PCMAudio, error] {
-	return func(yield func(realtimeproto.PCMAudio, error) bool) {
-		half := []byte(u.Text)
-		if yield(realtimeproto.PCMAudio{Format: voice32k, Data: half[:len(half)/2*2/2*2]}, nil) {
-			yield(realtimeproto.PCMAudio{Format: voice32k, Data: []byte("尾巴")}, nil)
-		}
-	}
+func (s *scriptedSession) Events() <-chan realtimeproto.ServerEvent { return s.events }
+func (s *scriptedSession) Close() error {
+	s.once.Do(func() { close(s.closed) })
+	return nil
 }
 
-func newServer(model brain.ChatModel) *httptest.Server {
-	return httptest.NewServer(brainserver.NewHandler(func() brainserver.Session {
-		return brain.NewSession(brain.Components{
-			Recognizer: fixedRecognizer{text: "讲个冷笑话"}, Model: model, Synthesizer: chunkySynthesizer{},
-			NewSegmenter: func() brain.TextSegmenter { return speech.NewSentenceSegmenter(4, 40) },
-		}, brain.Options{MaxHistoryTurn: 6, Instructions: "你是测试助手"}, quiet)
-	}, quiet))
+func (s *scriptedSession) receivedEvents() []realtimeproto.ClientEvent {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]realtimeproto.ClientEvent(nil), s.received...)
 }
 
+// newServer 起一个只接这条假会话的服务端（每个测试只连一次）。
+func newServer(session *scriptedSession) *httptest.Server {
+	return httptest.NewServer(brainserver.NewHandler(func() brainserver.Session { return session }, quiet))
+}
+
+// askOverWebSocket 发出一轮的客户端事件：打开会话（服务端判断说完）、送一段音频、带上画面、请求回答。
 func askOverWebSocket(t *testing.T, client *brainclient.Client) {
 	t.Helper()
 	ctx := context.Background()
+	turn := realtimeproto.TurnDetection{Type: "server_vad"}
 	for _, event := range []realtimeproto.ClientEvent{
-		realtimeproto.SessionUpdate{}, // 按键模式；输入格式由客户端补上
-		realtimeproto.InputAudioBufferAppend{Audio: realtimeproto.PCMAudio{Format: mic16k, Data: make([]byte, 32000)}},
-		realtimeproto.InputAudioBufferCommit{},
+		realtimeproto.SessionUpdate{TurnDetection: &turn}, // 输入格式由客户端补上
+		realtimeproto.InputAudioBufferAppend{Audio: realtimeproto.PCMAudio{Format: mic16k, Data: make([]byte, 3200)}},
 		realtimeproto.ConversationItemCreate{Item: realtimeproto.ConversationItem{Role: "user",
 			Content: []realtimeproto.ContentPart{{Type: "input_image", ImageJPEG: []byte{0xFF, 0xD8}}}}},
 		realtimeproto.ResponseCreate{},
@@ -109,9 +118,19 @@ func collectUntilDone(t *testing.T, client *brainclient.Client) []realtimeproto.
 	}
 }
 
-// 一轮完整的对话走 WebSocket：识别结果、逐句文字、分段的 32 kHz 声音、response.done 都原样到达终端。
+// 一轮完整的对话走 WebSocket：客户端事件原样到达服务端（输入格式由客户端补上）；
+// 识别结果、逐句文字、分段的 32 kHz 声音、response.done 原样到达终端。
 func TestConversationOverWebSocket(t *testing.T) {
-	server := newServer(slowModel{tokens: []string{"[调侃]为什么数学老师", "离婚了？", "因为解不开。"}})
+	session := newScriptedSession(false,
+		realtimeproto.InputAudioTranscriptionCompleted{ItemID: "item_1", Transcript: "讲个冷笑话"},
+		realtimeproto.ResponseOutputAudioTranscriptDelta{Delta: "为什么数学老师离婚了？"},
+		realtimeproto.ResponseOutputAudioDelta{Audio: realtimeproto.PCMAudio{Format: voice32k, Data: []byte("前半")}},
+		realtimeproto.ResponseOutputAudioDelta{Audio: realtimeproto.PCMAudio{Format: voice32k, Data: []byte("后半")}},
+		realtimeproto.ResponseOutputAudioTranscriptDelta{Delta: "因为解不开。"},
+		realtimeproto.ResponseOutputAudioDelta{Audio: realtimeproto.PCMAudio{Format: voice32k, Data: []byte("前半")}},
+		realtimeproto.ResponseOutputAudioDelta{Audio: realtimeproto.PCMAudio{Format: voice32k, Data: []byte("后半")}},
+	)
+	server := newServer(session)
 	defer server.Close()
 	client, err := brainclient.Dial(context.Background(), server.URL, mic16k, time.Second, quiet)
 	if err != nil {
@@ -121,7 +140,7 @@ func TestConversationOverWebSocket(t *testing.T) {
 	askOverWebSocket(t, client)
 	events := collectUntilDone(t, client)
 
-	var transcript, spoken strings.Builder
+	var transcript strings.Builder
 	audioDeltas := 0
 	for _, event := range events {
 		switch e := event.(type) {
@@ -136,19 +155,29 @@ func TestConversationOverWebSocket(t *testing.T) {
 				t.Errorf("音频格式应原样带过来：%+v", e.Audio.Format)
 			}
 			audioDeltas++
-			spoken.Write(e.Audio.Data)
 		case realtimeproto.Error:
 			t.Errorf("不应出错：%s", e.Message)
 		}
 	}
 	if transcript.String() != "为什么数学老师离婚了？因为解不开。" {
-		t.Errorf("文字（不带情绪标记）= %q", transcript.String())
+		t.Errorf("文字 = %q", transcript.String())
 	}
-	if audioDeltas < 4 { // 两句，每句两段
-		t.Errorf("声音应分段到达，只收到 %d 段", audioDeltas)
+	if audioDeltas != 4 {
+		t.Errorf("声音应分段到达，收到 %d 段", audioDeltas)
 	}
 	if done := events[len(events)-1].(realtimeproto.ResponseDone); done.Status != realtimeproto.StatusCompleted {
 		t.Errorf("response.done = %+v", done)
+	}
+
+	received := session.receivedEvents()
+	if len(received) != 4 {
+		t.Fatalf("服务端应收到 4 个事件，收到 %d 个", len(received))
+	}
+	if update, ok := received[0].(realtimeproto.SessionUpdate); !ok || update.InputFormat != mic16k || update.TurnDetection == nil {
+		t.Errorf("session.update 应带上客户端补的输入格式和 turn_detection：%+v", received[0])
+	}
+	if audio, ok := received[1].(realtimeproto.InputAudioBufferAppend); !ok || audio.Audio.Format != mic16k || len(audio.Audio.Data) != 3200 {
+		t.Errorf("音频应原样到达：%+v", received[1])
 	}
 }
 
@@ -179,7 +208,7 @@ func (l *trackingListener) killAll() {
 
 // 回答到一半服务端断了：终端收到 error + 失败的 response.done（不会一直等），之后 Send 返回 ErrDisconnected。
 func TestDisconnectDuringResponse(t *testing.T) {
-	server := newServer(slowModel{tokens: []string{"说到一半"}, hang: true})
+	server := newServer(newScriptedSession(true, realtimeproto.ResponseOutputAudioTranscriptDelta{Delta: "说到一半"}))
 	server.Close() // 只借用它的 handler，改用自己的监听
 	raw, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -222,13 +251,13 @@ func TestDisconnectDuringResponse(t *testing.T) {
 
 // 服务端一直没起来：等满 wait 后给出明确的错误。
 func TestDialGivesUpAfterWait(t *testing.T) {
-	server := newServer(slowModel{})
+	server := newServer(newScriptedSession(false))
 	url := server.URL
 	server.Close() // 地址存在但没人监听
 	started := time.Now()
 	_, err := brainclient.Dial(context.Background(), url, mic16k, 1500*time.Millisecond, quiet)
-	if err == nil || !strings.Contains(err.Error(), "连不上服务端") {
-		t.Fatalf("应返回「连不上服务端」，得到 %v", err)
+	if !errors.Is(err, brainclient.ErrUnreachable) {
+		t.Fatalf("应返回 ErrUnreachable，得到 %v", err)
 	}
 	if elapsed := time.Since(started); elapsed < time.Second {
 		t.Errorf("应该重试到等待时间用完，只等了 %s", elapsed)
@@ -237,7 +266,7 @@ func TestDialGivesUpAfterWait(t *testing.T) {
 
 // 音频格式和声明的不一致：直接拒绝（避免服务端按错的采样率去识别）。
 func TestRejectsMismatchedAudioFormat(t *testing.T) {
-	server := newServer(slowModel{})
+	server := newServer(newScriptedSession(false))
 	defer server.Close()
 	client, err := brainclient.Dial(context.Background(), server.URL, mic16k, time.Second, quiet)
 	if err != nil {
@@ -245,7 +274,7 @@ func TestRejectsMismatchedAudioFormat(t *testing.T) {
 	}
 	defer client.Close()
 	err = client.Send(context.Background(), realtimeproto.InputAudioBufferAppend{Audio: realtimeproto.PCMAudio{Format: voice32k, Data: []byte{1, 2}}})
-	if err == nil {
-		t.Error("格式不一致应报错")
+	if !errors.Is(err, brainclient.ErrFormatMismatch) {
+		t.Errorf("格式不一致应返回 ErrFormatMismatch，得到 %v", err)
 	}
 }

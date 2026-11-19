@@ -12,11 +12,6 @@ import (
 	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
-// SpeechRecognizer 把一段语音转成文字。
-type SpeechRecognizer interface {
-	Recognize(ctx context.Context, audio realtimeproto.PCMAudio) (string, error)
-}
-
 // ChatModel 根据完整的消息列表（系统提示词 + 历史 + 本轮输入 + 工具往来）流式给出回答。
 type ChatModel interface {
 	// StreamReply 逐段产出可见文字与工具调用；调用方 range 拉取，提前 break 即中止生成。
@@ -40,7 +35,7 @@ type SpokenError interface {
 	SpokenMessage() string
 }
 
-// ProfileSource 给出主人资料（v5 U1–U5）：全家共用的 + 说话人自己的事实与偏好，外部注入（不在公开代码里）。
+// ProfileSource 给出主人资料：全家共用的 + 说话人自己的事实与偏好，外部注入（不在公开代码里）。
 // 放在系统提示词里内置规矩之后、性格之前；很少变，所以不影响提示词缓存。没有资料时返回空。
 type ProfileSource interface {
 	Profile(person string) string
@@ -108,7 +103,7 @@ const (
 )
 
 // ChatMessage 是一条对话消息。Image 只在本轮输入里携带，历史里不保留图片。
-// json 标签：对话存盘用（v4 D1）；历史里不放图片。
+// json 标签：对话存盘用；历史里不放图片。
 type ChatMessage struct {
 	Role       ChatRole   `json:"role"`
 	Text       string     `json:"text,omitempty"`
@@ -154,7 +149,7 @@ type Toolbox interface {
 type ReplyUsage struct {
 	PromptTokens int // 输入的总数（含下面两项）
 	OutputTokens int
-	// 提示词缓存（v7，Claude）：命中缓存读进来的、这次写进缓存的输入 token。价格和普通输入不同（读约 0.1 倍、写约 1.25 倍），
+	// 提示词缓存（Claude）：命中缓存读进来的、这次写进缓存的输入 token。价格和普通输入不同（读约 0.1 倍、写约 1.25 倍），
 	// 记账时分开算；不报缓存的模型都是 0
 	CacheReadTokens  int
 	CacheWriteTokens int
@@ -163,7 +158,7 @@ type ReplyUsage struct {
 	Requests         int   // 这次回答请求了模型几次（调工具时不止一次；add 累加时计数）
 }
 
-// add 把一次模型请求的用量累加进来（v3 U-1）：调工具时一次回答要请求模型好几次，每次都要计费，
+// add 把一次模型请求的用量累加进来：调工具时一次回答要请求模型好几次，每次都要计费，
 // 只记最后一次会让日志里的用量比账单少。
 func (u *ReplyUsage) add(request *ReplyUsage) *ReplyUsage {
 	if request == nil {
@@ -200,7 +195,7 @@ type RecognizerStream interface {
 	SendAudio(ctx context.Context, pcm []byte) error
 	// SetAwake 切换唤醒门（只在启用唤醒词时有意义）：false = 休眠，true = 手动唤醒。
 	SetAwake(ctx context.Context, awake bool) error
-	// SetPlayback 告诉语音前端终端在不在播放回答（v3 I-1 打断）：true = 只听唤醒词（听到即打断），false = 恢复。
+	// SetPlayback 告诉语音前端终端在不在播放回答（打断用）：true = 只听唤醒词（听到即打断），false = 恢复。
 	SetPlayback(ctx context.Context, playing bool) error
 	// Events 发出 InputAudioBufferSpeechStarted / SpeechStopped / InputAudioTranscriptionCompleted /
 	// HaroWakeWordDetected / Error；连接断开时关闭。
@@ -210,7 +205,7 @@ type RecognizerStream interface {
 
 type speakerKey struct{}
 
-// WithSpeaker 把这一轮说话人（对话名）放进 ctx：工具执行时据此区分是谁的事（v5：后台调查按人记任务）。
+// WithSpeaker 把这一轮说话人（对话名）放进 ctx：工具执行时据此区分是谁的事（后台调查按人记任务）。
 func WithSpeaker(ctx context.Context, person string) context.Context {
 	return context.WithValue(ctx, speakerKey{}, person)
 }

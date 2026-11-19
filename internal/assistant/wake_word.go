@@ -9,7 +9,7 @@ import (
 	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
-// runWakeWord 是 v2.2 的唤醒词模式：麦克风一直开着，语音前端从休眠开始。
+// runWakeWord 是终端的对话循环：麦克风一直开着，语音前端从休眠开始。
 //   - 听到唤醒词（或按回车）→ 唤醒，进入对话窗口，自动轮流
 //   - 最后一次回答播完后安静 IdleTimeout（或再按回车）→ 通知语音前端休眠
 //
@@ -64,7 +64,7 @@ func (a *Assistant) runWakeWord(ctx context.Context) error {
 			}
 		case <-window.expired():
 			a.sleep(ctx, window, "对话窗口结束")
-		case event := <-a.replay: // 打断后等取消确认期间收到的事件（v3 I-1）
+		case event := <-a.replay: // 打断后等取消确认期间收到的事件
 			a.handleWakeEvent(ctx, window, event)
 		case event := <-a.parts.Brain.Events():
 			a.handleWakeEvent(ctx, window, event)
@@ -85,7 +85,7 @@ func (a *Assistant) handleWakeEvent(ctx context.Context, window *conversationWin
 	case realtimeproto.InputAudioBufferSpeechStopped:
 		if window.awake {
 			window.hold()
-			if a.respondHandsFree(ctx, a.uplink.wallClockAt(e.AudioEndMs)) {
+			if a.respondHandsFree(ctx, e.ItemID, a.uplink.wallClockAt(e.AudioEndMs)) {
 				window.wake() // 被打断：已经醒了，等用户接着说
 				a.logger.Info("👂 打断了，请说")
 				return
@@ -115,7 +115,7 @@ func (a *Assistant) playNotice(ctx context.Context, notice realtimeproto.HaroNot
 	a.playClip(ctx, a.opts.NoticeTone, "提示音")
 }
 
-// playSleepTone 休眠时说一声（2026-11-17：休眠没有声音，人不知道它已经睡了，接着说话没反应）。
+// playSleepTone 休眠时说一声：不出声的话，人不知道它已经睡了，接着说话会没反应。
 // 放在通知服务端休眠之后：这时语音前端只认唤醒词，提示音不会被当成用户说话。
 func (a *Assistant) playSleepTone(ctx context.Context) {
 	a.playClip(ctx, a.opts.WakeWord.SleepTone, "休眠提示音")

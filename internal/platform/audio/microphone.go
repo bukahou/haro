@@ -137,7 +137,7 @@ func (a *chunkAssembler) push(pcm []byte) [][]byte {
 	return chunks
 }
 
-// Recorder 按一次录一段（v1.5 按键模式），实现 assistant.AudioRecorder。
+// Recorder 按需录一段（登记声纹用），实现 assistant.AudioRecorder。
 type Recorder struct{ microphone *Microphone }
 
 // NewMiniaudioRecorder 创建录音器。key 同 NewMiniaudioMicrophone。

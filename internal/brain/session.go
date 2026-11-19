@@ -12,22 +12,21 @@ import (
 
 // Components 是服务端需要的全部能力，由 cmd/haro 组装注入。
 type Components struct {
-	Recognizer   SpeechRecognizer
-	Streaming    StreamingRecognizer // 可选：免按键（server_vad）模式需要
+	Streaming    StreamingRecognizer // 流式识别：服务端判断说完、唤醒词都靠它
 	Model        ChatModel
 	Synthesizer  SpeechSynthesizer
 	Tools        Toolbox              // 可选：v2.5 工具（内置 + MCP）
 	FrameExpert  FrameExpert          // 可选：看画面的幕后专家；nil = 画面直接交给前台模型
 	NewSegmenter func() TextSegmenter // 每次回答新建一个
-	// Conversations 是所有终端连接共用的对话簿（v4 D1）；nil = 每条连接自己一份、只在内存里
+	// Conversations 是所有终端连接共用的对话簿；nil = 每条连接自己一份、只在内存里
 	Conversations *ConversationBook
-	// WakeArbiter 是多台终端同时听到唤醒词时的仲裁（v4 D2）；nil = 不仲裁（每台都回答）
+	// WakeArbiter 是多台终端同时听到唤醒词时的仲裁；nil = 不仲裁（每台都回答）
 	WakeArbiter *WakeArbiter
-	// Briefers 每轮补充给模型的即时情况（v5：额度提醒、任务板）；可以为空
+	// Briefers 每轮补充给模型的即时情况（额度提醒、任务板）；可以为空
 	Briefers []Briefer
-	// Profiles 是主人资料（v5）；nil = 没有
+	// Profiles 是主人资料；nil = 没有
 	Profiles ProfileSource
-	// Notices 是所有终端连接共用的提示中转（v5：后台调查查完了让终端响一声）；nil = 不发提示
+	// Notices 是所有终端连接共用的提示中转（后台调查查完了让终端响一声）；nil = 不发提示
 	Notices *NoticeHub
 }
 
@@ -39,7 +38,7 @@ type Options struct {
 	// 终端在 session.update 里带了 instructions 时以终端的为准（与 Realtime 一致）。
 	Instructions string
 
-	// 性格档案（v3，可选）：两个以上时提供 switch_persona 工具
+	// 性格档案（可选）：两个以上时提供 switch_persona 工具
 	Personas       []Persona
 	DefaultPersona string       // 没记过当前性格时用哪个（ID）
 	PersonaState   PersonaState // 可选：记住当前性格，重启后保持
@@ -49,7 +48,7 @@ type Options struct {
 }
 
 // Session 是一次与终端的会话：接收 realtimeproto 客户端事件，经 Events() 发出服务端事件。
-// 同一时间只允许一个进行中的回答（与 Realtime 一致）。
+// 同一时间只允许一个进行中的回答（与 Realtime 一致）。说完由识别流判断（session.update 里的 turn_detection），不接受手动提交。
 type Session struct {
 	parts  Components
 	opts   Options
@@ -61,24 +60,30 @@ type Session struct {
 
 	mu             sync.Mutex
 	instructions   string
-	audio          realtimeproto.PCMAudio // 尚未提交的输入音频
-	transcription  *transcriptionJob      // 已提交、等待被回答使用的识别任务
-	image          []byte                 // 等待被回答使用的画面
-	cancelResponse context.CancelFunc     // 非 nil 表示有进行中的回答
+	transcription  *transcriptionJob  // 已判定说完、等待被回答使用的识别任务
+	image          []byte             // 等待被回答使用的画面
+	cancelResponse context.CancelFunc // 非 nil 表示有进行中的回答
 
-	stream      RecognizerStream             // 非 nil 表示免按键模式：音频转发给流式转写，由 VAD 判断说完
+	stream      RecognizerStream             // 识别流：音频转发给它，由它判断说完；nil = 还没打开或已断开
 	pendingJobs map[string]*transcriptionJob // 已判定说完、等待识别结果的语音段（按 item_id）
 	wakePending bool                         // 刚听到唤醒词：接下来这句如果是空的，就回「我在。」
 	playing     bool                         // 终端正在播放回答（打断自己的唤醒在仲裁里最优先，v4 D2）
 
-	conversation       *Conversation   // 这一轮说话的人的对话（v4 D1：跟人走，不跟连接走）
+	conversation       *Conversation   // 这一轮说话的人的对话（跟人走，不跟连接走）
 	spoken             []spokenSegment // 最近一次回答已经发给终端的句子（打断时按「听到多少」截断历史，v3 I-2）
 	truncateAtMs       int64           // 终端说用户只听到了前这么多毫秒；-1 = 没有截断
 	answeredInResponse bool            // 这次回答已经记进历史（截断时只改这次的，不碰上一轮）
-	noCamera           bool            // 终端声明没有摄像头（v3 H-2，session.update）：不提供看画面工具
-	cameraGone         bool            // 终端报告摄像头现在不可用（设备报告，v4 第 5 步 b）：同上
-	noSpeaker          bool            // 终端说现在没有音箱（v4 D3）：不合成语音，只发文字
+	noCamera           bool            // 终端声明没有摄像头（session.update）：不提供看画面工具
+	cameraGone         bool            // 终端报告摄像头现在不可用（设备报告）：同上
+	noSpeaker          bool            // 终端说现在没有音箱：不合成语音，只发文字
 }
+
+var (
+	// errNoStream：识别流还没打开（session.update 没带 turn_detection）或已断开，音频无处可送。
+	errNoStream = errors.New("识别流没有打开：session.update 要带 turn_detection；断开后要重新打开")
+	// errManualCommit：说完由服务端判断，不接受 input_audio_buffer.commit。
+	errManualCommit = errors.New("不接受手动提交：说完由服务端判断（session.update 里的 turn_detection）")
+)
 
 // NewSession 创建会话。
 // parts.Conversations 为 nil 时这条会话自己建一个只在内存里的对话簿（和 v3 一样：断开就没了）。
@@ -135,13 +140,13 @@ func (s *Session) Close() error {
 // Send 处理一个客户端事件。ctx 是这一轮对话的上下文（携带追踪 span），
 // 由它派生的识别、回答都会随它取消。
 func (s *Session) Send(ctx context.Context, event realtimeproto.ClientEvent) error {
-	// 免按键模式下音频与唤醒门控制直接转发，不持锁做网络写入。
+	// 音频与唤醒门控制直接转发给识别流，不持锁做网络写入。
 	switch e := event.(type) {
 	case realtimeproto.HaroPlaybackStarted, realtimeproto.HaroPlaybackStopped:
 		s.mu.Lock()
 		stream := s.stream
 		s.mu.Unlock()
-		if stream == nil { // 按键模式没有流式转写：播放期间本来就不收音，忽略
+		if stream == nil { // 识别流还没打开或已断开：没有要通知的
 			return nil
 		}
 		_, playing := event.(realtimeproto.HaroPlaybackStarted)
@@ -155,7 +160,7 @@ func (s *Session) Send(ctx context.Context, event realtimeproto.ClientEvent) err
 	case realtimeproto.HaroTerminalDevices:
 		s.mu.Lock()
 		s.noSpeaker = e.Speaker == ""
-		s.cameraGone = e.Camera == "" // 摄像头被拔掉 / 插回来：不给 / 再给模型看画面的工具（v4 第 5 步 b）
+		s.cameraGone = e.Camera == "" // 摄像头被拔掉 / 插回来：不给 / 再给模型看画面的工具
 		s.mu.Unlock()
 		s.logger.Info("终端设备", "microphone", deviceLabel(e.Microphone), "speaker", deviceLabel(e.Speaker),
 			"camera", deviceLabel(e.Camera))
@@ -174,12 +179,13 @@ func (s *Session) Send(ctx context.Context, event realtimeproto.ClientEvent) err
 		s.mu.Lock()
 		stream := s.stream
 		s.mu.Unlock()
-		if stream != nil {
-			if audio.Audio.Format != streamFormat {
-				return fmt.Errorf("免按键模式只接受 %+v 的音频，收到 %+v", streamFormat, audio.Audio.Format)
-			}
-			return stream.SendAudio(ctx, audio.Audio.Data)
+		if stream == nil {
+			return errNoStream
 		}
+		if audio.Audio.Format != streamFormat {
+			return fmt.Errorf("只接受 %+v 的音频，收到 %+v", streamFormat, audio.Audio.Format)
+		}
+		return stream.SendAudio(ctx, audio.Audio.Data)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -194,22 +200,8 @@ func (s *Session) Send(ctx context.Context, event realtimeproto.ClientEvent) err
 				return err
 			}
 		}
-	case realtimeproto.InputAudioBufferAppend:
-		if len(s.audio.Data) > 0 && s.audio.Format != e.Audio.Format {
-			return fmt.Errorf("输入音频格式不一致：%+v / %+v", s.audio.Format, e.Audio.Format)
-		}
-		s.audio.Format = e.Audio.Format
-		s.audio.Data = append(s.audio.Data, e.Audio.Data...)
 	case realtimeproto.InputAudioBufferCommit:
-		if s.stream != nil {
-			return errors.New("免按键模式下由 VAD 自动判断说完，不接受手动提交")
-		}
-		if len(s.audio.Data) == 0 {
-			return errors.New("输入音频缓冲为空，无法提交")
-		}
-		// 与 Realtime 一致：提交时就开始识别，和终端取帧等后续动作并行。
-		s.transcription = s.startTranscription(ctx, s.audio)
-		s.audio = realtimeproto.PCMAudio{}
+		return errManualCommit
 	case realtimeproto.ConversationItemCreate:
 		for _, part := range e.Item.Content {
 			if part.Type == "input_image" {

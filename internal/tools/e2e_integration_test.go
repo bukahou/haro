@@ -2,7 +2,7 @@
 
 // 真实模型 + 内置工具的端到端对话（默认不跑；语音用文字代替）：
 //
-//	HARO_TEST_IMAGE=/path/frame.jpg go test -tags integration -run ConversationLive -v ./internal/tools/
+//	HARO_ANTHROPIC_API_KEY=… [HARO_TEST_IMAGE=/path/frame.jpg] go test -tags integration -run ConversationLive -v ./internal/tools/
 package tools
 
 import (
@@ -10,32 +10,20 @@ import (
 	"io"
 	"iter"
 	"log/slog"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/bukahou/haro/internal/brain"
+	"github.com/bukahou/haro/internal/brain/braintest"
 	"github.com/bukahou/haro/internal/llm"
 	"github.com/bukahou/haro/internal/netdiag"
 	"github.com/bukahou/haro/internal/notes"
 	"github.com/bukahou/haro/internal/realtimeproto"
 	"github.com/bukahou/haro/internal/speech"
 )
-
-type textRecognizer struct {
-	mu   sync.Mutex
-	text string
-}
-
-func (r *textRecognizer) Recognize(context.Context, realtimeproto.PCMAudio) (string, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.text, nil
-}
 
 type textSynthesizer struct{}
 
@@ -54,41 +42,38 @@ func TestConversationLive(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	// 与正式运行一致：记事本、网络诊断都内置（v5）
+	// 与正式运行一致：记事本、网络诊断都内置
 	builtins := append(NoteTools(store, logger), NetworkDiagnostics(netdiag.NewChecker("www.cloudflare.com", "1.1.1.1:443"))...)
 	box, err := NewToolbox(ctx, nil, logger, builtins...)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer box.Close()
-	recognizer := &textRecognizer{}
+	voice := braintest.NewVoice()
 	session := brain.NewSession(brain.Components{
-		Recognizer: recognizer, Synthesizer: textSynthesizer{}, Tools: box,
+		Streaming: voice, Synthesizer: textSynthesizer{}, Tools: box,
 		Model:        testChatModel(t),
 		NewSegmenter: func() brain.TextSegmenter { return speech.NewSentenceSegmenter(4, 40) },
 	}, brain.Options{MaxHistoryTurn: 6}, slog.New(slog.NewTextHandler(os.Stderr, nil)))
 	defer session.Close()
 	turns := []string{"帮我记一下，车停在C3的7号位。", "我的车停在哪了？", "现在几点了？", "家里网络正常吗？",
 		"我最近都记了些什么？", "把车停车位那条记录删了。", "确认", "你能看到我吗？"}
-	_ = session.Send(ctx, realtimeproto.SessionUpdate{Instructions: brain.DefaultInstructions})
+	stream := braintest.Open(t, session, voice, realtimeproto.SessionUpdate{Instructions: brain.DefaultInstructions})
 	if conversation := os.Getenv("HARO_TEST_CONVERSATION"); conversation != "" {
 		turns = strings.Split(conversation, "|")
 	}
 	image, _ := os.ReadFile(os.Getenv("HARO_TEST_IMAGE"))
 
 	for _, text := range turns {
-		recognizer.mu.Lock()
-		recognizer.text = text
-		recognizer.mu.Unlock()
+		utterance := braintest.Utterance{Text: text}
+		braintest.Speak(t, session, stream, utterance)
 		started := time.Now()
-		_ = session.Send(ctx, realtimeproto.InputAudioBufferAppend{Audio: realtimeproto.PCMAudio{
-			Format: realtimeproto.AudioFormat{SampleRate: 16000, Channels: 1}, Data: make([]byte, 3200)}})
-		_ = session.Send(ctx, realtimeproto.InputAudioBufferCommit{})
 		if len(image) > 0 {
 			_ = session.Send(ctx, realtimeproto.ConversationItemCreate{Item: realtimeproto.ConversationItem{Role: "user",
 				Content: []realtimeproto.ContentPart{{Type: "input_image", ImageJPEG: image}}}})
 		}
 		_ = session.Send(ctx, realtimeproto.ResponseCreate{})
+		braintest.Recognized(t, stream, utterance)
 		var spoken strings.Builder
 		var firstAudio time.Duration
 		for done := false; !done; {
@@ -111,15 +96,17 @@ func TestConversationLive(t *testing.T) {
 	}
 }
 
-// testChatModel：HARO_LLM_PROVIDER=cloud 且填了 key 时走云端（OpenAI 兼容接口），否则走本机 ollama。
-// ⚠️ 走云端时若设了 HARO_TEST_IMAGE，画面会发到云端 —— 只在用户同意时设置。
+// testChatModel 是这个测试用的模型：Claude（HARO_ANTHROPIC_API_KEY；模型名 HARO_CLOUD_LLM_MODEL，不设用 Haiku）。没设密钥时跳过。
+// ⚠️ 设了 HARO_TEST_IMAGE 时画面会发到云端 —— 只在用户同意时设置。
 func testChatModel(t *testing.T) brain.ChatModel {
-	client := &http.Client{Timeout: 2 * time.Minute}
-	if os.Getenv("HARO_LLM_PROVIDER") == "cloud" && os.Getenv("HARO_CLOUD_LLM_API_KEY") != "" {
-		t.Logf("模型：云端 %s", os.Getenv("HARO_CLOUD_LLM_MODEL"))
-		return llm.NewOpenAIChatModel(os.Getenv("HARO_CLOUD_LLM_URL"), os.Getenv("HARO_CLOUD_LLM_MODEL"),
-			os.Getenv("HARO_CLOUD_LLM_API_KEY"), 300, client)
+	key := os.Getenv("HARO_ANTHROPIC_API_KEY")
+	if key == "" {
+		t.Skip("没设 HARO_ANTHROPIC_API_KEY")
 	}
-	t.Log("模型：本地 qwen3-vl:4b-instruct")
-	return llm.NewOllamaChatModel("http://127.0.0.1:11434", "qwen3-vl:4b-instruct", 4096, "30m", client)
+	model := os.Getenv("HARO_CLOUD_LLM_MODEL")
+	if model == "" {
+		model = "claude-haiku-5-5"
+	}
+	t.Logf("模型：%s", model)
+	return llm.NewAnthropicChatModel(llm.AnthropicOptions{API: llm.NewClaudeAPI(key, "", nil), Model: model, MaxTokens: 800})
 }

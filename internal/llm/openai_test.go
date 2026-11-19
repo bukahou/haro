@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"iter"
 	"log/slog"
@@ -15,24 +14,8 @@ import (
 	"time"
 
 	"github.com/bukahou/haro/internal/brain"
+	"github.com/bukahou/haro/internal/llm/llmtest"
 )
-
-// sseServer 返回一个按 chunks 依次推送 SSE 的假服务，并把收到的请求体交给 inspect。
-func sseServer(t *testing.T, chunks []string, inspect func(*http.Request, map[string]any)) *httptest.Server {
-	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var body map[string]any
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		if inspect != nil {
-			inspect(r, body)
-		}
-		w.Header().Set("Content-Type", "text/event-stream")
-		for _, chunk := range chunks {
-			fmt.Fprintf(w, "data: %s\n\n", chunk)
-		}
-		fmt.Fprint(w, "data: [DONE]\n\n")
-	}))
-}
 
 func collect(t *testing.T, seq iter.Seq2[brain.ReplyDelta, error]) (string, []brain.ToolCall, *brain.ReplyUsage, error) {
 	t.Helper()
@@ -53,34 +36,31 @@ func collect(t *testing.T, seq iter.Seq2[brain.ReplyDelta, error]) (string, []br
 }
 
 func TestOpenAIStreamsTextAndUsage(t *testing.T) {
-	server := sseServer(t, []string{
+	server := llmtest.NewOpenAIServer(t, llmtest.Script{Events: []string{
 		`{"choices":[{"delta":{"content":"你好，"}}]}`,
 		`{"choices":[{"delta":{"content":"我在。"},"finish_reason":"stop"}]}`,
 		`{"choices":[],"usage":{"prompt_tokens":1200,"completion_tokens":8}}`,
-	}, func(r *http.Request, body map[string]any) {
-		if r.URL.Path != "/v1/chat/completions" || r.Header.Get("Authorization") != "Bearer test-key" {
-			t.Errorf("请求 %s，鉴权头 %q", r.URL.Path, r.Header.Get("Authorization"))
-		}
-		if body["stream"] != true || body["model"] != "qwen.test" {
-			t.Errorf("请求体 %v", body)
-		}
-	})
-	defer server.Close()
+	}})
 	model := NewOpenAIChatModel(server.URL+"/v1/", "qwen.test", "test-key", 300, server.Client())
 	text, calls, usage, err := collect(t, model.StreamReply(context.Background(),
 		[]brain.ChatMessage{{Role: brain.RoleUser, Text: "你好"}}, nil))
 	if err != nil || text != "你好，我在。" || len(calls) != 0 || usage == nil || usage.PromptTokens != 1200 {
 		t.Errorf("text=%q calls=%v usage=%+v err=%v", text, calls, usage, err)
 	}
+	if got := server.Header(0).Get("Authorization"); got != "Bearer test-key" {
+		t.Errorf("鉴权头 %q", got)
+	}
+	if body := server.Request(0); body["stream"] != true || body["model"] != "qwen.test" {
+		t.Errorf("请求体 %v", body)
+	}
 }
 
 func TestOpenAIAccumulatesStreamedToolCall(t *testing.T) {
-	server := sseServer(t, []string{
+	server := llmtest.NewOpenAIServer(t, llmtest.Script{Events: []string{
 		`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"abc","type":"function","function":{"name":"save_","arguments":""}}]}}]}`,
 		`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"note","arguments":"{\"content\":"}}]}}]}`,
 		`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"车停在B2\"}"}}]},"finish_reason":"tool_calls"}]}`,
-	}, nil)
-	defer server.Close()
+	}})
 	model := NewOpenAIChatModel(server.URL, "qwen.test", "k", 300, server.Client())
 	_, calls, _, err := collect(t, model.StreamReply(context.Background(), []brain.ChatMessage{{Role: brain.RoleUser, Text: "记一下"}},
 		[]brain.ToolSpec{{Name: "save_note", Parameters: json.RawMessage(`{"type":"object"}`)}}))
@@ -90,9 +70,7 @@ func TestOpenAIAccumulatesStreamedToolCall(t *testing.T) {
 }
 
 func TestOpenAIRequestShape(t *testing.T) {
-	var sent map[string]any
-	server := sseServer(t, []string{`{"choices":[{"delta":{"content":"好"}}]}`}, func(_ *http.Request, body map[string]any) { sent = body })
-	defer server.Close()
+	server := llmtest.NewOpenAIServer(t, llmtest.Script{Events: []string{`{"choices":[{"delta":{"content":"好"}}]}`}})
 	messages := []brain.ChatMessage{
 		{Role: brain.RoleSystem, Text: "系统"},
 		{Role: brain.RoleUser, Text: "我车停哪了"},
@@ -105,7 +83,7 @@ func TestOpenAIRequestShape(t *testing.T) {
 	if _, _, _, err := collect(t, model.StreamReply(context.Background(), messages, nil)); err != nil {
 		t.Fatal(err)
 	}
-	wire := sent["messages"].([]any)
+	wire := server.Request(0)["messages"].([]any)
 	assistant := wire[2].(map[string]any)
 	tool := wire[3].(map[string]any)
 	callID := assistant["tool_calls"].([]any)[0].(map[string]any)["id"]
