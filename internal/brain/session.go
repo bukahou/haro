@@ -15,6 +15,7 @@ type Components struct {
 	Synthesizer  SpeechSynthesizer
 	Tools        Toolbox              // 可选：工具（内置 + MCP）
 	FrameExpert  FrameExpert          // 可选：看画面的幕后专家；nil = 画面直接交给前台模型
+	Camera       TerminalCamera       // 可选：终端经 MCP 提供的摄像头；nil 或拍不了时不给模型看画面的工具
 	NewSegmenter func() TextSegmenter // 每次回答新建一个
 	// Conversations 是所有终端连接共用的对话簿；nil = 每条连接自己一份、只在内存里
 	Conversations *ConversationBook
@@ -57,7 +58,6 @@ type Session struct {
 
 	mu             sync.Mutex
 	transcription  *transcriptionJob  // 已判定说完、等待被回答使用的识别任务
-	image          []byte             // 等待被回答使用的画面
 	cancelResponse context.CancelFunc // 非 nil 表示有进行中的回答
 
 	stream      RecognizerStream             // 识别流：音频转发给它，由它判断说完；nil = 还没打开或已断开
@@ -70,8 +70,6 @@ type Session struct {
 	truncateAtMs       int64           // 终端说用户只听到了前这么多毫秒；-1 = 没有截断
 	answeredInResponse bool            // 这次回答已经记进历史（截断时只改这次的，不碰上一轮）
 	responseItem       string          // 这次回答的是哪一句话（编号，打断的日志用）
-	noCamera           bool            // 终端声明没有摄像头（session.update）：不提供看画面工具
-	cameraGone         bool            // 终端报告摄像头现在不可用（设备报告）：同上
 	noSpeaker          bool            // 终端说现在没有音箱：不合成语音，只发文字
 }
 
@@ -154,10 +152,8 @@ func (s *Session) Send(ctx context.Context, event realtimeproto.ClientEvent) err
 	case realtimeproto.HaroTerminalDevices:
 		s.mu.Lock()
 		s.noSpeaker = e.Speaker == ""
-		s.cameraGone = e.Camera == "" // 摄像头被拔掉 / 插回来：不给 / 再给模型看画面的工具
 		s.mu.Unlock()
-		s.logger.Info("终端设备", "microphone", deviceLabel(e.Microphone), "speaker", deviceLabel(e.Speaker),
-			"camera", deviceLabel(e.Camera))
+		s.logger.Info("终端设备", "microphone", deviceLabel(e.Microphone), "speaker", deviceLabel(e.Speaker))
 		return nil
 	case realtimeproto.HaroWakeWordSleep, realtimeproto.HaroWakeWordWake:
 		s.mu.Lock()
@@ -186,27 +182,21 @@ func (s *Session) Send(ctx context.Context, event realtimeproto.ClientEvent) err
 	defer s.mu.Unlock()
 	switch e := event.(type) {
 	case realtimeproto.SessionUpdate:
-		s.noCamera = e.NoCamera
 		if e.TurnDetection != nil && s.stream == nil {
 			if err := s.openStream(ctx, StreamConfig{TurnDetection: *e.TurnDetection, WakeWord: e.WakeWord}); err != nil {
 				return err
 			}
 		}
-	case realtimeproto.ConversationItemCreate:
-		for _, part := range e.Item.Content {
-			if part.Type == "input_image" {
-				s.image = part.ImageJPEG
-			}
-		}
+	case realtimeproto.ConversationItemCreate: // 画面改为看的时候经 MCP 向终端要，这里附带的不用
 	case realtimeproto.ResponseCreate:
 		if s.cancelResponse != nil {
 			return realtimeproto.ProtocolErrorf(realtimeproto.CodeResponseInProgress, "已有进行中的回答")
 		}
 		responseCtx, cancel := context.WithCancel(ctx)
 		s.cancelResponse = cancel
-		job, image := s.transcription, s.image
-		s.transcription, s.image = nil, nil
-		go s.runResponse(responseCtx, job, image)
+		job := s.transcription
+		s.transcription = nil
+		go s.runResponse(responseCtx, job)
 	case realtimeproto.ResponseCancel:
 		if s.cancelResponse != nil {
 			s.cancelResponse()

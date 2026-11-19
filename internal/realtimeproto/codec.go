@@ -36,6 +36,7 @@ var clientEvents = map[string]clientCodec{
 	typeHaroPlaybackStarted:      typeOnlyClient(HaroPlaybackStarted{}),
 	typeHaroPlaybackStopped:      typeOnlyClient(HaroPlaybackStopped{}),
 	typeHaroTerminalDevices:      {wireTerminalDevices{}, decodeTerminalDevices},
+	typeHaroMCPMessage:           {wireMCPMessage{}, decodeMCPMessageFromClient},
 }
 
 var serverEvents = map[string]serverCodec{
@@ -48,6 +49,7 @@ var serverEvents = map[string]serverCodec{
 	typeResponseDone:           {wireResponseDone{}, decodeResponseDone},
 	typeHaroNotice:             {wireNotice{}, decodeNotice},
 	typeError:                  {wireError{}, decodeError},
+	typeHaroMCPMessage:         {wireMCPMessage{}, decodeMCPMessageFromServer},
 }
 
 // EncodeClientEvent 把客户端事件编码成 JSON。
@@ -132,14 +134,8 @@ func (e SessionUpdate) toWire() (any, error) {
 		wire.Session.Audio.Input.Format = &wireAudioFormat{Type: "audio/pcm", Rate: e.InputFormat.SampleRate}
 	}
 	wire.Session.Audio.Input.TurnDetection = e.TurnDetection
-	if e.WakeWord || e.NoCamera {
-		wire.Session.Haro = &wireHaroSession{}
-		if e.WakeWord {
-			wire.Session.Haro.WakeWord = &wireEnabled{Enabled: true}
-		}
-		if e.NoCamera {
-			wire.Session.Haro.Camera = &wireEnabled{Enabled: false}
-		}
+	if e.WakeWord {
+		wire.Session.Haro = &wireHaroSession{WakeWord: &wireEnabled{Enabled: true}}
 	}
 	return wire, nil
 }
@@ -163,13 +159,8 @@ func decodeSessionUpdate(data []byte, _ AudioFormat) (ClientEvent, error) {
 		}
 		update.InputFormat = AudioFormat{SampleRate: format.Rate, Channels: 1}
 	}
-	if haro := wire.Session.Haro; haro != nil {
-		if haro.WakeWord != nil {
-			update.WakeWord = haro.WakeWord.Enabled
-		}
-		if haro.Camera != nil {
-			update.NoCamera = !haro.Camera.Enabled
-		}
+	if haro := wire.Session.Haro; haro != nil && haro.WakeWord != nil {
+		update.WakeWord = haro.WakeWord.Enabled
 	}
 	return update, nil
 }
@@ -247,14 +238,37 @@ func decodeItemTruncate(data []byte, _ AudioFormat) (ClientEvent, error) {
 }
 
 func (e HaroTerminalDevices) toWire() (any, error) {
-	return wireTerminalDevices{Type: typeHaroTerminalDevices, Microphone: e.Microphone, Speaker: e.Speaker, Camera: e.Camera}, nil
+	return wireTerminalDevices{Type: typeHaroTerminalDevices, Microphone: e.Microphone, Speaker: e.Speaker}, nil
 }
 
 func decodeTerminalDevices(data []byte, _ AudioFormat) (ClientEvent, error) {
 	var wire wireTerminalDevices
 	err := json.Unmarshal(data, &wire)
-	return HaroTerminalDevices{Microphone: wire.Microphone, Speaker: wire.Speaker, Camera: wire.Camera}, err
+	return HaroTerminalDevices{Microphone: wire.Microphone, Speaker: wire.Speaker}, err
 }
+
+func (e HaroMCPMessage) toWire() (any, error) {
+	if len(e.Message) == 0 {
+		return nil, errors.New("haro.mcp.message 没有内容")
+	}
+	return wireMCPMessage{Type: typeHaroMCPMessage, Message: e.Message}, nil
+}
+
+func decodeMCPMessage(data []byte) (HaroMCPMessage, error) {
+	var wire wireMCPMessage
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return HaroMCPMessage{}, err
+	}
+	if len(wire.Message) == 0 {
+		return HaroMCPMessage{}, errors.New("haro.mcp.message 没有 message")
+	}
+	return HaroMCPMessage{Message: wire.Message}, nil
+}
+
+func decodeMCPMessageFromClient(data []byte, _ AudioFormat) (ClientEvent, error) {
+	return decodeMCPMessage(data)
+}
+func decodeMCPMessageFromServer(data []byte) (ServerEvent, error) { return decodeMCPMessage(data) }
 
 // 只有事件名、没有内容的事件。
 func (e ResponseCreate) toWire() (any, error)      { return wireTypeOnly{Type: e.Type()}, nil }

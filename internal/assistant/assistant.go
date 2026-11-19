@@ -72,8 +72,7 @@ func NewAssistant(parts Components, opts Options, logger *slog.Logger) *Assistan
 // Run 打开服务端会话（服务端判断说完、启用唤醒门），然后按唤醒词轮流说话，直到 ctx 取消或出错。
 func (a *Assistant) Run(ctx context.Context) error {
 	turn := a.opts.TurnDetection
-	update := realtimeproto.SessionUpdate{TurnDetection: &turn, WakeWord: true,
-		NoCamera: a.parts.Camera == nil}
+	update := realtimeproto.SessionUpdate{TurnDetection: &turn, WakeWord: true}
 	if err := a.parts.Brain.Send(ctx, update); err != nil {
 		return fmt.Errorf("初始化服务端会话: %w", err)
 	}

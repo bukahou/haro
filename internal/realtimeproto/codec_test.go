@@ -15,8 +15,7 @@ func TestClientEventsRoundTrip(t *testing.T) {
 	events := []ClientEvent{
 		SessionUpdate{InputFormat: input16k, WakeWord: true,
 			TurnDetection: &TurnDetection{Type: "semantic_vad", Eagerness: "auto", Threshold: 0.5, CreateResponse: &createResponse}},
-		SessionUpdate{InputFormat: input16k},                 // turn_detection 为 null：这次不改
-		SessionUpdate{InputFormat: input16k, NoCamera: true}, // 没有摄像头的终端
+		SessionUpdate{InputFormat: input16k}, // turn_detection 为 null：这次不改
 		SessionUpdate{Kind: SessionTranscription, InputFormat: input16k, WakeWord: true,
 			TurnDetection: &TurnDetection{Type: "server_vad", SilenceDurationMs: 500}}, // 服务端 → haro-asr
 		InputAudioBufferAppend{Audio: PCMAudio{Format: input16k, Data: []byte{1, 2, 3, 4}}},
@@ -24,7 +23,8 @@ func TestClientEventsRoundTrip(t *testing.T) {
 			{Type: "input_image", ImageJPEG: []byte{0xFF, 0xD8, 0xFF}}, {Type: "input_text", Text: "看这个"}}}},
 		ResponseCreate{}, ResponseCancel{}, HaroWakeWordSleep{}, HaroWakeWordWake{},
 		HaroPlaybackStarted{}, HaroPlaybackStopped{}, ConversationItemTruncate{AudioEndMs: 2340},
-		HaroTerminalDevices{Microphone: "USB 麦克风", Camera: "摄像头"},
+		HaroTerminalDevices{Microphone: "USB 麦克风"},
+		HaroMCPMessage{Message: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)},
 	}
 	for _, event := range events {
 		data, err := EncodeClientEvent(event)
@@ -75,6 +75,7 @@ func TestServerEventsRoundTrip(t *testing.T) {
 		ResponseDone{Status: StatusCompleted, Usage: &Usage{InputTokens: 1200, OutputTokens: 20}},
 		ResponseDone{Status: StatusIncomplete, Reason: ReasonEmptyTranscript},
 		Error{Code: CodeNoTranscriptionStream, Message: "识别流没有打开"},
+		HaroMCPMessage{Message: json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}`)},
 	}
 	for _, event := range events {
 		data, err := EncodeServerEvent(event)

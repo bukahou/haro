@@ -103,12 +103,6 @@ func (k *talker) ask(text string) []realtimeproto.ServerEvent {
 	return braintest.Ask(k.t, k.session, k.stream, braintest.Utterance{Text: text})
 }
 
-// askWithImage 同 ask，终端随这句话带上画面。
-func (k *talker) askWithImage(text string, image []byte) []realtimeproto.ServerEvent {
-	k.t.Helper()
-	return braintest.Ask(k.t, k.session, k.stream, braintest.Utterance{Text: text, Image: image})
-}
-
 // say 让主人说 text，要求回答正常完成，返回播出的文字。
 func (k *talker) say(text string) string {
 	k.t.Helper()
@@ -132,7 +126,7 @@ func TestSessionStreamsSentencesInOrder(t *testing.T) {
 	k := newTalker(t, brain.Components{Model: model, Synthesizer: fakeSynthesizer{}},
 		brain.Options{MaxHistoryTurn: 6, Instructions: "你是测试助手"})
 
-	events := k.askWithImage("你能看到我吗", []byte("jpeg"))
+	events := k.ask("你能看到我吗")
 
 	wantTypes := []string{
 		"conversation.item.input_audio_transcription.completed",

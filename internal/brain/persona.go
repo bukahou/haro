@@ -117,13 +117,13 @@ func (s *Session) switchPersona(arguments map[string]any) string {
 // systemPrompt 拼出系统提示词：基础提示词 + 当前性格的风格。
 func (s *Session) systemPrompt() string {
 	s.mu.Lock()
-	instructions, noCamera, conversation := s.opts.Instructions, s.noCamera || s.cameraGone, s.conversation
+	instructions, conversation := s.opts.Instructions, s.conversation
 	s.mu.Unlock()
 	profile := ""
 	if s.parts.Profiles != nil {
 		profile = s.parts.Profiles.Profile(conversation.Person())
 	}
-	prompt := composeSystemPrompt(instructions, profile, conversation.currentPersona(), noCamera)
+	prompt := composeSystemPrompt(instructions, profile, conversation.currentPersona())
 	if note := summaryNote(conversation.currentSummary()); note != "" {
 		prompt += "\n\n" + note
 	}
@@ -161,20 +161,15 @@ func (s *Session) briefing(person string) string {
 	return "【现在的情况（系统附注，不是主人说的话）】\n" + strings.Join(lines, "\n")
 }
 
-// noCameraNote 接在系统提示词最后：基础提示词里写了「能用 look_at_camera 看画面」，没有摄像头时要更正。
-const noCameraNote = "注意：现在这个终端没有摄像头，你看不到任何画面，也没有 look_at_camera 可用；主人问看得见的东西时，直接说现在看不到。"
-
-// composeSystemPrompt 的顺序：内置规矩（+ 外部追加）→ 主人资料 → 性格 → 没有摄像头的更正。
+// composeSystemPrompt 的顺序：内置规矩（+ 外部追加）→ 主人资料 → 性格。
 // 规矩在最前面优先级最高；这几段都很少变，每轮的即时情况不在这里（见 userTurn）。
-func composeSystemPrompt(instructions, profile string, persona *Persona, noCamera bool) string {
-	parts := make([]string, 0, 4)
+// 有没有摄像头不在这里：看画面的说明随 look_at_camera 工具一起出现或消失，系统提示词不变。
+func composeSystemPrompt(instructions, profile string, persona *Persona) string {
+	parts := make([]string, 0, 3)
 	for _, part := range []string{instructions, profile, personaPrompt(persona)} {
 		if part != "" {
 			parts = append(parts, part)
 		}
-	}
-	if noCamera {
-		parts = append(parts, noCameraNote)
 	}
 	return strings.Join(parts, "\n\n")
 }

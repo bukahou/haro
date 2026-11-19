@@ -28,6 +28,7 @@ import (
 	"github.com/bukahou/haro/internal/realtimeproto"
 	"github.com/bukahou/haro/internal/telemetry"
 	"github.com/bukahou/haro/internal/terminal"
+	"github.com/bukahou/haro/internal/terminaltools"
 	"github.com/bukahou/haro/internal/trigger"
 )
 
@@ -103,6 +104,7 @@ func run(logger *slog.Logger) error {
 		MicrophoneOverride: settings.AudioSource,
 		SpeakerOverride:    settings.AudioSink,
 		CameraName:         cameraName(camera),
+		Tools:              terminaltools.NewServer(camera, buildinfo.Version, logger),
 		NewSession: func(conn terminal.Connection, devices terminal.Devices) terminal.Session {
 			logger.Info("🎤 麦克风", "device", devices.Microphone.Name, "why", devices.Microphone.Reason)
 			if devices.HasSpeaker {

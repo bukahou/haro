@@ -5,7 +5,10 @@
 // 每个事件的 Type() 返回 Realtime 正式版的事件名；haro 自己的扩展以 haro. 开头。
 package realtimeproto
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // ClientEvent 是终端发给服务端的事件（转写会话里是服务端发给 haro-asr 的事件）。
 type ClientEvent interface {
@@ -42,9 +45,6 @@ type SessionUpdate struct {
 	// InputFormat 是之后 input_audio_buffer.append 的音频格式：走 WebSocket 时送音频之前必须声明。
 	// 进程内可以不填：每段音频本身带格式。
 	InputFormat AudioFormat
-	// NoCamera 为 true 表示这个终端没有摄像头（haro 扩展）：服务端不提供「看画面」工具。
-	// 默认 false = 有摄像头（不声明时保持原来的行为）。
-	NoCamera bool
 }
 
 // InputAudioBufferAppend 往识别流送一段 PCM（终端录音每 20ms 一块）。识别流没开时服务端报错，不暂存音频。
@@ -76,12 +76,18 @@ type HaroPlaybackStarted struct{}
 // HaroPlaybackStopped 表示终端播完了（含回声消散的等待）：语音前端恢复正常收听。
 type HaroPlaybackStopped struct{}
 
-// HaroTerminalDevices 是终端现在有哪些设备（haro 扩展）：连上时发一次，之后有变化再发。
+// HaroTerminalDevices 是终端现在的麦克风和音箱（haro 扩展）：连上时发一次，之后有变化再发。
 // 名字为空 = 没有这个设备。没有音箱时服务端不再合成语音，只发文字（终端写进日志）。
+// 摄像头不在这里：它是终端经 MCP 提供的工具，有没有看工具清单（HaroMCPMessage）。
 type HaroTerminalDevices struct {
 	Microphone string
 	Speaker    string
-	Camera     string
+}
+
+// HaroMCPMessage 是一条 MCP（JSON-RPC）消息，两个方向都用（haro 扩展）：终端是 MCP 服务端，
+// 把设备能力（拍一帧等）做成工具；服务端是 MCP 客户端。只在 haro 子协议的连接上用。
+type HaroMCPMessage struct {
+	Message json.RawMessage
 }
 
 // ConversationItemTruncate 表示用户只听到了回答的前 AudioEndMs 毫秒（被打断时由终端发出）：
@@ -101,6 +107,7 @@ func (HaroPlaybackStarted) Type() string      { return typeHaroPlaybackStarted }
 func (HaroPlaybackStopped) Type() string      { return typeHaroPlaybackStopped }
 func (HaroTerminalDevices) Type() string      { return typeHaroTerminalDevices }
 func (ConversationItemTruncate) Type() string { return typeConversationItemTruncate }
+func (HaroMCPMessage) Type() string           { return typeHaroMCPMessage }
 
 func (SessionUpdate) clientEvent()            {}
 func (InputAudioBufferAppend) clientEvent()   {}
@@ -113,6 +120,7 @@ func (HaroPlaybackStarted) clientEvent()      {}
 func (HaroPlaybackStopped) clientEvent()      {}
 func (HaroTerminalDevices) clientEvent()      {}
 func (ConversationItemTruncate) clientEvent() {}
+func (HaroMCPMessage) clientEvent()           {}
 
 // ——— 服务端 → 终端 ———
 
@@ -198,6 +206,7 @@ func (ResponseOutputAudioTranscriptDelta) serverEvent() {}
 func (ResponseOutputAudioDelta) serverEvent()           {}
 func (ResponseDone) serverEvent()                       {}
 func (Error) serverEvent()                              {}
+func (HaroMCPMessage) serverEvent()                     {}
 
 // ——— 公共数据类型 ———
 

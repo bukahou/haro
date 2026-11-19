@@ -12,7 +12,6 @@ import (
 	"github.com/bukahou/haro/internal/brain"
 	"github.com/bukahou/haro/internal/brain/braintest"
 	"github.com/bukahou/haro/internal/llm"
-	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
 // escalationProbe 包住真模型，记下这一轮有没有请更强的模型重答（本轮主人那句话被标上 Escalate）。
@@ -70,7 +69,6 @@ func TestLiveAskStronger(t *testing.T) {
 		probe := &escalationProbe{inner: model}
 		k := newTalker(t, brain.Components{Model: probe, Synthesizer: fakeSynthesizer{}},
 			brain.Options{MaxHistoryTurn: 6, Instructions: brain.DefaultInstructions, Escalation: true})
-		k.send(realtimeproto.SessionUpdate{NoCamera: true}) // 不让它去看画面
 		k.ask("日本的首都是哪里？")
 		probe.takeEscalated()
 		spoken := braintest.Spoken(k.ask(c.reply))

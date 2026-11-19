@@ -84,7 +84,7 @@ func (s *scriptedSession) receivedEvents() []realtimeproto.ClientEvent {
 
 // newServer 起一个只接这条假会话的服务端（每个测试只连一次）。
 func newServer(session *scriptedSession) *httptest.Server {
-	return httptest.NewServer(brainserver.NewHandler(func() brainserver.Session { return session }, brainserver.Options{}, quiet))
+	return httptest.NewServer(brainserver.NewHandler(func(brainserver.Terminal) brainserver.Session { return session }, brainserver.Options{}, quiet))
 }
 
 // askOverWebSocket 发出一轮的客户端事件：打开会话（服务端判断说完）、送一段音频、带上画面、请求回答。

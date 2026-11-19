@@ -18,9 +18,11 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/bukahou/haro/internal/buildinfo"
 	"github.com/bukahou/haro/internal/heartbeat"
+	"github.com/bukahou/haro/internal/mcpbridge"
 	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
@@ -36,6 +38,7 @@ var (
 // Client 是一条到 haro-server 的对话会话。
 type Client struct {
 	conn        *websocket.Conn
+	tools       *mcpbridge.Transport // 设备能力的 MCP 通道（终端是 MCP 服务端）
 	inputFormat realtimeproto.AudioFormat
 	events      chan realtimeproto.ServerEvent
 	done        chan struct{}
@@ -83,6 +86,9 @@ func Dial(ctx context.Context, opts DialOptions, logger *slog.Logger) (*Client, 
 	readCtx, cancel := context.WithCancel(context.Background())
 	client := &Client{conn: conn, inputFormat: opts.InputFormat, logger: logger, cancel: cancel,
 		events: make(chan realtimeproto.ServerEvent, 64), done: make(chan struct{})}
+	client.tools = mcpbridge.NewTransport(func(ctx context.Context, message json.RawMessage) error {
+		return client.Send(ctx, realtimeproto.HaroMCPMessage{Message: message})
+	})
 	go client.readEvents(readCtx)
 	go client.keepAlive(readCtx, opts.Heartbeat.OrDefault())
 	if serverVersion := response.Header.Get(buildinfo.Header); buildinfo.Mismatch(buildinfo.Version, serverVersion) {
@@ -153,6 +159,26 @@ func (c *Client) Send(ctx context.Context, event realtimeproto.ClientEvent) erro
 	return err
 }
 
+// DeviceTools 返回这条连接上的 MCP 通道（终端经它把设备能力提供给服务端）。
+func (c *Client) DeviceTools() mcp.Transport { return c.tools }
+
+// deliverTools 把一条 MCP 消息交给设备能力的会话；它卡住超过 eventBacklogTimeout 时断开连接，返回 false。
+func (c *Client) deliverTools(ctx context.Context, message json.RawMessage) bool {
+	deliverCtx, cancel := context.WithTimeout(ctx, eventBacklogTimeout)
+	defer cancel()
+	err := c.tools.Deliver(deliverCtx, message)
+	switch {
+	case err == nil:
+		return true
+	case ctx.Err() != nil:
+		return false
+	default:
+		c.disconnect(fmt.Errorf("%w：设备能力（MCP）%v", errEventBacklog, err))
+		c.conn.CloseNow()
+		return false
+	}
+}
+
 // Events 返回服务端发来的事件（会话期间不关闭）。
 func (c *Client) Events() <-chan realtimeproto.ServerEvent { return c.events }
 
@@ -181,6 +207,12 @@ func (c *Client) readEvents(ctx context.Context) {
 			continue
 		}
 		if event == nil { // 不认识的事件（例如以后新增的）：忽略
+			continue
+		}
+		if message, ok := event.(realtimeproto.HaroMCPMessage); ok { // 设备能力：交给 MCP 会话，不给对话
+			if !c.deliverTools(ctx, message.Message) {
+				return
+			}
 			continue
 		}
 		if _, ok := event.(realtimeproto.ResponseDone); ok {
@@ -234,6 +266,7 @@ func (c *Client) disconnect(cause error) {
 	c.inFlight = false
 	c.mu.Unlock()
 	close(c.done)
+	c.tools.Close()
 	if closing {
 		return
 	}

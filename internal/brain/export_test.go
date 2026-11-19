@@ -6,6 +6,6 @@ var (
 	AlreadyEscalatedNote = alreadyEscalatedNote
 	FrameRecalledNote    = frameRecalledNote
 	ExpertReportNote     = expertReportNote
-	NoCameraNote         = noCameraNote
 	UserSaysHeading      = userSaysHeading
+	CaptureFailedNote    = captureFailedNote
 )

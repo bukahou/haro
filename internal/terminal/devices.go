@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
 	"github.com/bukahou/haro/internal/assistant"
 )
 
@@ -80,6 +82,14 @@ type Frame struct {
 	TakenAt       time.Time
 	Width, Height int
 	Device        string // 摄像头的名字
+}
+
+// DeviceTools 是终端经 MCP 提供给服务端的设备能力（terminaltools.Server 满足它）。
+type DeviceTools interface {
+	// Serve 在一条连接的 MCP 通道上跑一个会话，直到连接断开或 ctx 结束。
+	Serve(ctx context.Context, transport mcp.Transport) error
+	// SetCameraAvailable 按摄像头现在能不能用增删「拍一帧」（清单变了会通知服务端）。
+	SetCameraAvailable(available bool)
 }
 
 // CameraPicker 按选择规则找现在要用的摄像头；ok=false 表示现在没有。

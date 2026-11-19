@@ -23,9 +23,11 @@ import (
 	"sync"
 
 	"github.com/coder/websocket"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/bukahou/haro/internal/buildinfo"
 	"github.com/bukahou/haro/internal/heartbeat"
+	"github.com/bukahou/haro/internal/mcpbridge"
 	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
@@ -36,8 +38,15 @@ type Session interface {
 	Close() error
 }
 
+// Terminal 是这条连接那头的情况，建会话时交给会话。
+type Terminal struct {
+	// DeviceTools 是 haro 终端经 MCP 提供设备能力（拍一帧等）的通道，服务端是 MCP 客户端；
+	// nil = 普通 Realtime 客户端，没有这条通道。
+	DeviceTools mcp.Transport
+}
+
 // SessionFactory 为每条连接新建一个会话。
-type SessionFactory func() Session
+type SessionFactory func(terminal Terminal) Session
 
 // Options 是连接层的设置。零值可用。
 type Options struct {
@@ -113,8 +122,6 @@ func serveConversation(w http.ResponseWriter, r *http.Request, newSession Sessio
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
-	session := newSession()
-	defer session.Close()
 	protocol := conn.Subprotocol()
 	if protocol == "" {
 		logger.Info("普通 Realtime 客户端已连接（只用标准事件）", "remote", r.RemoteAddr)
@@ -143,6 +150,18 @@ func serveConversation(w http.ResponseWriter, r *http.Request, newSession Sessio
 		defer writeMu.Unlock()
 		return conn.Write(ctx, websocket.MessageText, data)
 	}
+
+	var terminal Terminal
+	var tools *mcpbridge.Transport // haro 终端的设备能力（MCP）；普通客户端没有
+	if protocol == realtimeproto.ProtocolV2 {
+		tools = mcpbridge.NewTransport(func(_ context.Context, message json.RawMessage) error {
+			return write(realtimeproto.HaroMCPMessage{Message: message})
+		})
+		defer tools.Close()
+		terminal.DeviceTools = tools
+	}
+	session := newSession(terminal)
+	defer session.Close()
 	go func() { // 会话的事件 → 终端
 		for {
 			select {
@@ -172,6 +191,15 @@ func serveConversation(w http.ResponseWriter, r *http.Request, newSession Sessio
 		event, err := realtimeproto.DecodeClientEvent(data, inputFormat)
 		if err != nil {
 			_ = write(realtimeproto.ErrorEventFor("", err))
+			continue
+		}
+		if message, ok := event.(realtimeproto.HaroMCPMessage); ok { // 设备能力：交给 MCP 会话，不给对话
+			if tools == nil {
+				_ = write(realtimeproto.Error{Code: realtimeproto.CodeUnsupportedFeature,
+					Message: "haro.mcp.message: 普通 Realtime 客户端没有设备能力的通道"})
+			} else if err := tools.Deliver(ctx, message.Message); err != nil && ctx.Err() == nil {
+				logger.Warn("设备能力（MCP）的消息交不出去", "remote", r.RemoteAddr, "err", err)
+			}
 			continue
 		}
 		if update, ok := event.(realtimeproto.SessionUpdate); ok && update.InputFormat.SampleRate > 0 {

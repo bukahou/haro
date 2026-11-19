@@ -2,6 +2,7 @@ package terminal
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -11,7 +12,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
 	"github.com/bukahou/haro/internal/assistant"
+	"github.com/bukahou/haro/internal/mcpbridge"
 	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
@@ -24,9 +28,41 @@ type fakeConn struct {
 	once    sync.Once
 	mu      sync.Mutex
 	devices []realtimeproto.HaroTerminalDevices
+	tools   *mcpbridge.Transport
 }
 
-func newFakeConn() *fakeConn { return &fakeConn{done: make(chan struct{})} }
+func newFakeConn() *fakeConn {
+	return &fakeConn{done: make(chan struct{}),
+		tools: mcpbridge.NewTransport(func(context.Context, json.RawMessage) error { return nil })}
+}
+
+func (c *fakeConn) DeviceTools() mcp.Transport { return c.tools }
+
+// fakeTools 记下「拍一帧」的增删；Serve 一直跑到连接结束。
+type fakeTools struct {
+	mu        sync.Mutex
+	available []bool
+	serves    atomic.Int32
+}
+
+func (f *fakeTools) Serve(ctx context.Context, _ mcp.Transport) error {
+	f.serves.Add(1)
+	<-ctx.Done()
+	return nil
+}
+
+func (f *fakeTools) SetCameraAvailable(available bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.available = append(f.available, available)
+}
+
+// lastCamera 是最后一次设的摄像头能不能用。
+func (f *fakeTools) lastCamera() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.available) > 0 && f.available[len(f.available)-1]
+}
 
 func (c *fakeConn) Send(_ context.Context, event realtimeproto.ClientEvent) error {
 	if isDone(c) {
@@ -101,6 +137,7 @@ type rig struct {
 	sessions     []Devices
 	fail         chan error
 	sink         fakeSink
+	tools        fakeTools
 }
 
 func newRig() *rig {
@@ -130,6 +167,7 @@ func (r *rig) parts() Parts {
 		},
 		Catalog:    rigCatalog{r},
 		CameraName: func() string { return r.camera.Load().(string) },
+		Tools:      &r.tools,
 		NewSession: func(_ Connection, devices Devices) Session {
 			r.mu.Lock()
 			r.sessions = append(r.sessions, devices)
@@ -284,25 +322,20 @@ func TestSupervisorReportsSpeakerChanges(t *testing.T) {
 }
 
 // 摄像头被拔掉 / 插回来，都告诉服务端（v4 第 5 步 b：没有摄像头时服务端不给模型看画面的工具），且不重来。
-func TestSupervisorReportsCameraChanges(t *testing.T) {
+// 摄像头插拔：增删「拍一帧」工具（服务端随之给不给模型看画面），对话不重来。
+func TestSupervisorOffersCameraToolWhileCameraIsAvailable(t *testing.T) {
 	r := newRig()
 	stop := startSupervisor(t, r)
 	eventually(t, "运行", func() bool { return r.sessionCount() == 1 })
-	conn := r.lastConn()
-	if reports := conn.reports(); len(reports) == 0 || reports[0].Camera != "EMEET" {
-		t.Fatalf("一开始应报告摄像头：%+v", reports)
+	eventually(t, "连接上跑起设备能力的会话", func() bool { return r.tools.serves.Load() == 1 })
+	if !r.tools.lastCamera() {
+		t.Fatal("一开始有摄像头：应提供「拍一帧」")
 	}
 	r.camera.Store("")
-	eventually(t, "报告摄像头没了", func() bool {
-		reports := conn.reports()
-		return reports[len(reports)-1].Camera == ""
-	})
+	eventually(t, "摄像头没了：去掉「拍一帧」", func() bool { return !r.tools.lastCamera() })
 	r.camera.Store("EMEET")
-	eventually(t, "报告摄像头回来了", func() bool {
-		reports := conn.reports()
-		return reports[len(reports)-1].Camera == "EMEET"
-	})
-	if r.sessionCount() != 1 {
+	eventually(t, "摄像头回来了：加回「拍一帧」", r.tools.lastCamera)
+	if r.sessionCount() != 1 || r.tools.serves.Load() != 1 {
 		t.Error("摄像头变化不该重来")
 	}
 	_ = stop()

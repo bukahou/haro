@@ -36,6 +36,7 @@ import (
 	"github.com/bukahou/haro/internal/speech"
 	"github.com/bukahou/haro/internal/spending"
 	"github.com/bukahou/haro/internal/telemetry"
+	"github.com/bukahou/haro/internal/terminaltools"
 	"github.com/bukahou/haro/internal/tools"
 	"github.com/bukahou/haro/internal/vision"
 	"github.com/bukahou/haro/internal/weather"
@@ -191,7 +192,13 @@ func run(logger *slog.Logger) error {
 	if settings.WakeArbitration > 0 { // 多台终端同时听到唤醒词：只让最合适的那台回答
 		components.WakeArbiter = brain.NewWakeArbiter(settings.WakeArbitration)
 	}
-	newSession := func() brainserver.Session { return brain.NewSession(components, options, logger) }
+	newSession := func(terminal brainserver.Terminal) brainserver.Session {
+		parts := components
+		if terminal.DeviceTools != nil { // haro 终端：它的摄像头经 MCP 用（普通 Realtime 客户端没有）
+			parts.Camera = terminaltools.ConnectCamera(terminal.DeviceTools, buildinfo.Version, logger)
+		}
+		return brain.NewSession(parts, options, logger)
+	}
 
 	listener, err := net.Listen("tcp", settings.ServerListen)
 	if err != nil {

@@ -24,7 +24,7 @@ haro 是一个家用语音助手：家里每个房间放一台**终端**（麦�
 ## 终端和服务端之间的协议
 
 兼容 OpenAI Realtime API 的事件协议（WebSocket），只用其中的一个子集；haro 自己的扩展事件以 `haro.` 开头
-（例如终端上报现在用的麦克风、音箱、摄像头）。服务端和 haro-asr 之间的转写会话用同一份定义。见 `internal/realtimeproto`：
+（例如终端上报现在用的麦克风和音箱）。服务端和 haro-asr 之间的转写会话用同一份定义。见 `internal/realtimeproto`：
 
 - 线上的 JSON 结构只定义一处（`wire.go`），编解码只有一处（`codec.go`）；
 - 由它生成 JSON Schema（`haro.realtime.v2.schema.json`），测试比对两者，结构改了而文件没更新就失败；
@@ -32,6 +32,9 @@ haro 是一个家用语音助手：家里每个房间放一台**终端**（麦�
 - 握手时用 WebSocket 子协议协商版本（`haro.realtime.v2`）：报了不认识的 haro 版本、或者旧版终端没报版本，服务端拒绝握手，
   响应里给错误码和它支持的版本；什么都不报的当普通 Realtime 客户端（只用标准事件）。终端被拒后提示一次，隔几分钟才再试；
 - 两端各自每 10 秒 ping 一次，5 秒内等不到 pong 就断开（`internal/heartbeat`），终端的看守随即重连。
+- 终端的设备能力（现在是「拍一帧」）走 MCP：终端是 MCP 服务端，服务端是 MCP 客户端，消息装在 `haro.mcp.message` 事件里，
+  跑在同一条连接上（`internal/mcpbridge`；工具的名字、参数、结果、错误码只在 `internal/terminaltools` 定义一处）。
+  模型调用 `look_at_camera` 时，服务端才让终端打开摄像头拍一帧，摄像头平时关着；摄像头插拔时终端增删这个工具，服务端随之给不给模型看画面。
 
 ## 服务端（`internal/brain` 与周边）
 
@@ -70,7 +73,7 @@ haro 是一个家用语音助手：家里每个房间放一台**终端**（麦�
 | `save_note` / `search_notes` / `list_recent_notes` / `delete_note` | 记事本（SQLite）；删除前要口头确认 |
 | `check_network` / `network_interfaces` | 网络诊断（查的是服务端所在机器的网络） |
 | `get_weather` | 天气（Open-Meteo，不用密钥）；家的位置可以配坐标，或按公网 IP 推定。Open-Meteo 查不到时改用日本气象厅（见下） |
-| `look_at_camera` | 看终端摄像头的画面（终端有摄像头时才提供） |
+| `look_at_camera` | 看终端摄像头的画面：调用时才经 MCP 让终端拍一帧（终端的工具清单里有「拍一帧」时才提供） |
 | `switch_persona` | 换性格（有两个以上性格时才提供） |
 | `web_search` | 联网搜一次（Tavily 远程 MCP）；设了密钥才提供 |
 | `start_research` / `research_status` / `cancel_research` | 后台调查（见下）；设了搜索密钥才提供 |

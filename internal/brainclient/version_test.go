@@ -58,7 +58,7 @@ func pinVersion(t *testing.T, version string) {
 
 func newLoggedServer(logs *lockedBuffer) *httptest.Server {
 	logger := slog.New(slog.NewTextHandler(logs, nil))
-	return httptest.NewServer(brainserver.NewHandler(func() brainserver.Session { return newScriptedSession(false) }, brainserver.Options{}, logger))
+	return httptest.NewServer(brainserver.NewHandler(func(brainserver.Terminal) brainserver.Session { return newScriptedSession(false) }, brainserver.Options{}, logger))
 }
 
 // 服务端：握手响应里报自己的版本；终端的版本不同（或旧终端没报）时在日志里提醒。

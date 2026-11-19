@@ -21,6 +21,14 @@ type ChatModel interface {
 	Warmup(ctx context.Context) error
 }
 
+// TerminalCamera 是终端经 MCP 提供的摄像头（每条终端连接一个，由连接层注入）。
+type TerminalCamera interface {
+	// Available 是终端现在能不能拍（它的工具清单里有没有「拍一帧」）。
+	Available() bool
+	// Capture 让终端现拍一帧（JPEG）。失败时 error 的说明可以直接交给模型。
+	Capture(ctx context.Context) ([]byte, error)
+}
+
 // FrameExpert 是看画面的幕后专家（可选）：设了它，look_at_camera 不把画面交给前台模型，
 // 而是把画面和主人这一轮的原话交给专家，前台拿到的是专家的判断（文字），再用自己的口吻转述。
 // 专家出错时退回把画面直接交给前台。

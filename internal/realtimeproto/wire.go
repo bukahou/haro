@@ -1,5 +1,7 @@
 package realtimeproto
 
+import "encoding/json"
+
 // 本文件是事件在 WebSocket 上的 JSON 结构，全协议只有这一份：编解码在 codec.go，JSON Schema 由它生成（schema.go）。
 //
 // 事件名与字段照 OpenAI Realtime 正式版（GA）的子集。和官方不同的地方：
@@ -44,6 +46,7 @@ const (
 	typeHaroPlaybackStarted      = "haro.playback.started"
 	typeHaroPlaybackStopped      = "haro.playback.stopped"
 	typeHaroTerminalDevices      = "haro.terminal.devices"
+	typeHaroMCPMessage           = "haro.mcp.message"
 
 	typeSpeechStarted          = "input_audio_buffer.speech_started"
 	typeSpeechStopped          = "input_audio_buffer.speech_stopped"
@@ -76,7 +79,6 @@ type wireSession struct {
 
 type wireHaroSession struct {
 	WakeWord *wireEnabled `json:"wake_word,omitempty" jsonschema:"启用唤醒门：会话从休眠开始，听到唤醒词才处理用户说的话"`
-	Camera   *wireEnabled `json:"camera,omitempty" jsonschema:"对话会话：终端有没有摄像头；不声明 = 有"`
 }
 
 type wireEnabled struct {
@@ -116,7 +118,11 @@ type wireTerminalDevices struct {
 	Type       string `json:"type"`
 	Microphone string `json:"microphone" jsonschema:"麦克风的名字；空 = 没有"`
 	Speaker    string `json:"speaker" jsonschema:"音箱的名字；空 = 没有"`
-	Camera     string `json:"camera" jsonschema:"摄像头的名字；空 = 没有"`
+}
+
+type wireMCPMessage struct {
+	Type    string          `json:"type"`
+	Message json.RawMessage `json:"message" jsonschema:"一条完整的 MCP（JSON-RPC 2.0）消息"`
 }
 
 type wireItemTruncate struct {

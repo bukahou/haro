@@ -82,6 +82,31 @@
         "audio_end_ms"
       ]
     },
+    "client.haro.mcp.message": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "haro.mcp.message"
+        },
+        "message": {
+          "type": [
+            "null",
+            "array"
+          ],
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 255
+          },
+          "description": "一条完整的 MCP（JSON-RPC 2.0）消息"
+        }
+      },
+      "required": [
+        "type",
+        "message"
+      ]
+    },
     "client.haro.playback.started": {
       "type": "object",
       "properties": {
@@ -120,17 +145,12 @@
         "speaker": {
           "type": "string",
           "description": "音箱的名字；空 = 没有"
-        },
-        "camera": {
-          "type": "string",
-          "description": "摄像头的名字；空 = 没有"
         }
       },
       "required": [
         "type",
         "microphone",
-        "speaker",
-        "camera"
+        "speaker"
       ]
     },
     "client.haro.wake_word.sleep": {
@@ -308,21 +328,6 @@
                   "required": [
                     "enabled"
                   ]
-                },
-                "camera": {
-                  "type": [
-                    "null",
-                    "object"
-                  ],
-                  "properties": {
-                    "enabled": {
-                      "type": "boolean"
-                    }
-                  },
-                  "description": "对话会话：终端有没有摄像头；不声明 = 有",
-                  "required": [
-                    "enabled"
-                  ]
                 }
               },
               "description": "haro 扩展"
@@ -412,6 +417,31 @@
       "required": [
         "type",
         "error"
+      ]
+    },
+    "server.haro.mcp.message": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "haro.mcp.message"
+        },
+        "message": {
+          "type": [
+            "null",
+            "array"
+          ],
+          "items": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 255
+          },
+          "description": "一条完整的 MCP（JSON-RPC 2.0）消息"
+        }
+      },
+      "required": [
+        "type",
+        "message"
       ]
     },
     "server.haro.notice": {
@@ -636,6 +666,9 @@
       "$ref": "#/$defs/client.conversation.item.truncate"
     },
     {
+      "$ref": "#/$defs/client.haro.mcp.message"
+    },
+    {
       "$ref": "#/$defs/client.haro.playback.started"
     },
     {
@@ -667,6 +700,9 @@
     },
     {
       "$ref": "#/$defs/server.error"
+    },
+    {
+      "$ref": "#/$defs/server.haro.mcp.message"
     },
     {
       "$ref": "#/$defs/server.haro.notice"

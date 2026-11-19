@@ -15,6 +15,8 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
 	"github.com/bukahou/haro/internal/assistant"
 	"github.com/bukahou/haro/internal/realtimeproto"
 )
@@ -24,6 +26,8 @@ type Connection interface {
 	assistant.BrainSession
 	Done() <-chan struct{} // 连接断了时关闭
 	Close() error
+	// DeviceTools 是这条连接上的 MCP 通道：终端经它把设备能力（拍一帧等）提供给服务端。
+	DeviceTools() mcp.Transport
 }
 
 // Devices 是某一刻的设备情况。
@@ -48,6 +52,7 @@ type Parts struct {
 	MicrophoneOverride string                                         // 配置指定的麦克风 ID（HARO_AUDIO_SOURCE）；空 = 按规则选
 	SpeakerOverride    string                                         // 配置指定的音箱 ID（HARO_AUDIO_SINK）；空 = 跟系统默认
 	CameraName         func() string                                  // 现在能用的摄像头名字；空 = 没有（nil = 这台终端不用摄像头）
+	Tools              DeviceTools                                    // 经 MCP 提供给服务端的设备能力；nil = 不提供
 	NewSession         func(conn Connection, devices Devices) Session // 用这条连接和这组设备创建一次对话运行
 	ToneSink           assistant.AudioSink                            // 播提示音用（跟系统默认）
 	Offline            realtimeproto.PCMAudio                         // 「我和服务端断开了……」
@@ -189,6 +194,14 @@ func (s *Supervisor) serve(ctx context.Context, conn Connection) error {
 	session := s.parts.NewSession(conn, devices)
 	runCtx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
+	if s.parts.Tools != nil {
+		s.parts.Tools.SetCameraAvailable(devices.Camera != "")
+		go func() { // 设备能力（MCP）跟这条连接同生共死
+			if err := s.parts.Tools.Serve(runCtx, conn.DeviceTools()); err != nil && runCtx.Err() == nil && !isDone(conn) {
+				s.logger.Warn("设备能力（MCP）的会话结束了", "err", err)
+			}
+		}()
+	}
 	go s.watch(runCtx, cancel, conn, session, devices)
 	err = session.Run(runCtx)
 	cause := context.Cause(runCtx)
@@ -246,7 +259,7 @@ func (s *Supervisor) waitForMicrophone(ctx context.Context, conn Connection) (De
 }
 
 // watch 在对话运行期间看着连接和设备：服务端断了就结束；该换麦克风时（不在回答中）结束、重来；
-// 音箱、摄像头有无变化时告诉服务端（没有音箱就不合成语音；没有摄像头就不给模型看画面的工具）。
+// 音箱有无变化时告诉服务端（没有音箱就不合成语音）；摄像头有无变化时增删「拍一帧」工具（服务端随之给不给模型看画面）。
 func (s *Supervisor) watch(ctx context.Context, stop context.CancelCauseFunc, conn Connection, session Session, current Devices) {
 	ticker := time.NewTicker(s.timing.Poll)
 	defer ticker.Stop()
@@ -276,9 +289,16 @@ func (s *Supervisor) watch(ctx context.Context, stop context.CancelCauseFunc, co
 			}
 			changed = true
 		}
-		if latest.Camera != current.Camera { // 摄像头自己会记日志（只在状态变化时），这里只告诉服务端
+		if latest.Camera != current.Camera {
 			current.Camera = latest.Camera
-			changed = true
+			if current.Camera != "" {
+				s.logger.Info("📷 摄像头能用了", "device", current.Camera)
+			} else {
+				s.logger.Warn("📷 摄像头现在用不了")
+			}
+			if s.parts.Tools != nil {
+				s.parts.Tools.SetCameraAvailable(current.Camera != "")
+			}
 		}
 		if changed {
 			if err := conn.Send(ctx, report(current)); err != nil {
@@ -330,7 +350,7 @@ func (s *Supervisor) scan() Devices {
 
 // report 把设备情况转成发给服务端的事件。
 func report(devices Devices) realtimeproto.HaroTerminalDevices {
-	event := realtimeproto.HaroTerminalDevices{Camera: devices.Camera}
+	var event realtimeproto.HaroTerminalDevices
 	if devices.HasMicrophone {
 		event.Microphone = devices.Microphone.Name
 	}

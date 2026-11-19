@@ -1,7 +1,8 @@
 //go:build eval
 
-// 看图小评测：对样本里的每张画面问同一句「这是什么？」，跑几组「模型 × 思考 × 画面宽度」，记下回答、首字时间、用量和费用，
-// 用来决定：带画面的请求交给哪个模型、送给模型的画面多大、要不要开思考。
+// 看图小评测：按线上看画面走的路——幕后专家（internal/vision）——对样本里的每张画面问同一句「这是什么？」，
+// 跑几组「专家用的模型 × 思考 × 画面宽度」，记下判断、用时、用量和费用，
+// 用来决定：专家用哪个模型、送给模型的画面多大、要不要开思考。专家不联网（评测只看认得准不准，也不花搜索费）。
 //
 // 样本不放在这个仓库（家里拍的照片）：HARO_EVAL_DIR 指向样本目录，里面有
 //   - samples.tsv：每行「编号 <Tab> 正确答案」，# 开头的行跳过（旧格式第三列的关键词不再使用，有也忽略）
@@ -18,15 +19,20 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"iter"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/jsonschema-go/jsonschema"
 
 	"github.com/bukahou/haro/internal/brain"
+	"github.com/bukahou/haro/internal/vision"
 )
 
 // evalConfig 是一组评测配置。单价是官方价（美元 / 百万 token），只用来估算费用。
@@ -52,14 +58,14 @@ type evalSample struct {
 }
 
 type evalResult struct {
-	sample    evalSample
-	config    evalConfig
-	answer    string
-	verdict   judgement
-	firstText time.Duration
-	usage     brain.ReplyUsage
-	yen       float64
-	err       error
+	sample  evalSample
+	config  evalConfig
+	answer  string
+	verdict judgement
+	elapsed time.Duration
+	usage   brain.ReplyUsage
+	yen     float64
+	err     error
 }
 
 func TestVisionEval(t *testing.T) {
@@ -73,15 +79,13 @@ func TestVisionEval(t *testing.T) {
 	if key == "" && !dryRun {
 		t.Skip("没设 HARO_ANTHROPIC_API_KEY")
 	}
-	// 和正式环境一样的基础提示词（含看画面认东西的规矩）；不给工具，只看图回答
-	system := brain.ChatMessage{Role: brain.RoleSystem, Text: brain.DefaultInstructions}
 	if dryRun {
 		estimate := 0.0
 		for _, config := range evalConfigs {
 			for range samples {
 				imageTokens := float64(config.width * config.width * 9 / 16 / 750)
-				estimate += (imageTokens*config.in + 2000*config.cacheRead + 300*config.out) / 1e6 * evalYenPerUSD
-				estimate += (400*2.0 + 80*10.0) / 1e6 * evalYenPerUSD // 评审（Sonnet）每条约 400 输入、80 输出
+				estimate += ((imageTokens+1600)*config.in + 300*config.out) / 1e6 * evalYenPerUSD // 专家的提示词约 1.6k token
+				estimate += (400*2.0 + 80*10.0) / 1e6 * evalYenPerUSD                             // 评审（Sonnet）每条约 400 输入、80 输出
 			}
 		}
 		t.Logf("样本 %d 个 × 配置 %d 组 = %d 次请求（另加同样次数的评审）；估计约 ¥%.0f（另加每组第一次写缓存）", len(samples), len(evalConfigs),
@@ -96,17 +100,16 @@ func TestVisionEval(t *testing.T) {
 	judge := NewAnthropicChatModel(AnthropicOptions{API: api, Model: judgeModel, MaxTokens: 300, Effort: "low", Thinking: ThinkingDisabled})
 	var results []evalResult
 	for _, config := range evalConfigs {
-		model := NewAnthropicChatModel(AnthropicOptions{API: api, Model: config.model, MaxTokens: config.maxTokens,
-			Effort: config.effort, Thinking: config.thinking})
+		model := &usageTotal{ChatModel: NewAnthropicChatModel(AnthropicOptions{API: api, Model: config.model,
+			MaxTokens: config.maxTokens, Effort: config.effort, Thinking: config.thinking})}
+		expert := vision.NewExpert(model, config.name, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 		for _, sample := range samples {
 			frame, err := os.ReadFile(filepath.Join(dir, fmt.Sprintf("%s-%d.jpg", sample.id, config.width)))
 			if err != nil {
 				t.Fatal(err)
 			}
-			messages := []brain.ChatMessage{system, {Role: brain.RoleUser, Text: "这是什么？"},
-				{Role: brain.RoleUser, Text: "这是摄像头当前画面。", Image: frame}}
 			result := evalResult{sample: sample, config: config}
-			result.answer, result.firstText, result.usage, result.err = evalRound(model, messages)
+			result.answer, result.elapsed, result.usage, result.err = examineAsExpert(expert, model, frame)
 			if result.err == nil {
 				result.verdict = judgeAnswer(t, judge, sample.answer, result.answer)
 			}
@@ -152,27 +155,51 @@ func loadEvalSamples(t *testing.T, path string) []evalSample {
 	return samples
 }
 
-// evalRound 问一次，返回回答、首字时间与用量（不给工具）。
-func evalRound(model *AnthropicChatModel, messages []brain.ChatMessage) (string, time.Duration, brain.ReplyUsage, error) {
+// examineAsExpert 让专家看一次，返回它的判断、用时与这一次的用量（专家可能请求模型不止一次，加起来）。
+func examineAsExpert(expert *vision.Expert, model *usageTotal, frame []byte) (string, time.Duration, brain.ReplyUsage, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
+	model.reset()
 	started := time.Now()
-	var firstText time.Duration
-	var text strings.Builder
-	var usage brain.ReplyUsage
-	for delta, err := range model.StreamReply(ctx, messages, nil) {
-		if err != nil {
-			return text.String(), firstText, usage, err
-		}
-		if delta.Text != "" && firstText == 0 {
-			firstText = time.Since(started)
-		}
-		text.WriteString(delta.Text)
-		if delta.Usage != nil {
-			usage = *delta.Usage
+	report, err := expert.ExamineFrame(ctx, frame, "这是什么？")
+	return report, time.Since(started), model.total(), err
+}
+
+// usageTotal 包一层模型，把专家每次请求的用量加起来（专家只返回文字，不交出用量）。
+type usageTotal struct {
+	brain.ChatModel
+	mu    sync.Mutex
+	usage brain.ReplyUsage
+}
+
+func (u *usageTotal) StreamReply(ctx context.Context, messages []brain.ChatMessage, tools []brain.ToolSpec) iter.Seq2[brain.ReplyDelta, error] {
+	return func(yield func(brain.ReplyDelta, error) bool) {
+		for delta, err := range u.ChatModel.StreamReply(ctx, messages, tools) {
+			if delta.Usage != nil {
+				u.mu.Lock()
+				u.usage.PromptTokens += delta.Usage.PromptTokens
+				u.usage.OutputTokens += delta.Usage.OutputTokens
+				u.usage.CacheReadTokens += delta.Usage.CacheReadTokens
+				u.usage.CacheWriteTokens += delta.Usage.CacheWriteTokens
+				u.mu.Unlock()
+			}
+			if !yield(delta, err) {
+				return
+			}
 		}
 	}
-	return text.String(), firstText, usage, nil
+}
+
+func (u *usageTotal) reset() {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.usage = brain.ReplyUsage{}
+}
+
+func (u *usageTotal) total() brain.ReplyUsage {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.usage
 }
 
 // judgement 是评审模型交出的结论。
@@ -233,10 +260,10 @@ func judgeAnswer(t *testing.T, judge *AnthropicChatModel, expected, answer strin
 // evalReport 是 Markdown 报告：先每组配置的汇总，再逐条明细（评审模型的判断只是初判，最后以人看为准）。
 func evalReport(results []evalResult) string {
 	var report strings.Builder
-	fmt.Fprintf(&report, "# 看图小评测 %s\n\n| 配置 | 画面宽 | 评审判对 | 平均首字 | 费用 |\n|---|---|---|---|---|\n", time.Now().Format("2006-01-02 15:04"))
+	fmt.Fprintf(&report, "# 看图小评测（专家）%s\n\n| 配置 | 画面宽 | 评审判对 | 平均用时 | 费用 |\n|---|---|---|---|---|\n", time.Now().Format("2006-01-02 15:04"))
 	for _, config := range evalConfigs {
 		var correct, count int
-		var firstText time.Duration
+		var elapsed time.Duration
 		var yen float64
 		for _, result := range results {
 			if result.config != config {
@@ -246,22 +273,22 @@ func evalReport(results []evalResult) string {
 			if result.verdict.judged && result.verdict.Correct {
 				correct++
 			}
-			firstText += result.firstText
+			elapsed += result.elapsed
 			yen += result.yen
 		}
 		if count > 0 {
 			fmt.Fprintf(&report, "| %s | %d | %d / %d | %v | ¥%.2f |\n", config.name, config.width, correct, count,
-				(firstText / time.Duration(count)).Round(10*time.Millisecond), yen)
+				(elapsed / time.Duration(count)).Round(10*time.Millisecond), yen)
 		}
 	}
-	report.WriteString("\n| 编号 | 正确答案 | 配置 | 回答 | 判 | 首字 | 输入 / 输出 |\n|---|---|---|---|---|---|---|\n")
+	report.WriteString("\n| 编号 | 正确答案 | 配置 | 专家的判断 | 判 | 用时 | 输入 / 输出 |\n|---|---|---|---|---|---|---|\n")
 	for _, result := range results {
 		answer := strings.ReplaceAll(result.answer, "\n", " ")
 		if result.err != nil {
 			answer = "出错：" + result.err.Error()
 		}
 		fmt.Fprintf(&report, "| %s | %s | %s@%d | %s | %s %s | %v | %d / %d |\n", result.sample.id, result.sample.answer, result.config.name,
-			result.config.width, answer, result.verdict.mark(), result.verdict.Reason, result.firstText.Round(10*time.Millisecond),
+			result.config.width, answer, result.verdict.mark(), result.verdict.Reason, result.elapsed.Round(10*time.Millisecond),
 			result.usage.PromptTokens, result.usage.OutputTokens)
 	}
 	return report.String()

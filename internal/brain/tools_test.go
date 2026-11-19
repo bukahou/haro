@@ -160,18 +160,29 @@ func TestToolExchangeIsKeptInHistory(t *testing.T) {
 
 var lookAtCamera = braintest.Call("look_at_camera", nil)
 
-func TestLookAtCameraOnDemand(t *testing.T) {
-	model := braintest.NewModel(t, lookAtCamera, braintest.Say("你拿着手机。"), braintest.Say("哈哈。"))
-	k := newToolTalker(t, model, nil) // 没有工具箱也能看画面
+func newCameraTalker(t *testing.T, model brain.ChatModel, camera brain.TerminalCamera, expert brain.FrameExpert) *talker {
+	t.Helper()
+	return newTalker(t, brain.Components{Model: model, Synthesizer: fakeSynthesizer{}, Camera: camera, FrameExpert: expert},
+		brain.Options{MaxHistoryTurn: 6, Instructions: "基础规则。"})
+}
 
-	if spoken := braintest.Spoken(k.askWithImage("我手里拿着什么？", []byte("手机"))); spoken != "你拿着手机。" {
+// 模型调用 look_at_camera 时才经 MCP 让终端拍：拍到的画面交给模型；闲聊时不拍，历史里不留图片。
+func TestLookAtCameraCapturesOnDemand(t *testing.T) {
+	model := braintest.NewModel(t, lookAtCamera, braintest.Say("你拿着手机。"), braintest.Say("哈哈。"))
+	camera := braintest.NewCamera([]byte("手机"))
+	k := newCameraTalker(t, model, camera, nil)
+
+	if spoken := braintest.Spoken(k.ask("我手里拿着什么？")); spoken != "你拿着手机。" {
 		t.Fatalf("播出 %q", spoken)
 	}
 	if last := model.Requests()[1].Last(); last.Role != brain.RoleUser || string(last.Image) != "手机" {
 		t.Fatalf("调用 look_at_camera 后，下一次请求应带上画面：%+v", last)
 	}
 
-	k.askWithImage("讲个笑话吧", []byte("手机"))
+	k.ask("讲个笑话吧")
+	if camera.Captures() != 1 {
+		t.Errorf("只在模型要看时拍一次，实际拍了 %d 次", camera.Captures())
+	}
 	last := model.LastRequest().Messages
 	for _, msg := range last {
 		if len(msg.Image) > 0 {
@@ -202,18 +213,12 @@ func (e *fakeExpert) ExamineFrame(_ context.Context, frame []byte, request strin
 	return "白色方块，看着像充电头。", nil
 }
 
-func newExpertTalker(t *testing.T, model brain.ChatModel, expert brain.FrameExpert) *talker {
-	t.Helper()
-	return newTalker(t, brain.Components{Model: model, Synthesizer: fakeSynthesizer{}, FrameExpert: expert},
-		brain.Options{MaxHistoryTurn: 6})
-}
-
 // 有专家时：画面交给专家，前台只拿到专家的判断（文字），历史里留下这段判断。
 func TestLookAtCameraAsksExpert(t *testing.T) {
 	model, expert := braintest.NewModel(t, lookAtCamera, braintest.Say("转述专家的话。")), &fakeExpert{}
-	k := newExpertTalker(t, model, expert)
+	k := newCameraTalker(t, model, braintest.NewCamera([]byte("充电头")), expert)
 
-	if spoken := braintest.Spoken(k.askWithImage("我手里拿着什么？", []byte("充电头"))); spoken != "转述专家的话。" {
+	if spoken := braintest.Spoken(k.ask("我手里拿着什么？")); spoken != "转述专家的话。" {
 		t.Fatalf("播出 %q", spoken)
 	}
 	if len(expert.frames) != 1 || expert.frames[0] != "充电头" || expert.requests[0] != "我手里拿着什么？" {
@@ -234,11 +239,53 @@ func TestLookAtCameraAsksExpert(t *testing.T) {
 // 专家出错时：退回把画面直接交给前台。
 func TestLookAtCameraFallsBackWhenExpertFails(t *testing.T) {
 	model := braintest.NewModel(t, lookAtCamera, braintest.Say("你拿着手机。"))
-	k := newExpertTalker(t, model, &fakeExpert{err: errors.New("503")})
+	k := newCameraTalker(t, model, braintest.NewCamera([]byte("手机")), &fakeExpert{err: errors.New("503")})
 
-	k.askWithImage("我手里拿着什么？", []byte("手机"))
+	k.ask("我手里拿着什么？")
 	if last := model.LastRequest().Last(); last.Role != brain.RoleUser || string(last.Image) != "手机" {
 		t.Fatalf("专家出错时应把画面直接交给前台：%+v", last)
+	}
+}
+
+// 终端能拍时才给模型 look_at_camera：没有摄像头（普通客户端）、或终端的工具清单里没有「拍一帧」都不给；
+// 系统提示词不随摄像头变化（看画面的说明在工具说明里），提示词缓存不受影响。
+func TestLookAtCameraOnlyWhileTerminalCanCapture(t *testing.T) {
+	offered := func(camera brain.TerminalCamera) (bool, string) {
+		model := braintest.NewModel(t, braintest.Say("好的。"))
+		k := newCameraTalker(t, model, camera, nil)
+		k.ask("你好")
+		return slices.Contains(model.LastRequest().ToolNames(), "look_at_camera"), model.LastRequest().System()
+	}
+	camera := braintest.NewCamera([]byte("画面"))
+	withCamera, system := offered(camera)
+	camera.SetAvailable(false)
+	unplugged, unpluggedSystem := offered(camera)
+	none, noneSystem := offered(nil)
+	if !withCamera || unplugged || none {
+		t.Errorf("能拍时才给：能拍 %v，拔掉 %v，没有摄像头 %v", withCamera, unplugged, none)
+	}
+	if system != unpluggedSystem || system != noneSystem {
+		t.Errorf("系统提示词不该随摄像头变化：\n%q\n%q\n%q", system, unpluggedSystem, noneSystem)
+	}
+}
+
+// 拍失败时：模型拿到明确的「没拍成」和原因（不是空图），也不带画面消息。
+func TestCaptureFailureIsToldToModel(t *testing.T) {
+	model := braintest.NewModel(t, lookAtCamera, braintest.Say("现在看不到。"))
+	camera := braintest.NewCamera(nil)
+	failure := errors.New("摄像头被别的程序占着")
+	camera.FailWith(failure)
+	k := newCameraTalker(t, model, camera, nil)
+	k.ask("我手里拿着什么？")
+	answered := model.LastRequest().Messages
+	result := answered[len(answered)-1]
+	if result.Role != brain.RoleTool || result.Text != brain.CaptureFailedNote(failure) {
+		t.Errorf("工具结果应说明没拍成和原因：%+v", result)
+	}
+	for _, msg := range answered {
+		if len(msg.Image) > 0 {
+			t.Fatalf("拍失败时不该有画面消息：%+v", msg)
+		}
 	}
 }
 

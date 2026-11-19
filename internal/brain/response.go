@@ -30,7 +30,7 @@ type transcriptionJob struct {
 }
 
 // runResponse 执行一次回答，结束时恰好发出一个 ResponseDone。
-func (s *Session) runResponse(ctx context.Context, job *transcriptionJob, image []byte) {
+func (s *Session) runResponse(ctx context.Context, job *transcriptionJob) {
 	s.mu.Lock()
 	s.spoken, s.truncateAtMs, s.answeredInResponse, s.responseItem = nil, -1, false, job.item // 新的回答：重新记播出的句子
 	s.mu.Unlock()
@@ -42,11 +42,11 @@ func (s *Session) runResponse(ctx context.Context, job *transcriptionJob, image 
 		s.truncateLastAnswerLocked()
 		s.mu.Unlock()
 	}()
-	done := s.respond(ctx, job, image)
+	done := s.respond(ctx, job)
 	s.emit(done)
 }
 
-func (s *Session) respond(ctx context.Context, job *transcriptionJob, image []byte) (done realtimeproto.ResponseDone) {
+func (s *Session) respond(ctx context.Context, job *transcriptionJob) (done realtimeproto.ResponseDone) {
 	if job == nil {
 		return realtimeproto.ResponseDone{Status: realtimeproto.StatusIncomplete, Reason: realtimeproto.ReasonNoInputAudio}
 	}
@@ -92,7 +92,7 @@ func (s *Session) respond(ctx context.Context, job *transcriptionJob, image []by
 
 	// 画面不直接附在这句话上：模型需要看时调用 look_at_camera，闲聊时手里就没有画面
 	input := s.userTurn(job.text) // 带上现在的情况；历史里只存原话（remember 用 job.text）
-	answer, toolTrail, usage, err := s.speakAnswer(ctx, s.historyWithInstructions(), input, cameraView{frame: image, request: job.text})
+	answer, toolTrail, usage, err := s.speakAnswer(ctx, s.historyWithInstructions(), input, cameraView{request: job.text})
 	if ctx.Err() != nil {
 		s.rememberInterrupted(job.text) // 被打断：只记用户听到的部分
 		return realtimeproto.ResponseDone{Status: realtimeproto.StatusCancelled}
@@ -154,9 +154,8 @@ func (s *Session) failed(reason realtimeproto.ResponseReason, step string, err e
 	return realtimeproto.ResponseDone{Status: realtimeproto.StatusFailed, Reason: reason}
 }
 
-// cameraView 是这一轮能看的画面，以及主人这一轮的原话（看画面的专家要知道主人问的是什么）。
+// cameraView 是看画面时要带上的这一轮信息：主人这一轮的原话（看画面的专家要知道主人问的是什么）。
 type cameraView struct {
-	frame   []byte
 	request string
 }
 

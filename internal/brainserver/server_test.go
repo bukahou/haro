@@ -56,7 +56,7 @@ func (s *fakeSession) Close() error {
 
 func newServer(t *testing.T, session *fakeSession, opts brainserver.Options) *httptest.Server {
 	t.Helper()
-	server := httptest.NewServer(brainserver.NewHandler(func() brainserver.Session { return session }, opts, quiet))
+	server := httptest.NewServer(brainserver.NewHandler(func(brainserver.Terminal) brainserver.Session { return session }, opts, quiet))
 	t.Cleanup(server.Close)
 	return server
 }

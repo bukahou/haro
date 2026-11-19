@@ -10,7 +10,6 @@ import (
 
 	"github.com/bukahou/haro/internal/brain"
 	"github.com/bukahou/haro/internal/brain/braintest"
-	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
 var testPersonas = []brain.Persona{
@@ -107,46 +106,6 @@ func (m *specRecorder) StreamReply(_ context.Context, _ []brain.ChatMessage, too
 	return func(yield func(brain.ReplyDelta, error) bool) { yield(brain.ReplyDelta{Text: "好的。"}, nil) }
 }
 func (m *specRecorder) Warmup(context.Context) error { return nil }
-
-// 终端声明没有摄像头：不提供 look_at_camera，系统提示词末尾说明看不到。
-func TestNoCameraHidesLookTool(t *testing.T) {
-	model := &promptRecorder{}
-	k := newTalker(t, brain.Components{Model: model, Synthesizer: fakeSynthesizer{}},
-		brain.Options{MaxHistoryTurn: 6, Instructions: "基础规则。"})
-
-	k.say("你好")
-	if !slices.Contains(model.tools, "look_at_camera") {
-		t.Fatalf("默认（有摄像头）应提供 look_at_camera：%v", model.tools)
-	}
-	k.send(realtimeproto.SessionUpdate{NoCamera: true})
-	k.say("你能看到我吗")
-	if slices.Contains(model.tools, "look_at_camera") {
-		t.Errorf("没有摄像头时不应提供 look_at_camera：%v", model.tools)
-	}
-	if !strings.HasPrefix(model.system, "基础规则。") || !strings.HasSuffix(model.system, brain.NoCameraNote) {
-		t.Errorf("系统提示词应保留基础规则并说明没有摄像头：%q", model.system)
-	}
-}
-
-// 摄像头被拔掉（设备报告里没有摄像头）就不给模型看画面的工具，插回来再给；
-// session.update 说「有摄像头」，也不能盖掉设备报告的「现在不可用」。
-func TestCameraComesAndGoesWithDeviceReports(t *testing.T) {
-	model := &promptRecorder{}
-	k := newTalker(t, brain.Components{Model: model, Synthesizer: fakeSynthesizer{}},
-		brain.Options{MaxHistoryTurn: 6, Instructions: "基础规则。"})
-
-	k.send(realtimeproto.HaroTerminalDevices{Microphone: "USB", Speaker: "音箱"}) // 摄像头断着
-	k.send(realtimeproto.SessionUpdate{NoCamera: false})                        // 终端本身有摄像头
-	k.say("你看得见我吗")
-	if slices.Contains(model.tools, "look_at_camera") || !strings.HasSuffix(model.system, brain.NoCameraNote) {
-		t.Fatalf("摄像头不可用时不应提供 look_at_camera：%v", model.tools)
-	}
-	k.send(realtimeproto.HaroTerminalDevices{Microphone: "USB", Speaker: "音箱", Camera: "EMEET"})
-	k.say("现在呢")
-	if !slices.Contains(model.tools, "look_at_camera") || strings.Contains(model.system, brain.NoCameraNote) {
-		t.Errorf("摄像头插回来后应恢复 look_at_camera：%v", model.tools)
-	}
-}
 
 // promptRecorder 记下最近一次收到的工具名和系统提示词。
 type promptRecorder struct {
