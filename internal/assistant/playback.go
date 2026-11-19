@@ -13,7 +13,7 @@ import (
 	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
-// errInterrupted 表示这次回答被用户用唤醒词打断了（v3 I-1）。
+// errInterrupted 表示这次回答被用户用唤醒词打断了。
 var errInterrupted = errors.New("回答被打断")
 
 // cancelDrainTimeout：被打断后等服务端确认取消（response.done）最多这么久。
@@ -21,7 +21,7 @@ const cancelDrainTimeout = 3 * time.Second
 
 // playResponse 消费服务端的事件，直到回答结束、声音播完：日志记文字，音频交给后台写入。
 //
-// 为什么音频要后台写（v3 I-1）：播放器的管道满了写入就会阻塞，而语音合成比播放快——如果在这里直接写，
+// 为什么音频要后台写：播放器的管道满了写入就会阻塞，而语音合成比播放快——如果在这里直接写，
 // 大部分播放时间都卡在写入和「等播完」上，「唤醒（打断）」事件要排在一堆音频后面好几秒才轮得到。
 func (a *Assistant) playResponse(ctx context.Context, turnSpan trace.Span, item string, committedAt time.Time) error {
 	var (
@@ -56,12 +56,12 @@ func (a *Assistant) playResponse(ctx context.Context, turnSpan trace.Span, item 
 				}
 			case realtimeproto.HaroWakeWordDetected:
 				if a.opts.BargeIn {
-					err := a.interrupt(ctx, turnSpan, player, done != nil, answer.String())
+					err := a.interrupt(ctx, turnSpan, player, item, done != nil, answer.String())
 					player = nil
 					return err
 				}
 			case realtimeproto.InputAudioTranscriptionCompleted:
-				if e.SpeakerChecked { // 声纹（v3 H-3）：日志里看得到是谁说的
+				if e.SpeakerChecked { // 声纹：日志里看得到是谁说的
 					a.logger.Info("你说", "text", e.Transcript, "speaker", speakerLabel(e.Speaker))
 				} else {
 					a.logger.Info("你说", "text", e.Transcript)
@@ -118,15 +118,15 @@ func (a *Assistant) finishResponse(turnSpan trace.Span, done realtimeproto.Respo
 	}
 }
 
-// interrupt 处理打断（v3 I-1 / I-2）：立即停播；告诉服务端用户听到了多少（conversation.item.truncate）；
+// interrupt 处理打断：立即停播；告诉服务端用户听到了多少（conversation.item.truncate）；
 // 回答还没结束时再取消，并等它确认（期间收到的其他事件留给主循环）。
-func (a *Assistant) interrupt(ctx context.Context, turnSpan trace.Span, p *player, responseDone bool, answer string) error {
+func (a *Assistant) interrupt(ctx context.Context, turnSpan trace.Span, p *player, item string, responseDone bool, answer string) error {
 	var played time.Duration
 	if p != nil {
 		played = p.abort()
 		p.span.End()
 	}
-	a.logger.Info("✋ 被打断", "played", played.Round(time.Millisecond), "answer_so_far", answer)
+	a.logger.Info("✋ 被打断", "item", item, "played", played.Round(time.Millisecond), "answer_so_far", answer)
 	turnSpan.SetAttributes(attribute.String("haro.response.status", "interrupted"),
 		attribute.Float64("haro.turn.played_seconds", played.Seconds()))
 	brain := a.parts.Brain

@@ -18,12 +18,12 @@ const (
 	toolTimeout   = 10 * time.Second // 单次工具执行的超时
 )
 
-// lookAtCameraTool 是服务端内置的「看画面」工具（D-B ②）：画面由终端每轮提供，模型需要看时才交给它。
+// lookAtCameraTool 是服务端内置的「看画面」工具：画面由终端每轮提供，模型需要看时才交给它。
 const lookAtCameraTool = "look_at_camera"
 
 var lookAtCameraSpec = ToolSpec{Name: lookAtCameraTool,
 	Description: "看摄像头拍到的当前画面。只有主人问到看得见的东西时才用（例如：你能看到我吗、我旁边有什么、我手里拿着什么、我穿的什么）。" +
-		"看完先说看到了什么，再判断是什么；看不清就说看不清，请主人拿近一点或换个角度。",
+		"看完用一两句话回答主人问的：是什么、有多大把握；外观细节主人问到才说。看不清就说看不清，请主人拿近一点或换个角度。",
 	Parameters: json.RawMessage(`{"type":"object","properties":{}}`)}
 
 // cameraFrameNote 是承载画面的那条消息的文字；frameRecalledNote 是它写进历史时的替身（历史里不存图片）。
@@ -54,8 +54,9 @@ func (s *Session) toolSpecs() []ToolSpec {
 }
 
 // expertReportNote 放在专家的判断前面：告诉前台怎么转述（只在这条工具结果里，不改系统提示词，免得提示词缓存失效）。
-const expertReportNote = "看图更准的专家看了当前画面，判断如下。用你自己的口吻告诉主人（不用提专家）：" +
-	"保留它的把握程度（确定 / 看着像 / 不确定），不要说得比它更肯定，不要补充它没说的细节；它请主人拿近或换角度的，照样转达。" +
+const expertReportNote = "看图更准的专家看了当前画面，判断如下。用你自己的口吻告诉主人（不用提专家），一两句话说完：" +
+	"它判断是什么、有多大把握（确定 / 看着像 / 不确定），不要说得比它更肯定，不要补充它没说的细节；外观描述主人问到才说；" +
+	"它请主人拿近或换角度的，照样转达。" +
 	"它已经按需要联网核对过，这次不要再为画面里的东西另外去搜。\n\n"
 
 // lookAtCamera 返回交给模型的工具结果，以及承载画面的用户消息（没有画面、或由专家看了时为空）。
@@ -80,7 +81,7 @@ func (s *Session) lookAtCamera(ctx context.Context, view cameraView) (string, []
 	return "已拿到摄像头当前画面，见下一条消息。", []ChatMessage{{Role: RoleUser, Text: cameraFrameNote, Image: view.frame}}
 }
 
-// needsConfirmation 判断这批调用里有没有要用户口头确认的（MCP destructiveHint，T3 ①）。
+// needsConfirmation 判断这批调用里有没有要用户口头确认的（MCP destructiveHint）。
 func (s *Session) needsConfirmation(calls []ToolCall) bool {
 	for _, spec := range s.toolSpecs() {
 		for _, call := range calls {
@@ -146,7 +147,7 @@ func confirmationQuestion(calls []ToolCall) string {
 	}
 }
 
-// deleteTargets 取出删除工具参数里的描述：queries（v3 D-1，一次删多条）或旧的 query。
+// deleteTargets 取出删除工具参数里的描述：queries（一次删多条）或旧的 query。
 func deleteTargets(arguments map[string]any) []string {
 	var targets []string
 	add := func(value any) {
@@ -209,7 +210,7 @@ func (s *Session) handleConfirmation(ctx context.Context, text string, pending [
 			trail = append(trail, ChatMessage{Role: RoleTool, ToolName: call.Name, ToolCallID: call.ID,
 				Text: s.callTool(ctx, call)})
 		}
-		// 由模型根据执行结果回答（v3 D-1）：删了哪几条、哪些没找到、失败了为什么，固定的「删掉了」说不清这些。
+		// 由模型根据执行结果回答：删了哪几条、哪些没找到、失败了为什么，固定的「删掉了」说不清这些。
 		history := append(s.historyWithInstructions(), s.userTurn(text))
 		history = append(history, trail[:len(trail)-1]...)
 		answer, moreTrail, usage, err := s.speakAnswer(ctx, history, trail[len(trail)-1], cameraView{})
