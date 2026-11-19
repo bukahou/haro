@@ -171,7 +171,7 @@ func (m *AnthropicChatModel) StreamReply(ctx context.Context, messages []brain.C
 			}
 			event := stream.Current()
 			if err := message.Accumulate(event); err != nil {
-				yield(brain.ReplyDelta{}, fmt.Errorf("解析 Claude 的流式响应: %w", err))
+				yield(brain.ReplyDelta{Usage: partialUsage(message)}, fmt.Errorf("解析 Claude 的流式响应: %w", err))
 				return
 			}
 			blockDelta, ok := event.AsAny().(anthropic.ContentBlockDeltaEvent)
@@ -184,12 +184,12 @@ func (m *AnthropicChatModel) StreamReply(ctx context.Context, messages []brain.C
 				}
 			}
 		}
-		if err := stream.Err(); err != nil {
+		if err := stream.Err(); err != nil { // 出错、被取消：照样交出知道的那部分用量（记账不漏）
 			if errors.Is(context.Cause(requestCtx), errNoFirstToken) {
-				yield(brain.ReplyDelta{}, fmt.Errorf("请求 Claude: %w（等了 %v）", errNoFirstToken, m.firstTokenTimeout))
+				yield(brain.ReplyDelta{Usage: partialUsage(message)}, fmt.Errorf("请求 Claude: %w（等了 %v）", errNoFirstToken, m.firstTokenTimeout))
 				return
 			}
-			yield(brain.ReplyDelta{}, fmt.Errorf("请求 Claude: %w", err))
+			yield(brain.ReplyDelta{Usage: partialUsage(message)}, fmt.Errorf("请求 Claude: %w", err))
 			return
 		}
 		usage := usageOf(message.Usage)
@@ -477,6 +477,17 @@ func toolCallsOf(content []anthropic.ContentBlockUnion) ([]brain.ToolCall, error
 }
 
 // usageOf 换算用量：PromptTokens 是输入的总数（没命中缓存的 + 缓存读 + 缓存写），三者价格不同，分开记。
+// partialUsage 是请求没正常结束时知道的用量：Claude 在流的开头（message_start）就报了输入（含缓存读写），
+// 输出数要到结尾（message_delta）才给，所以输出不知道。连开头都没收到时什么都不知道。
+func partialUsage(message anthropic.Message) *brain.ReplyUsage {
+	if message.ID == "" {
+		return &brain.ReplyUsage{Incomplete: true, TokensUnknown: true}
+	}
+	usage := usageOf(message.Usage)
+	usage.OutputTokens, usage.Incomplete = 0, true
+	return usage
+}
+
 func usageOf(usage anthropic.Usage) *brain.ReplyUsage {
 	read, write := int(usage.CacheReadInputTokens), int(usage.CacheCreationInputTokens)
 	return &brain.ReplyUsage{PromptTokens: int(usage.InputTokens) + read + write, OutputTokens: int(usage.OutputTokens),

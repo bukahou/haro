@@ -194,6 +194,10 @@ type ReplyUsage struct {
 	ThinkingChars    int   // 思考内容的字数（只统计，不朗读）；用来查「看不见的输出」
 	LoadMillis       int64 // 本次请求里加载模型花的时间
 	Requests         int   // 这次回答请求了模型几次（调工具时不止一次；add 累加时计数）
+	// Incomplete：请求被打断或出错，用量只知道一部分：OutputTokens 不知道（为 0，不编）；
+	// 知道多少输入取决于厂商（Claude 在流的开头就报了输入）。TokensUnknown：连输入也不知道（还没开始就失败了）
+	Incomplete    bool
+	TokensUnknown bool
 }
 
 // add 把一次模型请求的用量累加进来：调工具时一次回答要请求模型好几次，每次都要计费，
@@ -213,6 +217,7 @@ func (u *ReplyUsage) add(request *ReplyUsage) *ReplyUsage {
 	total.ThinkingChars += request.ThinkingChars
 	total.LoadMillis += request.LoadMillis
 	total.Requests++
+	total.Incomplete = total.Incomplete || request.Incomplete
 	return &total
 }
 

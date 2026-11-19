@@ -26,14 +26,34 @@ func NewMeteredChatModel(inner brain.ChatModel, model string, purpose Purpose, p
 	return &MeteredChatModel{inner: inner, model: model, purpose: purpose, pricing: pricing, ledger: ledger, logger: logger}
 }
 
-// StreamReply 原样转发，最后一段带 Usage 时记账。
+// StreamReply 原样转发，每次请求都记一笔：正常结束时记最后一段带的用量；被打断、出错时记知道的那部分（标不完整），
+// 一点用量都拿不到时也记一行（token 不知道），不漏记。
+//
+// 调用方中途不要了（回答被打断）而 ctx 已经取消时，接着把内层收完：内层很快因为取消结束，并交出知道的用量。
 func (m *MeteredChatModel) StreamReply(ctx context.Context, messages []brain.ChatMessage, tools []brain.ToolSpec) iter.Seq2[brain.ReplyDelta, error] {
 	return func(yield func(brain.ReplyDelta, error) bool) {
-		for delta, err := range m.inner.StreamReply(ctx, messages, tools) {
-			if delta.Usage != nil {
-				m.record(delta.Usage)
+		recorded, callerGone := false, false
+		defer func() {
+			if !recorded {
+				m.record(&brain.ReplyUsage{Incomplete: true, TokensUnknown: true})
 			}
-			if !yield(delta, err) || err != nil {
+		}()
+		for delta, err := range m.inner.StreamReply(ctx, messages, tools) {
+			if delta.Usage != nil && !recorded {
+				m.record(delta.Usage)
+				recorded = true
+			}
+			if callerGone {
+				continue
+			}
+			if !yield(delta, err) {
+				if ctx.Err() == nil { // 没取消却不要了：内层还会接着生成，不等它，这次的用量就不知道了
+					return
+				}
+				callerGone = true
+				continue
+			}
+			if err != nil {
 				return
 			}
 		}
@@ -42,10 +62,15 @@ func (m *MeteredChatModel) StreamReply(ctx context.Context, messages []brain.Cha
 
 func (m *MeteredChatModel) record(usage *brain.ReplyUsage) {
 	charge := Charge{Purpose: m.purpose, Item: "llm:" + m.model, InputTokens: usage.PromptTokens, OutputTokens: usage.OutputTokens,
-		CacheReadTokens: usage.CacheReadTokens, CacheWriteTokens: usage.CacheWriteTokens, Yen: m.pricing.LLMYen(m.model, *usage)}
+		CacheReadTokens: usage.CacheReadTokens, CacheWriteTokens: usage.CacheWriteTokens, Yen: m.pricing.LLMYen(m.model, *usage),
+		Incomplete: usage.Incomplete, TokensUnknown: usage.TokensUnknown}
 	// 用独立的 context：回答被打断（ctx 取消）时，已经产生的费用照样要记
 	if err := m.ledger.Record(context.Background(), charge); err != nil {
 		m.logger.Warn("用量没记上", "err", err, "yen", charge.Yen)
+	}
+	if usage.Incomplete {
+		m.logger.Info("记账：这次请求没正常结束，只记知道的部分", "model", m.model, "purpose", m.purpose,
+			"input_tokens", usage.PromptTokens, "tokens_unknown", usage.TokensUnknown, "yen", charge.Yen)
 	}
 }
 
