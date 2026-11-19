@@ -183,8 +183,8 @@ func (s *Session) reopenStream() RecognizerStream {
 		WithBackoff(timing.Delay, timing.MaxDelay).
 		WithJitterFactor(0.1).
 		WithMaxRetries(-1).
-		OnRetry(func(event failsafe.ExecutionEvent[RecognizerStream]) {
-			s.logger.Warn("重开识别流失败，稍后再试", "attempt", event.Attempts(), "err", event.LastError())
+		OnRetryScheduled(func(event failsafe.ExecutionScheduledEvent[RecognizerStream]) { // 失败的当下就记（OnRetry 要等完间隔才调用）
+			s.logger.Warn("重开识别流失败", "attempt", event.Attempts(), "retry_in", event.Delay.Round(time.Millisecond), "err", event.LastError())
 			if !lostNotified && time.Since(lostAt) >= timing.LostNoticeAfter {
 				lostNotified = true
 				s.logger.Warn("识别流断开太久：提示终端现在听不见", "since", since(lostAt))

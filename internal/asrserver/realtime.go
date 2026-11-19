@@ -75,8 +75,8 @@ func semanticMaxWait(eagerness string) time.Duration {
 
 // handleRealtimeTranscription 实现 Realtime 转写会话的子集（事件定义见 realtimeproto）。
 func handleRealtimeTranscription(w http.ResponseWriter, r *http.Request, deps Dependencies) {
-	if r.URL.Query().Get("intent") != "transcription" {
-		writeError(w, http.StatusBadRequest, "只支持 intent=transcription")
+	if r.URL.Query().Get("intent") != realtimeproto.TranscriptionIntent {
+		writeError(w, http.StatusBadRequest, "只支持 intent="+realtimeproto.TranscriptionIntent)
 		return
 	}
 	if deps.NewVoiceDetector == nil {

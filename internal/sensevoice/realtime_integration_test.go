@@ -58,7 +58,7 @@ func TestRealtimeLive(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http")+realtimeproto.TranscriptionPath, nil)
+	conn, _, err := websocket.Dial(ctx, transcriptionURL(t, server.URL), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +127,7 @@ func TestWakeRealtimeLive(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http")+realtimeproto.TranscriptionPath, nil)
+	conn, _, err := websocket.Dial(ctx, transcriptionURL(t, server.URL), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,4 +171,14 @@ func writeClientEvent(ctx context.Context, conn *websocket.Conn, event realtimep
 		return err
 	}
 	return conn.Write(ctx, websocket.MessageText, data)
+}
+
+// transcriptionURL 是测试用的转写服务（httptest）上转写会话的地址。
+func transcriptionURL(t *testing.T, base string) string {
+	t.Helper()
+	address, err := realtimeproto.TranscriptionURL(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return address
 }

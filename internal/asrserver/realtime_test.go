@@ -7,7 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"strings"
+	"net/url"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -86,7 +86,7 @@ func dialRealtime(t *testing.T, factory VoiceDetectorFactory, transcriber Transc
 	t.Cleanup(server.Close)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	t.Cleanup(cancel)
-	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http")+realtimeproto.TranscriptionPath, nil)
+	conn, _, err := websocket.Dial(ctx, transcriptionURL(t, server.URL), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +166,13 @@ func TestRealtimeRejectsBadSessionUpdate(t *testing.T) {
 func TestRealtimeWithoutVADModel(t *testing.T) {
 	server := httptest.NewServer(NewHandler(Dependencies{Transcriber: &lengthTranscriber{}, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}))
 	defer server.Close()
-	resp, err := http.Get(server.URL + realtimeproto.TranscriptionPath)
+	address, err := url.Parse(server.URL) // 普通 HTTP 请求（不升级成 WebSocket）：地址按结构拼
+	if err != nil {
+		t.Fatal(err)
+	}
+	address = address.JoinPath(realtimeproto.TranscriptionPath)
+	address.RawQuery = url.Values{"intent": {realtimeproto.TranscriptionIntent}}.Encode()
+	resp, err := http.Get(address.String())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -331,7 +337,7 @@ func dialWakeSessionWith(t *testing.T, transcriber Transcriber, spotter *fakeSpo
 	t.Cleanup(server.Close)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	t.Cleanup(cancel)
-	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http")+realtimeproto.TranscriptionPath, nil)
+	conn, _, err := websocket.Dial(ctx, transcriptionURL(t, server.URL), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -645,4 +651,14 @@ func writeClientEvent(ctx context.Context, conn *websocket.Conn, event realtimep
 		return err
 	}
 	return conn.Write(ctx, websocket.MessageText, data)
+}
+
+// transcriptionURL 是测试用的转写服务（httptest）上转写会话的地址。
+func transcriptionURL(t *testing.T, base string) string {
+	t.Helper()
+	address, err := realtimeproto.TranscriptionURL(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return address
 }
