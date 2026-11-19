@@ -2,7 +2,6 @@ package brain_test
 
 import (
 	"slices"
-	"strings"
 	"testing"
 
 	"github.com/bukahou/haro/internal/brain"
@@ -52,7 +51,7 @@ func TestAskStrongerModelTwice(t *testing.T) {
 		t.Fatalf("应请求 3 次，实际 %d", len(requests))
 	}
 	first, second := requests[1].Last(), requests[2].Last()
-	if !strings.Contains(first.Text, "已改由更强的模型") || !strings.Contains(second.Text, "已经由更强的模型在回答") {
+	if first.Text != brain.EscalatedNote || second.Text != brain.AlreadyEscalatedNote {
 		t.Errorf("第二次调用应提示直接回答：%q / %q", first.Text, second.Text)
 	}
 }

@@ -123,7 +123,7 @@ func TestNoCameraHidesLookTool(t *testing.T) {
 	if slices.Contains(model.tools, "look_at_camera") {
 		t.Errorf("没有摄像头时不应提供 look_at_camera：%v", model.tools)
 	}
-	if !strings.HasPrefix(model.system, "基础规则。") || !strings.Contains(model.system, "没有摄像头") {
+	if !strings.HasPrefix(model.system, "基础规则。") || !strings.HasSuffix(model.system, brain.NoCameraNote) {
 		t.Errorf("系统提示词应保留基础规则并说明没有摄像头：%q", model.system)
 	}
 }
@@ -138,12 +138,12 @@ func TestCameraComesAndGoesWithDeviceReports(t *testing.T) {
 	k.send(realtimeproto.HaroTerminalDevices{Microphone: "USB", Speaker: "音箱"}) // 摄像头断着
 	k.send(realtimeproto.SessionUpdate{NoCamera: false})                        // 终端本身有摄像头
 	k.say("你看得见我吗")
-	if slices.Contains(model.tools, "look_at_camera") || !strings.Contains(model.system, "没有摄像头") {
+	if slices.Contains(model.tools, "look_at_camera") || !strings.HasSuffix(model.system, brain.NoCameraNote) {
 		t.Fatalf("摄像头不可用时不应提供 look_at_camera：%v", model.tools)
 	}
 	k.send(realtimeproto.HaroTerminalDevices{Microphone: "USB", Speaker: "音箱", Camera: "EMEET"})
 	k.say("现在呢")
-	if !slices.Contains(model.tools, "look_at_camera") || strings.Contains(model.system, "没有摄像头") {
+	if !slices.Contains(model.tools, "look_at_camera") || strings.Contains(model.system, brain.NoCameraNote) {
 		t.Errorf("摄像头插回来后应恢复 look_at_camera：%v", model.tools)
 	}
 }

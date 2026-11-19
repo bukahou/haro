@@ -29,7 +29,7 @@ func TestBriefingGoesBeforeTheUserTurn(t *testing.T) {
 		t.Errorf("系统提示词里不该有即时情况：%q", firstSystem)
 	}
 	if model.lastInput.Role != brain.RoleUser || !strings.Contains(model.lastInput.Text, "用到 80% 了") ||
-		!strings.HasSuffix(model.lastInput.Text, "【主人说】\n你好") {
+		!strings.HasSuffix(model.lastInput.Text, "\n"+brain.UserSaysHeading+"\n你好") {
 		t.Errorf("主人这句话前面应附上即时情况：%q", model.lastInput.Text)
 	}
 

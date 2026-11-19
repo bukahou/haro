@@ -130,6 +130,9 @@ func (s *Session) systemPrompt() string {
 	return prompt
 }
 
+// userSaysHeading 把每轮附带的即时情况和主人这句话隔开。
+const userSaysHeading = "【主人说】"
+
 // userTurn 是这一轮交给模型的「主人的话」：前面附上现在的情况（时间、位置、谁在说话、额度、任务板）。
 //
 // 为什么不放进系统提示词：这些每轮都变，而系统提示词在最前面——放在那里，每轮的开头都不一样，
@@ -140,7 +143,7 @@ func (s *Session) userTurn(text string) ChatMessage {
 	if briefing == "" {
 		return ChatMessage{Role: RoleUser, Text: text}
 	}
-	return ChatMessage{Role: RoleUser, Text: briefing + "\n【主人说】\n" + text}
+	return ChatMessage{Role: RoleUser, Text: briefing + "\n" + userSaysHeading + "\n" + text}
 }
 
 // briefing 汇总这一轮要补充的情况：谁在说话 + 各 Briefer（v5）。

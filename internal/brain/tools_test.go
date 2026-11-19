@@ -179,7 +179,7 @@ func TestLookAtCameraOnDemand(t *testing.T) {
 		}
 	}
 	// 历史里应留下「当时看了画面」的替身，而不是图片
-	if !slices.ContainsFunc(last, func(msg brain.ChatMessage) bool { return strings.Contains(msg.Text, "当时看了摄像头画面") }) {
+	if !slices.ContainsFunc(last, func(msg brain.ChatMessage) bool { return msg.Text == brain.FrameRecalledNote }) {
 		t.Error("历史里应留下「当时看了摄像头画面」")
 	}
 }
@@ -226,7 +226,7 @@ func TestLookAtCameraAsksExpert(t *testing.T) {
 		}
 	}
 	report := answered[len(answered)-1]
-	if report.Role != brain.RoleTool || !strings.Contains(report.Text, "白色方块，看着像充电头。") || !strings.Contains(report.Text, "不要说得比它更肯定") {
+	if report.Role != brain.RoleTool || report.Text != brain.ExpertReportNote+"白色方块，看着像充电头。" {
 		t.Errorf("工具结果应是专家的判断加转述要求：%+v", report)
 	}
 }
