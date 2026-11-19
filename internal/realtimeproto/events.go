@@ -52,12 +52,8 @@ type InputAudioBufferAppend struct {
 	Audio PCMAudio
 }
 
-// ConversationItemCreate 往对话里加一条内容（终端用它附带当前画面）。
-type ConversationItemCreate struct {
-	Item ConversationItem
-}
-
-// ResponseCreate 请服务端基于当前对话生成回答。
+// ResponseCreate 请服务端回答当前这句话。turn_detection 的 create_response 为 false 时客户端才需要发；
+// 默认（true）由服务端判定说完时自己开始回答。
 type ResponseCreate struct{}
 
 // ResponseCancel 取消正在生成的回答（被打断、终端退出时发出）。
@@ -98,7 +94,6 @@ type ConversationItemTruncate struct {
 
 func (SessionUpdate) Type() string            { return typeSessionUpdate }
 func (InputAudioBufferAppend) Type() string   { return typeInputAudioBufferAppend }
-func (ConversationItemCreate) Type() string   { return typeConversationItemCreate }
 func (ResponseCreate) Type() string           { return typeResponseCreate }
 func (ResponseCancel) Type() string           { return typeResponseCancel }
 func (HaroWakeWordSleep) Type() string        { return typeHaroWakeWordSleep }
@@ -111,7 +106,6 @@ func (HaroMCPMessage) Type() string           { return typeHaroMCPMessage }
 
 func (SessionUpdate) clientEvent()            {}
 func (InputAudioBufferAppend) clientEvent()   {}
-func (ConversationItemCreate) clientEvent()   {}
 func (ResponseCreate) clientEvent()           {}
 func (ResponseCancel) clientEvent()           {}
 func (HaroWakeWordSleep) clientEvent()        {}
@@ -174,6 +168,9 @@ type ResponseOutputAudioDelta struct {
 	Audio PCMAudio
 }
 
+// ResponseCreated 表示服务端开始了一次回答（之后恰好有一个 ResponseDone）。
+type ResponseCreated struct{}
+
 // ResponseDone 表示本次回答结束；每个开始了的回答恰好对应一个 ResponseDone。
 type ResponseDone struct {
 	Status ResponseStatus
@@ -194,6 +191,7 @@ func (InputAudioBufferSpeechStopped) Type() string      { return typeSpeechStopp
 func (InputAudioTranscriptionCompleted) Type() string   { return typeTranscriptionCompleted }
 func (ResponseOutputAudioTranscriptDelta) Type() string { return typeTranscriptDelta }
 func (ResponseOutputAudioDelta) Type() string           { return typeAudioDelta }
+func (ResponseCreated) Type() string                    { return typeResponseCreated }
 func (ResponseDone) Type() string                       { return typeResponseDone }
 func (Error) Type() string                              { return typeError }
 
@@ -204,6 +202,7 @@ func (InputAudioBufferSpeechStopped) serverEvent()      {}
 func (InputAudioTranscriptionCompleted) serverEvent()   {}
 func (ResponseOutputAudioTranscriptDelta) serverEvent() {}
 func (ResponseOutputAudioDelta) serverEvent()           {}
+func (ResponseCreated) serverEvent()                    {}
 func (ResponseDone) serverEvent()                       {}
 func (Error) serverEvent()                              {}
 func (HaroMCPMessage) serverEvent()                     {}
@@ -219,13 +218,14 @@ type TurnDetection struct {
 	Threshold         float64 `json:"threshold,omitempty" jsonschema:"语音概率阈值，0–1"`
 	PrefixPaddingMs   int     `json:"prefix_padding_ms,omitempty" jsonschema:"识别时带上语音开始前的这段音频（毫秒）"`
 	SilenceDurationMs int     `json:"silence_duration_ms,omitempty" jsonschema:"静音持续多久算说完（毫秒）"`
-	CreateResponse    *bool   `json:"create_response,omitempty" jsonschema:"haro 固定为 false：由终端带上画面后再请求回答"`
+	CreateResponse    *bool   `json:"create_response,omitempty" jsonschema:"判定说完后服务端自己开始回答（默认 true）；false = 等客户端发 response.create"`
 }
 
 // ResponseStatus 对应 Realtime response.status。
 type ResponseStatus string
 
 const (
+	StatusInProgress ResponseStatus = "in_progress" // 只出现在 response.created 里
 	StatusCompleted  ResponseStatus = "completed"
 	StatusCancelled  ResponseStatus = "cancelled"
 	StatusIncomplete ResponseStatus = "incomplete"
@@ -236,19 +236,6 @@ const (
 type Usage struct {
 	InputTokens  int
 	OutputTokens int
-}
-
-// ConversationItem 是对话中的一条内容。
-type ConversationItem struct {
-	Role    string // "user"
-	Content []ContentPart
-}
-
-// ContentPart 是一条内容里的一部分。
-type ContentPart struct {
-	Type      string // "input_text" | "input_image"
-	Text      string
-	ImageJPEG []byte
 }
 
 // AudioFormat 描述 PCM 格式。样本一律是 16 位有符号小端（s16le）。

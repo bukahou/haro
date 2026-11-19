@@ -55,10 +55,14 @@ type Session struct {
 	events    chan realtimeproto.ServerEvent
 	closed    chan struct{}
 	closeOnce sync.Once
+	// lifetime 随会话结束而取消：回答都在它下面跑（判定说完时自动开始的回答没有请求的上下文可用）
+	lifetime    context.Context
+	endLifetime context.CancelFunc
 
 	mu             sync.Mutex
 	transcription  *transcriptionJob  // 已判定说完、等待被回答使用的识别任务
 	cancelResponse context.CancelFunc // 非 nil 表示有进行中的回答
+	autoRespond    bool               // 判定说完时自己开始回答（turn_detection 的 create_response，默认是）
 
 	stream      RecognizerStream             // 识别流：音频转发给它，由它判断说完；nil = 还没打开或已断开
 	pendingJobs map[string]*transcriptionJob // 已判定说完、等待识别结果的语音段（按 item_id）
@@ -87,10 +91,11 @@ func NewSession(parts Components, opts Options, logger *slog.Logger) *Session {
 	if persona := conversation.currentPersona(); persona != nil {
 		logger.Info("当前性格", "persona", persona.Name, "available", len(opts.Personas))
 	}
+	lifetime, endLifetime := context.WithCancel(context.Background())
 	session := &Session{
 		parts: parts, opts: opts, logger: logger, conversation: conversation, truncateAtMs: -1,
 		events: make(chan realtimeproto.ServerEvent, 32),
-		closed: make(chan struct{}),
+		closed: make(chan struct{}), lifetime: lifetime, endLifetime: endLifetime,
 	}
 	if parts.Notices != nil {
 		parts.Notices.join(session)
@@ -125,6 +130,7 @@ func (s *Session) Close() error {
 		if stream != nil {
 			_ = stream.Close()
 		}
+		s.endLifetime()
 	})
 	return nil
 }
@@ -182,21 +188,16 @@ func (s *Session) Send(ctx context.Context, event realtimeproto.ClientEvent) err
 	defer s.mu.Unlock()
 	switch e := event.(type) {
 	case realtimeproto.SessionUpdate:
+		if e.TurnDetection != nil {
+			s.autoRespond = e.TurnDetection.CreateResponse == nil || *e.TurnDetection.CreateResponse
+		}
 		if e.TurnDetection != nil && s.stream == nil {
 			if err := s.openStream(ctx, StreamConfig{TurnDetection: *e.TurnDetection, WakeWord: e.WakeWord}); err != nil {
 				return err
 			}
 		}
-	case realtimeproto.ConversationItemCreate: // 画面改为看的时候经 MCP 向终端要，这里附带的不用
 	case realtimeproto.ResponseCreate:
-		if s.cancelResponse != nil {
-			return realtimeproto.ProtocolErrorf(realtimeproto.CodeResponseInProgress, "已有进行中的回答")
-		}
-		responseCtx, cancel := context.WithCancel(ctx)
-		s.cancelResponse = cancel
-		job := s.transcription
-		s.transcription = nil
-		go s.runResponse(responseCtx, job)
+		return s.startResponseLocked()
 	case realtimeproto.ResponseCancel:
 		if s.cancelResponse != nil {
 			s.cancelResponse()
@@ -204,6 +205,19 @@ func (s *Session) Send(ctx context.Context, event realtimeproto.ClientEvent) err
 	default:
 		return realtimeproto.ProtocolErrorf(realtimeproto.CodeUnsupportedEvent, "不支持的事件 %s", event.Type())
 	}
+	return nil
+}
+
+// startResponseLocked 开始回答最近判定说完的那句话（回答会等它的识别结果）。调用方持有 s.mu。
+func (s *Session) startResponseLocked() error {
+	if s.cancelResponse != nil {
+		return realtimeproto.ProtocolErrorf(realtimeproto.CodeResponseInProgress, "已有进行中的回答")
+	}
+	responseCtx, cancel := context.WithCancel(s.lifetime)
+	s.cancelResponse = cancel
+	job := s.transcription
+	s.transcription = nil
+	go s.runResponse(responseCtx, job)
 	return nil
 }
 

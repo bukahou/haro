@@ -62,7 +62,9 @@ const expertReportNote = "看图更准的专家看了当前画面，判断如下
 	"它已经按需要联网核对过，这次不要再为画面里的东西另外去搜。\n\n"
 
 // captureFailedNote 是拍失败时交给模型的工具结果：说明没拍成和原因（终端给的说明可以直接转述）。
-func captureFailedNote(err error) string { return "没拍成：" + err.Error() + "。告诉主人现在看不到。" }
+func captureFailedNote(err error) string {
+	return "没拍成：" + err.Error() + "。告诉主人现在看不到。"
+}
 
 // lookAtCamera 经 MCP 让终端现拍一帧，返回交给模型的工具结果，以及承载画面的用户消息（拍失败、或由专家看了时为空）。
 // 有看画面的专家时先问专家；专家出错时退回把画面直接交给前台模型。画面不存盘、不进历史。

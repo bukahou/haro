@@ -18,7 +18,7 @@ var endpointDelay = telemetry.MustLatencyHistogram(otel.Meter("github.com/bukaho
 	"haro.turn.endpoint_delay", "用户说完到判定说完的时间（等静音 + 判断）")
 
 // respondHandsFree 处理一轮（item 是服务端给这句话的编号，日志里和服务端的「一轮结束」对得上）：
-// 带上「说完那一刻」的画面请求回答，播完后恢复收音。返回是否被打断。
+// 服务端判定说完时已经自己开始回答（画面由它要的时候经 MCP 来拍），这里负责播放，播完后恢复收音。返回是否被打断。
 //
 // 播放期间不能听用户说话，否则会把自己的声音当成用户说的（没有回声消除）：
 //   - 可以打断时：麦克风照常上传，告诉语音前端「正在播放」，它只听唤醒词；
@@ -57,15 +57,6 @@ func (a *Assistant) respondHandsFree(ctx context.Context, item string, speechEnd
 	endpointDelay.Record(ctx, delay.Seconds())
 	a.logger.Info("⏱ 判定说完", "item", item, "endpoint_delay", delay.Round(time.Millisecond))
 
-	brain := a.parts.Brain
-	if err := a.attachFrame(ctx, span); err != nil {
-		a.logger.Error("提交画面失败", "err", err)
-		return false
-	}
-	if err := brain.Send(ctx, realtimeproto.ResponseCreate{}); err != nil {
-		a.logger.Error("请求回答失败", "err", err)
-		return false
-	}
 	err := a.playResponse(ctx, span, item, speechEnd)
 	if errors.Is(err, errInterrupted) {
 		return true

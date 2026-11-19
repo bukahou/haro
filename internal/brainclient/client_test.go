@@ -31,11 +31,13 @@ var (
 // scriptedSession 是假的服务端会话：记下收到的事件；收到 response.create 就按顺序发出 reply，
 // 再发 response.done；hang 时发完 reply 不结束，直到会话关闭（模拟还在生成）。
 type scriptedSession struct {
-	reply  []realtimeproto.ServerEvent
-	hang   bool
-	events chan realtimeproto.ServerEvent
-	closed chan struct{}
-	once   sync.Once
+	reply []realtimeproto.ServerEvent
+	hang  bool
+	// startOnAudio：收到音频就自己开始回答（先发 response.created），模拟服务端判定说完后不等请求就回答
+	startOnAudio bool
+	events       chan realtimeproto.ServerEvent
+	closed       chan struct{}
+	once         sync.Once
 
 	mu       sync.Mutex
 	received []realtimeproto.ClientEvent
@@ -50,8 +52,14 @@ func (s *scriptedSession) Send(_ context.Context, event realtimeproto.ClientEven
 	s.mu.Lock()
 	s.received = append(s.received, event)
 	s.mu.Unlock()
-	if _, ok := event.(realtimeproto.ResponseCreate); ok {
+	switch event.(type) {
+	case realtimeproto.ResponseCreate:
 		go s.respond()
+	case realtimeproto.InputAudioBufferAppend:
+		if s.startOnAudio {
+			s.reply = append([]realtimeproto.ServerEvent{realtimeproto.ResponseCreated{}}, s.reply...)
+			go s.respond()
+		}
 	}
 	return nil
 }
@@ -87,7 +95,7 @@ func newServer(session *scriptedSession) *httptest.Server {
 	return httptest.NewServer(brainserver.NewHandler(func(brainserver.Terminal) brainserver.Session { return session }, brainserver.Options{}, quiet))
 }
 
-// askOverWebSocket 发出一轮的客户端事件：打开会话（服务端判断说完）、送一段音频、带上画面、请求回答。
+// askOverWebSocket 发出一轮的客户端事件：打开会话（服务端判断说完）、送一段音频、请求回答。
 func askOverWebSocket(t *testing.T, client *brainclient.Client) {
 	t.Helper()
 	ctx := context.Background()
@@ -95,8 +103,6 @@ func askOverWebSocket(t *testing.T, client *brainclient.Client) {
 	for _, event := range []realtimeproto.ClientEvent{
 		realtimeproto.SessionUpdate{TurnDetection: &turn}, // 输入格式由客户端补上
 		realtimeproto.InputAudioBufferAppend{Audio: realtimeproto.PCMAudio{Format: mic16k, Data: make([]byte, 3200)}},
-		realtimeproto.ConversationItemCreate{Item: realtimeproto.ConversationItem{Role: "user",
-			Content: []realtimeproto.ContentPart{{Type: "input_image", ImageJPEG: []byte{0xFF, 0xD8}}}}},
 		realtimeproto.ResponseCreate{},
 	} {
 		if err := client.Send(ctx, event); err != nil {
@@ -174,8 +180,8 @@ func TestConversationOverWebSocket(t *testing.T) {
 	}
 
 	received := session.receivedEvents()
-	if len(received) != 4 {
-		t.Fatalf("服务端应收到 4 个事件，收到 %d 个", len(received))
+	if len(received) != 3 {
+		t.Fatalf("服务端应收到 3 个事件（会话设置、音频、请求回答），收到 %d 个", len(received))
 	}
 	if update, ok := received[0].(realtimeproto.SessionUpdate); !ok || update.InputFormat != mic16k || update.TurnDetection == nil {
 		t.Errorf("session.update 应带上客户端补的输入格式和 turn_detection：%+v", received[0])
@@ -250,6 +256,47 @@ func TestDisconnectDuringResponse(t *testing.T) {
 	}
 	if err := client.Send(context.Background(), realtimeproto.ResponseCreate{}); !errors.Is(err, brainclient.ErrDisconnected) {
 		t.Errorf("断开后 Send 应返回 ErrDisconnected，得到 %v", err)
+	}
+}
+
+// 服务端判定说完后自己开始的回答（终端没发 response.create）进行到一半断了：终端照样收到失败的 response.done，不会一直等。
+func TestDisconnectDuringServerStartedResponse(t *testing.T) {
+	session := newScriptedSession(true, realtimeproto.ResponseOutputAudioTranscriptDelta{Delta: "说到一半"})
+	session.startOnAudio = true
+	server := newServer(session)
+	server.Close() // 只借用它的 handler，改用自己的监听
+	raw, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener := &trackingListener{Listener: raw}
+	httpServer := &http.Server{Handler: server.Config.Handler}
+	go httpServer.Serve(listener)
+	defer httpServer.Close()
+
+	client, err := brainclient.Dial(context.Background(), brainclient.DialOptions{BaseURL: "http://" + raw.Addr().String(),
+		InputFormat: mic16k}, quiet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	turn := realtimeproto.TurnDetection{Type: "server_vad"}
+	for _, event := range []realtimeproto.ClientEvent{realtimeproto.SessionUpdate{TurnDetection: &turn},
+		realtimeproto.InputAudioBufferAppend{Audio: realtimeproto.PCMAudio{Format: mic16k, Data: make([]byte, 3200)}}} {
+		if err := client.Send(context.Background(), event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, ok := (<-client.Events()).(realtimeproto.ResponseCreated); !ok {
+		t.Fatal("应先收到 response.created")
+	}
+	time.Sleep(100 * time.Millisecond)
+	listener.killAll()
+
+	events := collectUntilDone(t, client)
+	done := events[len(events)-1].(realtimeproto.ResponseDone)
+	if done.Status != realtimeproto.StatusFailed || done.Reason != realtimeproto.ReasonServerDisconnected {
+		t.Errorf("应收到失败的 response.done：%v", events)
 	}
 }
 

@@ -1,62 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$defs": {
-    "client.conversation.item.create": {
-      "type": "object",
-      "properties": {
-        "type": {
-          "type": "string",
-          "const": "conversation.item.create"
-        },
-        "item": {
-          "type": "object",
-          "properties": {
-            "type": {
-              "type": "string",
-              "description": "message"
-            },
-            "role": {
-              "type": "string",
-              "description": "user"
-            },
-            "content": {
-              "type": [
-                "null",
-                "array"
-              ],
-              "items": {
-                "type": "object",
-                "properties": {
-                  "type": {
-                    "type": "string",
-                    "description": "input_text 或 input_image"
-                  },
-                  "text": {
-                    "type": "string"
-                  },
-                  "image_url": {
-                    "type": "string",
-                    "description": "input_image：data:image/jpeg;base64,…"
-                  }
-                },
-                "required": [
-                  "type"
-                ]
-              }
-            }
-          },
-          "required": [
-            "type",
-            "role",
-            "content"
-          ]
-        }
-      },
-      "required": [
-        "type",
-        "item"
-      ]
-    },
     "client.conversation.item.truncate": {
       "type": "object",
       "properties": {
@@ -290,7 +234,7 @@
                             "null",
                             "boolean"
                           ],
-                          "description": "haro 固定为 false：由终端带上画面后再请求回答"
+                          "description": "判定说完后服务端自己开始回答（默认 true）；false = 等客户端发 response.create"
                         }
                       },
                       "description": "由服务端的 VAD 判断说话开始和结束；null = 这次不改",
@@ -532,6 +476,31 @@
         "item_id"
       ]
     },
+    "server.response.created": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "response.created"
+        },
+        "response": {
+          "type": "object",
+          "properties": {
+            "status": {
+              "type": "string",
+              "description": "in_progress"
+            }
+          },
+          "required": [
+            "status"
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "response"
+      ]
+    },
     "server.response.done": {
       "type": "object",
       "properties": {
@@ -660,9 +629,6 @@
   "description": "haro 的事件：终端 ↔ 服务端的对话会话、服务端 ↔ haro-asr 的转写会话。OpenAI Realtime 正式版的子集加 haro 扩展。",
   "oneOf": [
     {
-      "$ref": "#/$defs/client.conversation.item.create"
-    },
-    {
       "$ref": "#/$defs/client.conversation.item.truncate"
     },
     {
@@ -715,6 +681,9 @@
     },
     {
       "$ref": "#/$defs/server.input_audio_buffer.speech_stopped"
+    },
+    {
+      "$ref": "#/$defs/server.response.created"
     },
     {
       "$ref": "#/$defs/server.response.done"

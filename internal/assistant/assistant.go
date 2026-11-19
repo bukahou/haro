@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
@@ -28,7 +27,6 @@ var (
 type Components struct {
 	Manual     ManualToggle // 回车手动唤醒 / 休眠
 	Microphone Microphone
-	Camera     FrameSource // 可为 nil：这个终端没有摄像头，不取画面，并在会话里声明
 	Speaker    AudioSink
 	Brain      BrainSession
 }
@@ -86,20 +84,4 @@ func fail(span trace.Span, step string, err error) error {
 		span.SetStatus(codes.Error, wrapped.Error())
 	}
 	return wrapped
-}
-
-// attachFrame 把「说完那一刻」的画面交给服务端。没有摄像头时什么都不做；取帧失败只记日志，本轮不带画面。
-// 只有交给服务端失败时返回错误。
-func (a *Assistant) attachFrame(ctx context.Context, span trace.Span) error {
-	if a.parts.Camera == nil {
-		return nil
-	}
-	frame, takenAt, err := a.parts.Camera.LatestFrame(ctx)
-	if err != nil {
-		a.logger.Warn("取帧失败，本轮不带画面", "err", err)
-		return nil
-	}
-	span.SetAttributes(attribute.Int64("haro.frame_age_ms", time.Since(takenAt).Milliseconds()))
-	return a.parts.Brain.Send(ctx, realtimeproto.ConversationItemCreate{Item: realtimeproto.ConversationItem{Role: "user",
-		Content: []realtimeproto.ContentPart{{Type: "input_image", ImageJPEG: frame}}}})
 }

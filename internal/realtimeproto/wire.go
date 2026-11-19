@@ -37,7 +37,6 @@ var DefaultOutputFormat = AudioFormat{SampleRate: 24000, Channels: 1}
 const (
 	typeSessionUpdate            = "session.update"
 	typeInputAudioBufferAppend   = "input_audio_buffer.append"
-	typeConversationItemCreate   = "conversation.item.create"
 	typeConversationItemTruncate = "conversation.item.truncate"
 	typeResponseCreate           = "response.create"
 	typeResponseCancel           = "response.cancel"
@@ -54,6 +53,7 @@ const (
 	typeHaroWakeWordDetected   = "haro.wake_word.detected"
 	typeTranscriptDelta        = "response.output_audio_transcript.delta"
 	typeAudioDelta             = "response.output_audio.delta"
+	typeResponseCreated        = "response.created"
 	typeResponseDone           = "response.done"
 	typeHaroNotice             = "haro.notice"
 	typeError                  = "error"
@@ -95,21 +95,6 @@ type wireAudioAppend struct {
 	Audio string `json:"audio" jsonschema:"base64 编码的 PCM"`
 }
 
-type wireItemCreate struct {
-	Type string `json:"type"`
-	Item struct {
-		Type    string        `json:"type" jsonschema:"message"`
-		Role    string        `json:"role" jsonschema:"user"`
-		Content []wireContent `json:"content"`
-	} `json:"item"`
-}
-
-type wireContent struct {
-	Type     string `json:"type" jsonschema:"input_text 或 input_image"`
-	Text     string `json:"text,omitempty"`
-	ImageURL string `json:"image_url,omitempty" jsonschema:"input_image：data:image/jpeg;base64,…"`
-}
-
 type wireTypeOnly struct {
 	Type string `json:"type"`
 }
@@ -131,8 +116,6 @@ type wireItemTruncate struct {
 	ContentIndex int    `json:"content_index"`
 	AudioEndMs   int64  `json:"audio_end_ms" jsonschema:"用户听到了回答的前多少毫秒"`
 }
-
-const jpegDataURIPrefix = "data:image/jpeg;base64,"
 
 // ——— 服务端事件 ———
 
@@ -192,6 +175,13 @@ type wireOutputFormat struct {
 type wireNotice struct {
 	Type string `json:"type"`
 	Kind string `json:"kind" jsonschema:"提示的种类，例如 research_done；不认识的种类也照样提示"`
+}
+
+type wireResponseCreated struct {
+	Type     string `json:"type"`
+	Response struct {
+		Status ResponseStatus `json:"status" jsonschema:"in_progress"`
+	} `json:"response"`
 }
 
 type wireResponseDone struct {

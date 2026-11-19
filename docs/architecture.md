@@ -35,6 +35,8 @@ haro 是一个家用语音助手：家里每个房间放一台**终端**（麦�
 - 终端的设备能力（现在是「拍一帧」）走 MCP：终端是 MCP 服务端，服务端是 MCP 客户端，消息装在 `haro.mcp.message` 事件里，
   跑在同一条连接上（`internal/mcpbridge`；工具的名字、参数、结果、错误码只在 `internal/terminaltools` 定义一处）。
   模型调用 `look_at_camera` 时，服务端才让终端打开摄像头拍一帧，摄像头平时关着；摄像头插拔时终端增删这个工具，服务端随之给不给模型看画面。
+- 一轮对话由服务端开始：语音前端判定说完时，服务端马上开始回答（先发标准的 `response.created`），识别和准备回答同时进行；
+  终端不上传画面、也不发 `response.create`，只负责播放（`create_response` 设成 false 的普通 Realtime 客户端照旧自己请求）。
 
 ## 服务端（`internal/brain` 与周边）
 

@@ -115,7 +115,6 @@ func run(logger *slog.Logger) error {
 			return assistant.NewAssistant(assistant.Components{
 				Manual:     keyboard,
 				Microphone: local.OpenMicrophone(devices.Microphone.ID),
-				Camera:     frameSourceOf(camera), // nil = 没有摄像头（会告诉服务端）
 				Speaker:    local.OpenSpeaker(devices.Speaker.ID),
 				Brain:      conn,
 			}, options, logger)
@@ -156,11 +155,10 @@ func enroll(logger *slog.Logger, name string, appendMode bool, seconds time.Dura
 
 // assistantOptions 由配置组装对话选项（系统提示词由服务端持有，终端不发）。
 func assistantOptions(settings config.Settings, sounds tones.Tones) assistant.Options {
-	createResponse := false // 由终端带上「说完那一刻」的画面后再请求回答
 	return assistant.Options{
-		TurnDetection: realtimeproto.TurnDetection{
+		TurnDetection: realtimeproto.TurnDetection{ // create_response 不填 = 服务端判定说完时自己开始回答
 			Type: settings.TurnDetection, Eagerness: settings.TurnEagerness,
-			Threshold: settings.VADThreshold, CreateResponse: &createResponse,
+			Threshold:         settings.VADThreshold,
 			SilenceDurationMs: int(settings.VADSilence.Milliseconds()),
 			PrefixPaddingMs:   int(settings.VADPrefix.Milliseconds()),
 		},
@@ -206,22 +204,6 @@ func cameraBackend(value string) terminal.CameraBackend {
 	default:
 		return terminal.CameraAuto
 	}
-}
-
-// frameSource 把摄像头接到对话取画面的接口上。
-type frameSource struct{ camera terminal.Camera }
-
-func (f frameSource) LatestFrame(ctx context.Context) ([]byte, time.Time, error) {
-	frame, err := f.camera.Capture(ctx, 0)
-	return frame.JPEG, frame.TakenAt, err
-}
-
-// frameSourceOf 没有摄像头时返回 nil（不能把 nil 包进接口）。
-func frameSourceOf(camera terminal.Camera) assistant.FrameSource {
-	if camera == nil {
-		return nil
-	}
-	return frameSource{camera: camera}
 }
 
 // cameraName 让看守随时知道摄像头能不能用；没有摄像头时为 nil。

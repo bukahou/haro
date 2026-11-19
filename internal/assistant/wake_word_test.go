@@ -132,7 +132,7 @@ func TestWakeWordConversation(t *testing.T) {
 	speaker := &recordingSpeaker{}
 	turn := realtimeproto.TurnDetection{Type: "server_vad"}
 	haro := assistant.NewAssistant(assistant.Components{
-		Manual: manual, Microphone: loudMicrophone{}, Camera: fakeCamera{}, Speaker: speaker, Brain: session,
+		Manual: manual, Microphone: loudMicrophone{}, Speaker: speaker, Brain: session,
 	}, assistant.Options{TurnDetection: turn, EchoGuard: 10 * time.Millisecond,
 		NoticeTone: realtimeproto.PCMAudio{Format: realtimeproto.AudioFormat{SampleRate: 16000, Channels: 1}, Data: []byte("[叮咚]")},
 		WakeWord: assistant.WakeWordOptions{Phrase: "哈罗哈罗", IdleTimeout: 150 * time.Millisecond,

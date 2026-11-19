@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 )
 
 // 事件的编解码，全协议只有这一处：编码由每个事件的 toWire 给出线上结构，解码查下面两张表。
@@ -27,7 +26,6 @@ type serverCodec struct {
 var clientEvents = map[string]clientCodec{
 	typeSessionUpdate:            {wireSessionUpdate{}, decodeSessionUpdate},
 	typeInputAudioBufferAppend:   {wireAudioAppend{}, decodeAudioAppend},
-	typeConversationItemCreate:   {wireItemCreate{}, decodeItemCreate},
 	typeConversationItemTruncate: {wireItemTruncate{}, decodeItemTruncate},
 	typeResponseCreate:           typeOnlyClient(ResponseCreate{}),
 	typeResponseCancel:           typeOnlyClient(ResponseCancel{}),
@@ -46,6 +44,7 @@ var serverEvents = map[string]serverCodec{
 	typeHaroWakeWordDetected:   {wireWakeWordDetected{}, decodeWakeWordDetected},
 	typeTranscriptDelta:        {wireTranscriptDelta{}, decodeTranscriptDelta},
 	typeAudioDelta:             {wireAudioDelta{}, decodeAudioDelta},
+	typeResponseCreated:        {wireResponseCreated{}, decodeResponseCreated},
 	typeResponseDone:           {wireResponseDone{}, decodeResponseDone},
 	typeHaroNotice:             {wireNotice{}, decodeNotice},
 	typeError:                  {wireError{}, decodeError},
@@ -184,49 +183,6 @@ func decodeAudioAppend(data []byte, input AudioFormat) (ClientEvent, error) {
 	return InputAudioBufferAppend{Audio: PCMAudio{Format: input, Data: pcm}}, nil
 }
 
-func (e ConversationItemCreate) toWire() (any, error) {
-	wire := wireItemCreate{Type: typeConversationItemCreate}
-	wire.Item.Type, wire.Item.Role = "message", e.Item.Role
-	for _, part := range e.Item.Content {
-		switch part.Type {
-		case "input_image":
-			wire.Item.Content = append(wire.Item.Content, wireContent{Type: part.Type,
-				ImageURL: jpegDataURIPrefix + base64.StdEncoding.EncodeToString(part.ImageJPEG)})
-		case "input_text":
-			wire.Item.Content = append(wire.Item.Content, wireContent{Type: part.Type, Text: part.Text})
-		default:
-			return nil, fmt.Errorf("不支持的内容类型 %q", part.Type)
-		}
-	}
-	return wire, nil
-}
-
-func decodeItemCreate(data []byte, _ AudioFormat) (ClientEvent, error) {
-	var wire wireItemCreate
-	if err := json.Unmarshal(data, &wire); err != nil {
-		return nil, err
-	}
-	item := ConversationItem{Role: wire.Item.Role}
-	for _, content := range wire.Item.Content {
-		switch content.Type {
-		case "input_image":
-			if !strings.HasPrefix(content.ImageURL, jpegDataURIPrefix) {
-				return nil, errors.New("input_image 只支持 data:image/jpeg;base64 形式")
-			}
-			jpeg, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(content.ImageURL, jpegDataURIPrefix))
-			if err != nil {
-				return nil, fmt.Errorf("图片不是合法的 base64: %w", err)
-			}
-			item.Content = append(item.Content, ContentPart{Type: content.Type, ImageJPEG: jpeg})
-		case "input_text":
-			item.Content = append(item.Content, ContentPart{Type: content.Type, Text: content.Text})
-		default:
-			return nil, fmt.Errorf("不支持的内容类型 %q", content.Type)
-		}
-	}
-	return ConversationItemCreate{Item: item}, nil
-}
-
 func (e ConversationItemTruncate) toWire() (any, error) {
 	return wireItemTruncate{Type: typeConversationItemTruncate, AudioEndMs: e.AudioEndMs}, nil
 }
@@ -363,6 +319,17 @@ func decodeAudioDelta(data []byte) (ServerEvent, error) {
 		format = AudioFormat{SampleRate: wire.Haro.Format.Rate, Channels: max(wire.Haro.Format.Channels, 1)}
 	}
 	return ResponseOutputAudioDelta{Audio: PCMAudio{Format: format, Data: pcm}}, nil
+}
+
+func (e ResponseCreated) toWire() (any, error) {
+	wire := wireResponseCreated{Type: typeResponseCreated}
+	wire.Response.Status = StatusInProgress
+	return wire, nil
+}
+
+func decodeResponseCreated(data []byte) (ServerEvent, error) {
+	var wire wireResponseCreated
+	return ResponseCreated{}, json.Unmarshal(data, &wire)
 }
 
 func (e ResponseDone) toWire() (any, error) {

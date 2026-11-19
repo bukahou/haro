@@ -25,12 +25,6 @@ type Recording interface {
 	Stop() (realtimeproto.PCMAudio, error)
 }
 
-// FrameSource 提供摄像头画面。
-type FrameSource interface {
-	// LatestFrame 现拍一帧（JPEG），返回画面和拍摄时刻。
-	LatestFrame(ctx context.Context) ([]byte, time.Time, error)
-}
-
 // AudioSink 打开播放流。一轮回答的所有句子写进同一条流。
 type AudioSink interface {
 	OpenStream(ctx context.Context, format realtimeproto.AudioFormat) (AudioStream, error)

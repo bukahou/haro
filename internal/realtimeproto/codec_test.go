@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
-	"strings"
 	"testing"
 )
 
@@ -19,8 +18,6 @@ func TestClientEventsRoundTrip(t *testing.T) {
 		SessionUpdate{Kind: SessionTranscription, InputFormat: input16k, WakeWord: true,
 			TurnDetection: &TurnDetection{Type: "server_vad", SilenceDurationMs: 500}}, // 服务端 → haro-asr
 		InputAudioBufferAppend{Audio: PCMAudio{Format: input16k, Data: []byte{1, 2, 3, 4}}},
-		ConversationItemCreate{Item: ConversationItem{Role: "user", Content: []ContentPart{
-			{Type: "input_image", ImageJPEG: []byte{0xFF, 0xD8, 0xFF}}, {Type: "input_text", Text: "看这个"}}}},
 		ResponseCreate{}, ResponseCancel{}, HaroWakeWordSleep{}, HaroWakeWordWake{},
 		HaroPlaybackStarted{}, HaroPlaybackStopped{}, ConversationItemTruncate{AudioEndMs: 2340},
 		HaroTerminalDevices{Microphone: "USB 麦克风"},
@@ -54,11 +51,6 @@ func TestClientWireShape(t *testing.T) {
 		session["haro"].(map[string]any)["wake_word"].(map[string]any)["enabled"] != true {
 		t.Errorf("session.update 的形状不对：%s", data)
 	}
-	data, _ = EncodeClientEvent(ConversationItemCreate{Item: ConversationItem{Role: "user",
-		Content: []ContentPart{{Type: "input_image", ImageJPEG: []byte{1}}}}})
-	if !strings.Contains(string(data), `"image_url":"data:image/jpeg;base64,AQ=="`) {
-		t.Errorf("图片应以 data URI 发送：%s", data)
-	}
 }
 
 func TestServerEventsRoundTrip(t *testing.T) {
@@ -72,6 +64,7 @@ func TestServerEventsRoundTrip(t *testing.T) {
 		HaroNotice{Kind: NoticeResearchDone},
 		ResponseOutputAudioTranscriptDelta{Delta: "为什么数学老师离婚了？"},
 		ResponseOutputAudioDelta{Audio: PCMAudio{Format: AudioFormat{SampleRate: 32000, Channels: 1}, Data: []byte{9, 8, 7, 6}}},
+		ResponseCreated{},
 		ResponseDone{Status: StatusCompleted, Usage: &Usage{InputTokens: 1200, OutputTokens: 20}},
 		ResponseDone{Status: StatusIncomplete, Reason: ReasonEmptyTranscript},
 		Error{Code: CodeNoTranscriptionStream, Message: "识别流没有打开"},
@@ -144,8 +137,8 @@ func TestDecodeClientEventErrorCodes(t *testing.T) {
 		{"不认识的事件", `{"type":"conversation.item.delete"}`, input16k, CodeUnsupportedEvent},
 		{"手动提交（服务端判断说完）", `{"type":"input_audio_buffer.commit"}`, input16k, CodeUnsupportedEvent},
 		{"不是 JSON", `{"type":`, input16k, CodeInvalidEvent},
-		{"图片只收 data URI", `{"type":"conversation.item.create","item":{"type":"message","role":"user",` +
-			`"content":[{"type":"input_image","image_url":"https://example.com/a.png"}]}}`, input16k, CodeInvalidEvent},
+		{"附带画面（画面改为看的时候经 MCP 要）", `{"type":"conversation.item.create","item":{"type":"message","role":"user",` +
+			`"content":[{"type":"input_image","image_url":"data:image/jpeg;base64,AQ=="}]}}`, input16k, CodeUnsupportedEvent},
 		{"送音频之前没声明格式", `{"type":"input_audio_buffer.append","audio":"AQI="}`, AudioFormat{}, CodeInputFormatRequired},
 		{"不是 PCM", `{"type":"session.update","session":{"type":"realtime","audio":{"input":{"format":{"type":"audio/pcmu","rate":8000},` +
 			`"turn_detection":null}}}}`, input16k, CodeUnsupportedAudioFormat},

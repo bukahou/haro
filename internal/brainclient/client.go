@@ -47,7 +47,7 @@ type Client struct {
 	writeMu     sync.Mutex
 
 	mu           sync.Mutex
-	inFlight     bool // 发了 response.create、还没收到 response.done
+	inFlight     bool // 有回答在进行：发了 response.create 或收到 response.created、还没收到 response.done
 	disconnected bool
 	closing      bool
 }
@@ -215,7 +215,12 @@ func (c *Client) readEvents(ctx context.Context) {
 			}
 			continue
 		}
-		if _, ok := event.(realtimeproto.ResponseDone); ok {
+		switch event.(type) {
+		case realtimeproto.ResponseCreated: // 服务端判定说完时自己开始的回答：断线时也要补发失败
+			c.mu.Lock()
+			c.inFlight = true
+			c.mu.Unlock()
+		case realtimeproto.ResponseDone:
 			c.mu.Lock()
 			c.inFlight = false
 			c.mu.Unlock()

@@ -57,7 +57,7 @@ func (s *Session) winWake(stream RecognizerStream, wake realtimeproto.HaroWakeWo
 }
 
 // pumpStreamEvents 把转写会话的事件翻译给终端：
-// speech_stopped 时登记一个识别任务（终端随后带上画面请求回答，回答会等这个任务完成），
+// speech_stopped 时登记一个识别任务，并（默认）马上开始回答——回答会等这个任务完成，识别和准备回答同时进行；
 // 识别结果到达时完成它。
 func (s *Session) pumpStreamEvents(stream RecognizerStream) {
 	for event := range stream.Events() {
@@ -79,6 +79,16 @@ func (s *Session) pumpStreamEvents(stream RecognizerStream) {
 			s.transcription = job
 			s.mu.Unlock()
 			s.emit(e)
+			s.mu.Lock()
+			var err error
+			if s.autoRespond {
+				err = s.startResponseLocked()
+			}
+			s.mu.Unlock()
+			if err != nil {
+				s.logger.Warn("判定说完时没能开始回答", "item", e.ItemID, "err", err)
+				s.emit(realtimeproto.ErrorEventFor("", err))
+			}
 		case realtimeproto.InputAudioTranscriptionCompleted:
 			s.mu.Lock()
 			job := s.pendingJobs[e.ItemID]

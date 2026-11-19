@@ -29,8 +29,9 @@ type transcriptionJob struct {
 	speakerChecked bool
 }
 
-// runResponse 执行一次回答，结束时恰好发出一个 ResponseDone。
+// runResponse 执行一次回答：开始时发 response.created，结束时恰好发出一个 response.done。
 func (s *Session) runResponse(ctx context.Context, job *transcriptionJob) {
+	s.emit(realtimeproto.ResponseCreated{})
 	s.mu.Lock()
 	s.spoken, s.truncateAtMs, s.answeredInResponse, s.responseItem = nil, -1, false, job.item // 新的回答：重新记播出的句子
 	s.mu.Unlock()
