@@ -23,7 +23,7 @@ const cancelDrainTimeout = 3 * time.Second
 //
 // 为什么音频要后台写（v3 I-1）：播放器的管道满了写入就会阻塞，而语音合成比播放快——如果在这里直接写，
 // 大部分播放时间都卡在写入和「等播完」上，「唤醒（打断）」事件要排在一堆音频后面好几秒才轮得到。
-func (a *Assistant) playResponse(ctx context.Context, turnSpan trace.Span, committedAt time.Time) error {
+func (a *Assistant) playResponse(ctx context.Context, turnSpan trace.Span, item string, committedAt time.Time) error {
 	var (
 		player   *player
 		answer   strings.Builder
@@ -81,7 +81,7 @@ func (a *Assistant) playResponse(ctx context.Context, turnSpan trace.Span, commi
 					turnSpan.AddEvent("first_audio")
 					turnSpan.SetAttributes(attribute.Float64("haro.turn.time_to_first_audio", firstAudio.Seconds()))
 					timeToFirstAudio.Record(ctx, firstAudio.Seconds())
-					a.logger.Info("⏱ 说完 → 第一个字", "elapsed", firstAudio.Round(time.Millisecond))
+					a.logger.Info("⏱ 说完 → 第一个字", "item", item, "elapsed", firstAudio.Round(time.Millisecond))
 				}
 				player.enqueue(e.Audio.Data)
 			case realtimeproto.Error:

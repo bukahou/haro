@@ -93,7 +93,7 @@ func TestBargeInWhileGenerating(t *testing.T) {
 	brain.events <- chunk
 	brain.events <- realtimeproto.HaroWakeWordDetected{Keyword: "哈罗哈罗"}
 
-	err := a.playResponse(context.Background(), noSpan(), time.Now())
+	err := a.playResponse(context.Background(), noSpan(), "item_1", time.Now())
 	if !errors.Is(err, errInterrupted) {
 		t.Fatalf("应返回被打断，得到 %v", err)
 	}
@@ -127,7 +127,7 @@ func TestBargeInWhileDraining(t *testing.T) {
 		time.Sleep(50 * time.Millisecond) // 让它先进入「等播完」
 		brain.events <- realtimeproto.HaroWakeWordDetected{Keyword: "哈罗哈罗"}
 	}()
-	err := a.playResponse(context.Background(), noSpan(), time.Now())
+	err := a.playResponse(context.Background(), noSpan(), "item_1", time.Now())
 	if !errors.Is(err, errInterrupted) || !sink.wasAborted() {
 		t.Fatalf("播放尾巴里也应能打断：err=%v aborted=%v", err, sink.wasAborted())
 	}
@@ -143,7 +143,7 @@ func TestPlaysToTheEnd(t *testing.T) {
 	brain.events <- chunk
 	brain.events <- realtimeproto.ResponseDone{Status: realtimeproto.StatusCompleted}
 	returned := make(chan error, 1)
-	go func() { returned <- a.playResponse(context.Background(), noSpan(), time.Now()) }()
+	go func() { returned <- a.playResponse(context.Background(), noSpan(), "item_1", time.Now()) }()
 	select {
 	case <-returned:
 		t.Fatal("还没播完就返回了")

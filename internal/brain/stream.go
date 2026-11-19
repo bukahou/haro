@@ -73,7 +73,7 @@ func (s *Session) pumpStreamEvents(stream RecognizerStream) {
 		case realtimeproto.InputAudioBufferSpeechStarted:
 			s.emit(e)
 		case realtimeproto.InputAudioBufferSpeechStopped:
-			job := &transcriptionJob{done: make(chan struct{}), started: time.Now()}
+			job := &transcriptionJob{item: e.ItemID, done: make(chan struct{}), started: time.Now()}
 			s.mu.Lock()
 			s.pendingJobs[e.ItemID] = job
 			s.transcription = job

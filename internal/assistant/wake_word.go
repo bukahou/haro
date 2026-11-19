@@ -85,7 +85,7 @@ func (a *Assistant) handleWakeEvent(ctx context.Context, window *conversationWin
 	case realtimeproto.InputAudioBufferSpeechStopped:
 		if window.awake {
 			window.hold()
-			if a.respondHandsFree(ctx, a.uplink.wallClockAt(e.AudioEndMs)) {
+			if a.respondHandsFree(ctx, e.ItemID, a.uplink.wallClockAt(e.AudioEndMs)) {
 				window.wake() // 被打断：已经醒了，等用户接着说
 				a.logger.Info("👂 打断了，请说")
 				return

@@ -3,6 +3,7 @@ package brain
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
@@ -18,6 +19,7 @@ import (
 
 // transcriptionJob 是一句话的识别任务：识别流报「说完了」时登记，识别结果到达时完成。
 type transcriptionJob struct {
+	item    string // 识别流给这句话的编号（终端日志里同一个编号）
 	done    chan struct{}
 	text    string
 	err     error
@@ -44,10 +46,15 @@ func (s *Session) runResponse(ctx context.Context, job *transcriptionJob, image 
 	s.emit(done)
 }
 
-func (s *Session) respond(ctx context.Context, job *transcriptionJob, image []byte) realtimeproto.ResponseDone {
+func (s *Session) respond(ctx context.Context, job *transcriptionJob, image []byte) (done realtimeproto.ResponseDone) {
 	if job == nil {
 		return realtimeproto.ResponseDone{Status: realtimeproto.StatusIncomplete, Reason: "no_input_audio"}
 	}
+	var tools []string // 这一轮调用了哪些工具（按调用顺序）
+	defer func() {
+		s.logger.Info("一轮结束", "item", job.item, "status", done.Status, "reason", done.Reason, "tools", tools,
+			"camera", slices.Contains(tools, lookAtCameraTool), "elapsed", since(job.started))
+	}()
 	select {
 	case <-job.done:
 	case <-ctx.Done():
@@ -98,8 +105,13 @@ func (s *Session) respond(ctx context.Context, job *transcriptionJob, image []by
 		}
 		return s.failed("生成回答", err)
 	}
+	for _, msg := range toolTrail {
+		for _, call := range msg.ToolCalls {
+			tools = append(tools, call.Name)
+		}
+	}
 	s.remember(job.text, toolTrail, answer)
-	done := realtimeproto.ResponseDone{Status: realtimeproto.StatusCompleted}
+	done = realtimeproto.ResponseDone{Status: realtimeproto.StatusCompleted}
 	if usage != nil {
 		done.Usage = &realtimeproto.Usage{InputTokens: usage.PromptTokens, OutputTokens: usage.OutputTokens}
 	}

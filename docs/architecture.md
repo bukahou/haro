@@ -19,7 +19,7 @@ haro 是一个家用语音助手：家里每个房间放一台**终端**（麦�
 |---|---|---|
 | `cmd/haro` | 终端。`haro -enroll <名字>` 登记声纹（录音经服务端登记） | cgo（音频库 miniaudio 随源码编译，不用装系统库）；摄像头需要 ffmpeg |
 | `cmd/haro-server` | 服务端 | 纯 Go |
-| `cmd/haro-asr` | 本地语音识别服务，由服务端作为子进程启动；也可以单独运行，提供 OpenAI 兼容的转写接口 | cgo（sherpa-onnx） |
+| `cmd/haro-asr` | 本地语音识别服务，由服务端作为子进程启动；也可以单独运行（流式转写，协议照 OpenAI Realtime 的转写会话） | cgo（sherpa-onnx） |
 
 ## 终端和服务端之间的协议
 
@@ -118,7 +118,7 @@ systemd 用户服务从 `~/.config/haro/haro.env` 读取（`deploy/systemd/`）�
 
 云端模型（`HARO_LLM_PROVIDER=cloud`）的接口格式由 `HARO_CLOUD_LLM_API` 选：
 
-- `anthropic`：Claude API（官方 Go SDK `anthropic-sdk-go`）。`HARO_CLOUD_LLM_MODEL` 例如 `claude-haiku-5-5`；
+- `anthropic`（默认）：Claude API（官方 Go SDK `anthropic-sdk-go`）。`HARO_CLOUD_LLM_MODEL` 例如 `claude-haiku-5-5`；
   思考关掉求快，回答力度用 `HARO_CLOUD_LLM_EFFORT`（聊天、摘要）/ `HARO_RESEARCH_EFFORT`（后台调查）；
   开着提示词缓存，缓存读写的单价用 `HARO_CLOUD_LLM_PRICE_CACHE_READ` / `_WRITE` 记账（不设就按普通输入价，记多不记少）。
   凭证：`HARO_ANTHROPIC_API_KEY`；不填时交给 SDK 自己找——在 Kubernetes 里可以用 Workload Identity Federation
@@ -126,7 +126,7 @@ systemd 用户服务从 `~/.config/haro/haro.env` 读取（`deploy/systemd/`）�
   不要用 `ANTHROPIC_API_KEY` 放 haro 的 key：开发机上 Claude Code 也读这个变量。
   服务端全进程只建一个 Claude 客户端（`llm.ClaudeAPI`），聊天、摘要、调查共用，HTTP 客户端也只用一个：
   SDK 按「客户端 × HTTP 客户端」各存一份令牌，而集群的服务账号令牌只能换一次，多一份就会被拒（401）。
-- `openai`（默认）：任意 OpenAI 兼容的 `/chat/completions`（`HARO_CLOUD_LLM_URL`、`HARO_CLOUD_LLM_API_KEY`）。
+- `openai`：任意 OpenAI 兼容的 `/chat/completions`（`HARO_CLOUD_LLM_URL`、`HARO_CLOUD_LLM_API_KEY`）。
 
 **按规则选模型**（可选，`HARO_STRONG_LLM_MODEL`，例如 `claude-sonnet-5-5`；和云端模型同一个接口与凭证）：
 换哪个模型写在代码里（`llm.RouterChatModel`）：看画面按规则、重答由前台模型认出主人在纠正后标记，不让模型凭自己有没有把握决定换不换。`HARO_STRONG_LLM_USE` 选用在哪些地方：

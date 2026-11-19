@@ -53,7 +53,7 @@ type Settings struct {
 
 	// 模型
 	OllamaURL      string `env:"HARO_OLLAMA_URL" envDefault:"http://127.0.0.1:11434"`
-	Model          string `env:"HARO_MODEL" envDefault:"qwen3-vl:4b"`
+	Model          string `env:"HARO_MODEL" envDefault:"qwen3-vl:8b-instruct"` // 本地（ollama）模型；4b 是思考变体，每轮多等 1.5–3 秒
 	ContextSize    int    `env:"HARO_CONTEXT_SIZE" envDefault:"4096"`
 	ModelKeepAlive string `env:"HARO_MODEL_KEEP_ALIVE" envDefault:"30m"`
 	// 追加在内置基础提示词后面（内置的永远生效，外部只能追加；内置的见 brain.DefaultInstructions）
@@ -65,9 +65,9 @@ type Settings struct {
 	ConversationSummary bool `env:"HARO_CONVERSATION_SUMMARY" envDefault:"true"`
 
 	// 服务端：local（ollama）/ cloud（云端，失败时这一轮退回 ollama）
-	LLMProvider string `env:"HARO_LLM_PROVIDER" envDefault:"local"`
+	LLMProvider string `env:"HARO_LLM_PROVIDER" envDefault:"cloud"`
 	// 云端的接口格式：openai（OpenAI 兼容）/ anthropic（Claude API）
-	CloudLLMAPI    string `env:"HARO_CLOUD_LLM_API" envDefault:"openai"`
+	CloudLLMAPI    string `env:"HARO_CLOUD_LLM_API" envDefault:"anthropic"`
 	CloudLLMURL    string `env:"HARO_CLOUD_LLM_URL"`     // openai：接口的根地址（…/v1）；anthropic：留空 = 官方地址
 	CloudLLMModel  string `env:"HARO_CLOUD_LLM_MODEL"`   // 云端的模型 ID（例如 claude-haiku-5-5）
 	CloudLLMAPIKey string `env:"HARO_CLOUD_LLM_API_KEY"` // openai 的凭证：无默认值，只来自环境变量
@@ -181,8 +181,8 @@ type Settings struct {
 	NetdiagInternetTarget string `env:"HARO_NETDIAG_INTERNET_TARGET" envDefault:"1.1.1.1:443"`
 
 	// 语音合成：HARO_TTS 选引擎。piper 且没设 HARO_TTS_URL 时，由 haro 把 Piper 官方 HTTP 服务作为子进程拉起
-	TTS         string        `env:"HARO_TTS" envDefault:"piper"` // piper / gpt-sovits
-	PiperPython string        `env:"HARO_PIPER_PYTHON"`           // 装了 piper-tts 与 flask 的 venv 里的 python
+	TTS         string        `env:"HARO_TTS" envDefault:"gpt-sovits"` // piper / gpt-sovits
+	PiperPython string        `env:"HARO_PIPER_PYTHON"`                // 装了 piper-tts 与 flask 的 venv 里的 python
 	PiperModel  string        `env:"HARO_PIPER_MODEL"`
 	PiperPort   int           `env:"HARO_PIPER_PORT" envDefault:"59125"`
 	TTSURL      string        `env:"HARO_TTS_URL"`                      // 外部语音合成服务地址（gpt-sovits 必填）
