@@ -227,3 +227,27 @@ func TestToolResultIsSavedBeforeTheTurnEnds(t *testing.T) {
 		t.Errorf("这一轮收尾后应清掉没收尾的记录：%+v", open)
 	}
 }
+
+// 关停时关会话：Close 等进行中的那一轮收尾（照被打断的规则写进历史）才返回——之后关数据库不会和它抢。
+func TestCloseWaitsForTheTurnToBeRecorded(t *testing.T) {
+	store := &latestStore{}
+	model := braintest.NewModel(t, braintest.Reply{Chunks: []string{"从前有座山。"}, Hang: true})
+	opts := brain.Options{MaxHistoryTurn: 6}
+	k := newTalker(t, brain.Components{Model: model, Synthesizer: fakeSynthesizer{},
+		Conversations: brain.NewConversationBook(store, opts, quiet)}, opts)
+
+	braintest.Speak(t, k.session, k.stream, braintest.Utterance{})
+	braintest.Expect[realtimeproto.ResponseCreated](t, k.session)
+	braintest.Recognized(t, k.stream, braintest.Utterance{Text: "讲个故事"})
+	deadline := time.Now().Add(braintest.EventTimeout)
+	for len(model.Requests()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	k.send(realtimeproto.ConversationItemTruncate{AudioEndMs: 500}) // 终端报了播到哪
+	_ = k.session.Close()
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if history := store.records[brain.SharedPerson].History; len(history) != 1 {
+		t.Errorf("Close 返回时这一轮应已写进历史：%+v", history)
+	}
+}

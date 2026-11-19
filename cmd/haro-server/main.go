@@ -25,6 +25,7 @@ import (
 	"github.com/bukahou/haro/internal/buildinfo"
 	"github.com/bukahou/haro/internal/config"
 	"github.com/bukahou/haro/internal/conversationstore"
+	"github.com/bukahou/haro/internal/graceful"
 	"github.com/bukahou/haro/internal/llm"
 	"github.com/bukahou/haro/internal/netdiag"
 	"github.com/bukahou/haro/internal/notes"
@@ -72,7 +73,11 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	defer shutdownTelemetry(context.Background())
+	defer func() { // 最后一步：在期限内把还没发出的遥测发出去（采集器连不上时不卡住退出）
+		flushCtx, cancel := context.WithTimeout(context.Background(), shutdownTelemetryFlush)
+		defer cancel()
+		_ = shutdownTelemetry(flushCtx)
+	}()
 
 	httpClient := &http.Client{Timeout: settings.RequestTimeout}
 	// Claude 的客户端全进程只建一个，所有用途共用（见 llm.ClaudeAPI：多一个客户端 / HTTP 客户端就多一份令牌缓存，
@@ -223,20 +228,24 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	server := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second}
-	go func() {
-		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = server.Shutdown(shutdownCtx)
-	}()
 	logger.Info("haro-server 启动", "version", buildinfo.Version, "listen", listener.Addr().String(), "model", activeModel(settings), "tts", settings.TTS,
 		"personas", len(options.Personas))
-	if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	// 收到退出信号：停止接新连接 → 结束会话（每一轮收尾、落盘）→ 返回后 defer 依次停后台调查、关数据库、发出遥测
+	if _, err := graceful.Serve(ctx, listener, handler, graceful.Timing{Shutdown: shutdownRequests, Drain: shutdownSessions},
+		logger); err != nil {
 		return err
 	}
 	return ctx.Err()
 }
+
+// 关停各步的期限（加起来 10 秒，比 k8s 的宽限期 30 秒短）：停止接新连接、等普通请求 2 秒 → 会话收尾 5 秒 →
+// 后台调查停下 2 秒 → 遥测发出 1 秒。
+const (
+	shutdownRequests       = 2 * time.Second
+	shutdownSessions       = 5 * time.Second
+	shutdownResearch       = 2 * time.Second
+	shutdownTelemetryFlush = 1 * time.Second
+)
 
 // brainHandler 是服务端的全部 HTTP 入口：对话（WebSocket）+ 远程登记声纹（转给 haro-asr）+ 存活 / 就绪检查。
 // 终端只认识服务端的地址；haro-asr 只监听本机（集群里在同一个 Pod）。
@@ -500,10 +509,22 @@ func startResearch(ctx context.Context, settings config.Settings, claude *llm.Cl
 			settings.ResearchEffort, settings.StrongLLMThinking, 2, 0, httpClient), settings.StrongLLMModel, spending.PurposeResearch, pricing, ledger, logger))
 		writer = settings.StrongLLMModel
 	}
-	go runner.Run(ctx)
+	running := make(chan struct{})
+	go func() {
+		defer close(running)
+		runner.Run(ctx) // ctx 随退出信号结束：手上的调查停下（下次启动标成被中断）
+	}()
 	logger.Info("后台调查已开启", "model", settings.ResearchLLM, "conclusion_writer", writer, "timeout", limits.Timeout,
 		"max_rounds", limits.MaxRounds, "max_searches", limits.MaxSearches, "max_tokens", limits.MaxTokens)
-	return runner, func() { store.Close() }, nil
+	stop := func() { // 先等调查的循环退出，再关任务账本：不然它最后一次写任务时库已经关了
+		select {
+		case <-running:
+		case <-time.After(shutdownResearch):
+			logger.Warn("后台调查没在期限内停下：照样关任务账本", "timeout", shutdownResearch)
+		}
+		store.Close()
+	}
+	return runner, stop, nil
 }
 
 // summaryMaxTokens 是写滚动摘要时每次请求的输出上限。

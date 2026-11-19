@@ -121,7 +121,7 @@ func (r *Runner) Start(ctx context.Context, person, question string) (Task, int,
 	select {
 	case r.queue <- task.ID:
 	default:
-		_ = r.store.Finish(ctx, task.ID, StatusFailed, "", nil, "队列满了")
+		_, _ = r.store.Finish(ctx, task.ID, StatusFailed, "", nil, "队列满了")
 		return Task{}, 0, errors.New("调查队列满了")
 	}
 	r.logger.Info("派出调查", "id", task.ID, "person", person, "question", question, "ahead", len(active))
@@ -161,8 +161,16 @@ func (r *Runner) Cancel(ctx context.Context, person string, id int64) (Task, err
 	if cancel != nil {
 		cancel() // 在查：让它停下（runTask 会记成取消）
 	}
-	if err := r.store.Finish(ctx, id, StatusCancelled, "", nil, "主人说不查了"); err != nil {
+	cancelled, err := r.store.Finish(ctx, id, StatusCancelled, "", nil, "主人说不查了")
+	if err != nil {
 		return Task{}, err
+	}
+	if !cancelled { // 刚好在这之前查完了：以查完的为准
+		task, err := r.store.Get(ctx, id)
+		if err != nil {
+			return Task{}, err
+		}
+		return task, fmt.Errorf("调查 #%d 刚好已经%s，没取消", id, task.Status.Label())
 	}
 	_ = r.store.MarkReported(ctx, id)
 	r.logger.Info("取消调查", "id", id)
@@ -196,8 +204,13 @@ func (r *Runner) runTask(ctx context.Context, id int64) {
 	if ctx.Err() != nil { // 服务端在关：下次启动时标成被中断
 		return
 	}
-	if err := r.store.Finish(context.WithoutCancel(ctx), id, outcome.status, outcome.conclusion, outcome.sources, outcome.reason); err != nil {
+	finished, err := r.store.Finish(context.WithoutCancel(ctx), id, outcome.status, outcome.conclusion, outcome.sources, outcome.reason)
+	switch {
+	case err != nil:
 		r.logger.Warn("调查结果没存上", "id", id, "err", err)
+	case !finished: // 查完的同时主人取消了：以取消为准，不报查完
+		r.logger.Info("调查已取消（结果作废）", "id", id)
+		return
 	}
 	r.logger.Info("调查结束", "id", id, "status", outcome.status, "reason", outcome.reason, "rounds", outcome.rounds,
 		"searches", outcome.searches, "tokens", outcome.tokens, "elapsed", time.Since(started).Round(time.Second))

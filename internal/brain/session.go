@@ -61,6 +61,7 @@ type Session struct {
 	// lifetime 随会话结束而取消：回答都在它下面跑（判定说完时自动开始的回答没有请求的上下文可用）
 	lifetime    context.Context
 	endLifetime context.CancelFunc
+	responses   sync.WaitGroup // 进行中的回答（Close 等它们收尾）
 
 	mu             sync.Mutex
 	transcription  *transcriptionJob  // 已判定说完、等待被回答使用的识别任务
@@ -119,7 +120,7 @@ func (s *Session) Warmup(ctx context.Context) error {
 // Events 返回服务端事件流（会话期间不关闭）。
 func (s *Session) Events() <-chan realtimeproto.ServerEvent { return s.events }
 
-// Close 结束会话并取消进行中的回答。
+// Close 结束会话：取消进行中的回答，等它收尾（写进历史）后才返回。
 func (s *Session) Close() error {
 	s.closeOnce.Do(func() {
 		s.mu.Lock()
@@ -140,6 +141,7 @@ func (s *Session) Close() error {
 		}
 		s.endLifetime()
 	})
+	s.responses.Wait() // 等进行中的那一轮收尾（被取消后照 3.4 的规则写进历史）：关停时之后才关数据库
 	return nil
 }
 
@@ -241,7 +243,11 @@ func (s *Session) startResponseLocked() error {
 	s.cancelResponse = cancel
 	job := s.transcription
 	s.transcription = nil
-	go s.runResponse(responseCtx, job)
+	s.responses.Add(1)
+	go func() {
+		defer s.responses.Done()
+		s.runResponse(responseCtx, job)
+	}()
 	return nil
 }
 

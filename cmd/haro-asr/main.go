@@ -19,13 +19,13 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
-	"sync"
 	"syscall"
 	"time"
 
 	"github.com/bukahou/haro/internal/asrserver"
 	"github.com/bukahou/haro/internal/buildinfo"
 	"github.com/bukahou/haro/internal/config"
+	"github.com/bukahou/haro/internal/graceful"
 	"github.com/bukahou/haro/internal/sensevoice"
 	"github.com/bukahou/haro/internal/smartturn"
 	"github.com/bukahou/haro/internal/voiceprint"
@@ -140,55 +140,17 @@ func run(settings config.ASRSettings, logger *slog.Logger) error {
 		Speakers: speakers, Logger: logger})
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	drained, err := serve(ctx, settings.Listen, handler, sessionDrainTimeout, logger)
+	listener, err := net.Listen("tcp", settings.Listen)
+	if err != nil {
+		return err
+	}
+	logger.Info("开始监听", "addr", settings.Listen)
+	drained, err := graceful.Serve(ctx, listener, handler, graceful.Timing{Shutdown: shutdownTimeout, Drain: sessionDrainTimeout}, logger)
 	releaseModels = drained
+	if drained && err == nil {
+		logger.Info("释放模型后退出")
+	}
 	return err
-}
-
-// serve 监听到 ctx 结束（收到退出信号），然后按顺序关停：停止接新连接 → 结束进行中的会话 → 等它们退出。
-// 返回会话是不是都退出了（都退出了才能释放模型）。
-// http.Server.Shutdown 不管 WebSocket 这类被接管的连接：会话的 context 由 BaseContext 派生，关停时取消它，会话才会结束。
-func serve(ctx context.Context, listen string, handler http.Handler, drainTimeout time.Duration, logger *slog.Logger) (drained bool, err error) {
-	sessionsCtx, endSessions := context.WithCancel(context.Background())
-	defer endSessions()
-	var sessions sync.WaitGroup
-	server := &http.Server{
-		Addr: listen,
-		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			sessions.Add(1)
-			defer sessions.Done()
-			handler.ServeHTTP(w, r)
-		}),
-		BaseContext:       func(net.Listener) context.Context { return sessionsCtx },
-		ReadHeaderTimeout: 10 * time.Second,
-	}
-	listening := make(chan error, 1)
-	go func() { listening <- server.ListenAndServe() }()
-	logger.Info("开始监听", "addr", listen)
-	select {
-	case err := <-listening: // 没能监听（例如端口被占）：还没有会话
-		return true, err
-	case <-ctx.Done():
-	}
-
-	logger.Info("收到退出信号：停止接新连接，结束进行中的会话")
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-	defer cancel()
-	_ = server.Shutdown(shutdownCtx)
-	endSessions()
-	finished := make(chan struct{})
-	go func() {
-		sessions.Wait()
-		close(finished)
-	}()
-	select {
-	case <-finished:
-		logger.Info("会话都已结束：释放模型后退出")
-		return true, nil
-	case <-time.After(drainTimeout):
-		logger.Warn("会话没在期限内结束：不释放模型，直接退出（由系统回收）", "timeout", drainTimeout)
-		return false, nil
-	}
 }
 
 // modelReleases 是要在退出时释放的模型（按加载的逆序释放）。

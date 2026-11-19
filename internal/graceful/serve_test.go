@@ -1,4 +1,4 @@
-package main
+package graceful
 
 import (
 	"context"
@@ -53,7 +53,13 @@ func TestServeEndsSessionsBeforeReturning(t *testing.T) {
 			ctx, signal := context.WithCancel(context.Background())
 			result := make(chan bool, 1)
 			go func() {
-				drained, err := serve(ctx, address, handler, 200*time.Millisecond, discard)
+				listener, err := net.Listen("tcp", address)
+				if err != nil {
+					t.Errorf("监听：%v", err)
+					result <- false
+					return
+				}
+				drained, err := Serve(ctx, listener, handler, Timing{Shutdown: time.Second, Drain: 200 * time.Millisecond}, discard)
 				if err != nil {
 					t.Errorf("serve: %v", err)
 				}
@@ -85,15 +91,15 @@ func TestServeEndsSessionsBeforeReturning(t *testing.T) {
 	}
 }
 
-// 没能监听（端口被占）：直接返回错误，还没有会话（可以释放模型）。
-func TestServeReportsListenFailure(t *testing.T) {
-	busy, err := net.Listen("tcp", "127.0.0.1:0")
+// 没能提供服务（监听已经关了）：直接返回错误，还没有会话。
+func TestServeReportsServeFailure(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer busy.Close()
-	drained, err := serve(context.Background(), busy.Addr().String(), http.NotFoundHandler(), time.Second, discard)
+	listener.Close()
+	drained, err := Serve(context.Background(), listener, http.NotFoundHandler(), Timing{Shutdown: time.Second, Drain: time.Second}, discard)
 	if err == nil || !drained {
-		t.Errorf("端口被占时应返回错误、可以释放模型：drained=%v err=%v", drained, err)
+		t.Errorf("提供不了服务时应返回错误、没有会话：drained=%v err=%v", drained, err)
 	}
 }

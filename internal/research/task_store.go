@@ -78,7 +78,8 @@ type TaskStore interface {
 	Create(ctx context.Context, person, question string) (Task, error)
 	Get(ctx context.Context, id int64) (Task, error)
 	MarkRunning(ctx context.Context, id int64) error
-	Finish(ctx context.Context, id int64, status Status, conclusion string, sources []string, reason string) error
+	// Finish 结束一个还在排队或在查的任务；返回这次有没有结束它（已经结束的不改：取消和查完同时到时，先到的算数）。
+	Finish(ctx context.Context, id int64, status Status, conclusion string, sources []string, reason string) (bool, error)
 	// Active 是所有人排队中、在查的任务（按派出顺序）。
 	Active(ctx context.Context) ([]Task, error)
 	// Recent 是某人最近的任务（新的在前）。
@@ -211,11 +212,17 @@ func (s *sqliteTaskStore) MarkRunning(ctx context.Context, id int64) error {
 	return err
 }
 
-func (s *sqliteTaskStore) Finish(ctx context.Context, id int64, status Status, conclusion string, sources []string, reason string) error {
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE research_tasks SET status = ?, conclusion = ?, sources = ?, stop_reason = ?, finished_at = ? WHERE id = ?`,
-		string(status), conclusion, strings.Join(sources, "\n"), reason, time.Now().Unix(), id)
-	return err
+func (s *sqliteTaskStore) Finish(ctx context.Context, id int64, status Status, conclusion string, sources []string, reason string) (bool, error) {
+	result, err := s.db.ExecContext(ctx,
+		`UPDATE research_tasks SET status = ?, conclusion = ?, sources = ?, stop_reason = ?, finished_at = ?
+		 WHERE id = ? AND status IN (?, ?)`,
+		string(status), conclusion, strings.Join(sources, "\n"), reason, time.Now().Unix(), id,
+		string(StatusQueued), string(StatusRunning))
+	if err != nil {
+		return false, err
+	}
+	changed, err := result.RowsAffected()
+	return changed == 1, err
 }
 
 func (s *sqliteTaskStore) Active(ctx context.Context) ([]Task, error) {

@@ -449,12 +449,12 @@ func TestTaskStoreBoard(t *testing.T) {
 	running := create("主人", "在查")
 	_ = store.MarkRunning(ctx, running)
 	unreported := create("主人", "查完没说")
-	_ = store.Finish(ctx, unreported, StatusDone, "结论", nil, "")
+	_, _ = store.Finish(ctx, unreported, StatusDone, "结论", nil, "")
 	reported := create("主人", "查完说过")
-	_ = store.Finish(ctx, reported, StatusDone, "结论", nil, "")
+	_, _ = store.Finish(ctx, reported, StatusDone, "结论", nil, "")
 	_ = store.MarkReported(ctx, reported)
 	cancelled := create("主人", "取消了")
-	_ = store.Finish(ctx, cancelled, StatusCancelled, "", nil, "")
+	_, _ = store.Finish(ctx, cancelled, StatusCancelled, "", nil, "")
 	create("别人", "别人的")
 
 	board, err := store.Board(ctx, "主人")
@@ -467,5 +467,29 @@ func TestTaskStoreBoard(t *testing.T) {
 	}
 	if want := []int64{queued, running, unreported}; !slices.Equal(ids, want) {
 		t.Errorf("任务板应是排队中、在查、查完没说的（按派出顺序）：得到 %v，应为 %v", ids, want)
+	}
+}
+
+// 取消和查完同时到：先结束的算数，后到的不改它（以前「查完」会盖掉已经记下的「取消」，或反过来）。
+func TestFinishOnlyOnce(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenTaskStore(ctx, filepath.Join(t.TempDir(), "research.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	task, err := store.Create(ctx, "主人", "A 和 B 哪个便宜")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = store.MarkRunning(ctx, task.ID)
+	if cancelled, err := store.Finish(ctx, task.ID, StatusCancelled, "", nil, "主人说不查了"); err != nil || !cancelled {
+		t.Fatalf("在查的任务应能取消：%v %v", cancelled, err)
+	}
+	if finished, err := store.Finish(ctx, task.ID, StatusDone, "结论：A 便宜。", nil, ""); err != nil || finished {
+		t.Errorf("已经取消的任务不应再被「查完」改掉：%v %v", finished, err)
+	}
+	if got, _ := store.Get(ctx, task.ID); got.Status != StatusCancelled || got.Conclusion != "" {
+		t.Errorf("应保持取消：%+v", got)
 	}
 }
