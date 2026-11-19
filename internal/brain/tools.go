@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -22,10 +24,13 @@ const (
 // 怎么看、怎么说都写在工具说明里，不写进系统提示词：没有摄像头时这些说明随工具一起不出现，系统提示词不变。
 const lookAtCameraTool = "look_at_camera"
 
+// CameraAnswerChars 是看画面后说给主人听的话的上限（字）：语音每秒约五个字，50 字约十秒。
+const CameraAnswerChars = 50
+
 var lookAtCameraSpec = ToolSpec{Name: lookAtCameraTool,
 	Description: "看摄像头拍到的当前画面（调用时才拍）。只有主人问到看得见的东西时才用（例如：你能看到我吗、我旁边有什么、" +
 		"我手里拿着什么、我穿的什么）；没看画面就不要说看到了什么。" +
-		"看清形状、颜色和上面的字再下判断。回答一两句、不超过 50 个字：是什么、把握多大（确定 / 看着像 / 不确定）；" +
+		fmt.Sprintf("看清形状、颜色和上面的字再下判断。回答一两句、不超过 %d 个字：是什么、把握多大（确定 / 看着像 / 不确定）；", CameraAnswerChars) +
 		"外观细节主人问到才说；画面里没有的东西不要编。看不清就说看不清，请主人拿近一点或换个角度。" +
 		"画面里直接看到的比搜到的资料可靠，两者对不上时以画面为准，并说不确定。认东西要联网查时，搜索词用外观特征加上画面里读到的字。" +
 		"调用前说过的话（例如「我看看」），拿到结果后不要再说一遍。",
@@ -55,11 +60,25 @@ func (s *Session) toolSpecs() []ToolSpec {
 	return specs
 }
 
-// expertReportNote 放在专家的判断前面：告诉前台怎么转述（只在这条工具结果里，不改系统提示词，免得提示词缓存失效）。
-const expertReportNote = "看图更准的专家看了当前画面，判断如下。用你自己的口吻告诉主人（不用提专家），一两句话、不超过 50 个字：" +
-	"它判断是什么、有多大把握（确定 / 看着像 / 不确定），不要说得比它更肯定，不要补充它没说的细节；外观描述主人问到才说；" +
-	"它请主人拿近或换角度的，照样转达；调用前说过的话不要再说一遍。" +
-	"它已经按需要联网核对过，这次不要再为画面里的东西另外去搜。\n\n"
+// expertReport 是专家看完后交给前台的工具结果（转述的要求只放在这条结果里，不改系统提示词，免得提示词缓存失效）：
+// 专家已经写好说给主人听的那句，前台照着说；细节留在历史里，主人追问时用。
+func expertReport(report FrameReport) string {
+	if report.Spoken == "" {
+		return expertDetailsOnlyNote + report.Details
+	}
+	return expertSpokenNote + report.Spoken + expertDetailsHeading + report.Details
+}
+
+var (
+	expertSpokenNote = "看图更准的专家看了当前画面，替你写好了说给主人听的话。照这句说（不用提专家；可以带上你的口吻，" +
+		"但不加内容、不说得更长；调用前说过的话不要再说一遍）：\n"
+	expertDetailsHeading = "\n\n专家看到的细节和依据（主人追问时用，这次不要念出来；它已经按需要联网核对过，不要再为画面里的东西另外去搜）：\n"
+	// expertDetailsOnlyNote：专家没把要说的话单独交出来时，前台自己压短。
+	expertDetailsOnlyNote = "看图更准的专家看了当前画面，判断如下。用你自己的口吻告诉主人（不用提专家），一两句话、" +
+		"不超过 " + strconv.Itoa(CameraAnswerChars) + " 个字：" +
+		"它判断是什么、有多大把握，不要说得比它更肯定，不要补充它没说的细节；它请主人拿近或换角度的，照样转达；" +
+		"调用前说过的话不要再说一遍。它已经按需要联网核对过，这次不要再为画面里的东西另外去搜。\n\n"
+)
 
 // captureFailedNote 是拍失败时交给模型的工具结果：说明没拍成和原因（终端给的说明可以直接转述）。
 func captureFailedNote(err error) string {
@@ -85,8 +104,9 @@ func (s *Session) lookAtCamera(ctx context.Context, view cameraView) (string, []
 	if s.parts.FrameExpert != nil {
 		report, err := s.parts.FrameExpert.ExamineFrame(ctx, frame, view.request)
 		if err == nil {
-			s.logger.Info("调用工具", "tool", lookAtCameraTool, "frame_bytes", len(frame), "by", "专家")
-			return expertReportNote + report, nil
+			s.logger.Info("调用工具", "tool", lookAtCameraTool, "frame_bytes", len(frame), "by", "专家",
+				"spoken_chars", utf8.RuneCountInString(report.Spoken))
+			return expertReport(report), nil
 		}
 		if ctx.Err() != nil {
 			return "没看成（被打断了）。", nil
@@ -126,7 +146,7 @@ func (s *Session) callTool(ctx context.Context, call ToolCall) string {
 		if errors.As(err, &spoken) { // 例如额度用完：不是暂时的，不提示重试
 			return "工具执行失败：" + err.Error()
 		}
-		// 实测（2026-11-17）：只给错误时，小模型之后主人再问也不再调用，一直说「服务在打瞌睡」
+		// 实测：只给错误时，小模型之后主人再问也不再调用，一直说「服务在打瞌睡」
 		return "工具执行失败：" + err.Error() + "（多半是暂时的：如实告诉主人这次没查到；主人再问时要重新调用这个工具，不要凭之前的失败回答）"
 	}
 	return result

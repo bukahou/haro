@@ -195,27 +195,29 @@ func TestLookAtCameraCapturesOnDemand(t *testing.T) {
 	}
 }
 
-// fakeExpert 是看画面的专家：记下拿到的画面和主人的原话。
+// fakeExpert 是看画面的专家：记下拿到的画面和主人的原话，交出设好的结论。
 type fakeExpert struct {
 	mu       sync.Mutex
 	frames   []string
 	requests []string
+	report   brain.FrameReport
 	err      error
 }
 
-func (e *fakeExpert) ExamineFrame(_ context.Context, frame []byte, request string) (string, error) {
+func (e *fakeExpert) ExamineFrame(_ context.Context, frame []byte, request string) (brain.FrameReport, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.frames, e.requests = append(e.frames, string(frame)), append(e.requests, request)
 	if e.err != nil {
-		return "", e.err
+		return brain.FrameReport{}, e.err
 	}
-	return "白色方块，看着像充电头。", nil
+	return e.report, nil
 }
 
-// 有专家时：画面交给专家，前台只拿到专家的判断（文字），历史里留下这段判断。
+// 有专家时：画面交给专家，前台只拿到专家的结论（要说的那句 + 细节），历史里留下这段结论。
 func TestLookAtCameraAsksExpert(t *testing.T) {
-	model, expert := braintest.NewModel(t, lookAtCamera, braintest.Say("转述专家的话。")), &fakeExpert{}
+	conclusion := brain.FrameReport{Spoken: "看着像充电头。", Details: "白色方块，一面有插脚。"}
+	model, expert := braintest.NewModel(t, lookAtCamera, braintest.Say("转述专家的话。")), &fakeExpert{report: conclusion}
 	k := newCameraTalker(t, model, braintest.NewCamera([]byte("充电头")), expert)
 
 	if spoken := braintest.Spoken(k.ask("我手里拿着什么？")); spoken != "转述专家的话。" {
@@ -231,8 +233,21 @@ func TestLookAtCameraAsksExpert(t *testing.T) {
 		}
 	}
 	report := answered[len(answered)-1]
-	if report.Role != brain.RoleTool || report.Text != brain.ExpertReportNote+"白色方块，看着像充电头。" {
-		t.Errorf("工具结果应是专家的判断加转述要求：%+v", report)
+	if report.Role != brain.RoleTool || report.Text != brain.ExpertReport(conclusion) {
+		t.Errorf("工具结果应是专家的结论加转述要求：%+v", report)
+	}
+}
+
+// 要说的那句和细节分开交给前台：那句在前、照着说，细节另起一段；专家没单独交那句时，前台拿到细节自己压短。
+func TestExpertReportLayout(t *testing.T) {
+	both := brain.ExpertReport(brain.FrameReport{Spoken: "看着像充电头。", Details: "白色方块。"})
+	spokenAt, detailsAt := strings.Index(both, "看着像充电头。"), strings.Index(both, "白色方块。")
+	if spokenAt < 0 || detailsAt < spokenAt {
+		t.Errorf("要说的那句应在细节前面：%q", both)
+	}
+	detailsOnly := brain.ExpertReport(brain.FrameReport{Details: "白色方块，看着像充电头。"})
+	if !strings.HasSuffix(detailsOnly, "白色方块，看着像充电头。") || detailsOnly == both {
+		t.Errorf("只有细节时应换成让前台自己压短的说明：%q", detailsOnly)
 	}
 }
 
