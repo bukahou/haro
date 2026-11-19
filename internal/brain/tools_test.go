@@ -195,58 +195,107 @@ func TestLookAtCameraCapturesOnDemand(t *testing.T) {
 	}
 }
 
-// fakeExpert 是看画面的专家：记下拿到的画面和主人的原话，交出设好的结论。
+// fakeExpert 是看画面的专家：记下拿到的问题，交出设好的结论。
 type fakeExpert struct {
-	mu       sync.Mutex
-	frames   []string
-	requests []string
-	report   brain.FrameReport
-	err      error
+	mu        sync.Mutex
+	questions []brain.FrameQuestion
+	report    brain.FrameReport
+	err       error
 }
 
-func (e *fakeExpert) ExamineFrame(_ context.Context, frame []byte, request string) (brain.FrameReport, error) {
+func (e *fakeExpert) ExamineFrame(_ context.Context, question brain.FrameQuestion) (brain.FrameReport, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.frames, e.requests = append(e.frames, string(frame)), append(e.requests, request)
+	e.questions = append(e.questions, question)
 	if e.err != nil {
 		return brain.FrameReport{}, e.err
 	}
 	return e.report, nil
 }
 
-// 有专家时：画面交给专家，前台只拿到专家的结论（要说的那句 + 细节），历史里留下这段结论。
-func TestLookAtCameraAsksExpert(t *testing.T) {
+// 有专家、这一轮只调用了看画面：专家那句直接当回答念出来，不再请求前台模型；前台看不到画面。
+// 历史里留下调用前那句、专家的结论（已经说了什么 + 细节）和念出来的那句，下一轮追问时都在。
+func TestLookAtCameraSpeaksExpertSentence(t *testing.T) {
 	conclusion := brain.FrameReport{Spoken: "看着像充电头。", Details: "白色方块，一面有插脚。"}
-	model, expert := braintest.NewModel(t, lookAtCamera, braintest.Say("转述专家的话。")), &fakeExpert{report: conclusion}
+	lookFirst := braintest.Reply{Chunks: []string{"我看看。"}, ToolCalls: lookAtCamera.ToolCalls}
+	model, expert := braintest.NewModel(t, lookFirst, braintest.Say("插脚是两根的。")), &fakeExpert{report: conclusion}
 	k := newCameraTalker(t, model, braintest.NewCamera([]byte("充电头")), expert)
 
-	if spoken := braintest.Spoken(k.ask("我手里拿着什么？")); spoken != "转述专家的话。" {
+	if spoken := braintest.Spoken(k.ask("我手里拿着什么？")); spoken != "我看看。"+conclusion.Spoken {
 		t.Fatalf("播出 %q", spoken)
 	}
-	if len(expert.frames) != 1 || expert.frames[0] != "充电头" || expert.requests[0] != "我手里拿着什么？" {
-		t.Fatalf("专家应拿到画面和主人的原话：%v %v", expert.frames, expert.requests)
+	if len(model.Requests()) != 1 {
+		t.Fatalf("专家那句直接念：这一轮只请求前台一次，实际 %d 次", len(model.Requests()))
 	}
-	answered := model.LastRequest().Messages
-	for _, msg := range answered {
+	if len(expert.questions) != 1 || string(expert.questions[0].Frame) != "充电头" || expert.questions[0].Request != "我手里拿着什么？" {
+		t.Fatalf("专家应拿到画面和主人的原话：%+v", expert.questions)
+	}
+
+	k.ask("插脚是几根？")
+	history := model.LastRequest().Messages
+	for _, msg := range history {
 		if len(msg.Image) > 0 {
 			t.Fatalf("有专家时前台不应看到画面：%+v", msg)
 		}
 	}
-	report := answered[len(answered)-1]
-	if report.Role != brain.RoleTool || report.Text != brain.ExpertReport(conclusion) {
-		t.Errorf("工具结果应是专家的结论加转述要求：%+v", report)
+	if !slices.ContainsFunc(history, func(msg brain.ChatMessage) bool {
+		return msg.Role == brain.RoleTool && msg.Text == brain.ExpertReport(conclusion, true)
+	}) {
+		t.Errorf("历史里应有专家的结论（已经说了什么 + 细节）：%+v", history)
+	}
+	if !slices.ContainsFunc(history, func(msg brain.ChatMessage) bool {
+		return msg.Role == brain.RoleAssistant && strings.HasSuffix(msg.Text, conclusion.Spoken)
+	}) {
+		t.Errorf("历史里这一轮的回答应是念出来的那句：%+v", history)
 	}
 }
 
-// 要说的那句和细节分开交给前台：那句在前、照着说，细节另起一段；专家没单独交那句时，前台拿到细节自己压短。
-func TestExpertReportLayout(t *testing.T) {
-	both := brain.ExpertReport(brain.FrameReport{Spoken: "看着像充电头。", Details: "白色方块。"})
-	spokenAt, detailsAt := strings.Index(both, "看着像充电头。"), strings.Index(both, "白色方块。")
-	if spokenAt < 0 || detailsAt < spokenAt {
-		t.Errorf("要说的那句应在细节前面：%q", both)
+// 同时调用了别的工具：专家那句交给前台，和别的结果一起说。
+func TestLookAtCameraWithOtherToolsLetsModelSpeak(t *testing.T) {
+	conclusion := brain.FrameReport{Spoken: "看着像充电头。", Details: "白色方块。"}
+	both := braintest.Reply{ToolCalls: []brain.ToolCall{{Name: "look_at_camera"}, {Name: "switch_persona", Arguments: map[string]any{"persona": "不存在"}}}}
+	model := braintest.NewModel(t, both, braintest.Say("前台说的。"))
+	k := newCameraTalker(t, model, braintest.NewCamera([]byte("充电头")), &fakeExpert{report: conclusion})
+
+	if spoken := braintest.Spoken(k.ask("看看这是什么，再换个性格")); spoken != "前台说的。" {
+		t.Fatalf("播出 %q", spoken)
 	}
-	detailsOnly := brain.ExpertReport(brain.FrameReport{Details: "白色方块，看着像充电头。"})
-	if !strings.HasSuffix(detailsOnly, "白色方块，看着像充电头。") || detailsOnly == both {
+	if !slices.ContainsFunc(model.LastRequest().Messages, func(msg brain.ChatMessage) bool {
+		return msg.Role == brain.RoleTool && msg.Text == brain.ExpertReport(conclusion, false)
+	}) {
+		t.Errorf("前台应拿到照着说的那句：%+v", model.LastRequest().Messages)
+	}
+}
+
+// 专家没单独交那句：前台拿到细节自己压短。
+func TestLookAtCameraWithoutExpertSentence(t *testing.T) {
+	conclusion := brain.FrameReport{Details: "白色方块，看着像充电头。"}
+	model := braintest.NewModel(t, lookAtCamera, braintest.Say("像充电头。"))
+	k := newCameraTalker(t, model, braintest.NewCamera([]byte("充电头")), &fakeExpert{report: conclusion})
+
+	if spoken := braintest.Spoken(k.ask("我手里拿着什么？")); spoken != "像充电头。" {
+		t.Fatalf("播出 %q", spoken)
+	}
+	if last := model.LastRequest().Last(); last.Role != brain.RoleTool || last.Text != brain.ExpertReport(conclusion, false) {
+		t.Errorf("工具结果应是让前台自己压短的说明：%+v", last)
+	}
+}
+
+// 要说的那句和细节分开：那句在前，细节另起一段；直接念了和交给前台说，说明不同；只有细节时让前台自己压短。
+func TestExpertReportLayout(t *testing.T) {
+	conclusion := brain.FrameReport{Spoken: "看着像充电头。", Details: "白色方块。"}
+	said, relayed := brain.ExpertReport(conclusion, true), brain.ExpertReport(conclusion, false)
+	for _, text := range []string{said, relayed} {
+		spokenAt, detailsAt := strings.Index(text, conclusion.Spoken), strings.Index(text, conclusion.Details)
+		if spokenAt < 0 || detailsAt < spokenAt {
+			t.Errorf("要说的那句应在细节前面：%q", text)
+		}
+	}
+	if said == relayed {
+		t.Error("直接念了和交给前台说，说明应不同")
+	}
+	detailsOnly := brain.ExpertReport(brain.FrameReport{Details: "白色方块，看着像充电头。"}, false)
+	if !strings.HasSuffix(detailsOnly, "白色方块，看着像充电头。") || detailsOnly == relayed {
 		t.Errorf("只有细节时应换成让前台自己压短的说明：%q", detailsOnly)
 	}
 }
@@ -311,5 +360,22 @@ func TestConfirmationListsEveryTarget(t *testing.T) {
 	k := newToolTalker(t, model, &fakeToolbox{})
 	if spoken := k.say("把取快递和取干洗删了"); !strings.Contains(spoken, "「明天下午去取快递」「周三取干洗」有关的这几条吗") {
 		t.Errorf("应列出每一条，播出 %q", spoken)
+	}
+}
+
+// 专家写那句时拿到当前性格的说明；直接念出来的那句用性格的语气。
+func TestLookAtCameraUsesPersonaStyle(t *testing.T) {
+	expert := &fakeExpert{report: brain.FrameReport{Spoken: "充电头，没跑了。"}}
+	var seen []brain.Utterance
+	model := braintest.NewModel(t, lookAtCamera)
+	k := newTalker(t, brain.Components{Model: model, Synthesizer: fakeSynthesizer{seen: &seen}, Camera: braintest.NewCamera([]byte("充电头")),
+		FrameExpert: expert}, brain.Options{MaxHistoryTurn: 6, Instructions: "基础规则。", Personas: testPersonas, DefaultPersona: "buddy"})
+
+	k.ask("我手里拿着什么？")
+	if len(expert.questions) != 1 || expert.questions[0].Style != testPersonas[0].Prompt {
+		t.Fatalf("专家应拿到当前性格的说明：%+v", expert.questions)
+	}
+	if len(seen) != 1 || seen[0].Text != "充电头，没跑了。" || seen[0].Emotion != testPersonas[0].DefaultEmotion {
+		t.Errorf("直接念的那句应用性格的语气：%+v", seen)
 	}
 }

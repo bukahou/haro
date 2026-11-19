@@ -276,6 +276,7 @@ func (s *Session) generateSentences(ctx context.Context, history []ChatMessage, 
 		}
 		exchange := []ChatMessage{{Role: RoleAssistant, Text: roundText.String(), ToolCalls: calls}}
 		var frameMessages []ChatMessage // 看画面：图片只能放在用户消息里，排在所有工具结果之后
+		var directAnswer string         // 专家那句直接当这一轮的回答（不再请求前台模型）
 		switched := false
 		for _, call := range calls {
 			if call.Name == switchPersonaTool {
@@ -290,9 +291,14 @@ func (s *Session) generateSentences(ctx context.Context, history []ChatMessage, 
 				continue
 			}
 			if call.Name == lookAtCameraTool {
-				result, frameMessage := s.lookAtCamera(ctx, view)
-				exchange = append(exchange, ChatMessage{Role: RoleTool, ToolName: call.Name, ToolCallID: call.ID, Text: result})
-				frameMessages = append(frameMessages, frameMessage...)
+				look := s.lookAtCamera(ctx, view)
+				direct := look.speakDirectly(calls)
+				if direct {
+					directAnswer = look.report.Spoken
+				}
+				exchange = append(exchange, ChatMessage{Role: RoleTool, ToolName: call.Name, ToolCallID: call.ID,
+					Text: look.toolResult(direct)})
+				frameMessages = append(frameMessages, look.frameMessages()...)
 				continue
 			}
 			exchange = append(exchange, ChatMessage{Role: RoleTool, ToolName: call.Name, ToolCallID: call.ID,
@@ -304,6 +310,15 @@ func (s *Session) generateSentences(ctx context.Context, history []ChatMessage, 
 		}
 		messages = append(messages, exchange...)
 		toolTrail = append(toolTrail, exchange...)
+		if directAnswer != "" {
+			// 前台模型转述时会扩写、重复调用前说过的话，字数由专家那边保证：这一轮直接念专家那句
+			s.logger.Info("看画面：直接念专家那句", "chars", utf8.RuneCountInString(directAnswer))
+			answer.WriteString(directAnswer)
+			if err := send(segmenter.Push(directAnswer)); err != nil {
+				return nil, nil, err
+			}
+			break
+		}
 	}
 	if err := send(segmenter.Flush()); err != nil {
 		return nil, nil, err

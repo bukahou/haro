@@ -33,10 +33,17 @@ type TerminalCamera interface {
 // 而是把画面和主人这一轮的原话交给专家，前台拿到的是专家的判断（文字），再用自己的口吻转述。
 // 专家出错时退回把画面直接交给前台。
 type FrameExpert interface {
-	ExamineFrame(ctx context.Context, frame []byte, request string) (FrameReport, error)
+	ExamineFrame(ctx context.Context, question FrameQuestion) (FrameReport, error)
 }
 
-// FrameReport 是专家看完画面的结论，分两段交出：前台照 Spoken 说，Details 留在这一轮的工具结果里供主人追问。
+// FrameQuestion 是交给专家的一次看画面。
+type FrameQuestion struct {
+	Frame   []byte // 摄像头当前画面（JPEG）
+	Request string // 主人这一轮的原话
+	Style   string // 说给主人听的那句用的口吻（当前性格的说明）；空 = 不限
+}
+
+// FrameReport 是专家看完画面的结论，分两段交出：Spoken 直接念给主人，Details 留在这一轮的工具结果里供主人追问。
 type FrameReport struct {
 	Spoken  string // 说给主人听的一两句（专家已压到很短）；空 = 专家没按要求分开交，只有 Details
 	Details string // 看到的细节、判断依据、查到的资料（不念给主人）

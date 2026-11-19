@@ -60,19 +60,25 @@ func (s *Session) toolSpecs() []ToolSpec {
 	return specs
 }
 
-// expertReport 是专家看完后交给前台的工具结果（转述的要求只放在这条结果里，不改系统提示词，免得提示词缓存失效）：
-// 专家已经写好说给主人听的那句，前台照着说；细节留在历史里，主人追问时用。
-func expertReport(report FrameReport) string {
-	if report.Spoken == "" {
+// expertReport 是专家看完后交给前台的工具结果（转述的要求只放在这条结果里，不改系统提示词，免得提示词缓存失效）。
+// 这一轮只调用了看画面时，专家那句由代码直接念给主人（工具结果就是这一轮的回答），结果里记下已经说了什么；
+// 同时调用了别的工具时，由前台把专家那句和别的结果一起说。细节都留在历史里，主人追问时用。
+func expertReport(report FrameReport, spokenDirectly bool) string {
+	switch {
+	case report.Spoken == "":
 		return expertDetailsOnlyNote + report.Details
+	case spokenDirectly:
+		return expertSaidNote + report.Spoken + expertDetailsHeading + report.Details
+	default:
+		return expertSpokenNote + report.Spoken + expertDetailsHeading + report.Details
 	}
-	return expertSpokenNote + report.Spoken + expertDetailsHeading + report.Details
 }
 
 var (
+	expertSaidNote   = "看图更准的专家看了当前画面，已经直接把这句告诉主人：\n"
 	expertSpokenNote = "看图更准的专家看了当前画面，替你写好了说给主人听的话。照这句说（不用提专家；可以带上你的口吻，" +
 		"但不加内容、不说得更长；调用前说过的话不要再说一遍）：\n"
-	expertDetailsHeading = "\n\n专家看到的细节和依据（主人追问时用，这次不要念出来；它已经按需要联网核对过，不要再为画面里的东西另外去搜）：\n"
+	expertDetailsHeading = "\n\n专家看到的细节和依据（主人追问时用，不要念出来；它已经按需要联网核对过，不要再为画面里的东西另外去搜）：\n"
 	// expertDetailsOnlyNote：专家没把要说的话单独交出来时，前台自己压短。
 	expertDetailsOnlyNote = "看图更准的专家看了当前画面，判断如下。用你自己的口吻告诉主人（不用提专家），一两句话、" +
 		"不超过 " + strconv.Itoa(CameraAnswerChars) + " 个字：" +
@@ -85,36 +91,68 @@ func captureFailedNote(err error) string {
 	return "没拍成：" + err.Error() + "。告诉主人现在看不到。"
 }
 
-// lookAtCamera 经 MCP 让终端现拍一帧，返回交给模型的工具结果，以及承载画面的用户消息（拍失败、或由专家看了时为空）。
-// 有看画面的专家时先问专家；专家出错时退回把画面直接交给前台模型。画面不存盘、不进历史。
-func (s *Session) lookAtCamera(ctx context.Context, view cameraView) (string, []ChatMessage) {
+// cameraLook 是一次看画面的结果。
+type cameraLook struct {
+	frame  []byte       // 拍到的画面；没拍成时为空
+	report *FrameReport // 专家的结论；没有专家、专家出错或没拍成时为 nil
+	result string       // 交给模型的工具结果（没拍成、或专家出错退回让前台看时）
+}
+
+// lookAtCamera 经 MCP 让终端现拍一帧。有看画面的专家时先问专家；专家出错时退回把画面直接交给前台模型。
+// 画面不存盘、不进历史。
+func (s *Session) lookAtCamera(ctx context.Context, view cameraView) cameraLook {
 	if s.parts.Camera == nil {
-		return "这个终端没有摄像头，看不到。", nil
+		return cameraLook{result: "这个终端没有摄像头，看不到。"}
 	}
 	started := time.Now()
 	frame, err := s.parts.Camera.Capture(ctx)
 	if err != nil {
 		if ctx.Err() != nil {
-			return "没看成（被打断了）。", nil
+			return cameraLook{result: "没看成（被打断了）。"}
 		}
 		s.logger.Warn("调用工具", "tool", lookAtCameraTool, "err", err, "elapsed", since(started))
-		return captureFailedNote(err), nil
+		return cameraLook{result: captureFailedNote(err)}
 	}
 	s.logger.Info("拍了一帧", "frame_bytes", len(frame), "elapsed", since(started))
 	if s.parts.FrameExpert != nil {
-		report, err := s.parts.FrameExpert.ExamineFrame(ctx, frame, view.request)
+		question := FrameQuestion{Frame: frame, Request: view.request}
+		if persona := s.currentPersona(); persona != nil {
+			question.Style = persona.Prompt
+		}
+		report, err := s.parts.FrameExpert.ExamineFrame(ctx, question)
 		if err == nil {
 			s.logger.Info("调用工具", "tool", lookAtCameraTool, "frame_bytes", len(frame), "by", "专家",
 				"spoken_chars", utf8.RuneCountInString(report.Spoken))
-			return expertReport(report), nil
+			return cameraLook{frame: frame, report: &report}
 		}
 		if ctx.Err() != nil {
-			return "没看成（被打断了）。", nil
+			return cameraLook{result: "没看成（被打断了）。"}
 		}
 		s.logger.Warn("看画面的专家出错：这次把画面直接交给前台模型", "err", err)
 	}
 	s.logger.Info("调用工具", "tool", lookAtCameraTool, "frame_bytes", len(frame))
-	return "已拿到摄像头当前画面，见下一条消息。", []ChatMessage{{Role: RoleUser, Text: cameraFrameNote, Image: frame}}
+	return cameraLook{frame: frame, result: "已拿到摄像头当前画面，见下一条消息。"}
+}
+
+// frameMessages 是承载画面的用户消息：只有画面要交给前台模型看时才有（由专家看了、或没拍成时为空）。
+func (look cameraLook) frameMessages() []ChatMessage {
+	if look.report != nil || len(look.frame) == 0 {
+		return nil
+	}
+	return []ChatMessage{{Role: RoleUser, Text: cameraFrameNote, Image: look.frame}}
+}
+
+// speakDirectly 判断专家那句能不能直接当这一轮的回答：这一轮只调用了看画面、专家单独交出了要说的话。
+func (look cameraLook) speakDirectly(calls []ToolCall) bool {
+	return len(calls) == 1 && look.report != nil && look.report.Spoken != ""
+}
+
+// toolResult 是交给模型（并存进历史）的工具结果。
+func (look cameraLook) toolResult(spokenDirectly bool) string {
+	if look.report != nil {
+		return expertReport(*look.report, spokenDirectly)
+	}
+	return look.result
 }
 
 // needsConfirmation 判断这批调用里有没有要用户口头确认的（MCP destructiveHint）。
