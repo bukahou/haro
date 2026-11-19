@@ -7,6 +7,7 @@ import (
 	"iter"
 	"log/slog"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -18,11 +19,13 @@ import (
 var quietLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
 
 // scriptedModel 按 replies 依次回答；replies 用完后重复 repeat（nil = 给出结论）。记下每次是否给了工具。
+// gate 不为 nil 时，每次回答前都等测试关掉它（由测试决定调查什么时候往下走，不靠时间）。
 type scriptedModel struct {
 	mu        sync.Mutex
 	replies   []brain.ReplyDelta
 	repeat    *brain.ReplyDelta
 	delay     time.Duration
+	gate      chan struct{}
 	toolsSeen []bool
 	lastMsgs  []brain.ChatMessage
 }
@@ -40,9 +43,17 @@ func (m *scriptedModel) StreamReply(ctx context.Context, messages []brain.ChatMe
 	case m.repeat != nil:
 		reply = *m.repeat
 	}
-	delay := m.delay
+	delay, gate := m.delay, m.gate
 	m.mu.Unlock()
 	return func(yield func(brain.ReplyDelta, error) bool) {
+		if gate != nil {
+			select {
+			case <-gate:
+			case <-ctx.Done():
+				yield(brain.ReplyDelta{}, ctx.Err())
+				return
+			}
+		}
 		if delay > 0 {
 			select {
 			case <-time.After(delay):
@@ -126,7 +137,7 @@ func TestResearchFindsAnswerAndBriefsOnce(t *testing.T) {
 	model := &scriptedModel{replies: []brain.ReplyDelta{
 		call("search_web", map[string]any{"query": "A B 价格"}),
 		call("read_pages", map[string]any{"urls": []any{"https://example.com/a"}}),
-	}}
+	}, gate: make(chan struct{})}
 	runner, store, searcher, budget := newTestRunner(t, model, DefaultLimits)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -136,12 +147,11 @@ func TestResearchFindsAnswerAndBriefsOnce(t *testing.T) {
 	if err != nil || ahead != 0 {
 		t.Fatalf("派任务：%v ahead=%d", err, ahead)
 	}
+	// 调查还卡在模型那里（gate 没开）：任务板只列出在查的这一条
 	if lines := runner.Brief("主人"); len(lines) != 1 || !strings.Contains(lines[0], "不用主动提") {
-		// 可能已经查完了：那就是结论那一行
-		if len(lines) != 1 || !strings.Contains(lines[0], "查完了") {
-			t.Errorf("任务板应列出在查的任务：%v", lines)
-		}
+		t.Errorf("任务板应只列出在查的任务：%v", lines)
 	}
+	close(model.gate)
 	done := waitFinished(t, store, task.ID)
 	if done.Status != StatusDone || done.Conclusion != "结论：A 比 B 便宜。" || len(done.Sources) != 1 {
 		t.Fatalf("结论：%+v", done)
@@ -412,5 +422,45 @@ func TestResearchWriterAtLimits(t *testing.T) {
 		if done.Status != StatusPartial || done.Conclusion != c.want {
 			t.Errorf("%s：%+v", c.name, done)
 		}
+	}
+}
+
+// 任务板一次读出这个人在查的、查完还没说的：查完说过的、取消的、别人的都不在里面。
+func TestTaskStoreBoard(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenTaskStore(ctx, filepath.Join(t.TempDir(), "research.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	create := func(person, question string) int64 {
+		task, err := store.Create(ctx, person, question)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return task.ID
+	}
+	queued := create("主人", "排队中")
+	running := create("主人", "在查")
+	_ = store.MarkRunning(ctx, running)
+	unreported := create("主人", "查完没说")
+	_ = store.Finish(ctx, unreported, StatusDone, "结论", nil, "")
+	reported := create("主人", "查完说过")
+	_ = store.Finish(ctx, reported, StatusDone, "结论", nil, "")
+	_ = store.MarkReported(ctx, reported)
+	cancelled := create("主人", "取消了")
+	_ = store.Finish(ctx, cancelled, StatusCancelled, "", nil, "")
+	create("别人", "别人的")
+
+	board, err := store.Board(ctx, "主人")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []int64
+	for _, task := range board {
+		ids = append(ids, task.ID)
+	}
+	if want := []int64{queued, running, unreported}; !slices.Equal(ids, want) {
+		t.Errorf("任务板应是排队中、在查、查完没说的（按派出顺序）：得到 %v，应为 %v", ids, want)
 	}
 }

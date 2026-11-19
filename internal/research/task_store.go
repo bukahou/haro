@@ -85,6 +85,9 @@ type TaskStore interface {
 	Recent(ctx context.Context, person string, limit int) ([]Task, error)
 	// Unreported 是某人已经结束、还没告诉过的任务。
 	Unreported(ctx context.Context, person string) ([]Task, error)
+	// Board 是某人的任务板：排队中、在查的，加上已经结束、还没告诉过的（按派出顺序）。
+	// 一次查询读出来，是同一时刻的快照：同一个任务不会既算在查、又算查完。
+	Board(ctx context.Context, person string) ([]Task, error)
 	MarkReported(ctx context.Context, ids ...int64) error
 	// Search 按问题或结论里的关键词找某人以前的任务（「上周让你查的那个」）。
 	Search(ctx context.Context, person, query string, limit int) ([]Task, error)
@@ -226,6 +229,11 @@ func (s *sqliteTaskStore) Recent(ctx context.Context, person string, limit int) 
 func (s *sqliteTaskStore) Unreported(ctx context.Context, person string) ([]Task, error) {
 	return s.query(ctx, `WHERE person = ? AND reported = 0 AND status NOT IN (?, ?, ?) ORDER BY id`,
 		person, string(StatusQueued), string(StatusRunning), string(StatusCancelled))
+}
+
+func (s *sqliteTaskStore) Board(ctx context.Context, person string) ([]Task, error) {
+	return s.query(ctx, `WHERE person = ? AND (status IN (?, ?) OR (reported = 0 AND status NOT IN (?, ?, ?))) ORDER BY id`,
+		person, string(StatusQueued), string(StatusRunning), string(StatusQueued), string(StatusRunning), string(StatusCancelled))
 }
 
 func (s *sqliteTaskStore) MarkReported(ctx context.Context, ids ...int64) error {

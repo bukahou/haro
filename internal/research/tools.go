@@ -86,21 +86,18 @@ const briefingConclusionRunes = 400
 func (r *Runner) Brief(person string) []string {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	var lines []string
-	if active, err := r.store.Active(ctx); err == nil {
-		for _, task := range active {
-			if task.Person == person {
-				lines = append(lines, fmt.Sprintf("后台调查 #%d「%s」%s（派出 %s 了），不用主动提。",
-					task.ID, task.Question, task.Status.Label(), since(task.CreatedAt)))
-			}
-		}
-	}
-	unreported, err := r.store.Unreported(ctx, person)
+	board, err := r.store.Board(ctx, person)
 	if err != nil {
-		return lines
+		return nil
 	}
+	var lines []string
 	var told []int64
-	for _, task := range unreported {
+	for _, task := range board {
+		if !task.Status.Finished() {
+			lines = append(lines, fmt.Sprintf("后台调查 #%d「%s」%s（派出 %s 了），不用主动提。",
+				task.ID, task.Question, task.Status.Label(), since(task.CreatedAt)))
+			continue
+		}
 		told = append(told, task.ID)
 		switch task.Status {
 		case StatusDone, StatusPartial:
