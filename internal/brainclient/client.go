@@ -60,7 +60,7 @@ func Dial(ctx context.Context, baseURL string, inputFormat realtimeproto.AudioFo
 	for attempt := 1; ; attempt++ {
 		conn, response, err := websocket.Dial(ctx, url, options)
 		if err == nil {
-			conn.SetReadLimit(8 << 20)
+			conn.SetReadLimit(realtimeproto.MaxMessageBytes)
 			readCtx, cancel := context.WithCancel(context.Background())
 			client := &Client{conn: conn, inputFormat: inputFormat, logger: logger, cancel: cancel,
 				events: make(chan realtimeproto.ServerEvent, 64), done: make(chan struct{})}
@@ -146,7 +146,7 @@ func (c *Client) readEvents(ctx context.Context) {
 			c.disconnect(err)
 			return
 		}
-		event, err := realtimeproto.DecodeServerWireEvent(data)
+		event, err := realtimeproto.DecodeServerEvent(data)
 		if err != nil {
 			c.logger.Warn("解析服务端的事件失败", "err", err)
 			continue
@@ -186,7 +186,7 @@ func (c *Client) disconnect(cause error) {
 	go func() { // 不在读循环里阻塞：没人读事件时也不会卡住
 		c.events <- realtimeproto.Error{Message: ErrDisconnected.Error()}
 		if inFlight {
-			c.events <- realtimeproto.ResponseDone{Status: realtimeproto.StatusFailed, Reason: "brain_disconnected"}
+			c.events <- realtimeproto.ResponseDone{Status: realtimeproto.StatusFailed, Reason: realtimeproto.ReasonServerDisconnected}
 		}
 	}()
 }

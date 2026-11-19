@@ -1,8 +1,8 @@
-// Package brainserver 把服务端挂到 WebSocket 上（v3 第 3 步）：
-//   - GET /v1/realtime：对话会话（Realtime 事件，格式见 realtimeproto/conversation_wire.go）
+// Package brainserver 把服务端挂到 WebSocket 上：
+//   - GET /v1/realtime：对话会话（Realtime 事件，定义见 realtimeproto）
 //   - GET /health
 //
-// 一条连接一个会话（S-3，与 OpenAI Realtime 一致）：连接断了，这次的对话历史就没了（性格记在文件里，不受影响）。
+// 一条连接一个会话（与 OpenAI Realtime 一致）：连接断了，这次的对话历史就没了（性格记在文件里，不受影响）。
 // 本包只管协议和连接，会话由外部注入（haro-server 注入 brain.Session）。
 package brainserver
 
@@ -30,12 +30,6 @@ type Session interface {
 // SessionFactory 为每条连接新建一个会话。
 type SessionFactory func() Session
 
-// defaultInputFormat 是终端没在 session.update 里声明格式时的输入音频格式（haro 的麦克风是 16 kHz）。
-var defaultInputFormat = realtimeproto.AudioFormat{SampleRate: 16000, Channels: 1}
-
-// readLimit：一条消息最大 8 MB（一帧画面 base64 后约 100–200 KB，留足余量）。
-const readLimit = 8 << 20
-
 // NewHandler 返回挂好路由的 HTTP handler。
 func NewHandler(newSession SessionFactory, logger *slog.Logger) http.Handler {
 	mux := http.NewServeMux()
@@ -50,14 +44,14 @@ func NewHandler(newSession SessionFactory, logger *slog.Logger) http.Handler {
 }
 
 func serveConversation(w http.ResponseWriter, r *http.Request, newSession SessionFactory, logger *slog.Logger) {
-	w.Header().Set(buildinfo.Header, buildinfo.Version) // 握手响应里报服务端的版本（v6 T6）
+	w.Header().Set(buildinfo.Header, buildinfo.Version) // 握手响应里报服务端的版本（只用于日志）
 	conn, err := websocket.Accept(w, r, nil)
 	if err != nil {
 		logger.Warn("WebSocket 握手失败", "remote", r.RemoteAddr, "err", err)
 		return
 	}
 	defer conn.CloseNow()
-	conn.SetReadLimit(readLimit)
+	conn.SetReadLimit(realtimeproto.MaxMessageBytes)
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
@@ -95,7 +89,7 @@ func serveConversation(w http.ResponseWriter, r *http.Request, newSession Sessio
 		}
 	}()
 
-	inputFormat := defaultInputFormat
+	var inputFormat realtimeproto.AudioFormat // session.update 声明之前为空：这时送来的音频会被拒绝
 	for {
 		_, data, err := conn.Read(ctx)
 		if err != nil {
@@ -109,14 +103,14 @@ func serveConversation(w http.ResponseWriter, r *http.Request, newSession Sessio
 		}
 		event, err := realtimeproto.DecodeClientEvent(data, inputFormat)
 		if err != nil {
-			_ = write(realtimeproto.Error{Message: err.Error()})
+			_ = write(realtimeproto.ErrorEventFor("", err))
 			continue
 		}
 		if update, ok := event.(realtimeproto.SessionUpdate); ok && update.InputFormat.SampleRate > 0 {
 			inputFormat = update.InputFormat
 		}
 		if err := session.Send(ctx, event); err != nil {
-			_ = write(realtimeproto.Error{Message: event.Type() + ": " + err.Error()})
+			_ = write(realtimeproto.ErrorEventFor(event.Type(), err))
 		}
 	}
 }

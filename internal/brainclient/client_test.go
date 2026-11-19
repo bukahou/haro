@@ -236,7 +236,7 @@ func TestDisconnectDuringResponse(t *testing.T) {
 		}
 	}
 	done := events[len(events)-1].(realtimeproto.ResponseDone)
-	if !sawError || done.Status != realtimeproto.StatusFailed || done.Reason != "brain_disconnected" {
+	if !sawError || done.Status != realtimeproto.StatusFailed || done.Reason != realtimeproto.ReasonServerDisconnected {
 		t.Errorf("应收到 error 和失败的 response.done：%v", events)
 	}
 	select {

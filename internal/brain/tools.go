@@ -218,7 +218,7 @@ func (s *Session) handleConfirmation(ctx context.Context, text string, pending [
 			return realtimeproto.ResponseDone{Status: realtimeproto.StatusCancelled}, true
 		}
 		if err != nil {
-			return s.failed("生成回答", err), true
+			return s.failed(realtimeproto.ReasonGenerationFailed, "生成回答", err), true
 		}
 		s.remember(text, append(trail, moreTrail...), answer)
 		done := realtimeproto.ResponseDone{Status: realtimeproto.StatusCompleted}

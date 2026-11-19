@@ -47,7 +47,7 @@ func TestRemoteEnrollmentUploadsClips(t *testing.T) {
 			t.Errorf("路径：%s", r.URL.EscapedPath())
 		}
 		_ = json.NewDecoder(r.Body).Decode(&got)
-		_, _ = w.Write([]byte(`{"name":"主人","sentences":9,"pairwise":[{"A":1,"B":2,"Score":0.84}],"best_vs_existing":0.73,"speakers":["主人"]}`))
+		_, _ = w.Write([]byte(`{"name":"主人","sentences":9,"pairwise":[{"a":1,"b":2,"score":0.84}],"best_vs_existing":0.73,"speakers":["主人"]}`))
 	}))
 	defer brain.Close()
 

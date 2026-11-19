@@ -257,7 +257,7 @@ func brainHandler(settings config.Settings, newSession brainserver.SessionFactor
 	mux.Handle("/", brainserver.NewHandler(newSession, logger))
 	if settings.ASR == config.ASRLocal {
 		asrURL, _ := url.Parse(localURL(settings.ASRPort))
-		mux.Handle("POST /v1/voiceprints/{name}", httputil.NewSingleHostReverseProxy(asrURL))
+		mux.Handle(realtimeproto.VoiceprintRoute, httputil.NewSingleHostReverseProxy(asrURL))
 	}
 	return mux
 }

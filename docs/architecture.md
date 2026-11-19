@@ -24,7 +24,11 @@ haro 是一个家用语音助手：家里每个房间放一台**终端**（麦�
 ## 终端和服务端之间的协议
 
 兼容 OpenAI Realtime API 的事件协议（WebSocket），只用其中的一个子集；haro 自己的扩展事件以 `haro.` 开头
-（例如终端上报现在用的麦克风、音箱、摄像头）。见 `internal/realtimeproto`。
+（例如终端上报现在用的麦克风、音箱、摄像头）。服务端和 haro-asr 之间的转写会话用同一份定义。见 `internal/realtimeproto`：
+
+- 线上的 JSON 结构只定义一处（`wire.go`），编解码只有一处（`codec.go`）；
+- 由它生成 JSON Schema（`haro.realtime.v2.schema.json`），测试比对两者，结构改了而文件没更新就失败；
+- 错误事件带稳定的错误码（`errors.go`），调用方按码判断，不看说明文字。
 
 ## 服务端（`internal/brain` 与周边）
 

@@ -38,8 +38,8 @@ func (m *memoryState) SavePersona(id string) error {
 func newPersonaTalker(t *testing.T, model brain.ChatModel, state brain.PersonaState, seen *[]brain.Utterance) *talker {
 	t.Helper()
 	k := newTalker(t, brain.Components{Model: model, Synthesizer: fakeSynthesizer{seen: seen}},
-		brain.Options{MaxHistoryTurn: 6, Personas: testPersonas, DefaultPersona: "buddy", PersonaState: state})
-	k.send(realtimeproto.SessionUpdate{Instructions: "基础规则。"})
+		brain.Options{MaxHistoryTurn: 6, Instructions: "基础规则。", Personas: testPersonas, DefaultPersona: "buddy",
+			PersonaState: state})
 	return k
 }
 

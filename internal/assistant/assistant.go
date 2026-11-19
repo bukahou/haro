@@ -35,7 +35,6 @@ type Components struct {
 
 // Options 是终端行为的可调参数。
 type Options struct {
-	Instructions  string                      // 系统提示词，启动时经 session.update 交给服务端；空 = 用服务端自己的
 	TurnDetection realtimeproto.TurnDetection // 服务端怎么判断说完
 	EchoGuard     time.Duration               // 不能打断时：播完后再静音这么久才恢复上传，防止把自己的回音当成用户说话
 	WakeWord      WakeWordOptions             // 叫唤醒词才听，对话窗口结束自动休眠
@@ -73,7 +72,7 @@ func NewAssistant(parts Components, opts Options, logger *slog.Logger) *Assistan
 // Run 打开服务端会话（服务端判断说完、启用唤醒门），然后按唤醒词轮流说话，直到 ctx 取消或出错。
 func (a *Assistant) Run(ctx context.Context) error {
 	turn := a.opts.TurnDetection
-	update := realtimeproto.SessionUpdate{Instructions: a.opts.Instructions, TurnDetection: &turn, WakeWord: true,
+	update := realtimeproto.SessionUpdate{TurnDetection: &turn, WakeWord: true,
 		NoCamera: a.parts.Camera == nil}
 	if err := a.parts.Brain.Send(ctx, update); err != nil {
 		return fmt.Errorf("初始化服务端会话: %w", err)

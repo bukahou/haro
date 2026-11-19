@@ -2,15 +2,13 @@ package brain
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"log/slog"
 	"sync"
 
 	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
-// Components 是服务端需要的全部能力，由 cmd/haro 组装注入。
+// Components 是服务端需要的全部能力，由 cmd/haro-server 组装注入。
 type Components struct {
 	Streaming    StreamingRecognizer // 流式识别：服务端判断说完、唤醒词都靠它
 	Model        ChatModel
@@ -34,8 +32,7 @@ type Components struct {
 type Options struct {
 	MaxHistoryTurn int // 保留最近几轮（一问一答算一轮）的文字历史
 
-	// Instructions 是默认的基础提示词（身份、能力、底线），由服务端持有，终端不用发；
-	// 终端在 session.update 里带了 instructions 时以终端的为准（与 Realtime 一致）。
+	// Instructions 是基础提示词（身份、能力、底线），只由服务端持有：客户端不能经 session.update 替换。
 	Instructions string
 
 	// 性格档案（可选）：两个以上时提供 switch_persona 工具
@@ -59,7 +56,6 @@ type Session struct {
 	closeOnce sync.Once
 
 	mu             sync.Mutex
-	instructions   string
 	transcription  *transcriptionJob  // 已判定说完、等待被回答使用的识别任务
 	image          []byte             // 等待被回答使用的画面
 	cancelResponse context.CancelFunc // 非 nil 表示有进行中的回答
@@ -79,12 +75,9 @@ type Session struct {
 	noSpeaker          bool            // 终端说现在没有音箱：不合成语音，只发文字
 }
 
-var (
-	// errNoStream：识别流还没打开（session.update 没带 turn_detection）或已断开，音频无处可送。
-	errNoStream = errors.New("识别流没有打开：session.update 要带 turn_detection；断开后要重新打开")
-	// errManualCommit：说完由服务端判断，不接受 input_audio_buffer.commit。
-	errManualCommit = errors.New("不接受手动提交：说完由服务端判断（session.update 里的 turn_detection）")
-)
+// errNoStream：识别流还没打开（session.update 没带 turn_detection）或已断开，音频无处可送。
+var errNoStream = realtimeproto.ProtocolErrorf(realtimeproto.CodeNoTranscriptionStream,
+	"识别流没有打开：session.update 要带 turn_detection；断开后要重新打开")
 
 // NewSession 创建会话。
 // parts.Conversations 为 nil 时这条会话自己建一个只在内存里的对话簿（断开就没了）。
@@ -97,7 +90,7 @@ func NewSession(parts Components, opts Options, logger *slog.Logger) *Session {
 		logger.Info("当前性格", "persona", persona.Name, "available", len(opts.Personas))
 	}
 	session := &Session{
-		parts: parts, opts: opts, logger: logger, conversation: conversation, instructions: opts.Instructions, truncateAtMs: -1,
+		parts: parts, opts: opts, logger: logger, conversation: conversation, truncateAtMs: -1,
 		events: make(chan realtimeproto.ServerEvent, 32),
 		closed: make(chan struct{}),
 	}
@@ -171,7 +164,7 @@ func (s *Session) Send(ctx context.Context, event realtimeproto.ClientEvent) err
 		stream := s.stream
 		s.mu.Unlock()
 		if stream == nil {
-			return errors.New("没有流式转写会话，无法切换唤醒状态")
+			return realtimeproto.ProtocolErrorf(realtimeproto.CodeNoTranscriptionStream, "没有流式转写会话，无法切换唤醒状态")
 		}
 		_, awake := event.(realtimeproto.HaroWakeWordWake)
 		return stream.SetAwake(ctx, awake)
@@ -184,7 +177,8 @@ func (s *Session) Send(ctx context.Context, event realtimeproto.ClientEvent) err
 			return errNoStream
 		}
 		if audio.Audio.Format != streamFormat {
-			return fmt.Errorf("只接受 %+v 的音频，收到 %+v", streamFormat, audio.Audio.Format)
+			return realtimeproto.ProtocolErrorf(realtimeproto.CodeUnsupportedAudioFormat, "只接受 %+v 的音频，收到 %+v",
+				streamFormat, audio.Audio.Format)
 		}
 		return stream.SendAudio(ctx, audio.Audio.Data)
 	}
@@ -192,17 +186,12 @@ func (s *Session) Send(ctx context.Context, event realtimeproto.ClientEvent) err
 	defer s.mu.Unlock()
 	switch e := event.(type) {
 	case realtimeproto.SessionUpdate:
-		if e.Instructions != "" { // 不带 instructions 时保留服务端自己的默认提示词
-			s.instructions = e.Instructions
-		}
 		s.noCamera = e.NoCamera
 		if e.TurnDetection != nil && s.stream == nil {
 			if err := s.openStream(ctx, StreamConfig{TurnDetection: *e.TurnDetection, WakeWord: e.WakeWord}); err != nil {
 				return err
 			}
 		}
-	case realtimeproto.InputAudioBufferCommit:
-		return errManualCommit
 	case realtimeproto.ConversationItemCreate:
 		for _, part := range e.Item.Content {
 			if part.Type == "input_image" {
@@ -211,7 +200,7 @@ func (s *Session) Send(ctx context.Context, event realtimeproto.ClientEvent) err
 		}
 	case realtimeproto.ResponseCreate:
 		if s.cancelResponse != nil {
-			return errors.New("已有进行中的回答")
+			return realtimeproto.ProtocolErrorf(realtimeproto.CodeResponseInProgress, "已有进行中的回答")
 		}
 		responseCtx, cancel := context.WithCancel(ctx)
 		s.cancelResponse = cancel
@@ -223,7 +212,7 @@ func (s *Session) Send(ctx context.Context, event realtimeproto.ClientEvent) err
 			s.cancelResponse()
 		}
 	default:
-		return fmt.Errorf("不支持的事件 %s", event.Type())
+		return realtimeproto.ProtocolErrorf(realtimeproto.CodeUnsupportedEvent, "不支持的事件 %s", event.Type())
 	}
 	return nil
 }
@@ -286,8 +275,8 @@ func (s *Session) useConversationOf(person string) {
 // remember 记下一轮：用户的话、这一轮的工具往来（调用了什么、结果是什么）、最终回答。图片不进历史。
 //
 // 为什么要保留工具往来：只保留最终回答时，历史里全是「记下了」「网络正常」，小模型照着学，
-// 就不再调用工具、直接说办好了（2026-11-15 实测：同一段历史，只留回答 0/4 调用 save_note，
-// 保留工具往来 4/4）。
+// 就不再调用工具、直接说办好了（实测：同一段历史，只留回答时 4 次里 0 次调用 save_note，
+// 保留工具往来时 4 次都调用）。
 func (s *Session) remember(question string, toolTrail []ChatMessage, answer string) {
 	turn := make([]ChatMessage, 0, len(toolTrail)+2)
 	turn = append(turn, ChatMessage{Role: RoleUser, Text: question})

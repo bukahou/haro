@@ -2,9 +2,7 @@ package asrserver
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/binary"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,7 +11,6 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
-	"github.com/coder/websocket/wsjson"
 
 	"github.com/bukahou/haro/internal/realtimeproto"
 )
@@ -54,11 +51,11 @@ const (
 	samplesPerMs   = realtimeproto.TranscriptionSampleRate / 1000
 	historySeconds = 30 // 只保留最近 30 秒音频，用于截取语音段（含前置缓冲）
 
-	// semantic_vad：VAD 静音这么久就交给模型判断。200 → 300 ms（v3 D-2）：真机两次实测，句子说完 238 ms 后
-	// 尾音（换气、拖音）又冒出一小段，被切成新的一句、识别成「Yeah.」；等 300 ms 让尾音并进同一句（每句慢约 0.1 s）。
+	// semantic_vad：VAD 静音这么久就交给模型判断。太短时，句子说完后的尾音（换气、拖音，实测约在 238 ms 后）
+	// 会被切成新的一句、识别成「Yeah.」；300 ms 让尾音并进同一句（每句慢约 0.1 s）。
 	semanticSilenceMs = 300
 
-	wakeOnlyWaitMs      = 1000 // 只叫了唤醒词：等这么久没开口就回「我在。」（2 s 太久，改成 1 s）
+	wakeOnlyWaitMs      = 1000 // 只叫了唤醒词：等这么久没开口就回「我在。」
 	wakeKeywordWindowMs = 1500 // 唤醒词识别报告时刻之前的这段一定包含整个唤醒词（「哈罗哈罗」约 1 s + 报告延迟约 0.3 s）
 	endOfTurnCutoff     = 0.5  // 模型概率 ≥ 0.5 算说完（与 Smart Turn 参考实现一致）
 )
@@ -76,7 +73,7 @@ func semanticMaxWait(eagerness string) time.Duration {
 	}
 }
 
-// handleRealtimeTranscription 实现 Realtime 转写会话的子集（见 realtimeproto/transcription_wire.go）。
+// handleRealtimeTranscription 实现 Realtime 转写会话的子集（事件定义见 realtimeproto）。
 func handleRealtimeTranscription(w http.ResponseWriter, r *http.Request, deps Dependencies) {
 	if r.URL.Query().Get("intent") != "transcription" {
 		writeError(w, http.StatusBadRequest, "只支持 intent=transcription")
@@ -91,12 +88,12 @@ func handleRealtimeTranscription(w http.ResponseWriter, r *http.Request, deps De
 		return
 	}
 	defer conn.CloseNow()
-	conn.SetReadLimit(1 << 20)
+	conn.SetReadLimit(realtimeproto.MaxMessageBytes)
 	ctx := r.Context()
 
 	session, err := startTranscriptionSession(ctx, conn, deps)
 	if err != nil {
-		_ = wsjson.Write(ctx, conn, realtimeproto.NewWireError("invalid_request_error", err.Error()))
+		_ = writeEvent(ctx, conn, realtimeproto.ErrorEventFor("", err))
 		conn.Close(websocket.StatusPolicyViolation, "bad session.update")
 		return
 	}
@@ -124,9 +121,9 @@ type utterance struct {
 	waiting        bool   // 模型判定没说完（或刚被唤醒还没开口），正在等用户接着说
 	wake           bool   // 这句话里有唤醒词：识别后在文字上去掉它
 	awaitingSpeech bool   // 唤醒词说完就停了，还没开口：最多等 wakeOnlyWaitMs，等不到就按「只叫了唤醒词」处理
-	bargeIn        bool   // 终端播放回答时用唤醒词打断的（v3 I-1）：唤醒词前面混着 haro 自己的回声，去掉唤醒词时连前面一起去掉
-	wakeSpeaker    string // 唤醒时声纹认得很准的人（达到 Threshold，v3 V-a）：这一句沿用它，不再用这句（多半很短）重新比对
-	wakeGuess      string // 唤醒时只过了唤醒门槛的人（v3 BV）：这一句照常比对；只叫了唤醒词（去掉后没有文字）时才沿用，让 haro 回「我在」
+	bargeIn        bool   // 终端播放回答时用唤醒词打断的：唤醒词前面混着 haro 自己的回声，去掉唤醒词时连前面一起去掉
+	wakeSpeaker    string // 唤醒时声纹认得很准的人（达到 Threshold）：这一句沿用它，不再用这句（多半很短）重新比对
+	wakeGuess      string // 唤醒时只过了唤醒门槛的人：这一句照常比对；只叫了唤醒词（去掉后没有文字）时才沿用，让 haro 回「我在」
 }
 
 type transcriptionSession struct {
@@ -137,16 +134,16 @@ type transcriptionSession struct {
 	semantic      bool
 	maxWaitSample int
 
-	// 唤醒门（haro 扩展，v2.2）：休眠时只跑唤醒词识别，不识别、不上报任何内容
+	// 唤醒门（haro 扩展）：休眠时只跑唤醒词识别，不识别、不上报任何内容
 	wakeEnabled bool
 	awake       bool
 	spotter     KeywordSpotter
 
-	// 打断（haro 扩展，v3 I-1）：终端播放回答期间只听唤醒词（麦克风里主要是 haro 自己的回声）
+	// 打断（haro 扩展）：终端播放回答期间只听唤醒词（麦克风里主要是 haro 自己的回声）
 	playback            bool
 	awakeBeforePlayback bool
 	playbackLevel       levelMeter // 播放期间的麦克风音量（排查打断用：设备会不会在放声音时把麦克风压低）
-	// echoUntil：这个采样点之前的声音是 haro 自己的回声（v3 E-1）。播完时 = 播放结束的位置；打断时 = 打断句的开头。
+	// echoUntil：这个采样点之前的声音是 haro 自己的回声。播完时 = 播放结束的位置；打断时 = 打断句的开头。
 	// 播放期间开始、播完后才结束的语音段，只取这之后的部分——否则回声会被当成用户说的话，
 	// 用户紧接着说的话也会和回声并成一句（声纹被拉低、被当成陌生人丢掉）。
 	echoUntil int
@@ -163,37 +160,42 @@ type transcriptionSession struct {
 
 // startTranscriptionSession 读取第一条消息（必须是 session.update）并创建 VAD。
 func startTranscriptionSession(ctx context.Context, conn *websocket.Conn, deps Dependencies) (*transcriptionSession, error) {
-	var update realtimeproto.WireTranscriptionSessionUpdate
-	if err := wsjson.Read(ctx, conn, &update); err != nil {
+	_, data, err := conn.Read(ctx)
+	if err != nil {
 		return nil, fmt.Errorf("读取 session.update: %w", err)
 	}
-	input := update.Session.Audio.Input
-	switch {
-	case update.Type != "session.update" || update.Session.Type != "transcription":
-		return nil, errors.New("第一条消息必须是 type=transcription 的 session.update")
-	case input.Format.Rate != realtimeproto.TranscriptionSampleRate:
-		return nil, fmt.Errorf("只支持 %dHz 的 audio/pcm", realtimeproto.TranscriptionSampleRate)
-	case input.TurnDetection == nil:
-		return nil, errors.New("必须指定 turn_detection")
+	event, err := realtimeproto.DecodeClientEvent(data, realtimeproto.AudioFormat{})
+	if err != nil {
+		return nil, err
 	}
-	turn := *input.TurnDetection
+	update, ok := event.(realtimeproto.SessionUpdate)
+	switch {
+	case !ok || update.Kind != realtimeproto.SessionTranscription:
+		return nil, realtimeproto.ProtocolErrorf(realtimeproto.CodeInvalidEvent, "第一条消息必须是 type=transcription 的 session.update")
+	case update.InputFormat != realtimeproto.TranscriptionFormat:
+		return nil, realtimeproto.ProtocolErrorf(realtimeproto.CodeUnsupportedAudioFormat, "只支持 %dHz 单声道的 audio/pcm",
+			realtimeproto.TranscriptionSampleRate)
+	case update.TurnDetection == nil:
+		return nil, realtimeproto.ProtocolErrorf(realtimeproto.CodeInvalidEvent, "必须指定 turn_detection")
+	}
+	turn := *update.TurnDetection
 	session := &transcriptionSession{conn: conn, deps: deps, turnDetection: turn}
 	vadConfig := turn
 	switch turn.Type {
 	case "server_vad":
 	case "semantic_vad":
 		if deps.TurnDetector == nil {
-			return nil, errors.New("haro-asr 启动时没有指定 -turn-model，不支持 semantic_vad")
+			return nil, realtimeproto.ProtocolErrorf(realtimeproto.CodeUnsupportedFeature, "haro-asr 启动时没有指定 -turn-model，不支持 semantic_vad")
 		}
 		session.semantic = true
 		session.maxWaitSample = int(semanticMaxWait(turn.Eagerness).Milliseconds()) * samplesPerMs
 		vadConfig.SilenceDurationMs = semanticSilenceMs
 	default:
-		return nil, fmt.Errorf("不支持的 turn_detection.type %q（支持 server_vad / semantic_vad）", turn.Type)
+		return nil, realtimeproto.ProtocolErrorf(realtimeproto.CodeInvalidEvent, "不支持的 turn_detection.type %q（支持 server_vad / semantic_vad）", turn.Type)
 	}
-	if haro := update.Session.Haro; haro != nil && haro.WakeWord != nil && haro.WakeWord.Enabled {
+	if update.WakeWord {
 		if deps.NewKeywordSpotter == nil {
-			return nil, errors.New("haro-asr 启动时没有指定 -kws-model-dir / -keywords-file，不支持唤醒词")
+			return nil, realtimeproto.ProtocolErrorf(realtimeproto.CodeUnsupportedFeature, "haro-asr 启动时没有指定 -kws-model-dir / -keywords-file，不支持唤醒词")
 		}
 		spotter, err := deps.NewKeywordSpotter()
 		if err != nil {
@@ -218,39 +220,27 @@ func (s *transcriptionSession) run(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		var head struct {
-			Type  string `json:"type"`
-			Audio string `json:"audio"`
+		event, err := realtimeproto.DecodeClientEvent(data, realtimeproto.TranscriptionFormat)
+		if err != nil {
+			_ = writeEvent(ctx, s.conn, realtimeproto.ErrorEventFor("", err))
+			continue
 		}
-		if err := json.Unmarshal(data, &head); err == nil && s.wakeEnabled {
-			switch head.Type {
-			case "haro.wake_word.sleep":
-				s.sleep()
-				continue
-			case "haro.wake_word.wake":
-				s.awake = true
-				s.deps.Logger.Info("手动唤醒")
-				continue
-			case "haro.playback.started":
-				s.startPlayback()
-				continue
-			case "haro.playback.stopped":
-				s.stopPlayback()
+		switch event.(type) {
+		case realtimeproto.InputAudioBufferAppend:
+			if err := s.acceptAudio(ctx, event.(realtimeproto.InputAudioBufferAppend).Audio.Data); err != nil {
+				return err
+			}
+		case realtimeproto.HaroWakeWordSleep, realtimeproto.HaroWakeWordWake, realtimeproto.HaroPlaybackStarted,
+			realtimeproto.HaroPlaybackStopped:
+			if !s.wakeEnabled {
+				_ = writeEvent(ctx, s.conn, realtimeproto.Error{Code: realtimeproto.CodeUnsupportedFeature,
+					Message: event.Type() + ": 这个会话没有启用唤醒门"})
 				continue
 			}
-		}
-		if err := json.Unmarshal(data, &head); err != nil || head.Type != "input_audio_buffer.append" {
-			_ = wsjson.Write(ctx, s.conn, realtimeproto.NewWireError("invalid_request_error",
-				fmt.Sprintf("不支持的事件 %q（只接受 input_audio_buffer.append）", head.Type)))
-			continue
-		}
-		pcm, err := base64.StdEncoding.DecodeString(head.Audio)
-		if err != nil {
-			_ = wsjson.Write(ctx, s.conn, realtimeproto.NewWireError("invalid_request_error", "audio 不是合法的 base64"))
-			continue
-		}
-		if err := s.acceptAudio(ctx, pcm); err != nil {
-			return err
+			s.applyWakeEvent(event)
+		default:
+			_ = writeEvent(ctx, s.conn, realtimeproto.Error{Code: realtimeproto.CodeUnsupportedEvent,
+				Message: "转写会话不支持 " + event.Type()})
 		}
 	}
 }
@@ -321,11 +311,11 @@ func (s *transcriptionSession) acceptAudio(ctx context.Context, pcm []byte) erro
 
 // wakeUp 听到唤醒词：进入唤醒状态，并把唤醒词所在的这句话标记为「唤醒句」（一口气说完时接得住）。
 func (s *transcriptionSession) wakeUp(ctx context.Context, keyword string, speaking bool) error {
-	// 声纹（v3 H-3a）：唤醒词要是登记过的人说的才醒——旁人叫不醒，播放时 haro 自己的声音也打断不了
-	// 唤醒词只有 1 秒多，声纹算不稳：门槛比说话时低（v3 BV）；没到说话门槛的，唤醒句照常比对
+	// 声纹：唤醒词要是登记过的人说的才醒——旁人叫不醒，播放时 haro 自己的声音也打断不了
+	// 唤醒词只有 1 秒多，声纹算不稳：门槛比说话时低；没到说话门槛的，唤醒句照常比对
 	wakeSpeaker, wakeGuess := "", ""
 	window := pcm16ToFloat(s.sliceHistory(s.wakeWindowStart(), s.totalSamples))
-	quality := wakeQuality{level: rootMeanSquare(window)} // 几台终端同时听到时，服务端据此选一台回答（v4 D2）
+	quality := wakeQuality{level: rootMeanSquare(window)} // 几台终端同时听到时，服务端据此选一台回答
 	if s.deps.Speakers.enabled() {
 		name, score, sure, err := s.deps.Speakers.identifyWake(window)
 		quality.score = score
@@ -354,9 +344,8 @@ func (s *transcriptionSession) wakeUp(ctx context.Context, keyword string, speak
 	s.lastWakeAt = s.totalSamples
 	s.deps.Logger.Info("听到唤醒词", "keyword", keyword, "audio_ms", s.totalSamples/samplesPerMs,
 		"vad_speaking", speaking, "speech_start_ms", s.speechStart/samplesPerMs, "in_item", s.current != nil)
-	if err := wsjson.Write(ctx, s.conn, realtimeproto.WireWakeWordDetected{
-		Type: "haro.wake_word.detected", Keyword: keyword, AudioMs: int64(s.totalSamples / samplesPerMs),
-		Score: quality.score, Level: quality.level}); err != nil {
+	if err := writeEvent(ctx, s.conn, realtimeproto.HaroWakeWordDetected{Keyword: keyword,
+		AudioMs: int64(s.totalSamples / samplesPerMs), Score: quality.score, Level: quality.level}); err != nil {
 		return err
 	}
 	if s.current != nil { // 醒着时这句话已经开始了：只需标记，识别后去掉唤醒词
@@ -429,14 +418,14 @@ func (s *transcriptionSession) waitLimit() int {
 func (s *transcriptionSession) beginUtterance(ctx context.Context, atSample int) error {
 	s.itemCount++
 	s.current = &utterance{itemID: fmt.Sprintf("item_%d", s.itemCount), startSample: atSample, endSample: atSample}
-	return wsjson.Write(ctx, s.conn, realtimeproto.WireSpeechStarted{
-		Type: "input_audio_buffer.speech_started", AudioStartMs: int64(atSample / samplesPerMs), ItemID: s.current.itemID})
+	return writeEvent(ctx, s.conn, realtimeproto.InputAudioBufferSpeechStarted{
+		AudioStartMs: int64(atSample / samplesPerMs), ItemID: s.current.itemID})
 }
 
 // handleSegment 把一个 VAD 语音段并入当前这句话，再决定是否已经说完。
 func (s *transcriptionSession) handleSegment(ctx context.Context, segment SpeechSegment) error {
 	end := segment.StartSample + segment.SampleCount
-	if segment.StartSample < s.echoUntil { // 开头是 haro 自己的回声（v3 E-1）：只取回声之后的部分
+	if segment.StartSample < s.echoUntil { // 开头是 haro 自己的回声：只取回声之后的部分
 		if end-s.echoUntil < minAfterEchoMs*samplesPerMs {
 			s.deps.Logger.Info("忽略：haro 自己的声音（播放时开始的语音段）", "start_ms", segment.StartSample/samplesPerMs,
 				"end_ms", end/samplesPerMs, "echo_until_ms", s.echoUntil/samplesPerMs)
@@ -483,18 +472,18 @@ func (s *transcriptionSession) handleSegment(ctx context.Context, segment Speech
 func (s *transcriptionSession) finishUtterance(ctx context.Context) error {
 	current := s.current
 	s.current = nil
-	if err := wsjson.Write(ctx, s.conn, realtimeproto.WireSpeechStopped{
-		Type: "input_audio_buffer.speech_stopped", AudioEndMs: int64(current.endSample / samplesPerMs), ItemID: current.itemID}); err != nil {
+	if err := writeEvent(ctx, s.conn, realtimeproto.InputAudioBufferSpeechStopped{
+		AudioEndMs: int64(current.endSample / samplesPerMs), ItemID: current.itemID}); err != nil {
 		return err
 	}
 	audio := realtimeproto.PCMAudio{
-		Format: realtimeproto.AudioFormat{SampleRate: realtimeproto.TranscriptionSampleRate, Channels: 1},
+		Format: realtimeproto.TranscriptionFormat,
 		Data:   s.sliceHistory(s.paddedStart(current.startSample), current.endSample),
 	}
 	started := time.Now()
 	transcript, err := s.deps.Transcriber.Transcribe(ctx, audio)
 	if err != nil {
-		return wsjson.Write(ctx, s.conn, realtimeproto.NewWireError("server_error", "识别失败: "+err.Error()))
+		return writeEvent(ctx, s.conn, realtimeproto.Error{Code: realtimeproto.CodeTranscriptionFailed, Message: "识别失败: " + err.Error()})
 	}
 	s.deps.Logger.Info("一句话的范围", "item", current.itemID, "start_ms", current.startSample/samplesPerMs,
 		"end_ms", current.endSample/samplesPerMs, "after_wake_ms", s.sinceWakeMs(current.startSample), "wake", current.wake)
@@ -510,23 +499,24 @@ func (s *transcriptionSession) finishUtterance(ctx context.Context) error {
 		"elapsed", time.Since(started).Round(time.Millisecond), "text", transcript.Text)
 	speaker, checked := s.identifySpeaker(current.itemID, audio.Data)
 	switch {
-	case current.wakeSpeaker != "": // 唤醒时已经认出来了（v3 V-a）：这句沿用，不让很短的唤醒句重新比对推翻它
+	case current.wakeSpeaker != "": // 唤醒时已经认出来了：这句沿用，不让很短的唤醒句重新比对推翻它
 		speaker, checked = current.wakeSpeaker, true
 	case current.wakeGuess != "" && speaker == "" && transcript.Text == "":
-		// 唤醒时只过了唤醒门槛，又只叫了唤醒词：放行，让 haro 回「我在」（不带信息、不做事；v3 BV）
+		// 唤醒时只过了唤醒门槛，又只叫了唤醒词：放行，让 haro 回「我在」（不带信息、不做事）
 		s.deps.Logger.Info("只叫了唤醒词：沿用唤醒时的声纹，回「我在」", "item", current.itemID, "speaker", current.wakeGuess)
 		speaker, checked = current.wakeGuess, true
 	}
-	return wsjson.Write(ctx, s.conn, realtimeproto.NewWireTranscriptionCompleted(current.itemID, transcript.Text, speaker, checked))
+	return writeEvent(ctx, s.conn, realtimeproto.InputAudioTranscriptionCompleted{ItemID: current.itemID,
+		Transcript: transcript.Text, Speaker: speaker, SpeakerChecked: checked})
 }
 
-// minAfterEchoMs：剪掉回声后剩下不到这么长，就当整段都是回声（v3 E-1）。
+// minAfterEchoMs：剪掉回声后剩下不到这么长，就当整段都是回声。
 const minAfterEchoMs = 250
 
 // minWakeWindowMs：算唤醒词声纹至少要这么长的声音（避开回声后太短就不避了）。
 const minWakeWindowMs = 1000
 
-// paddedStart 是识别一句话时音频的起点：往前多取 prefix_padding_ms，但不取进 haro 自己的回声（v3 E-1）。
+// paddedStart 是识别一句话时音频的起点：往前多取 prefix_padding_ms，但不取进 haro 自己的回声。
 func (s *transcriptionSession) paddedStart(startSample int) int {
 	return max(startSample-s.turnDetection.PrefixPaddingMs*samplesPerMs, min(startSample, s.echoUntil))
 }
@@ -577,7 +567,7 @@ func (s *transcriptionSession) sinceWakeMs(sample int) int {
 	return (sample - s.lastWakeAt) / samplesPerMs
 }
 
-// identifySpeaker 比对这句话的声纹（v3 H-3）；没登记声纹或算不出来时 checked = false（服务端不过滤）。
+// identifySpeaker 比对这句话的声纹；没登记声纹或算不出来时 checked = false（服务端不过滤）。
 func (s *transcriptionSession) identifySpeaker(itemID string, pcm []byte) (string, bool) {
 	if !s.deps.Speakers.enabled() {
 		return "", false
@@ -613,4 +603,28 @@ func (m *levelMeter) add(samples []float32) (rms, peak float64, ok bool) {
 	rms, peak = math.Sqrt(m.sumSq/float64(m.samples)), m.peak
 	*m = levelMeter{}
 	return rms, peak, true
+}
+
+// applyWakeEvent 处理唤醒门的四个控制事件（会话启用了唤醒门时才会走到这里）。
+func (s *transcriptionSession) applyWakeEvent(event realtimeproto.ClientEvent) {
+	switch event.(type) {
+	case realtimeproto.HaroWakeWordSleep:
+		s.sleep()
+	case realtimeproto.HaroWakeWordWake:
+		s.awake = true
+		s.deps.Logger.Info("手动唤醒")
+	case realtimeproto.HaroPlaybackStarted:
+		s.startPlayback()
+	case realtimeproto.HaroPlaybackStopped:
+		s.stopPlayback()
+	}
+}
+
+// writeEvent 把一个服务端事件编码后发给对端。
+func writeEvent(ctx context.Context, conn *websocket.Conn, event realtimeproto.ServerEvent) error {
+	data, err := realtimeproto.EncodeServerEvent(event)
+	if err != nil {
+		return err
+	}
+	return conn.Write(ctx, websocket.MessageText, data)
 }

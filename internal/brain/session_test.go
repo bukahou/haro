@@ -129,8 +129,8 @@ func (k *talker) send(event realtimeproto.ClientEvent) {
 
 func TestSessionStreamsSentencesInOrder(t *testing.T) {
 	model := &fakeModel{tokens: []string{"我看到你", "坐在电脑前面，", "旁边有", "一个杯子。", "还有键盘。"}, delay: 5 * time.Millisecond}
-	k := newTestTalker(t, model, fakeSynthesizer{})
-	k.send(realtimeproto.SessionUpdate{Instructions: "你是测试助手"})
+	k := newTalker(t, brain.Components{Model: model, Synthesizer: fakeSynthesizer{}},
+		brain.Options{MaxHistoryTurn: 6, Instructions: "你是测试助手"})
 
 	events := k.askWithImage("你能看到我吗", []byte("jpeg"))
 

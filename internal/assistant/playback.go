@@ -111,7 +111,7 @@ func (a *Assistant) finishResponse(turnSpan trace.Span, done realtimeproto.Respo
 		a.logger.Info("本轮完成", "total", time.Since(committedAt).Round(time.Millisecond))
 		return nil
 	case realtimeproto.StatusFailed:
-		return fail(turnSpan, "服务端", errors.New(done.Reason))
+		return fail(turnSpan, "服务端", errors.New(string(done.Reason)))
 	default:
 		a.logger.Info("本轮未完成", "status", done.Status, "reason", done.Reason)
 		return nil

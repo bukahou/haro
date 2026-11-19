@@ -21,7 +21,7 @@ type Persona struct {
 	DefaultEmotion Emotion  // 没打标记（或标「平常」）的句子用的语气
 }
 
-// PersonaState 记住当前性格，重启后保持（P-3）。
+// PersonaState 记住当前性格，重启后保持。
 type PersonaState interface {
 	LoadPersona() (string, error) // 没记过时返回 ""
 	SavePersona(id string) error
@@ -104,7 +104,7 @@ func (s *Session) switchPersona(arguments map[string]any) string {
 		s.logger.Info("调用工具", "tool", switchPersonaTool, "name", name, "err", "没有这个性格")
 		return fmt.Sprintf("没有叫「%s」的性格，没有切换。", name)
 	}
-	s.currentConversation().setPersona(persona) // 只换这个人的（v4 C-1）
+	s.currentConversation().setPersona(persona) // 只换这个人的
 	if s.opts.PersonaState != nil {             // 也记成全家「上次选的」：新的人从它开始
 		if err := s.opts.PersonaState.SavePersona(persona.ID); err != nil {
 			s.logger.Warn("记住当前性格失败（重启后会回到默认）", "err", err)
@@ -117,7 +117,7 @@ func (s *Session) switchPersona(arguments map[string]any) string {
 // systemPrompt 拼出系统提示词：基础提示词 + 当前性格的风格。
 func (s *Session) systemPrompt() string {
 	s.mu.Lock()
-	instructions, noCamera, conversation := s.instructions, s.noCamera || s.cameraGone, s.conversation
+	instructions, noCamera, conversation := s.opts.Instructions, s.noCamera || s.cameraGone, s.conversation
 	s.mu.Unlock()
 	profile := ""
 	if s.parts.Profiles != nil {
@@ -136,7 +136,7 @@ const userSaysHeading = "【主人说】"
 // userTurn 是这一轮交给模型的「主人的话」：前面附上现在的情况（时间、位置、谁在说话、额度、任务板）。
 //
 // 为什么不放进系统提示词：这些每轮都变，而系统提示词在最前面——放在那里，每轮的开头都不一样，
-// 支持提示词缓存的模型（按开头复用）就永远命中不了，本地模型也得从头处理整段历史（2026-11-17）。
+// 支持提示词缓存的模型（按开头复用）就永远命中不了，本地模型也得从头处理整段历史。
 // 放在最后一条消息里，系统提示词和历史保持不变；历史里只存主人的原话，不存这段附注。
 func (s *Session) userTurn(text string) ChatMessage {
 	briefing := s.briefing(s.currentConversation().Person())
@@ -146,7 +146,7 @@ func (s *Session) userTurn(text string) ChatMessage {
 	return ChatMessage{Role: RoleUser, Text: briefing + "\n" + userSaysHeading + "\n" + text}
 }
 
-// briefing 汇总这一轮要补充的情况：谁在说话 + 各 Briefer（v5）。
+// briefing 汇总这一轮要补充的情况：谁在说话 + 各 Briefer。
 func (s *Session) briefing(person string) string {
 	var lines []string
 	if person != "" && person != SharedPerson {

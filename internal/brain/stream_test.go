@@ -31,7 +31,7 @@ func TestSessionHandsFreeTurn(t *testing.T) {
 	ctx := context.Background()
 
 	turn := realtimeproto.TurnDetection{Type: "server_vad", SilenceDurationMs: 700}
-	stream := braintest.Open(t, session, voice, realtimeproto.SessionUpdate{Instructions: "测试", TurnDetection: &turn})
+	stream := braintest.Open(t, session, voice, realtimeproto.SessionUpdate{TurnDetection: &turn})
 	if voice.Config().TurnDetection.SilenceDurationMs != 700 {
 		t.Errorf("转写会话收到的配置 %+v", voice.Config())
 	}
@@ -46,9 +46,6 @@ func TestSessionHandsFreeTurn(t *testing.T) {
 	wrong := realtimeproto.PCMAudio{Format: realtimeproto.AudioFormat{SampleRate: 22050, Channels: 1}, Data: []byte{0, 0}}
 	if err := session.Send(ctx, realtimeproto.InputAudioBufferAppend{Audio: wrong}); err == nil {
 		t.Error("格式不对的音频应被拒绝")
-	}
-	if err := session.Send(ctx, realtimeproto.InputAudioBufferCommit{}); err == nil {
-		t.Error("手动提交应被拒绝（由服务端判断说完）")
 	}
 
 	// VAD：开始 → 结束；终端带画面请求回答；识别结果随后才到

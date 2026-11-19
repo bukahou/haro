@@ -102,7 +102,7 @@ func TestRealtimeTranscriptionSession(t *testing.T) {
 	conn, ctx := dialRealtime(t, factory, transcriber, nil)
 
 	turn := realtimeproto.TurnDetection{Type: "server_vad", PrefixPaddingMs: 100, SilenceDurationMs: 300}
-	if err := wsjson.Write(ctx, conn, realtimeproto.NewTranscriptionSessionUpdate(turn, false)); err != nil {
+	if err := writeClientEvent(ctx, conn, transcriptionUpdate(turn, false)); err != nil {
 		t.Fatal(err)
 	}
 	// 200ms 静音 → 500ms 说话 → 400ms 静音，每 20ms 一块
@@ -111,7 +111,7 @@ func TestRealtimeTranscriptionSession(t *testing.T) {
 		loud bool
 	}{{200, false}, {500, true}, {400, false}} {
 		for sent := 0; sent < part.ms; sent += 20 {
-			if err := wsjson.Write(ctx, conn, realtimeproto.NewWireAudioAppend(pcmChunk(20, part.loud))); err != nil {
+			if err := writeClientEvent(ctx, conn, audioChunk(pcmChunk(20, part.loud))); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -123,7 +123,7 @@ func TestRealtimeTranscriptionSession(t *testing.T) {
 		if err != nil {
 			t.Fatalf("已收到 %v，读取出错 %v", events, err)
 		}
-		event, err := realtimeproto.DecodeServerWireEvent(data)
+		event, err := realtimeproto.DecodeServerEvent(data)
 		if err != nil || event == nil {
 			t.Fatalf("解析 %s: %v", data, err)
 		}
@@ -150,15 +150,15 @@ func TestRealtimeTranscriptionSession(t *testing.T) {
 func TestRealtimeRejectsBadSessionUpdate(t *testing.T) {
 	factory := func(realtimeproto.TurnDetection) (VoiceDetector, error) { return &energyDetector{}, nil }
 	conn, ctx := dialRealtime(t, factory, &lengthTranscriber{}, nil)
-	update := realtimeproto.NewTranscriptionSessionUpdate(realtimeproto.TurnDetection{Type: "server_vad"}, false)
-	update.Session.Audio.Input.Format.Rate = 24000
-	_ = wsjson.Write(ctx, conn, update)
+	update := transcriptionUpdate(realtimeproto.TurnDetection{Type: "server_vad"}, false)
+	update.InputFormat = realtimeproto.AudioFormat{SampleRate: 24000, Channels: 1}
+	_ = writeClientEvent(ctx, conn, update)
 	_, data, err := conn.Read(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	event, _ := realtimeproto.DecodeServerWireEvent(data)
-	if e, ok := event.(realtimeproto.Error); !ok || !strings.Contains(e.Message, "16000") {
+	event, _ := realtimeproto.DecodeServerEvent(data)
+	if e, ok := event.(realtimeproto.Error); !ok || e.Code != realtimeproto.CodeUnsupportedAudioFormat {
 		t.Errorf("应返回采样率错误，得到 %s", data)
 	}
 }
@@ -205,7 +205,7 @@ func sendPattern(t *testing.T, ctx context.Context, conn *websocket.Conn, parts 
 	t.Helper()
 	for _, part := range parts { // [毫秒, 是否说话(1/0)]
 		for sent := 0; sent < part[0]; sent += 20 {
-			if err := wsjson.Write(ctx, conn, realtimeproto.NewWireAudioAppend(pcmChunk(20, part[1] == 1))); err != nil {
+			if err := writeClientEvent(ctx, conn, audioChunk(pcmChunk(20, part[1] == 1))); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -220,7 +220,7 @@ func readEvents(t *testing.T, ctx context.Context, conn *websocket.Conn, n int) 
 		if err != nil {
 			t.Fatalf("已收到 %v，读取出错 %v", events, err)
 		}
-		if event, _ := realtimeproto.DecodeServerWireEvent(data); event != nil {
+		if event, _ := realtimeproto.DecodeServerEvent(data); event != nil {
 			events = append(events, event)
 		}
 	}
@@ -232,7 +232,7 @@ func TestSemanticVADMergesPauseIntoOneUtterance(t *testing.T) {
 	transcriber := &lengthTranscriber{}
 	conn, ctx := dialRealtime(t, semanticFactory(t), transcriber, turnDetector)
 	turn := realtimeproto.TurnDetection{Type: "semantic_vad", Eagerness: "auto"}
-	_ = wsjson.Write(ctx, conn, realtimeproto.NewTranscriptionSessionUpdate(turn, false))
+	_ = writeClientEvent(ctx, conn, transcriptionUpdate(turn, false))
 
 	// 0.2s 静音 → 0.5s 说话 → 0.4s 停顿 → 0.4s 说话 → 0.4s 静音
 	sendPattern(t, ctx, conn, [2]int{200, 0}, [2]int{500, 1}, [2]int{400, 0}, [2]int{400, 1}, [2]int{400, 0})
@@ -262,7 +262,7 @@ func TestSemanticVADTimesOutWhenUserStopsTalking(t *testing.T) {
 	turnDetector := &scriptedTurnDetector{probabilities: []float64{0.1}} // 一直判断「没说完」
 	conn, ctx := dialRealtime(t, semanticFactory(t), &lengthTranscriber{}, turnDetector)
 	turn := realtimeproto.TurnDetection{Type: "semantic_vad", Eagerness: "high"} // 最多再等 1s
-	_ = wsjson.Write(ctx, conn, realtimeproto.NewTranscriptionSessionUpdate(turn, false))
+	_ = writeClientEvent(ctx, conn, transcriptionUpdate(turn, false))
 
 	sendPattern(t, ctx, conn, [2]int{200, 0}, [2]int{500, 1}, [2]int{600, 0}) // 停顿 0.6s：还没到 1s
 	sendPattern(t, ctx, conn, [2]int{600, 0})                                 // 再静 0.6s：超时
@@ -274,9 +274,9 @@ func TestSemanticVADTimesOutWhenUserStopsTalking(t *testing.T) {
 
 func TestSemanticVADRequiresTurnModel(t *testing.T) {
 	conn, ctx := dialRealtime(t, semanticFactory(t), &lengthTranscriber{}, nil)
-	_ = wsjson.Write(ctx, conn, realtimeproto.NewTranscriptionSessionUpdate(realtimeproto.TurnDetection{Type: "semantic_vad"}, false))
+	_ = writeClientEvent(ctx, conn, transcriptionUpdate(realtimeproto.TurnDetection{Type: "semantic_vad"}, false))
 	events := readEvents(t, ctx, conn, 1)
-	if e, ok := events[0].(realtimeproto.Error); !ok || !strings.Contains(e.Message, "turn-model") {
+	if e, ok := events[0].(realtimeproto.Error); !ok || e.Code != realtimeproto.CodeUnsupportedFeature {
 		t.Errorf("没有 Smart Turn 模型时应拒绝 semantic_vad：%v", events)
 	}
 }
@@ -337,7 +337,7 @@ func dialWakeSessionWith(t *testing.T, transcriber Transcriber, spotter *fakeSpo
 	}
 	t.Cleanup(func() { conn.CloseNow() })
 	turn := realtimeproto.TurnDetection{Type: "server_vad", SilenceDurationMs: 300}
-	if err := wsjson.Write(ctx, conn, realtimeproto.NewTranscriptionSessionUpdate(turn, true)); err != nil {
+	if err := writeClientEvent(ctx, conn, transcriptionUpdate(turn, true)); err != nil {
 		t.Fatal(err)
 	}
 	return conn, ctx
@@ -346,7 +346,7 @@ func dialWakeSessionWith(t *testing.T, transcriber Transcriber, spotter *fakeSpo
 func sendKeyword(t *testing.T, ctx context.Context, conn *websocket.Conn) {
 	t.Helper()
 	for i := 0; i < 10; i++ {
-		if err := wsjson.Write(ctx, conn, realtimeproto.NewWireAudioAppend(keywordChunk())); err != nil {
+		if err := writeClientEvent(ctx, conn, audioChunk(keywordChunk())); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -423,9 +423,9 @@ func TestWakeWordOnlyProducesEmptyUtterance(t *testing.T) {
 func TestWakeWordRequiresSpotter(t *testing.T) {
 	conn, ctx := dialRealtime(t, func(realtimeproto.TurnDetection) (VoiceDetector, error) { return &energyDetector{}, nil },
 		&lengthTranscriber{}, nil)
-	_ = wsjson.Write(ctx, conn, realtimeproto.NewTranscriptionSessionUpdate(realtimeproto.TurnDetection{Type: "server_vad"}, true))
+	_ = writeClientEvent(ctx, conn, transcriptionUpdate(realtimeproto.TurnDetection{Type: "server_vad"}, true))
 	events := readEvents(t, ctx, conn, 1)
-	if e, ok := events[0].(realtimeproto.Error); !ok || !strings.Contains(e.Message, "唤醒词") {
+	if e, ok := events[0].(realtimeproto.Error); !ok || e.Code != realtimeproto.CodeUnsupportedFeature {
 		t.Errorf("没有唤醒词模型时应拒绝：%v", events)
 	}
 }
@@ -625,4 +625,24 @@ func TestWakeThresholdFallsBackToThreshold(t *testing.T) {
 			t.Errorf("WakeThreshold %.1f → %.1f，应为 %.1f", c.wake, got, c.want)
 		}
 	}
+}
+
+// transcriptionUpdate 是转写会话的第一条消息。
+func transcriptionUpdate(turn realtimeproto.TurnDetection, wakeWord bool) realtimeproto.SessionUpdate {
+	return realtimeproto.SessionUpdate{Kind: realtimeproto.SessionTranscription, TurnDetection: &turn, WakeWord: wakeWord,
+		InputFormat: realtimeproto.TranscriptionFormat}
+}
+
+// audioChunk 是一块 16 kHz 的音频。
+func audioChunk(pcm []byte) realtimeproto.InputAudioBufferAppend {
+	return realtimeproto.InputAudioBufferAppend{Audio: realtimeproto.PCMAudio{Format: realtimeproto.TranscriptionFormat, Data: pcm}}
+}
+
+// writeClientEvent 把一个客户端事件编码后发出去。
+func writeClientEvent(ctx context.Context, conn *websocket.Conn, event realtimeproto.ClientEvent) error {
+	data, err := realtimeproto.EncodeClientEvent(event)
+	if err != nil {
+		return err
+	}
+	return conn.Write(ctx, websocket.MessageText, data)
 }

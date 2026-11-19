@@ -64,12 +64,12 @@ func TestRealtimeLive(t *testing.T) {
 	}
 	defer conn.CloseNow()
 	turn := realtimeproto.TurnDetection{Type: "server_vad", Threshold: 0.5, SilenceDurationMs: 700, PrefixPaddingMs: 300}
-	if err := wsjson.Write(ctx, conn, realtimeproto.NewTranscriptionSessionUpdate(turn, false)); err != nil {
+	if err := writeClientEvent(ctx, conn, transcriptionUpdate(turn, false)); err != nil {
 		t.Fatal(err)
 	}
 	go func() {
 		for offset := 0; offset < len(stream); offset += 640 {
-			_ = wsjson.Write(ctx, conn, realtimeproto.NewWireAudioAppend(stream[offset:min(offset+640, len(stream))]))
+			_ = writeClientEvent(ctx, conn, audioChunk(stream[offset:min(offset+640, len(stream))]))
 		}
 	}()
 
@@ -79,7 +79,7 @@ func TestRealtimeLive(t *testing.T) {
 		if err != nil {
 			t.Fatalf("已识别 %d 段，读取出错 %v", completed, err)
 		}
-		event, _ := realtimeproto.DecodeServerWireEvent(data)
+		event, _ := realtimeproto.DecodeServerEvent(data)
 		switch e := event.(type) {
 		case realtimeproto.InputAudioBufferSpeechStarted:
 			t.Logf("speech_started  %s  audio_start_ms=%d", e.ItemID, e.AudioStartMs)
@@ -133,10 +133,10 @@ func TestWakeRealtimeLive(t *testing.T) {
 	}
 	defer conn.CloseNow()
 	turn := realtimeproto.TurnDetection{Type: "server_vad", Threshold: 0.5, SilenceDurationMs: 700, PrefixPaddingMs: 300}
-	_ = wsjson.Write(ctx, conn, realtimeproto.NewTranscriptionSessionUpdate(turn, true))
+	_ = writeClientEvent(ctx, conn, transcriptionUpdate(turn, true))
 	go func() {
 		for offset := 0; offset < len(stream); offset += 640 {
-			_ = wsjson.Write(ctx, conn, realtimeproto.NewWireAudioAppend(stream[offset:min(offset+640, len(stream))]))
+			_ = writeClientEvent(ctx, conn, audioChunk(stream[offset:min(offset+640, len(stream))]))
 		}
 		_ = wsjson.Write(ctx, conn, map[string]string{"type": "haro.wake_word.sleep"}) // 流结束后的标记
 	}()
@@ -148,7 +148,27 @@ func TestWakeRealtimeLive(t *testing.T) {
 			t.Logf("（读取结束：%v）", err)
 			return
 		}
-		event, _ := realtimeproto.DecodeServerWireEvent(data)
+		event, _ := realtimeproto.DecodeServerEvent(data)
 		t.Logf("%s  %+v", event.Type(), event)
 	}
+}
+
+// transcriptionUpdate 是转写会话的第一条消息。
+func transcriptionUpdate(turn realtimeproto.TurnDetection, wakeWord bool) realtimeproto.SessionUpdate {
+	return realtimeproto.SessionUpdate{Kind: realtimeproto.SessionTranscription, TurnDetection: &turn, WakeWord: wakeWord,
+		InputFormat: realtimeproto.TranscriptionFormat}
+}
+
+// audioChunk 是一块 16 kHz 的音频。
+func audioChunk(pcm []byte) realtimeproto.InputAudioBufferAppend {
+	return realtimeproto.InputAudioBufferAppend{Audio: realtimeproto.PCMAudio{Format: realtimeproto.TranscriptionFormat, Data: pcm}}
+}
+
+// writeClientEvent 把一个客户端事件编码后发出去。
+func writeClientEvent(ctx context.Context, conn *websocket.Conn, event realtimeproto.ClientEvent) error {
+	data, err := realtimeproto.EncodeClientEvent(event)
+	if err != nil {
+		return err
+	}
+	return conn.Write(ctx, websocket.MessageText, data)
 }

@@ -54,11 +54,11 @@ func TestConversationLive(t *testing.T) {
 		Streaming: voice, Synthesizer: textSynthesizer{}, Tools: box,
 		Model:        testChatModel(t),
 		NewSegmenter: func() brain.TextSegmenter { return speech.NewSentenceSegmenter(4, 40) },
-	}, brain.Options{MaxHistoryTurn: 6}, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	}, brain.Options{MaxHistoryTurn: 6, Instructions: brain.DefaultInstructions}, slog.New(slog.NewTextHandler(os.Stderr, nil)))
 	defer session.Close()
 	turns := []string{"帮我记一下，车停在C3的7号位。", "我的车停在哪了？", "现在几点了？", "家里网络正常吗？",
 		"我最近都记了些什么？", "把车停车位那条记录删了。", "确认", "你能看到我吗？"}
-	stream := braintest.Open(t, session, voice, realtimeproto.SessionUpdate{Instructions: brain.DefaultInstructions})
+	stream := braintest.Open(t, session, voice, realtimeproto.SessionUpdate{})
 	if conversation := os.Getenv("HARO_TEST_CONVERSATION"); conversation != "" {
 		turns = strings.Split(conversation, "|")
 	}

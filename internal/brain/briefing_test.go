@@ -20,8 +20,7 @@ func TestBriefingGoesBeforeTheUserTurn(t *testing.T) {
 	model := &fakeModel{tokens: []string{"好的。"}}
 	k := newTalker(t, brain.Components{Model: model, Synthesizer: fakeSynthesizer{},
 		Briefers: []brain.Briefer{staticBriefer{lines: []string{"额度提醒：这个月用到 80% 了"}}}},
-		brain.Options{MaxHistoryTurn: 6})
-	k.send(realtimeproto.SessionUpdate{Instructions: "你是测试助手"})
+		brain.Options{MaxHistoryTurn: 6, Instructions: "你是测试助手"})
 	k.ask("你好")
 	firstSystem := model.history[0].Text
 
