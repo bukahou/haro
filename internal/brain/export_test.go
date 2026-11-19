@@ -5,7 +5,7 @@ var (
 	EscalatedNote        = escalatedNote
 	AlreadyEscalatedNote = alreadyEscalatedNote
 	FrameRecalledNote    = frameRecalledNote
-	ExpertReportNote     = expertReportNote
+	ExpertReport         = expertReport
 	UserSaysHeading      = userSaysHeading
 	CaptureFailedNote    = captureFailedNote
 )

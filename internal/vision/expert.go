@@ -1,5 +1,5 @@
 // Package vision 是看画面的幕后专家：前台模型不直接看图，要看画面时把画面和主人这一轮的原话交给更强的模型，
-// 拿回一段文字判断交给前台转述（实现 brain.FrameExpert）。
+// 拿回两段结论（说给主人听的一句、看到的细节）交给前台（实现 brain.FrameExpert）。
 //
 // 专家只看画面和主人的原话：不带性格、不带对话记录，输入小（约 1.6k token），比让更强的模型接手整轮便宜得多。
 // 需要联网核对时专家自己查：只有它看得到画面，才能按「画面比搜到的资料可靠」取舍搜索结果。
@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/google/jsonschema-go/jsonschema"
 
 	"github.com/bukahou/haro/internal/brain"
 )
@@ -41,22 +43,67 @@ func NewExpert(model brain.ChatModel, modelName string, search Search, logger *s
 
 var _ brain.FrameExpert = (*Expert)(nil)
 
-const searchTool = "search_web"
+const (
+	searchTool = "search_web"
+	reportTool = "report_frame"
+)
 
-var searchSpec = brain.ToolSpec{Name: searchTool,
-	Description: "联网搜索一次，用来核对画面里的东西（例如确认产品名、型号）。搜索词用外观特征加上画面里读到的字。",
-	Parameters:  json.RawMessage(`{"type":"object","properties":{"query":{"type":"string","description":"搜索词，例如「蓝色 包装盒 M.2 硬盘盒 Groovy」"}},"required":["query"]}`)}
+// searchArgs 是 search_web 的参数；reportArgs 是 report_frame 的参数。工具的参数定义由这两个结构体生成。
+type searchArgs struct {
+	Query string `json:"query" jsonschema:"搜索词，用外观特征加上画面里读到的字，例如「蓝色 包装盒 M.2 硬盘盒 Groovy」"`
+}
 
-// expertPrompt 是专家的提示词：只管看画面、说出判断，由前台转述给主人。
-var expertPrompt = "你是看图专家，帮家里的语音助手看摄像头画面。主人一般是手举着东西、离镜头一臂远在问。你的回答由助手转述给主人。" +
-	"先用一两句说出看到的：形状、颜色、材质、上面的字和图案；字看不清就说看不清，不要猜字。再说是什么，并说出把握：确定、看着像、还是不确定。" +
+type reportArgs struct {
+	Spoken  string `json:"spoken"`
+	Details string `json:"details" jsonschema:"看到的形状、颜色、材质、上面的字和图案，判断依据，哪些是画面上看到的、哪些是查到的（主人追问时用，不念给主人）"`
+}
+
+var (
+	searchSpec = brain.ToolSpec{Name: searchTool,
+		Description: "联网搜索一次，用来核对画面里的东西（例如确认产品名、型号）。",
+		Parameters:  toolSchema[searchArgs](nil)}
+	reportSpec = brain.ToolSpec{Name: reportTool,
+		Description: "看完画面后调用一次，交出结论：说给主人听的话和细节分开交。",
+		Parameters: toolSchema[reportArgs](map[string]string{"spoken": fmt.Sprintf("助手照着说给主人听的一两句，不超过 %d 个字，"+
+			"只说主人问的：是什么、把握多大（确定 / 看着像 / 不确定）；看不清就说要主人怎么做（拿近一点，或者把哪一面转向镜头）",
+			brain.CameraAnswerChars)})}
+)
+
+// toolSchema 由参数结构体生成工具的 JSON Schema；descriptions 补上要引用常量、写不进结构体标签的字段说明。
+func toolSchema[T any](descriptions map[string]string) json.RawMessage {
+	schema, err := jsonschema.For[T](nil)
+	if err != nil {
+		panic(fmt.Sprintf("生成工具参数的 Schema: %v", err))
+	}
+	for field, description := range descriptions {
+		schema.Properties[field].Description = description
+	}
+	data, err := json.Marshal(schema)
+	if err != nil {
+		panic(fmt.Sprintf("编码工具参数的 Schema: %v", err))
+	}
+	return data
+}
+
+// expertPrompt 是专家的提示词：只管看画面、交出结论（说给主人听的话由助手照着说）。
+var expertPrompt = "你是看图专家，帮家里的语音助手看摄像头画面。主人一般是手举着东西、离镜头一臂远在问。" +
+	"先看清形状、颜色、材质、上面的字和图案；字看不清就当看不清，不要猜字。再判断是什么，以及把握：确定、看着像、还是不确定。" +
 	"画面里直接看到的比搜到的资料可靠，两者对不上时以画面为准，并说不确定。" +
 	fmt.Sprintf("主人问的是画面上看不全的信息（规格、价格、用法、确切型号）时，用画面里读到的品牌、型号和外观特征去 %s 查，最多 %d 次；", searchTool, maxSearches) +
-	"只问是什么、而画面已经看得出来时不用查。说出哪些是画面上看到的、哪些是查到的。" +
-	"不确定时，说清要主人怎么做：拿近一点，或者把哪一面转向镜头。只回答主人问的，150 字以内，用口语，不用列表和 Markdown。画面里没有的东西不要编。"
+	"只问是什么、而画面已经看得出来时不用查。" +
+	fmt.Sprintf("看完调用 %s 交出结论：spoken 是助手照着说给主人听的一两句，不超过 %d 个字，只说主人问的；details 写细节和依据，不念给主人。",
+		reportTool, brain.CameraAnswerChars) +
+	"用口语，不用列表和 Markdown。画面里没有的东西不要编。"
+
+// reportReminder：专家说了判断却没调用 report_frame 时提醒它一次。
+var reportReminder = fmt.Sprintf("用 %s 交出结论：spoken 一两句、不超过 %d 个字，details 写细节。", reportTool, brain.CameraAnswerChars)
+
+// maxRounds：搜 maxSearches 次各一轮，交结论一轮，再留一轮给提醒。到上限还没交结论，就把它说的话当细节交给前台。
+const maxRounds = maxSearches + 2
 
 // ExamineFrame 看一帧画面，回答主人这一轮的话；需要时联网查（最多 maxSearches 次）。
-func (e *Expert) ExamineFrame(ctx context.Context, frame []byte, request string) (string, error) {
+// 结论经 report_frame 分两段交出；专家没按要求交时，它说的话放进 Details，由前台自己压短。
+func (e *Expert) ExamineFrame(ctx context.Context, frame []byte, request string) (brain.FrameReport, error) {
 	ctx, cancel := context.WithTimeout(ctx, examineTimeout)
 	defer cancel()
 	started := time.Now()
@@ -66,25 +113,42 @@ func (e *Expert) ExamineFrame(ctx context.Context, frame []byte, request string)
 		{Role: brain.RoleUser, Text: "这是摄像头当前画面。", Image: frame},
 	}
 	searches, promptTokens, outputTokens := 0, 0, 0
+	reminded := false
+	finish := func(report brain.FrameReport) (brain.FrameReport, error) {
+		e.logger.Info("看画面：专家看完", "model", e.modelName, "elapsed", since(started), "searches", searches,
+			"spoken_chars", utf8.RuneCountInString(report.Spoken), "details_chars", utf8.RuneCountInString(report.Details),
+			"prompt_tokens", promptTokens, "output_tokens", outputTokens)
+		return report, nil
+	}
 	for round := 1; ; round++ {
-		var specs []brain.ToolSpec
-		if e.search != nil && searches < maxSearches {
-			specs = []brain.ToolSpec{searchSpec}
+		specs := []brain.ToolSpec{reportSpec}
+		if e.search != nil && searches < maxSearches && round < maxRounds {
+			specs = append(specs, searchSpec)
 		}
 		text, calls, usage, err := complete(ctx, e.model, messages, specs)
 		promptTokens, outputTokens = promptTokens+usage.PromptTokens, outputTokens+usage.OutputTokens
 		if err != nil {
 			e.logger.Warn("看画面的专家出错", "model", e.modelName, "elapsed", since(started), "err", err)
-			return "", err
+			return brain.FrameReport{}, err
 		}
-		if len(calls) == 0 || len(specs) == 0 {
-			report := strings.TrimSpace(text)
-			if report == "" {
-				return "", errors.New("看画面的专家没有给出判断")
+		if report, ok := reportIn(calls); ok {
+			return finish(report)
+		}
+		text = strings.TrimSpace(text)
+		if text == "" && len(calls) == 0 {
+			return brain.FrameReport{}, errors.New("看画面的专家没有给出判断")
+		}
+		if round >= maxRounds || (len(calls) == 0 && reminded) {
+			if text == "" {
+				return brain.FrameReport{}, errors.New("看画面的专家没有给出判断")
 			}
-			e.logger.Info("看画面：专家看完", "model", e.modelName, "elapsed", since(started), "searches", searches,
-				"chars", utf8.RuneCountInString(report), "prompt_tokens", promptTokens, "output_tokens", outputTokens)
-			return report, nil
+			return finish(brain.FrameReport{Details: text})
+		}
+		if len(calls) == 0 { // 说了判断但没交结论：提醒一次
+			messages = append(messages, brain.ChatMessage{Role: brain.RoleAssistant, Text: text},
+				brain.ChatMessage{Role: brain.RoleUser, Text: reportReminder})
+			reminded = true
+			continue
 		}
 		for i := range calls {
 			if calls[i].ID == "" {
@@ -99,6 +163,23 @@ func (e *Expert) ExamineFrame(ctx context.Context, frame []byte, request string)
 	}
 }
 
+// reportIn 从这一轮的工具调用里取出 report_frame 交的结论；没有、或两段都空时 ok = false。
+func reportIn(calls []brain.ToolCall) (brain.FrameReport, bool) {
+	for _, call := range calls {
+		if call.Name != reportTool {
+			continue
+		}
+		var args reportArgs
+		data, err := json.Marshal(call.Arguments)
+		if err != nil || json.Unmarshal(data, &args) != nil {
+			return brain.FrameReport{}, false
+		}
+		report := brain.FrameReport{Spoken: strings.TrimSpace(args.Spoken), Details: strings.TrimSpace(args.Details)}
+		return report, report.Spoken != "" || report.Details != ""
+	}
+	return brain.FrameReport{}, false
+}
+
 // runTool 执行专家的一次工具调用；出错也作为文字交给专家，让它根据画面回答。
 func (e *Expert) runTool(ctx context.Context, call brain.ToolCall, searches *int) string {
 	if call.Name != searchTool {
@@ -107,7 +188,11 @@ func (e *Expert) runTool(ctx context.Context, call brain.ToolCall, searches *int
 	if *searches >= maxSearches {
 		return fmt.Sprintf("搜索次数已经用完（上限 %d 次）。根据画面和已有资料回答。", maxSearches)
 	}
-	query, _ := call.Arguments["query"].(string)
+	var args searchArgs
+	if data, err := json.Marshal(call.Arguments); err == nil {
+		_ = json.Unmarshal(data, &args)
+	}
+	query := args.Query
 	if strings.TrimSpace(query) == "" {
 		return "query 不能为空"
 	}

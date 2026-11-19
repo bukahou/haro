@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/bukahou/haro/internal/llm"
 	"github.com/bukahou/haro/internal/tools"
@@ -55,5 +56,5 @@ func TestLiveExpert(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Logf("专家的判断：%s", report)
+	t.Logf("说给主人听的（%d 字）：%s\n细节：%s", utf8.RuneCountInString(report.Spoken), report.Spoken, report.Details)
 }

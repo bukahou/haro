@@ -155,14 +155,19 @@ func loadEvalSamples(t *testing.T, path string) []evalSample {
 	return samples
 }
 
-// examineAsExpert 让专家看一次，返回它的判断、用时与这一次的用量（专家可能请求模型不止一次，加起来）。
+// examineAsExpert 让专家看一次，返回主人会听到的那句（专家没单独交时用它的细节）、用时与这一次的用量
+// （专家可能请求模型不止一次，加起来）。
 func examineAsExpert(expert *vision.Expert, model *usageTotal, frame []byte) (string, time.Duration, brain.ReplyUsage, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	model.reset()
 	started := time.Now()
 	report, err := expert.ExamineFrame(ctx, frame, "这是什么？")
-	return report, time.Since(started), model.total(), err
+	answer := report.Spoken
+	if answer == "" {
+		answer = report.Details
+	}
+	return answer, time.Since(started), model.total(), err
 }
 
 // usageTotal 包一层模型，把专家每次请求的用量加起来（专家只返回文字，不交出用量）。
@@ -281,7 +286,7 @@ func evalReport(results []evalResult) string {
 				(elapsed / time.Duration(count)).Round(10*time.Millisecond), yen)
 		}
 	}
-	report.WriteString("\n| 编号 | 正确答案 | 配置 | 专家的判断 | 判 | 用时 | 输入 / 输出 |\n|---|---|---|---|---|---|---|\n")
+	report.WriteString("\n| 编号 | 正确答案 | 配置 | 说给主人听的 | 判 | 用时 | 输入 / 输出 |\n|---|---|---|---|---|---|---|\n")
 	for _, result := range results {
 		answer := strings.ReplaceAll(result.answer, "\n", " ")
 		if result.err != nil {
