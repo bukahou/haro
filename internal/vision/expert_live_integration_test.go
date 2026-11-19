@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 	"unicode/utf8"
 
 	"github.com/bukahou/haro/internal/brain"
@@ -40,12 +39,7 @@ func TestLiveExpert(t *testing.T) {
 		MaxTokens: 800, Effort: "low", Thinking: llm.ThinkingBetweenTools})
 	var search Search
 	if tavilyKey := os.Getenv("HARO_TAVILY_API_KEY"); tavilyKey != "" {
-		connectCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		searcher, err := tools.ConnectTavily(connectCtx, "https://mcp.tavily.com/mcp/", tavilyKey, http.DefaultClient, logger)
-		cancel()
-		if err != nil {
-			t.Fatal(err)
-		}
+		searcher := tools.NewTavilySearcher("https://mcp.tavily.com/mcp/", tavilyKey, http.DefaultClient, logger)
 		defer searcher.Close()
 		search = func(ctx context.Context, query string) (string, error) { return searcher.Search(ctx, query, 3) }
 	}

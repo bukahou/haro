@@ -122,7 +122,7 @@ func run(logger *slog.Logger) error {
 				briefers = append(briefers, brain.BriefLines(weather.LocationNote{Home: home}.Brief)) // 每轮告诉模型主人家大致在哪（城市级）
 			}
 		}
-		if searcher := connectWebSearch(ctx, settings, httpClient, logger); searcher != nil {
+		if searcher := connectWebSearch(settings, httpClient, logger); searcher != nil {
 			defer searcher.Close()
 			meter := spending.NewSearchMeter(guard, ledger, pricingOf(settings), spending.PurposeSearch, "tavily")
 			builtins = append(builtins, tools.WebSearchTools(searcher, meter, logger)...)
@@ -459,20 +459,14 @@ func weatherForecaster(ctx context.Context, settings config.Settings, primary *w
 	return weather.WithBackup(primary, "Open-Meteo", jma, "日本气象厅", logger)
 }
 
-// connectWebSearch 连接联网搜索；没设密钥或连不上时返回 nil：第三方服务出问题不影响服务端启动，只是没有联网搜索。
-func connectWebSearch(ctx context.Context, settings config.Settings, httpClient *http.Client, logger *slog.Logger) *tools.TavilySearcher {
+// connectWebSearch 准备联网搜索（这时不连：用到时才连，断了自动重连）；没设密钥时返回 nil。
+func connectWebSearch(settings config.Settings, httpClient *http.Client, logger *slog.Logger) *tools.TavilySearcher {
 	if settings.TavilyAPIKey == "" {
 		logger.Info("联网搜索：没设 HARO_TAVILY_API_KEY，不提供")
 		return nil
 	}
-	connectCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	searcher, err := tools.ConnectTavily(connectCtx, settings.TavilyMCPURL, settings.TavilyAPIKey, httpClient, logger)
-	if err != nil {
-		logger.Warn("联网搜索：连不上 Tavily，这次不提供（重启服务端再试）", "err", err)
-		return nil
-	}
-	return searcher
+	logger.Info("联网搜索：Tavily（用到时才连，断了自动重连）")
+	return tools.NewTavilySearcher(settings.TavilyMCPURL, settings.TavilyAPIKey, httpClient, logger)
 }
 
 // startResearch 开启后台调查：任务账本、调查用的模型、上限，并在后台开始处理队列。
