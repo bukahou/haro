@@ -21,7 +21,7 @@ const micChunkBytes = 16000 / 50 * 2
 // micQueueChunks：送给上层的块最多排这么多（1 秒）；上层跟不上时丢最新的，不阻塞音频线程。
 const micQueueChunks = 50
 
-// Microphone 常驻录音（v2 免按键），实现 assistant.Microphone。
+// Microphone 常驻录音，实现 assistant.Microphone。
 type Microphone struct {
 	backend *Backend
 	key     string // 空 = 系统默认（跟随切换）
