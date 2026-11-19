@@ -136,22 +136,27 @@ func (s *Session) systemPrompt() string {
 // 支持提示词缓存的模型（按开头复用）就永远命中不了，本地模型也得从头处理整段历史。
 // 放在最后一条消息里，系统提示词和历史保持不变；历史里只存主人的原话，不存这段附注。
 // 情况说明单独成一条（标 Synthetic），不和主人的话拼在一起：最后一条始终是主人的原话。
-func (s *Session) userTurn(text string) (situation []ChatMessage, input ChatMessage) {
+// 要「说完才算告诉了」的情况（任务板的结论、额度提醒）记进 record，这一轮说完时才确认（closeTurn）。
+func (s *Session) userTurn(text string, record *turnRecord) (situation []ChatMessage, input ChatMessage) {
 	input = ChatMessage{Role: RoleUser, Text: text}
-	if briefing := s.briefing(s.currentConversation().Person()); briefing != "" {
+	if briefing := s.briefing(s.currentConversation().Person(), record); briefing != "" {
 		situation = []ChatMessage{{Role: RoleUser, Text: briefing, Synthetic: true}}
 	}
 	return situation, input
 }
 
 // briefing 汇总这一轮要补充的情况：谁在说话 + 各 Briefer。
-func (s *Session) briefing(person string) string {
+func (s *Session) briefing(person string, record *turnRecord) string {
 	var lines []string
 	if person != "" && person != SharedPerson {
 		lines = append(lines, "现在说话的是："+person+"（按声纹认出）。")
 	}
 	for _, briefer := range s.parts.Briefers {
-		lines = append(lines, briefer.Brief(person)...)
+		briefing := briefer.Brief(person)
+		lines = append(lines, briefing.Lines...)
+		if briefing.Delivered != nil {
+			record.delivered = append(record.delivered, briefing.Delivered)
+		}
 	}
 	if len(lines) == 0 {
 		return ""

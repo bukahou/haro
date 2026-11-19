@@ -99,8 +99,8 @@ func (s *Session) respond(ctx context.Context, job *transcriptionJob) (done real
 	}
 
 	// 画面不直接附在这句话上：模型需要看时调用 look_at_camera，闲聊时手里就没有画面
-	situation, input := s.userTurn(job.text) // 现在的情况单独成一条、不进历史；历史里只存原话
 	record := newTurnRecord(job.text)
+	situation, input := s.userTurn(job.text, record) // 现在的情况单独成一条、不进历史；历史里只存原话
 	defer func() {
 		for _, round := range record.rounds {
 			for _, call := range round.calls {

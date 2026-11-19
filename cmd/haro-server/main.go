@@ -119,7 +119,7 @@ func run(logger *slog.Logger) error {
 			forecaster := weatherForecaster(ctx, settings, openMeteo, home, weatherHTTP, logger)
 			builtins = append(builtins, tools.WeatherTools(openMeteo, forecaster, home, logger)...)
 			if home != nil {
-				briefers = append(briefers, weather.LocationNote{Home: home}) // 每轮告诉模型主人家大致在哪（城市级）
+				briefers = append(briefers, brain.BriefLines(weather.LocationNote{Home: home}.Brief)) // 每轮告诉模型主人家大致在哪（城市级）
 			}
 		}
 		if searcher := connectWebSearch(ctx, settings, httpClient, logger); searcher != nil {

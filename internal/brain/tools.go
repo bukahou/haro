@@ -296,6 +296,7 @@ func (s *Session) handleConfirmation(ctx context.Context, text string, pending [
 	case confirmYes:
 		// 真正执行的操作也记进这一轮（之后被打断、出错，历史里照样有它）
 		record := newTurnRecord(text)
+		situation, input := s.userTurn(text, record)
 		round := record.beginRound("", pending)
 		trail := []ChatMessage{{Role: RoleAssistant, ToolCalls: pending}}
 		for _, call := range pending {
@@ -304,7 +305,6 @@ func (s *Session) handleConfirmation(ctx context.Context, text string, pending [
 			trail = append(trail, ChatMessage{Role: RoleTool, ToolName: call.Name, ToolCallID: call.ID, Text: result})
 		}
 		// 由模型根据执行结果回答：删了哪几条、哪些没找到、失败了为什么，固定的「删掉了」说不清这些。
-		situation, input := s.userTurn(text)
 		history := append(append(s.historyWithInstructions(), situation...), input)
 		history = append(history, trail[:len(trail)-1]...)
 		answer, usage, err := s.speakAnswer(ctx, history, trail[len(trail)-1], cameraView{}, record)

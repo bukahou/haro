@@ -81,14 +81,14 @@ func (r *Runner) status(ctx context.Context, person, query string) (string, erro
 // briefingConclusionRunes 是任务板里每条结论最多带多少字（太长的让模型调 research_status 取全文）。
 const briefingConclusionRunes = 400
 
-// Brief 实现 brain.Briefer：任务板（R3 a / R4）。在查的列出来；查完还没告诉的，把结论放进这一轮，让模型先说。
-// 放进去就算告诉过了（每条只出现一次，以后要看用 research_status）。
-func (r *Runner) Brief(person string) []string {
+// Brief 实现 brain.Briefer：任务板。在查的列出来；查完还没告诉的，把结论放进这一轮，让模型先说。
+// 这一轮说完才算告诉过了（Delivered 标记已汇报；被打断、出错时下一轮再附上）；以后要看用 research_status。
+func (r *Runner) Brief(person string) brain.Briefing {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	board, err := r.store.Board(ctx, person)
 	if err != nil {
-		return nil
+		return brain.Briefing{}
 	}
 	var lines []string
 	var told []int64
@@ -112,8 +112,17 @@ func (r *Runner) Brief(person string) []string {
 				task.ID, task.Question, task.Status.Label(), task.StopReason))
 		}
 	}
-	_ = r.store.MarkReported(ctx, told...)
-	return lines
+	briefing := brain.Briefing{Lines: lines}
+	if len(told) > 0 {
+		briefing.Delivered = func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			if err := r.store.MarkReported(ctx, told...); err != nil {
+				r.logger.Warn("标记调查结论已汇报失败：下一轮会再说一次", "tasks", told, "err", err)
+			}
+		}
+	}
+	return briefing
 }
 
 func since(t time.Time) string {

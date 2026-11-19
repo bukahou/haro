@@ -148,7 +148,7 @@ func TestResearchFindsAnswerAndBriefsOnce(t *testing.T) {
 		t.Fatalf("派任务：%v ahead=%d", err, ahead)
 	}
 	// 调查还卡在模型那里（gate 没开）：任务板只列出在查的这一条
-	if lines := runner.Brief("主人"); len(lines) != 1 || !strings.Contains(lines[0], "不用主动提") {
+	if lines := runner.Brief("主人").Lines; len(lines) != 1 || !strings.Contains(lines[0], "不用主动提") {
 		t.Errorf("任务板应只列出在查的任务：%v", lines)
 	}
 	close(model.gate)
@@ -159,15 +159,20 @@ func TestResearchFindsAnswerAndBriefsOnce(t *testing.T) {
 	if searcher.searches != 1 || searcher.reads != 1 || budget.credits != 2 {
 		t.Errorf("搜索 %d、读 %d、记账 %d 积分", searcher.searches, searcher.reads, budget.credits)
 	}
-	lines := runner.Brief("主人")
-	if !strings.Contains(strings.Join(lines, ""), "A 比 B 便宜") {
-		t.Errorf("任务板应带上没告诉过的结论：%v", lines)
+	briefing := runner.Brief("主人")
+	if !strings.Contains(strings.Join(briefing.Lines, ""), "A 比 B 便宜") || briefing.Delivered == nil {
+		t.Errorf("任务板应带上没告诉过的结论：%+v", briefing)
 	}
-	if again := runner.Brief("主人"); len(again) != 0 {
-		t.Errorf("结论只放一次：%v", again)
+	// 那一轮没说完（被打断、出错，没确认）：下一轮照样附上
+	if again := runner.Brief("主人"); !strings.Contains(strings.Join(again.Lines, ""), "A 比 B 便宜") {
+		t.Errorf("没确认说过之前应一直附上：%v", again.Lines)
 	}
-	if others := runner.Brief("别人"); len(others) != 0 {
-		t.Errorf("不给别人看：%v", others)
+	briefing.Delivered()
+	if again := runner.Brief("主人"); len(again.Lines) != 0 {
+		t.Errorf("说完之后结论不再附上：%v", again.Lines)
+	}
+	if others := runner.Brief("别人"); len(others.Lines) != 0 {
+		t.Errorf("不给别人看：%v", others.Lines)
 	}
 	if found, _ := runner.status(ctx, "主人", "便宜"); !strings.Contains(found, "A 比 B 便宜") {
 		t.Errorf("按关键词找以前的调查：%s", found)
@@ -261,7 +266,7 @@ func TestResearchBudgetQueueCancelAndRestart(t *testing.T) {
 	if interrupted.Status != StatusInterrupted {
 		t.Fatalf("重启后应标成被中断：%+v", interrupted)
 	}
-	if lines := restarted.Brief("主人"); !strings.Contains(strings.Join(lines, ""), "被中断") {
+	if lines := restarted.Brief("主人").Lines; !strings.Contains(strings.Join(lines, ""), "被中断") {
 		t.Errorf("任务板应告诉主人被中断了：%v", lines)
 	}
 }

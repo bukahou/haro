@@ -165,16 +165,22 @@ func (g *Guard) allowLLM(ctx context.Context) error {
 	return nil
 }
 
-// Brief 实现 brain.Briefer：有还没告诉主人的额度提醒时，放进这一轮的系统提示词（只给一次）。
-func (g *Guard) Brief(string) []string {
+// Brief 实现 brain.Briefer：有还没告诉主人的额度提醒时附上；这一轮说完才算告诉了（被打断、出错时下一轮再附上）。
+func (g *Guard) Brief(string) brain.Briefing {
 	g.mu.Lock()
-	defer g.mu.Unlock()
-	if g.pendingMsg == "" {
-		return nil
-	}
 	msg := g.pendingMsg
-	g.pendingMsg = ""
-	return []string{"额度提醒（找机会用一句话告诉主人，不用展开）：" + msg}
+	g.mu.Unlock()
+	if msg == "" {
+		return brain.Briefing{}
+	}
+	return brain.Briefing{Lines: []string{"额度提醒（找机会用一句话告诉主人，不用展开）：" + msg},
+		Delivered: func() {
+			g.mu.Lock()
+			defer g.mu.Unlock()
+			if g.pendingMsg == msg { // 这期间又换了新的提醒就留着新的
+				g.pendingMsg = ""
+			}
+		}}
 }
 
 // SearchMeter 按用途给搜索查额度、记账（实现 tools.SearchMeter）：快查用 PurposeSearch，后台调查用 PurposeResearch。

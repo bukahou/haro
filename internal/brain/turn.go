@@ -26,6 +26,8 @@ type turnRecord struct {
 	final strings.Builder
 	// askedConfirmation：这一轮问了主人「确定要删掉吗」（被打断时撤掉这个待确认的操作）
 	askedConfirmation bool
+	// delivered：这一轮附上的、要「说完才算告诉了」的情况的确认（任务板的结论、额度提醒）；只在说完时调用
+	delivered []func()
 }
 
 // toolRound 是模型一次要求调用工具：调用前说的话、要求的调用、各自的结果。
@@ -142,6 +144,11 @@ func (s *Session) closeTurn(record *turnRecord, ending turnEnding) bool {
 		s.logger.Info("问确认时被打断：撤掉待确认的操作")
 	}
 	s.rememberTurn(record.messages(ending, answer))
+	if ending == turnCompleted { // 说完了才算把附上的结论、提醒告诉了主人；被打断、出错时下一轮再附上
+		for _, delivered := range record.delivered {
+			delivered()
+		}
+	}
 	if ending != turnCompleted {
 		s.logger.Info("这一轮没说完：照实记进历史", "item", item, "ending", endingLabel(ending),
 			"tools_done", record.executedTools(), "answer", answer)

@@ -63,11 +63,25 @@ type ProfileSource interface {
 }
 
 // Briefer 在每轮对话前给模型补充即时情况（时间、位置、额度提醒、后台调查的任务板……）。
-// 返回的几行附在这一轮主人的话前面（不放系统提示词：见 Session.userTurn）、不进历史；person 是这一轮说话人的对话名。
+// 给出的几行附在这一轮主人的话前面（不放系统提示词：见 Session.userTurn）、不进历史；person 是这一轮说话人的对话名。
 // 每轮都会调用：不要在这里做网络请求。
 type Briefer interface {
-	Brief(person string) []string
+	Brief(person string) Briefing
 }
+
+// Briefing 是一个 Briefer 这一轮附上的情况。
+type Briefing struct {
+	Lines []string
+	// Delivered 在这一轮说完之后调用：这些情况算是告诉主人了（任务板的结论、额度提醒，下一轮不再附上）。
+	// 被打断、出错时不调用，下一轮照样附上。nil = 不用确认（时间、位置这类每轮重新算的）
+	Delivered func()
+}
+
+// BriefLines 把只给几行情况、不用确认的函数当作 Briefer（时间、位置这类每轮重新算的）。
+type BriefLines func(person string) []string
+
+// Brief 实现 Briefer。
+func (f BriefLines) Brief(person string) Briefing { return Briefing{Lines: f(person)} }
 
 // SpeechSynthesizer 把一句话合成为语音（在内存里传，不落临时文件）。
 // 边合成边产出：第一段声音一到就交给调用方，不等整句合成完。

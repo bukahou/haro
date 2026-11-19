@@ -102,20 +102,26 @@ func TestGuardLimits(t *testing.T) {
 		t.Errorf("28+3 > 30 次应拒绝：%v", err)
 	}
 
-	// 月度：用到 80% 提醒一次（只进一轮提示词），超过上限拒绝
-	if lines := guard.Brief("主人"); lines != nil {
-		t.Errorf("没到 80%% 不该提醒：%v", lines)
+	// 月度：用到 80% 提醒一次（说完那一轮之后不再附上），超过上限拒绝
+	if briefing := guard.Brief("主人"); briefing.Lines != nil || briefing.Delivered != nil {
+		t.Errorf("没到 80%% 不该提醒：%+v", briefing)
 	}
 	_ = ledger.Record(ctx, Charge{Purpose: PurposeChat, Item: "llm:x", Yen: 750})
 	if err := guard.AllowPaidLLM(ctx); err != nil {
 		t.Fatalf("850 < 1000，应允许：%v", err)
 	}
-	if lines := guard.Brief("主人"); len(lines) != 1 || !strings.Contains(lines[0], "1000 日元") {
-		t.Errorf("到 80%% 应提醒一次：%v", lines)
+	briefing := guard.Brief("主人")
+	if len(briefing.Lines) != 1 || !strings.Contains(briefing.Lines[0], "1000 日元") || briefing.Delivered == nil {
+		t.Errorf("到 80%% 应提醒一次：%+v", briefing)
 	}
+	// 那一轮没说完（没确认）：下一轮照样附上
+	if again := guard.Brief("主人"); len(again.Lines) != 1 {
+		t.Errorf("没确认说过之前应一直附上：%+v", again)
+	}
+	briefing.Delivered()
 	_ = guard.AllowPaidLLM(ctx)
-	if lines := guard.Brief("主人"); lines != nil {
-		t.Errorf("同一个月只提醒一次：%v", lines)
+	if again := guard.Brief("主人"); again.Lines != nil {
+		t.Errorf("同一个月只提醒一次：%+v", again)
 	}
 	_ = ledger.Record(ctx, Charge{Purpose: PurposeChat, Item: "llm:x", Yen: 200})
 	if err := guard.AllowPaidLLM(ctx); !errors.Is(err, ErrOverBudget) {
