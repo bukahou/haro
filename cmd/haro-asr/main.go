@@ -6,6 +6,7 @@
 // 配置全部来自环境变量（config.ASRSettings）。
 //
 //	haro-asr [-version]
+//	haro-asr -probe livez|readyz   # 探一次自己（k8s 的 exec 探针：haro-asr 只监听本机，httpGet 探针连的 Pod IP 够不着）
 package main
 
 import (
@@ -15,6 +16,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"syscall"
@@ -30,6 +32,7 @@ import (
 
 func main() {
 	showVersion := flag.Bool("version", false, "打印版本号后退出")
+	probe := flag.String("probe", "", "探一次自己的 livez 或 readyz 后退出：正常时退出码 0（k8s 的 exec 探针用）")
 	flag.Parse()
 	if *showVersion {
 		fmt.Println(buildinfo.Describe("haro-asr"))
@@ -38,13 +41,41 @@ func main() {
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil)).With("service", "haro-asr")
 	settings, err := config.LoadASRSettings()
-	if err == nil {
+	if err == nil && *probe != "" {
+		err = probeSelf(settings.Listen, *probe)
+	} else if err == nil {
 		err = run(settings, logger)
 	}
 	if err != nil {
 		logger.Error("haro-asr 退出", "err", err)
 		os.Exit(1)
 	}
+}
+
+// probeTimeout：探针一次最多等这么久（比 k8s 探针的 timeoutSeconds 短）。
+const probeTimeout = 2 * time.Second
+
+// probeSelf 请求一次本机上的 /livez 或 /readyz：返回 200 才算正常。
+func probeSelf(listen, check string) error {
+	if check != "livez" && check != "readyz" {
+		return fmt.Errorf("-probe 只能是 livez 或 readyz，现在是 %q", check)
+	}
+	address := url.URL{Scheme: "http", Host: listen, Path: "/" + check}
+	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, address.String(), nil)
+	if err != nil {
+		return err
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("%s 返回 %d", address.String(), response.StatusCode)
+	}
+	return nil
 }
 
 func run(settings config.ASRSettings, logger *slog.Logger) error {
