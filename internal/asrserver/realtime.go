@@ -106,7 +106,11 @@ func handleRealtimeTranscription(w http.ResponseWriter, r *http.Request, deps De
 		"eagerness", turn.Eagerness, "prefix_ms", turn.PrefixPaddingMs, "threshold", turn.Threshold,
 		"wake_word", session.wakeEnabled)
 	err = session.run(ctx)
-	if websocket.CloseStatus(err) == websocket.StatusNormalClosure || errors.Is(err, io.EOF) || ctx.Err() != nil {
+	switch {
+	case ctx.Err() != nil: // 会话的 context 由服务派生：取消 = 服务在关停（客户端断开时连接读取会先报错）
+		deps.Logger.Info("转写会话结束", "reason", "服务关停")
+		return
+	case websocket.CloseStatus(err) == websocket.StatusNormalClosure || errors.Is(err, io.EOF):
 		deps.Logger.Info("转写会话结束", "reason", "客户端关闭")
 		return
 	}
