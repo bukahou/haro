@@ -1,6 +1,7 @@
 package assistant_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -17,6 +18,36 @@ import (
 
 // 唤醒词整轮：休眠 → 听到唤醒词 → 一口气说完的问题被回答 → 对话窗口超时 → 通知休眠。
 
+// loudMicrophone 每 2ms 产出一块非静音的 20ms 音频。
+type loudMicrophone struct{}
+
+func (loudMicrophone) OpenStream(ctx context.Context) (assistant.MicrophoneStream, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	stream := &loudMicStream{cancel: cancel, chunks: make(chan realtimeproto.PCMAudio)}
+	go func() {
+		defer close(stream.chunks)
+		for {
+			chunk := realtimeproto.PCMAudio{Format: realtimeproto.AudioFormat{SampleRate: 16000, Channels: 1},
+				Data: bytes.Repeat([]byte{0x40, 0x1F}, 320)}
+			select {
+			case stream.chunks <- chunk:
+			case <-ctx.Done():
+				return
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+	}()
+	return stream, nil
+}
+
+type loudMicStream struct {
+	cancel context.CancelFunc
+	chunks chan realtimeproto.PCMAudio
+}
+
+func (s *loudMicStream) Chunks() <-chan realtimeproto.PCMAudio { return s.chunks }
+func (s *loudMicStream) Close() error                          { s.cancel(); return nil }
+
 type blockingManual struct{ done chan struct{} }
 
 func (b blockingManual) WaitForToggle(ctx context.Context) error {
@@ -28,19 +59,23 @@ func (b blockingManual) WaitForToggle(ctx context.Context) error {
 	}
 }
 
-// wakeStream 是替身转写会话：收到第 10 块音频时报告「唤醒 + 一句话」，并记录 SetAwake。
+// wakeStream 是替身转写会话：收到第 10 块音频时报告「唤醒 + 一句话」；记录 SetAwake，以及之后收到的全零音频块（半双工静音）。
 type wakeStream struct {
-	mu         sync.Mutex
-	chunks     int
-	awakeCalls []bool
-	events     chan realtimeproto.ServerEvent
-	closeOnce  sync.Once
+	mu          sync.Mutex
+	chunks      int
+	silentAfter int
+	awakeCalls  []bool
+	events      chan realtimeproto.ServerEvent
+	closeOnce   sync.Once
 }
 
-func (w *wakeStream) SendAudio(context.Context, []byte) error {
+func (w *wakeStream) SendAudio(_ context.Context, pcm []byte) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.chunks++
+	if w.chunks > 10 && bytes.Count(pcm, []byte{0}) == len(pcm) {
+		w.silentAfter++
+	}
 	if w.chunks == 10 {
 		w.events <- realtimeproto.HaroWakeWordDetected{Keyword: "哈罗哈罗", AudioMs: 100}
 		w.events <- realtimeproto.InputAudioBufferSpeechStarted{AudioStartMs: 100, ItemID: "item_1"}
@@ -61,6 +96,12 @@ func (w *wakeStream) Close() error {
 	w.closeOnce.Do(func() { close(w.events) })
 	return nil
 }
+func (w *wakeStream) silentChunks() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.silentAfter
+}
+
 func (w *wakeStream) sleepRequested() bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -92,9 +133,9 @@ func TestWakeWordConversation(t *testing.T) {
 	turn := realtimeproto.TurnDetection{Type: "server_vad"}
 	haro := assistant.NewAssistant(assistant.Components{
 		Manual: manual, Microphone: loudMicrophone{}, Camera: fakeCamera{}, Speaker: speaker, Brain: session,
-	}, assistant.Options{TurnDetection: &turn, EchoGuard: 10 * time.Millisecond,
+	}, assistant.Options{TurnDetection: turn, EchoGuard: 10 * time.Millisecond,
 		NoticeTone: realtimeproto.PCMAudio{Format: realtimeproto.AudioFormat{SampleRate: 16000, Channels: 1}, Data: []byte("[叮咚]")},
-		WakeWord: &assistant.WakeWordOptions{Phrase: "哈罗哈罗", IdleTimeout: 150 * time.Millisecond,
+		WakeWord: assistant.WakeWordOptions{Phrase: "哈罗哈罗", IdleTimeout: 150 * time.Millisecond,
 			SleepTone: realtimeproto.PCMAudio{Format: realtimeproto.AudioFormat{SampleRate: 16000, Channels: 1}, Data: []byte("[我去睡觉了]")}}}, logger)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -120,6 +161,11 @@ func TestWakeWordConversation(t *testing.T) {
 			t.Fatalf("唤醒后的问题应被回答、休眠时说一声：播出 %q", audio)
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+
+	// 不能打断时（半双工）：从请求回答到播完后的 EchoGuard 期间都应上传静音
+	if streaming.stream.silentChunks() == 0 {
+		t.Error("回答期间应上传静音（半双工），但一块静音都没收到")
 	}
 
 	// 睡着时服务端发来提示（后台调查查完了）：响一声

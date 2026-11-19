@@ -19,7 +19,7 @@ import (
 	"strconv"
 	"syscall"
 	"time"
-	_ "time/tzdata" // 内置时区数据：镜像里没有 /usr/share/zoneinfo 时 TZ（例如 Asia/Tokyo）照样生效（v7：集群里默认是 UTC）
+	_ "time/tzdata" // 内置时区数据：镜像里没有 /usr/share/zoneinfo 时 TZ（例如 Asia/Tokyo）照样生效（集群里默认是 UTC）
 
 	"github.com/bukahou/haro/internal/brain"
 	"github.com/bukahou/haro/internal/brainserver"
@@ -61,6 +61,9 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	for _, note := range settings.RemovedSettingNotes {
+		logger.Warn(note)
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -87,7 +90,7 @@ func run(logger *slog.Logger) error {
 	}
 	defer stopRecognizer()
 
-	// 用量账本与额度（v5 R5）：先有刹车，再接搜索、后台调查
+	// 用量账本与额度：先有刹车，再接搜索、后台调查
 	ledger, err := spending.OpenLedger(ctx, settings.UsageDB)
 	if err != nil {
 		return err
@@ -105,7 +108,7 @@ func run(logger *slog.Logger) error {
 	var toolbox brain.Toolbox
 	var expertSearch vision.Search // 看画面的专家联网查：和主对话的快查同一套搜索与额度
 	if settings.Tools {
-		// 自研工具内置（v5）：记事本直接连数据库，网络诊断在本进程里执行；MCP 只接第三方（现在还没有）
+		// 自研工具内置：记事本直接连数据库，网络诊断在本进程里执行；MCP 只接第三方（现在还没有）
 		store, err := notes.Open(ctx, settings.NotesDB)
 		if err != nil {
 			return err
@@ -169,23 +172,23 @@ func run(logger *slog.Logger) error {
 	if settings.VisionExpert() {
 		components.FrameExpert = newVisionExpert(settings, claude, httpClient, ledger, guard, expertSearch, logger)
 	}
-	// 对话簿所有终端连接共用：换终端、重连、服务端重启都接得上（v4 D1）
+	// 对话簿所有终端连接共用：换终端、重连、服务端重启都接得上
 	var conversationStore brain.ConversationStore
 	if settings.ConversationsDir != "" {
 		conversationStore = conversationstore.NewFileStore(settings.ConversationsDir)
 	}
 	components.Conversations = brain.NewConversationBook(conversationStore, options, logger)
-	if settings.ProfileDir != "" { // 主人资料（v5 U1–U5）：外部注入，改了文件下一轮就生效
+	if settings.ProfileDir != "" { // 主人资料：外部注入，改了文件下一轮就生效
 		profiles := profile.OpenDir(settings.ProfileDir, logger)
 		household, people := profiles.Summary()
 		logger.Info("主人资料", "dir", settings.ProfileDir, "household_runes", household, "people", people)
 		components.Profiles = profiles
 	}
-	if settings.ConversationSummary { // 滚动摘要（v5 R4）：和主对话同一套模型，按 summary 用途记账
+	if settings.ConversationSummary { // 滚动摘要：和主对话同一套模型，按 summary 用途记账
 		components.Conversations.SummarizeWith(buildChatModel(settings, claude, httpClient, ledger, guard, spending.PurposeSummary,
 			logger.With("model_use", "summary")))
 	}
-	if settings.WakeArbitration > 0 { // 多台终端同时听到唤醒词：只让最合适的那台回答（v4 D2）
+	if settings.WakeArbitration > 0 { // 多台终端同时听到唤醒词：只让最合适的那台回答
 		components.WakeArbiter = brain.NewWakeArbiter(settings.WakeArbitration)
 	}
 	newSession := func() brainserver.Session { return brain.NewSession(components, options, logger) }
@@ -233,7 +236,7 @@ func buildRecognizer(ctx context.Context, settings config.Settings, httpClient *
 			"-kws-threshold", strconv.FormatFloat(settings.KWSThreshold, 'f', -1, 64),
 			"-kws-score", strconv.FormatFloat(settings.KWSScore, 'f', -1, 64))
 	}
-	if settings.SpeakerModel != "" { // 声纹（v3 H-3）
+	if settings.SpeakerModel != "" { // 声纹
 		args = append(args, "-speaker-model", settings.SpeakerModel, "-voiceprints-dir", settings.VoiceprintsDir,
 			"-speaker-threshold", strconv.FormatFloat(settings.SpeakerThreshold, 'f', -1, 64),
 			"-wake-speaker-threshold", strconv.FormatFloat(settings.WakeSpeakerThreshold, 'f', -1, 64))
@@ -253,7 +256,7 @@ func buildRecognizer(ctx context.Context, settings config.Settings, httpClient *
 
 func localURL(port int) string { return "http://127.0.0.1:" + strconv.Itoa(port) }
 
-// brainHandler 是服务端对终端的全部 HTTP 入口：对话（WebSocket）+ 远程登记声纹（v4 C-3，转给 haro-asr）。
+// brainHandler 是服务端对终端的全部 HTTP 入口：对话（WebSocket）+ 远程登记声纹（转给 haro-asr）。
 // 终端只认识服务端的地址；haro-asr 只监听本机（容器部署时在同一个容器里）。
 func brainHandler(settings config.Settings, newSession brainserver.SessionFactory, logger *slog.Logger) http.Handler {
 	mux := http.NewServeMux()
@@ -364,7 +367,7 @@ func newClaudeAPI(settings config.Settings, httpClient *http.Client) *llm.Claude
 	return llm.NewClaudeAPI(settings.AnthropicAPIKey, settings.CloudLLMURL, httpClient)
 }
 
-// newCloudChatModel 按 HARO_CLOUD_LLM_API 创建云端的 model（v7）：openai = OpenAI 兼容接口（用 client），
+// newCloudChatModel 按 HARO_CLOUD_LLM_API 创建云端的 model：openai = OpenAI 兼容接口（用 client），
 // anthropic = Claude API（用共用的 claude；effort、thinking、retries、firstTokenTimeout 只对它有效）。
 func newCloudChatModel(settings config.Settings, claude *llm.ClaudeAPI, model string, maxTokens int, effort, thinking string, retries int,
 	firstTokenTimeout time.Duration, client *http.Client) brain.ChatModel {
@@ -445,7 +448,7 @@ func weatherForecaster(ctx context.Context, settings config.Settings, primary *w
 	return weather.WithBackup(primary, "Open-Meteo", jma, "日本气象厅", logger)
 }
 
-// connectWebSearch 连接联网搜索（v5 E3）；没设密钥或连不上时返回 nil：第三方服务出问题不影响服务端启动，只是没有联网搜索。
+// connectWebSearch 连接联网搜索；没设密钥或连不上时返回 nil：第三方服务出问题不影响服务端启动，只是没有联网搜索。
 func connectWebSearch(ctx context.Context, settings config.Settings, httpClient *http.Client, logger *slog.Logger) *tools.TavilySearcher {
 	if settings.TavilyAPIKey == "" {
 		logger.Info("联网搜索：没设 HARO_TAVILY_API_KEY，不提供")
@@ -535,9 +538,9 @@ func buildSynthesizer(ctx context.Context, settings config.Settings, httpClient 
 	return speech.NewPiperHTTPSynthesizer(ttsURL, settings.TTSTimeout, httpClient), stop, nil
 }
 
-// buildBrainOptions 读取性格档案（v3 第 2 步）；没设 HARO_PERSONAS_DIR 时不分性格。
+// buildBrainOptions 读取性格档案；没设 HARO_PERSONAS_DIR 时不分性格。
 func buildBrainOptions(settings config.Settings) (brain.Options, error) {
-	// 基础提示词：内置的永远生效，HARO_SYSTEM_PROMPT 只能追加（v5 U2）
+	// 基础提示词：内置的永远生效，HARO_SYSTEM_PROMPT 只能追加
 	options := brain.Options{MaxHistoryTurn: settings.MaxHistoryTurn, Instructions: brain.ComposeInstructions(settings.ExtraSystemPrompt),
 		Escalation: settings.StrongLLMFor(config.StrongForCorrection)} // 和 routeToStrong 配「重答」那条路的条件一致
 	if settings.PersonasDir == "" {

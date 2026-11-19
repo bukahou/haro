@@ -119,3 +119,23 @@ func TestValidateStrongLLM(t *testing.T) {
 		}
 	}
 }
+
+// 环境里还写着已删除的配置项：值和现在的行为一致时只提醒；要求已删除的行为时启动失败。
+func TestRemovedSettings(t *testing.T) {
+	lookup := func(env map[string]string) func(string) (string, bool) {
+		return func(name string) (string, bool) { value, ok := env[name]; return value, ok }
+	}
+	notes, err := checkRemovedSettings(lookup(map[string]string{"HARO_TURN_MODE": "hands-free", "HARO_WAKE_WORD": "true",
+		"HARO_MIN_SPEECH": "700ms"}))
+	if err != nil || len(notes) != 3 {
+		t.Errorf("和现在一致的写法只提醒：notes=%v err=%v", notes, err)
+	}
+	for _, env := range []map[string]string{{"HARO_TURN_MODE": "push-to-talk"}, {"HARO_WAKE_WORD": "false"}} {
+		if _, err := checkRemovedSettings(lookup(env)); err == nil {
+			t.Errorf("%v 要求已删除的行为，应启动失败", env)
+		}
+	}
+	if notes, err := checkRemovedSettings(lookup(nil)); err != nil || len(notes) != 0 {
+		t.Errorf("没写时什么都不说：notes=%v err=%v", notes, err)
+	}
+}

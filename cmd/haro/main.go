@@ -1,8 +1,8 @@
-// haro：终端（v3 第 3 步起只管硬件：麦克风、摄像头、音箱、对话窗口）。
+// haro：终端（只管硬件：麦克风、摄像头、音箱、对话窗口）。
 // 「听懂、思考、说什么」都在服务端 haro-server 里，两者经 WebSocket 传 Realtime 事件（架构见 docs/architecture.md）。
 // 这里只做组装（组装点）：读配置 → 打开平台层（internal/platform）→ 注入看守（internal/terminal）一直运行。
-// 只有这里认识具体实现；看守与对话逻辑只认接口（v4 第 5 步）。
-// 服务端断了、设备没了都不退出，由看守重连、等设备（v4 D3）；只有关机信号才退出。
+// 只有这里认识具体实现；看守与对话逻辑只认接口。
+// 服务端断了、设备没了都不退出，由看守重连、等设备；只有关机信号才退出。
 package main
 
 import (
@@ -35,7 +35,7 @@ import (
 var microphoneFormat = realtimeproto.AudioFormat{SampleRate: 16000, Channels: 1}
 
 func main() {
-	enrollName := flag.String("enroll", "", "登记声纹（v4 C-3）：在这台终端上录 3 句话，发给服务端登记，例如 -enroll 主人")
+	enrollName := flag.String("enroll", "", "登记声纹：在这台终端上录 3 句话，发给服务端登记，例如 -enroll 主人")
 	enrollAppend := flag.Bool("append", false, "和 -enroll 一起用：补录（换了麦克风、换了位置时），加进原来的声纹")
 	enrollSeconds := flag.Duration("seconds", 5*time.Second, "和 -enroll 一起用：每句录多久")
 	showVersion := flag.Bool("version", false, "打印版本号后退出")
@@ -83,13 +83,15 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	keyboard := trigger.NewKeyboardTrigger(os.Stdin, os.Stdout)
+	keyboard := trigger.NewKeyboardTrigger(os.Stdin)
 	options := assistantOptions(settings, sounds)
-	logger.Info("haro 启动", "version", buildinfo.Version, "server", settings.ServerURL, "turn_mode", settings.TurnMode,
-		"turn_detection", settings.TurnDetection, "wake_word", options.WakeWord != nil,
-		"barge_in", options.BargeIn, "camera_mode", settings.CameraMode)
+	logger.Info("haro 启动", "version", buildinfo.Version, "server", settings.ServerURL,
+		"turn_detection", settings.TurnDetection, "barge_in", options.BargeIn, "camera_mode", settings.CameraMode)
+	for _, note := range settings.RemovedSettingNotes {
+		logger.Warn(note)
+	}
 
-	// 看守（v4 D3）：连服务端 → 等麦克风 → 运行；出什么错都退回去重来，只有关机信号才退出
+	// 看守：连服务端 → 等麦克风 → 运行；出什么错都退回去重来，只有关机信号才退出
 	supervisor := terminal.NewSupervisor(terminal.Parts{
 		Dial: func(ctx context.Context) (terminal.Connection, error) {
 			return brainclient.Dial(ctx, settings.ServerURL, microphoneFormat, 0, logger)
@@ -106,9 +108,6 @@ func run(logger *slog.Logger) error {
 				logger.Warn("没有音箱：照常听，回答只写日志")
 			}
 			return assistant.NewAssistant(assistant.Components{
-				Trigger:    keyboard,
-				Recorder:   local.OpenRecorder(devices.Microphone.ID),
-				Toggle:     keyboard,
 				Manual:     keyboard,
 				Microphone: local.OpenMicrophone(devices.Microphone.ID),
 				Camera:     camera, // nil = 没有摄像头（会告诉服务端）
@@ -150,28 +149,25 @@ func enroll(logger *slog.Logger, name string, appendMode bool, seconds time.Dura
 		Client: &http.Client{Timeout: 60 * time.Second}})
 }
 
-// assistantOptions 由配置组装对话选项（系统提示词由服务端持有，v3 起终端不发）。
+// assistantOptions 由配置组装对话选项（系统提示词由服务端持有，终端不发）。
 func assistantOptions(settings config.Settings, sounds tones.Tones) assistant.Options {
-	options := assistant.Options{MinSpeech: settings.MinSpeech, EchoGuard: settings.EchoGuard, NoticeTone: sounds.Notice}
-	if settings.TurnMode == config.TurnHandsFree {
-		createResponse := false // 由终端带上「说完那一刻」的画面后再请求回答
-		options.TurnDetection = &realtimeproto.TurnDetection{
+	createResponse := false // 由终端带上「说完那一刻」的画面后再请求回答
+	return assistant.Options{
+		TurnDetection: realtimeproto.TurnDetection{
 			Type: settings.TurnDetection, Eagerness: settings.TurnEagerness,
 			Threshold: settings.VADThreshold, CreateResponse: &createResponse,
 			SilenceDurationMs: int(settings.VADSilence.Milliseconds()),
 			PrefixPaddingMs:   int(settings.VADPrefix.Milliseconds()),
-		}
-		if settings.WakeWord {
-			options.WakeWord = &assistant.WakeWordOptions{Phrase: settings.WakePhrase, IdleTimeout: settings.WakeIdle,
-				SleepTone: sounds.Sleep}
-			options.BargeIn = settings.BargeIn // 回答时喊唤醒词打断（v3 I-1）
-		}
+		},
+		EchoGuard:  settings.EchoGuard,
+		WakeWord:   assistant.WakeWordOptions{Phrase: settings.WakePhrase, IdleTimeout: settings.WakeIdle, SleepTone: sounds.Sleep},
+		BargeIn:    settings.BargeIn,
+		NoticeTone: sounds.Notice,
 	}
-	return options
 }
 
-// openCamera 选摄像头并打开（v3 H-2）；启动时没有摄像头就不用（P-1：之后插上要重启终端），返回 nil。
-// 启动时有、之后被拔掉或换了设备号，由平台层按同一套规则重新找（第 5 步 b）。列不出摄像头也不退出（D3）。
+// openCamera 选摄像头并打开；启动时没有摄像头就不用（之后插上要重启终端），返回 nil。
+// 启动时有、之后被拔掉或换了设备号，由平台层按同一套规则重新找。列不出摄像头也不退出。
 func openCamera(ctx context.Context, settings config.Settings, local *platform.LocalDevices,
 	logger *slog.Logger) terminal.Camera {
 	cameras, err := local.Cameras(ctx)

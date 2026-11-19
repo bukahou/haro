@@ -80,7 +80,7 @@ var chunk = realtimeproto.ResponseOutputAudioDelta{Audio: realtimeproto.PCMAudio
 
 func newBargeInAssistant(brain *scriptedBrain, sink *slowSink) *Assistant {
 	return NewAssistant(Components{Brain: brain, Speaker: sink}, Options{BargeIn: true,
-		WakeWord: &WakeWordOptions{Phrase: "哈罗哈罗"}}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		WakeWord: WakeWordOptions{Phrase: "哈罗哈罗"}}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
 
 func noSpan() trace.Span { return trace.SpanFromContext(context.Background()) }
