@@ -16,31 +16,15 @@ import (
 	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
-// transcriptionJob 是提交音频时启动的识别任务。
+// transcriptionJob 是一句话的识别任务：识别流报「说完了」时登记，识别结果到达时完成。
 type transcriptionJob struct {
 	done    chan struct{}
 	text    string
 	err     error
 	started time.Time
-	// 声纹（v3 H-3）：speakerChecked 为 true 时比对过，speaker 为空表示不是登记的人
+	// 声纹：speakerChecked 为 true 时比对过，speaker 为空表示不是登记的人
 	speaker        string
 	speakerChecked bool
-}
-
-func (s *Session) startTranscription(ctx context.Context, audio realtimeproto.PCMAudio) *transcriptionJob {
-	job := &transcriptionJob{done: make(chan struct{}), started: time.Now()}
-	go func() {
-		defer close(job.done)
-		ctx, span := tracer.Start(ctx, "brain.recognize")
-		defer span.End()
-		started := time.Now()
-		job.text, job.err = s.parts.Recognizer.Recognize(ctx, audio)
-		job.text = strings.TrimSpace(job.text)
-		span.SetAttributes(attribute.Float64("haro.speech_seconds", audio.Duration().Seconds()))
-		recordSpanError(span, job.err)
-		s.logger.Info("阶段耗时", "stage", "brain.recognize", "elapsed", since(started))
-	}()
-	return job
 }
 
 // runResponse 执行一次回答，结束时恰好发出一个 ResponseDone。
@@ -74,11 +58,11 @@ func (s *Session) respond(ctx context.Context, job *transcriptionJob, image []by
 	}
 	s.emit(realtimeproto.InputAudioTranscriptionCompleted{Transcript: job.text, Speaker: job.speaker,
 		SpeakerChecked: job.speakerChecked})
-	if job.speakerChecked && job.speaker == "" { // 不是登记的人说的（v3 H-3a）：不回答
+	if job.speakerChecked && job.speaker == "" { // 不是登记的人说的：不回答
 		s.logger.Info("不是登记的人说的，不回答", "text", job.text)
 		return realtimeproto.ResponseDone{Status: realtimeproto.StatusIncomplete, Reason: "unknown_speaker"}
 	}
-	if job.speakerChecked { // 对话跟人走（v4 D1）：认出是谁就接这个人的对话
+	if job.speakerChecked { // 对话跟人走：认出是谁就接这个人的对话
 		s.useConversationOf(job.speaker)
 	} else {
 		s.useConversationOf(SharedPerson)
@@ -99,11 +83,11 @@ func (s *Session) respond(ctx context.Context, job *transcriptionJob, image []by
 		}
 	}
 
-	// 画面不直接附在这句话上：模型需要看时调用 look_at_camera（D-B ②），闲聊时手里就没有画面
+	// 画面不直接附在这句话上：模型需要看时调用 look_at_camera，闲聊时手里就没有画面
 	input := s.userTurn(job.text) // 带上现在的情况；历史里只存原话（remember 用 job.text）
 	answer, toolTrail, usage, err := s.speakAnswer(ctx, s.historyWithInstructions(), input, cameraView{frame: image, request: job.text})
 	if ctx.Err() != nil {
-		s.rememberInterrupted(job.text) // 被打断：只记用户听到的部分（v3 I-2）
+		s.rememberInterrupted(job.text) // 被打断：只记用户听到的部分
 		return realtimeproto.ResponseDone{Status: realtimeproto.StatusCancelled}
 	}
 	if err != nil {
@@ -122,7 +106,7 @@ func (s *Session) respond(ctx context.Context, job *transcriptionJob, image []by
 	return done
 }
 
-// wakeAcknowledgement 是只叫了唤醒词时的回答（K3 ①）。
+// wakeAcknowledgement 是只叫了唤醒词时的回答。
 const wakeAcknowledgement = "我在。"
 
 // speakFixedReply 不经过大模型，直接合成一句固定的话。
@@ -196,7 +180,7 @@ func (s *Session) speakAnswer(ctx context.Context, history []ChatMessage, input 
 
 // generateSentences 拉取模型的流式输出，切好的句子写进 sentences。
 // 模型要求调用工具时：执行 → 把结果交回模型 → 再生成（最多 maxToolRounds 轮）；
-// 需要确认的工具不执行，改为问用户「确定要删掉吗」，等下一轮回答（T3 ①）。
+// 需要确认的工具不执行，改为问用户「确定要删掉吗」，等下一轮回答。
 // 返回这一轮的工具往来（assistant 的 tool_calls + 各工具结果），供写进历史。
 func (s *Session) generateSentences(ctx context.Context, history []ChatMessage, input ChatMessage, view cameraView,
 	sentences chan<- string, answer *strings.Builder) (*ReplyUsage, []ChatMessage, error) {
@@ -325,7 +309,7 @@ func (s *Session) generateSentences(ctx context.Context, history []ChatMessage, 
 }
 
 // speakUtterance 合成一句并边合成边发给终端：先发这句的文字，再逐段发音频。
-// 合成失败时日志写明是语音合成这一环（v3 不设备用语音合成，出问题只能看日志）。
+// 合成失败时日志写明是语音合成这一环（没有备用语音合成，出问题只能看日志）。
 func (s *Session) speakUtterance(ctx context.Context, index int, utterance Utterance) error {
 	ctx, span := tracer.Start(ctx, "brain.synthesize")
 	defer span.End()
@@ -333,7 +317,7 @@ func (s *Session) speakUtterance(ctx context.Context, index int, utterance Utter
 	s.mu.Lock()
 	noSpeaker := s.noSpeaker
 	s.mu.Unlock()
-	if noSpeaker { // 终端没有音箱（v4 D3）：只发文字，不占用语音合成
+	if noSpeaker { // 终端没有音箱：只发文字，不占用语音合成
 		s.markSpoken(utterance.Text)
 		s.emit(realtimeproto.ResponseOutputAudioTranscriptDelta{Delta: utterance.Text})
 		span.SetAttributes(attribute.Bool("haro.segment.no_speaker", true))

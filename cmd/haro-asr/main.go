@@ -1,8 +1,8 @@
-// haro-asr：本地语音识别服务（SenseVoice-Small + Silero VAD，sherpa-onnx，CPU）。提供 OpenAI 兼容的
-//   - POST /v1/audio/transcriptions（一问一答）
-//   - GET  /v1/realtime?intent=transcription（WebSocket 流式转写，server_vad；需要 -vad-model）
+// haro-asr：本地语音识别服务（SenseVoice-Small + Silero VAD，sherpa-onnx，CPU）。提供
+//   - GET  /v1/realtime?intent=transcription（WebSocket 流式转写，协议照 OpenAI Realtime 的转写会话；需要 -vad-model）
+//   - POST /v1/voiceprints/{name}（远程登记声纹）
 //
-// 平时由 haro 作为子进程托管；也可以单独运行，供任何 OpenAI 兼容客户端调用。
+// 平时由 haro-server 作为子进程托管；也可以单独运行，haro-server 用 HARO_ASR=openai + HARO_ASR_URL 连过来。
 //
 //	haro-asr -model-dir <SenseVoice 模型目录> [-vad-model silero_vad.onnx] [-turn-model smart-turn-v3.2-cpu.onnx]
 //	         [-listen 127.0.0.1:59126] [-threads 4]
@@ -141,7 +141,7 @@ func run(opts options, logger *slog.Logger) error {
 	return nil
 }
 
-// loadSpeakerCheck 加载说话人识别模型和登记的声纹（v3 H-3）；没指定模型时返回 nil（不比对）。
+// loadSpeakerCheck 加载说话人识别模型和登记的声纹；没指定模型时返回 nil（不比对）。
 // 返回的清理函数总是非 nil。
 func loadSpeakerCheck(opts options, logger *slog.Logger) (*asrserver.SpeakerCheck, func(), error) {
 	if opts.speakerModel == "" {

@@ -28,11 +28,10 @@ const (
 // claudeEfforts 是思考关掉时 Claude 接受的回答力度（xhigh / max 要开着思考）。
 var claudeEfforts = map[string]bool{"": true, "low": true, "medium": true, "high": true}
 
-// 语音识别方式。
+// 语音识别方式（都是流式转写，协议照 OpenAI Realtime 的转写会话）。
 const (
-	ASRLocal    = "local"     // haro 拉起 haro-asr 子进程（SenseVoice，CPU）
-	ASROpenAI   = "openai"    // 外部的 OpenAI 兼容识别服务
-	ASRVoiceAPI = "voice-api" // 外部的 Whisper 转写服务（whisper.cpp 兼容的 HTTP 接口）
+	ASRLocal  = "local"  // haro 拉起 haro-asr 子进程（SenseVoice，CPU）
+	ASROpenAI = "openai" // 连 HARO_ASR_URL 上的转写服务（例如别处运行的 haro-asr）
 )
 
 // 语音合成引擎。
@@ -116,14 +115,12 @@ type Settings struct {
 	SearchCreditUSD          float64 `env:"HARO_SEARCH_CREDIT_USD"`                    // 每个搜索积分的美元价；0 = 免费额度内
 
 	// 语音识别
-	ASR          string `env:"HARO_ASR" envDefault:"local"` // local / openai / voice-api
-	ASRBinary    string `env:"HARO_ASR_BIN"`                // local：haro-asr 可执行文件（make build 生成 bin/haro-asr）
-	ASRModelDir  string `env:"HARO_ASR_MODEL_DIR"`          // local：SenseVoice 模型目录
-	ASRThreads   int    `env:"HARO_ASR_THREADS" envDefault:"4"`
-	ASRPort      int    `env:"HARO_ASR_PORT" envDefault:"59126"`
-	ASRURL       string `env:"HARO_ASR_URL"` // openai：OpenAI 兼容识别服务的根地址
-	ASRModelName string `env:"HARO_ASR_MODEL_NAME" envDefault:"sensevoice-small"`
-	VoiceAPIURL  string `env:"HARO_VOICE_API_URL"` // voice-api：外部 Whisper 转写服务的地址
+	ASR         string `env:"HARO_ASR" envDefault:"local"` // local / openai
+	ASRBinary   string `env:"HARO_ASR_BIN"`                // local：haro-asr 可执行文件（make build 生成 bin/haro-asr）
+	ASRModelDir string `env:"HARO_ASR_MODEL_DIR"`          // local：SenseVoice 模型目录
+	ASRThreads  int    `env:"HARO_ASR_THREADS" envDefault:"4"`
+	ASRPort     int    `env:"HARO_ASR_PORT" envDefault:"59126"`
+	ASRURL      string `env:"HARO_ASR_URL"` // openai：转写服务的根地址
 
 	// 说完判断与 VAD
 	VADModel string `env:"HARO_VAD_MODEL"` // local：silero_vad.onnx 路径
@@ -155,18 +152,18 @@ type Settings struct {
 
 	// 工具（见 docs/architecture.md）：自研工具内置在服务端里，MCP 只接第三方服务
 	Tools   bool   `env:"HARO_TOOLS" envDefault:"true"`
-	NotesDB string `env:"HARO_NOTES_DB"` // 记事本存储：SQLite 文件路径（v5 起服务端直接连，不再有 haro-notes 程序）
+	NotesDB string `env:"HARO_NOTES_DB"` // 记事本存储：SQLite 文件路径（服务端直接连）
 	// 联网搜索：Tavily 官方远程 MCP。密钥不设 = 不提供联网搜索（凭证：无默认值，只来自环境变量）
 	TavilyAPIKey string `env:"HARO_TAVILY_API_KEY"`
 	TavilyMCPURL string `env:"HARO_TAVILY_MCP_URL" envDefault:"https://mcp.tavily.com/mcp/"`
-	// 后台调查（v5 第 3 节；有搜索时才有）：任务账本、用哪个模型（R6）、每个任务的上限（R2）
+	// 后台调查（有搜索时才有）：任务账本、用哪个模型、每个任务的上限
 	ResearchDB          string        `env:"HARO_RESEARCH_DB"`                            // 任务账本（SQLite）；空 = 只在内存里
-	ResearchLLM         string        `env:"HARO_RESEARCH_LLM" envDefault:"cloud"`        // cloud / local：调查用哪个模型（R6：默认云端，本地 8B 调工具不可靠）
+	ResearchLLM         string        `env:"HARO_RESEARCH_LLM" envDefault:"cloud"`        // cloud / local：调查用哪个模型（默认云端：本地小模型调工具不可靠）
 	ResearchTimeout     time.Duration `env:"HARO_RESEARCH_TIMEOUT" envDefault:"3m"`       // 搜索阶段最多多久
 	ResearchMaxRounds   int           `env:"HARO_RESEARCH_MAX_ROUNDS" envDefault:"10"`    // 最多请求模型几轮（搜一次、读一次各占一轮；6 轮实测不够，2026-11-17 改 10）
 	ResearchMaxSearches int           `env:"HARO_RESEARCH_MAX_SEARCHES" envDefault:"5"`   // 最多搜几次
 	ResearchMaxTokens   int           `env:"HARO_RESEARCH_MAX_TOKENS" envDefault:"80000"` // 累计 token 上限
-	// 天气（v5 E2 / R7 c）：Open-Meteo 公开接口，不用密钥。家的位置：「纬度,经度」（只放在配置里，不进代码），
+	// 天气：Open-Meteo 公开接口，不用密钥。家的位置：「纬度,经度」（只放在配置里，不进代码），
 	// 或 "ip"（按家里的公网 IP 推定，城市级）；不设 = 查天气时必须说地名
 	Weather             bool   `env:"HARO_WEATHER" envDefault:"true"`
 	WeatherHome         string `env:"HARO_WEATHER_HOME"`
@@ -179,7 +176,7 @@ type Settings struct {
 	WeatherBackup             string `env:"HARO_WEATHER_BACKUP" envDefault:"jma"`
 	WeatherJMAURL             string `env:"HARO_WEATHER_JMA_URL" envDefault:"https://www.jma.go.jp/bosai"`
 	WeatherReverseGeocoderURL string `env:"HARO_WEATHER_REVERSE_GEOCODER_URL" envDefault:"https://mreversegeocoder.gsi.go.jp/reverse-geocoder/LonLatToAddress"`
-	// 网络诊断：v3 起内置在主程序里（V-4），不再启动 haro-netdiag
+	// 网络诊断：内置在主程序里
 	NetdiagDNSName        string `env:"HARO_NETDIAG_DNS_NAME" envDefault:"www.cloudflare.com"`
 	NetdiagInternetTarget string `env:"HARO_NETDIAG_INTERNET_TARGET" envDefault:"1.1.1.1:443"`
 
@@ -200,14 +197,14 @@ type Settings struct {
 	PersonaDefault   string        `env:"HARO_PERSONA_DEFAULT" envDefault:"buddy"`  // 没记过当前性格时用哪个（ID）
 	PersonaState     string        `env:"HARO_PERSONA_STATE"`                       // 记住当前性格的文件；空 = 重启回到默认
 	ConversationsDir string        `env:"HARO_CONVERSATIONS_DIR"`                   // 对话跟人走：每人一个文件；空 = 只在内存里（服务端重启就没了）
-	WakeArbitration  time.Duration `env:"HARO_WAKE_ARBITRATION" envDefault:"300ms"` // 多台终端同时听到唤醒词时等多久再选一台（v4 D2 / C-2）；0 = 不仲裁
+	WakeArbitration  time.Duration `env:"HARO_WAKE_ARBITRATION" envDefault:"300ms"` // 多台终端同时听到唤醒词时等多久再选一台；0 = 不仲裁
 
 	// 切句
 	FirstSegmentMinRunes int `env:"HARO_FIRST_SEGMENT_MIN_RUNES" envDefault:"4"` // 0 = 第一句不在逗号处提前切
 	MaxSegmentRunes      int `env:"HARO_MAX_SEGMENT_RUNES" envDefault:"40"`
 
 	// 硬件
-	// 设备一律自动检测（规则见 internal/terminal/device_rules.go）；只在要手动指定时才设，值是各系统自己的设备 ID（P-2）
+	// 设备一律自动检测（规则见 internal/terminal/device_rules.go）；只在要手动指定时才设，值是各系统自己的设备 ID
 	AudioSource  string `env:"HARO_AUDIO_SOURCE"`  // 空 = 自动：跟系统默认，但跳过蓝牙麦克风
 	AudioSink    string `env:"HARO_AUDIO_SINK"`    // 空 = 跟系统默认（蓝牙重连后自动接回）
 	CameraDevice string `env:"HARO_CAMERA_DEVICE"` // 空 = 自动找；none = 不用摄像头
@@ -306,15 +303,8 @@ func (settings Settings) validateBrain() error {
 		if settings.ASRURL == "" {
 			return fmt.Errorf("HARO_ASR=openai 时必须设 HARO_ASR_URL")
 		}
-	case ASRVoiceAPI:
-		if settings.VoiceAPIURL == "" {
-			return fmt.Errorf("HARO_ASR=voice-api 时必须设 HARO_VOICE_API_URL")
-		}
 	default:
-		return fmt.Errorf("HARO_ASR 只能是 %s / %s / %s，现在是 %q", ASRLocal, ASROpenAI, ASRVoiceAPI, settings.ASR)
-	}
-	if settings.ASR == ASRVoiceAPI {
-		return fmt.Errorf("对话需要流式转写，HARO_ASR 不能是 voice-api")
+		return fmt.Errorf("HARO_ASR 只能是 %s 或 %s，现在是 %q（整段转写的 voice-api 已删除）", ASRLocal, ASROpenAI, settings.ASR)
 	}
 	if settings.ASR == ASRLocal && settings.VADModel == "" {
 		return fmt.Errorf("HARO_ASR=local 时必须设 HARO_VAD_MODEL")

@@ -53,12 +53,6 @@ func (s *recordingSpeaker) snapshot() (opened int, audio string, drained bool) {
 func (s *recordingSpeaker) Abort() error          { return nil }
 func (s *recordingSpeaker) Played() time.Duration { return 0 }
 
-type stubRecognizer struct{}
-
-func (stubRecognizer) Recognize(context.Context, realtimeproto.PCMAudio) (string, error) {
-	return "我旁边有什么", nil
-}
-
 type stubModel struct{}
 
 func (stubModel) StreamReply(context.Context, []brain.ChatMessage, []brain.ToolSpec) iter.Seq2[brain.ReplyDelta, error] {

@@ -164,3 +164,12 @@ func TestTwoTerminalsHearingWakeWordOnlyOneAnswers(t *testing.T) {
 		t.Errorf("远的那台的识别流应被送回休眠：%v", got)
 	}
 }
+
+// 识别流还没打开（session.update 没带 turn_detection）时收到的音频无处可送：明确拒绝，不在服务端堆积。
+func TestAudioBeforeStreamIsRejected(t *testing.T) {
+	session := newStreamSession(t, braintest.NewVoice(), &fakeModel{}, nil)
+	audio := realtimeproto.InputAudioBufferAppend{Audio: realtimeproto.PCMAudio{Format: testFormat, Data: make([]byte, 640)}}
+	if err := session.Send(context.Background(), audio); err == nil {
+		t.Error("识别流没打开时应拒绝音频")
+	}
+}

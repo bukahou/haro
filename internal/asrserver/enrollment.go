@@ -12,12 +12,12 @@ import (
 	"github.com/bukahou/haro/internal/voiceprint"
 )
 
-// 远程登记声纹（v4 C-3）：终端录几句话发过来，这里算向量、存进声纹目录、立刻生效（不用重启）。
+// 远程登记声纹：终端录几句话发过来，这里算向量、存进声纹目录、立刻生效（不用重启）。
 // 声纹存在服务端那边的数据目录里，终端不能直接写。
 //
 //	POST /v1/voiceprints/{name}   {"append": false, "clips": ["<base64 pcm16 16kHz 单声道>", …]}
 //
-// ⚠️ 声纹属于生物特征数据：只存在这台机器的声纹目录（0600），不进任何备份（v4 D8）。
+// ⚠️ 声纹属于生物特征数据：只存在这台机器的声纹目录（0600），不进任何备份。
 
 // EnrollmentRequest 是登记请求。
 type EnrollmentRequest struct {
@@ -39,6 +39,9 @@ type PairResult struct {
 	A, B  int
 	Score float64
 }
+
+// maxUploadBytes 是一次登记声纹请求体的上限：几句话的 base64 音频远到不了这么大。
+const maxUploadBytes = 32 << 20
 
 // minEnrollmentClips：至少几句（太少声纹不稳）。
 const minEnrollmentClips = 2

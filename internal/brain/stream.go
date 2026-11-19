@@ -10,13 +10,13 @@ import (
 	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
-// streamFormat 是免按键模式要求的音频格式（与转写会话一致）。
+// streamFormat 是识别流要求的音频格式（与转写会话一致）。
 var streamFormat = realtimeproto.AudioFormat{SampleRate: realtimeproto.TranscriptionSampleRate, Channels: 1}
 
 // openStream 打开流式转写会话并开始转发它的事件。调用方持有 s.mu。
 func (s *Session) openStream(ctx context.Context, config StreamConfig) error {
 	if s.parts.Streaming == nil {
-		return errors.New("没有配置流式识别，无法使用免按键模式")
+		return errors.New("没有配置流式识别，无法打开识别流")
 	}
 	stream, err := s.parts.Streaming.OpenStream(ctx, config)
 	if err != nil {
@@ -24,7 +24,7 @@ func (s *Session) openStream(ctx context.Context, config StreamConfig) error {
 	}
 	s.stream = stream
 	s.pendingJobs = map[string]*transcriptionJob{}
-	if config.WakeWord && s.parts.WakeArbiter != nil { // 参加多终端唤醒仲裁（v4 D2）
+	if config.WakeWord && s.parts.WakeArbiter != nil { // 参加多终端唤醒仲裁
 		s.parts.WakeArbiter.join(s)
 	}
 	go s.pumpStreamEvents(stream)
@@ -34,7 +34,7 @@ func (s *Session) openStream(ctx context.Context, config StreamConfig) error {
 // wakeArbitrationTimeout：输掉仲裁后让识别流回去休眠，最多等这么久。
 const wakeArbitrationTimeout = 2 * time.Second
 
-// winWake 在多台终端同时听到唤醒词时决定这台要不要回答（v4 D2）；输了就让这台的识别流回去休眠。
+// winWake 在多台终端同时听到唤醒词时决定这台要不要回答；输了就让这台的识别流回去休眠。
 func (s *Session) winWake(stream RecognizerStream, wake realtimeproto.HaroWakeWordDetected) bool {
 	arbiter := s.parts.WakeArbiter
 	if arbiter == nil {
@@ -108,6 +108,6 @@ func (s *Session) pumpStreamEvents(stream RecognizerStream) {
 	select {
 	case <-s.closed: // 正常关闭，不报错
 	default:
-		s.emit(realtimeproto.Error{Message: "转写服务连接断开，免按键模式不可用"})
+		s.emit(realtimeproto.Error{Message: "转写服务连接断开，听不到了"})
 	}
 }

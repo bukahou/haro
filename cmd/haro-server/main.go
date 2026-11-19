@@ -1,6 +1,6 @@
 // haro-server：haro 的服务端（架构见 docs/architecture.md）。
 // 识别（haro-asr 子进程）→ 模型 → 工具 → 性格 → 语音合成（GPT-SoVITS 服务或 Piper），
-// 经 WebSocket（Realtime 事件）为终端 haro 服务。一条连接一个会话（S-3）。
+// 经 WebSocket（Realtime 事件）为终端 haro 服务。一条连接一个会话。
 // 这里只做组装：读配置 → 创建各段实现 → 挂到 HTTP 服务上。
 package main
 
@@ -84,7 +84,7 @@ func run(logger *slog.Logger) error {
 	}
 	defer stopSynthesizer()
 
-	recognizer, streaming, stopRecognizer, err := buildRecognizer(ctx, settings, httpClient, logger)
+	streaming, stopRecognizer, err := buildRecognizer(ctx, settings, logger)
 	if err != nil {
 		return err
 	}
@@ -163,7 +163,7 @@ func run(logger *slog.Logger) error {
 		logger.Warn("模型预热失败，第一轮对话会比较慢", "err", err)
 	}
 	components := brain.Components{
-		Recognizer: recognizer, Streaming: streaming, Model: model, Synthesizer: synthesizer, Tools: toolbox,
+		Streaming: streaming, Model: model, Synthesizer: synthesizer, Tools: toolbox,
 		Briefers: briefers, Notices: notices,
 		NewSegmenter: func() brain.TextSegmenter {
 			return speech.NewSentenceSegmenter(settings.FirstSegmentMinRunes, settings.MaxSegmentRunes)
@@ -212,16 +212,11 @@ func run(logger *slog.Logger) error {
 	return ctx.Err()
 }
 
-// buildRecognizer 按 HARO_ASR 选择识别实现；local 模式把 haro-asr 作为子进程拉起。
-// 返回一问一答的识别器、流式转写（voice-api 模式为 nil）和清理函数。
-func buildRecognizer(ctx context.Context, settings config.Settings, httpClient *http.Client,
-	logger *slog.Logger) (brain.SpeechRecognizer, brain.StreamingRecognizer, func(), error) {
-	switch settings.ASR {
-	case config.ASRVoiceAPI:
-		return speech.NewVoiceAPIRecognizer(settings.VoiceAPIURL, httpClient), nil, func() {}, nil
-	case config.ASROpenAI:
-		return speech.NewOpenAITranscriptionRecognizer(settings.ASRURL, settings.ASRModelName, httpClient),
-			speech.NewRealtimeTranscriptionClient(settings.ASRURL), func() {}, nil
+// buildRecognizer 按 HARO_ASR 选择流式识别：local 把 haro-asr 作为子进程拉起；openai 连 HARO_ASR_URL 上的转写服务。
+// 返回流式识别和清理函数。
+func buildRecognizer(ctx context.Context, settings config.Settings, logger *slog.Logger) (brain.StreamingRecognizer, func(), error) {
+	if settings.ASR == config.ASROpenAI {
+		return speech.NewRealtimeTranscriptionClient(settings.ASRURL), func() {}, nil
 	}
 	args := []string{"-listen", "127.0.0.1:" + strconv.Itoa(settings.ASRPort),
 		"-model-dir", settings.ASRModelDir, "-threads", strconv.Itoa(settings.ASRThreads)}
@@ -247,11 +242,10 @@ func buildRecognizer(ctx context.Context, settings config.Settings, httpClient *
 		LogOutput: os.Stderr, // 说完判断的概率、识别结果都在 haro-asr 的日志里
 	})
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 	logger.Info("haro-asr 识别服务已就绪", "url", asr.BaseURL, "threads", settings.ASRThreads, "vad", settings.VADModel != "")
-	return speech.NewOpenAITranscriptionRecognizer(asr.BaseURL, settings.ASRModelName, httpClient),
-		speech.NewRealtimeTranscriptionClient(asr.BaseURL), asr.Stop, nil
+	return speech.NewRealtimeTranscriptionClient(asr.BaseURL), asr.Stop, nil
 }
 
 func localURL(port int) string { return "http://127.0.0.1:" + strconv.Itoa(port) }
@@ -269,7 +263,7 @@ func brainHandler(settings config.Settings, newSession brainserver.SessionFactor
 }
 
 // buildChatModel 按 HARO_LLM_PROVIDER 组装服务端用的模型，HARO_LLM_FALLBACK 时另一个当退路：
-//   - cloud：云端为主、本地 ollama 退路（D-A ②）
+//   - cloud：云端为主、本地 ollama 退路
 //   - local：本地 ollama 为主、云端退路（本地模型那台机器离线时自动改用云端）
 //
 // purpose 是记账用途：主对话（chat）与滚动摘要（summary，R4）各建一套，费用分开记。
@@ -301,7 +295,7 @@ func buildChatModel(settings config.Settings, claude *llm.ClaudeAPI, httpClient 
 		return spending.NewMeteredChatModel(newCloudChatModel(settings, claude, settings.CloudLLMModel, maxTokens, settings.CloudLLMEffort,
 			settings.CloudLLMThinking, 0, firstTokenTimeout, client), settings.CloudLLMModel, purpose, pricing, ledger, logger)
 	}
-	var paid, free brain.ChatModel // paid：平时用的那套（可能花钱）；free：月度额度用完后退回的本地模型（R5 c）
+	var paid, free brain.ChatModel // paid：平时用的那套（可能花钱）；free：月度额度用完后退回的本地模型
 	switch {
 	case settings.LLMProvider != config.LLMCloud && !settings.LLMFallback:
 		logger.Info("服务端：本地模型", "model", settings.Model)
@@ -464,7 +458,7 @@ func connectWebSearch(ctx context.Context, settings config.Settings, httpClient 
 	return searcher
 }
 
-// startResearch 开启后台调查（v5 第 3 节）：任务账本、调查用的模型（R6）、上限（R2），并在后台开始处理队列。
+// startResearch 开启后台调查：任务账本、调查用的模型、上限，并在后台开始处理队列。
 func startResearch(ctx context.Context, settings config.Settings, claude *llm.ClaudeAPI, httpClient *http.Client, searcher tools.WebSearcher,
 	ledger spending.Ledger, guard *spending.Guard, logger *slog.Logger) (*research.Runner, func(), error) {
 	store, err := research.OpenTaskStore(ctx, settings.ResearchDB)

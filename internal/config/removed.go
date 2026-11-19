@@ -21,6 +21,8 @@ var removedSettings = []removedSetting{
 		return err == nil && on
 	}, removed: "唤醒词是唯一的对话方式，不能关闭"},
 	{name: "HARO_MIN_SPEECH", removed: "按键说话已删除，这个时长不再使用"},
+	{name: "HARO_VOICE_API_URL", removed: "整段转写的 voice-api 识别已删除，只用流式识别"},
+	{name: "HARO_ASR_MODEL_NAME", removed: "整段转写已删除，流式识别不用这个模型名"},
 }
 
 // checkRemovedSettings 检查环境里还写着的已删除配置项：返回给人看的提醒；值要求已删除的行为时返回错误。
