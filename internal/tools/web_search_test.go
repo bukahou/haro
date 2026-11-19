@@ -49,7 +49,9 @@ func fakeTavily(t *testing.T, wantKey string, lastQuery *atomic.Value) (*httptes
 		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: string(body)}}}, nil, nil
 	})
 	var handler atomic.Pointer[mcp.StreamableHTTPHandler]
-	restart := func() { handler.Store(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, nil)) }
+	restart := func() {
+		handler.Store(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, nil))
+	}
 	restart()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer "+wantKey {
@@ -173,4 +175,3 @@ func TestTavilyConnectsLazilyAndReconnects(t *testing.T) {
 		t.Errorf("重连后的搜索应到达服务：%v", got)
 	}
 }
-
