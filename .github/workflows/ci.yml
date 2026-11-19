@@ -4,7 +4,7 @@
 ##   version  版本号 = v + VERSION 文件 + 提交号前 7 位（= Release 标签 = 镜像标签），例如 v0.5.0-1a2b3c4
 ##   test     gofmt + go vet + go test -short（跳过要网络的测试）+ check-darwin
 ##   scripts  shellcheck（安装脚本、模型下载脚本等）
-##   build    终端三个平台（Linux x86_64 / arm64、macOS Apple 芯片），各在原生机器上编译、跑一次 -version，
+##   build    终端的各个平台（列表只在 version 的 platforms 一处；现在是 Linux x86_64 / arm64），各在原生机器上编译、跑一次 -version，
 ##            再用安装脚本装一遍、升一遍、卸一遍（含「校验和不对必须拒装」的阳性对照）。
 ##            产物传成 artifact：release.yml 直接拿去发布 —— 发布的就是这里测过的那一份，不重新编译。
 ##   image    服务端镜像：构建一次（不推送）+ 检查镜像里的程序版本 —— Dockerfile、基础镜像（Dependabot 的 PR）、
@@ -23,6 +23,9 @@ on:
       tag:
         description: 版本号（= Release 标签 = 镜像标签），例如 v0.5.0-1a2b3c4
         value: ${{ jobs.version.outputs.tag }}
+      platforms:
+        description: 终端要发布的平台（JSON 数组，每项 platform + runner）
+        value: ${{ jobs.version.outputs.platforms }}
 
 permissions:
   contents: read
@@ -32,6 +35,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
+      platforms: ${{ steps.platforms.outputs.platforms }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -43,6 +47,11 @@ jobs:
             { echo "::error file=VERSION::VERSION 要写成 X.Y.Z，现在是「${version}」"; exit 1; }
           echo "tag=v${version}-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
           echo "版本号：v${version}-${GITHUB_SHA::7}"
+      # 终端要发布的平台只定义在这里：build 的 matrix、release.yml 的「每个平台都要在」检查和发布说明都从这里读。
+      # Mac 版暂停编译（没有在用，Mac 机器常要排队）；要用时加回 {"platform":"darwin-arm64","runner":"macos-15"}
+      - id: platforms
+        run: |
+          echo 'platforms=[{"platform":"linux-amd64","runner":"ubuntu-24.04"},{"platform":"linux-arm64","runner":"ubuntu-24.04-arm"}]' >> "$GITHUB_OUTPUT"
 
   test:
     runs-on: ubuntu-24.04
@@ -87,10 +96,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { platform: linux-amd64, runner: ubuntu-24.04 }
-          - { platform: linux-arm64, runner: ubuntu-24.04-arm } # 公开仓库免费
-          - { platform: darwin-arm64, runner: macos-15 }
+        include: ${{ fromJSON(needs.version.outputs.platforms) }}
     runs-on: ${{ matrix.runner }}
     env:
       TAG: ${{ needs.version.outputs.tag }}

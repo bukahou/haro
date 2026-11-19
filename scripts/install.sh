@@ -156,10 +156,11 @@ trap 'exit 130' INT TERM
 say "下载 ${asset}（${version}）"
 curl -fsSL --retry 3 --retry-delay 2 -o "$work/SHA256SUMS" "$base_url/SHA256SUMS" ||
 	die "下载不了 $base_url/SHA256SUMS（版本写对了吗？）"
+# 发布的平台以这个版本的 SHA256SUMS 为准：不在里面就是这个版本没有这个平台的安装包
+expected=$(awk -v name="$asset" '$2 == name || $2 == "*" name { print $1; exit }' "$work/SHA256SUMS")
+[ -n "$expected" ] || die "这个版本没有 ${platform} 的安装包（发布了哪些平台见 $base_url/SHA256SUMS）"
 curl -fsSL --retry 3 --retry-delay 2 -o "$work/$asset" "$base_url/$asset" ||
 	die "下载不了 $base_url/$asset"
-expected=$(awk -v name="$asset" '$2 == name || $2 == "*" name { print $1; exit }' "$work/SHA256SUMS")
-[ -n "$expected" ] || die "SHA256SUMS 里没有 $asset"
 actual=$(sha256_of "$work/$asset")
 [ "$actual" = "$expected" ] || die "校验不过：$asset 的 sha256 是 ${actual}，SHA256SUMS 写的是 ${expected}（下载出错或文件被改过），没有安装"
 

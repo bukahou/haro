@@ -49,6 +49,11 @@ printf '%064d  %s\n' 0 "$asset" >"$release/SHA256SUMS"
 if installer >"$work/out" 2>&1; then fail "校验和不对也装上了"; fi
 grep -F '校验不过' "$work/out" >/dev/null || fail "拒装的原因不是校验不过：$(cat "$work/out")"
 
+echo "== 这个版本没有这台机器的平台（SHA256SUMS 里只有别的平台）：必须拒装，并说明是没有这个平台"
+printf '%s  %s\n' "$sum" "haro-other-platform.tar.gz" >"$release/SHA256SUMS"
+if installer >"$work/out" 2>&1; then fail "这个版本没有这个平台也装上了"; fi
+grep -F '这个版本没有' "$work/out" >/dev/null || fail "拒装的原因不是没有这个平台：$(cat "$work/out")"
+
 echo "== 卸载：程序删掉，配置文件留着"
 installer --uninstall
 [ ! -e "$home/.local/bin/haro" ] || fail "卸载后程序还在"

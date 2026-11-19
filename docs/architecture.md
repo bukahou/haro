@@ -189,7 +189,7 @@ make version          # 这次构建的版本号
 - **合并前的检查**（`.github/workflows/ci.yml`；日常开发在 `dev`，推 `dev` 和开 PR 时跑）：测试、终端三个平台的编译和安装脚本，
   再试建一次服务端镜像（不推送；和发版用同一份构建步骤 `.github/actions/server-image`）—— Dockerfile、基础镜像的问题合并前就能发现。
 - **合并到 `main` 就发版**（`.github/workflows/release.yml`）：
-  1. 测试 + 终端三个平台（Linux x86_64 / arm64、macOS Apple 芯片）的程序，各在原生机器上编译，用安装脚本装、卸一遍；
+  1. 测试 + 终端各平台（列表只在 `ci.yml` 的 `platforms` 一处；现在是 Linux x86_64 / arm64，Mac 版暂停编译）的程序，各在原生机器上编译，用安装脚本装、卸一遍；
   2. 程序发到 GitHub Release（附 `SHA256SUMS`、`install.sh`、来源证明），设为 latest；`v*` 的 Release 只留最近 20 个；
   3. 服务端镜像：模型从本仓库的 Release 下载并按 `models.lock` 校验 → 构建 → Trivy 扫描（有可修的 CRITICAL
      或疑似凭证就不推）→ 推 Docker Hub `bukahou/haro-server`（版本号 + latest）；

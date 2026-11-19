@@ -6,7 +6,7 @@
 > Terminals and the server speak an OpenAI Realtime API–compatible WebSocket protocol.
 > Documentation is in Chinese; see [docs/architecture.md](docs/architecture.md).
 >
-> Install a terminal (Linux x86_64 / arm64, macOS Apple silicon; user-level, no root):
+> Install a terminal (Linux x86_64 / arm64; macOS builds are paused; user-level, no root):
 > `curl -fsSL https://github.com/bukahou/haro/releases/latest/download/install.sh | sh -s -- --server-url http://<server>:59130`.
 > The server ships as the Docker image `bukahou/haro-server` (models included; see [deploy/server/MODELS.md](deploy/server/MODELS.md)).
 >
@@ -24,7 +24,7 @@
 
 ## 安装
 
-终端（Linux x86_64 / arm64、macOS Apple 芯片；装在自己的用户目录，不需要 root；再跑一次就是升级）：
+终端（Linux x86_64 / arm64；Mac 版暂停发布；装在自己的用户目录，不需要 root；再跑一次就是升级）：
 
 ```sh
 curl -fsSL https://github.com/bukahou/haro/releases/latest/download/install.sh | sh -s -- --server-url http://服务端地址:59130
