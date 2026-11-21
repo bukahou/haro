@@ -9,11 +9,21 @@ import (
 )
 
 // ParametersFor 由结构体 T 生成工具参数的定义（JSON Schema）：字段的 jsonschema 标签是给模型看的说明，
-// 带 omitempty 的是可选参数。T 是代码里写死的类型，生成不了就是写错了：直接 panic，测试和启动时就暴露。
-func ParametersFor[T any]() json.RawMessage {
+// 带 omitempty 的是可选参数。descriptions（可选）按 JSON 字段名补上说明：要用常量拼、写不进结构体标签的那几项。
+// T 是代码里写死的类型，生成不了、说明对不上字段就是写错了：直接 panic，测试和启动时就暴露。
+func ParametersFor[T any](descriptions ...map[string]string) json.RawMessage {
 	schema, err := jsonschema.For[T](nil)
 	if err != nil {
 		panic(fmt.Sprintf("工具参数 %v 生成不了定义: %v", reflect.TypeFor[T](), err))
+	}
+	for _, fields := range descriptions {
+		for field, description := range fields {
+			property, ok := schema.Properties[field]
+			if !ok {
+				panic(fmt.Sprintf("工具参数 %v 没有字段 %q，补的说明对不上", reflect.TypeFor[T](), field))
+			}
+			property.Description = description
+		}
 	}
 	data, err := json.Marshal(schema)
 	if err != nil {

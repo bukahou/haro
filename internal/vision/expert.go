@@ -8,7 +8,6 @@ package vision
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -17,36 +16,42 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/google/jsonschema-go/jsonschema"
-
 	"github.com/bukahou/haro/internal/agents"
 	"github.com/bukahou/haro/internal/brain"
 )
 
 // Rules 是专家这个代理的规则：从「看画面」的定义得来（RulesFrom）。
 type Rules struct {
-	Name        string        // 日志、代理链里的名字
-	Prompt      string        // 系统提示词（已填好值）
-	Tools       []string      // 能用的工具（search_web、report_frame 里的，要有 report_frame）；nil = 都能用
-	MaxSteps    int           // 一次看画面最多请求模型几次
-	MaxSearches int           // 一次看画面最多联网查几次
-	Timeout     time.Duration // 看一次（含联网查）最多多久；前台在等，超时就退回把画面交给前台
+	Name string // 日志、代理链里的名字
+	// Prompt、OfflinePrompt 是系统提示词（已填好值）：能联网时用 Prompt，不能时用 OfflinePrompt（搜索那几句不出现）。
+	// 能不能联网要到 NewExpert 才知道，两份都先填好，各自逐字不变
+	Prompt        string
+	OfflinePrompt string
+	Tools         []string      // 能用的工具（search_web、report_frame 里的，要有 report_frame）；nil = 都能用
+	MaxSteps      int           // 一次看画面最多请求模型几次
+	MaxSearches   int           // 一次看画面最多联网查几次
+	Timeout       time.Duration // 看一次（含联网查）最多多久；前台在等，超时就退回把画面交给前台
 }
 
-// PromptValues 是「看画面」的定义正文里可以引用的值：工具名、字数上限只在代码里定义一处，搜索次数来自定义的 max_searches。
-func PromptValues(maxSearches int) map[string]any {
+// PromptValues 是「看画面」的定义正文里可以引用的值：工具名、字数上限只在代码里定义一处，搜索次数来自定义的 max_searches，
+// CanSearch 是专家能不能联网（没配搜索、或定义的 tools 里去掉了 search_web 时不能）。
+func PromptValues(maxSearches int, canSearch bool) map[string]any {
 	return map[string]any{"SearchTool": searchTool, "ReportTool": reportTool, "MaxSearches": maxSearches,
-		"AnswerChars": brain.CameraAnswerChars}
+		"AnswerChars": brain.CameraAnswerChars, "CanSearch": canSearch}
 }
 
-// RulesFrom 由「看画面」的定义得到专家的规则。
+// RulesFrom 由「看画面」的定义得到专家的规则（系统提示词按能不能联网各填一份）。
 func RulesFrom(definition agents.Definition) (Rules, error) {
-	prompt, err := definition.RenderPrompt(PromptValues(definition.MaxSearches))
+	prompt, err := definition.RenderPrompt(PromptValues(definition.MaxSearches, true))
 	if err != nil {
 		return Rules{}, err
 	}
-	return Rules{Name: definition.Title, Prompt: prompt, Tools: definition.Tools, MaxSteps: definition.MaxSteps,
-		MaxSearches: definition.MaxSearches, Timeout: definition.Timeout}, nil
+	offline, err := definition.RenderPrompt(PromptValues(definition.MaxSearches, false))
+	if err != nil {
+		return Rules{}, err
+	}
+	return Rules{Name: definition.Title, Prompt: prompt, OfflinePrompt: offline, Tools: definition.Tools,
+		MaxSteps: definition.MaxSteps, MaxSearches: definition.MaxSearches, Timeout: definition.Timeout}, nil
 }
 
 // check 检查规则：只能用专家认识的工具，要能交结论，至少请求一次。
@@ -59,7 +64,7 @@ func (r Rules) check() error {
 			return fmt.Errorf("看画面的代理不认识工具 %q（只有 %s、%s）", tool, searchTool, reportTool)
 		}
 	}
-	if r.MaxSteps < 1 || strings.TrimSpace(r.Prompt) == "" {
+	if r.MaxSteps < 1 || strings.TrimSpace(r.Prompt) == "" || strings.TrimSpace(r.OfflinePrompt) == "" {
 		return fmt.Errorf("看画面的代理要有系统提示词、步数至少 1（现在 %d）", r.MaxSteps)
 	}
 	if r.Timeout <= 0 || r.MaxSearches < 0 { // 前台在等它：没有期限就可能一直等下去
@@ -78,11 +83,13 @@ type Expert struct {
 	model     brain.ChatModel // 已按用途记账、查额度
 	modelName string          // 只用于日志
 	rules     Rules
+	prompt    string // 系统提示词：按能不能联网选好的那份
 	search    Search
 	logger    *slog.Logger
 }
 
-// NewExpert 创建专家；search 为 nil 时专家不能联网（规则里也没给 search_web 时同样不能）。规则不对时报错。
+// NewExpert 创建专家；search 为 nil 时专家不能联网（规则里也没给 search_web 时同样不能），系统提示词里也不提搜索
+// （否则模型会照着名字去调用）。规则不对时报错。
 func NewExpert(model brain.ChatModel, modelName string, rules Rules, search Search, logger *slog.Logger) (*Expert, error) {
 	if err := rules.check(); err != nil {
 		return nil, err
@@ -90,7 +97,12 @@ func NewExpert(model brain.ChatModel, modelName string, rules Rules, search Sear
 	if !rules.allows(searchTool) {
 		search = nil
 	}
-	return &Expert{model: model, modelName: modelName, rules: rules, search: search, logger: logger.With("agent", rules.Name)}, nil
+	prompt := rules.Prompt
+	if search == nil {
+		prompt = rules.OfflinePrompt
+	}
+	return &Expert{model: model, modelName: modelName, rules: rules, prompt: prompt, search: search,
+		logger: logger.With("agent", rules.Name)}, nil
 }
 
 // AgentName 实现 brain.FrameExpert。
@@ -116,29 +128,13 @@ type reportArgs struct {
 var (
 	searchSpec = brain.ToolSpec{Name: searchTool,
 		Description: "联网搜索一次，用来核对画面里的东西（例如确认产品名、型号）。",
-		Parameters:  toolSchema[searchArgs](nil)}
+		Parameters:  brain.ParametersFor[searchArgs]()}
 	reportSpec = brain.ToolSpec{Name: reportTool,
 		Description: "看完画面后调用一次，交出结论：说给主人听的话和细节分开交。",
-		Parameters: toolSchema[reportArgs](map[string]string{"spoken": fmt.Sprintf("直接念给主人听的一两句，不超过 %d 个字，"+
+		Parameters: brain.ParametersFor[reportArgs](map[string]string{"spoken": fmt.Sprintf("直接念给主人听的一两句，不超过 %d 个字，"+
 			"只说主人问的：是什么、把握多大（确定 / 看着像 / 不确定）；看不清就说要主人怎么做（拿近一点，或者把哪一面转向镜头）",
 			brain.CameraAnswerChars)})}
 )
-
-// toolSchema 由参数结构体生成工具的 JSON Schema；descriptions 补上要引用常量、写不进结构体标签的字段说明。
-func toolSchema[T any](descriptions map[string]string) json.RawMessage {
-	schema, err := jsonschema.For[T](nil)
-	if err != nil {
-		panic(fmt.Sprintf("生成工具参数的 Schema: %v", err))
-	}
-	for field, description := range descriptions {
-		schema.Properties[field].Description = description
-	}
-	data, err := json.Marshal(schema)
-	if err != nil {
-		panic(fmt.Sprintf("编码工具参数的 Schema: %v", err))
-	}
-	return data
-}
 
 // reportReminder：专家说了判断却没调用 report_frame 时提醒它一次。
 var reportReminder = fmt.Sprintf("用 %s 交出结论：spoken 一两句、不超过 %d 个字，details 写细节。", reportTool, brain.CameraAnswerChars)
@@ -157,7 +153,7 @@ func (e *Expert) ExamineFrame(ctx context.Context, question brain.FrameQuestion)
 	defer cancel()
 	started := time.Now()
 	maxRounds := e.rules.MaxSteps
-	messages := []brain.ChatMessage{{Role: brain.RoleSystem, Text: e.rules.Prompt}}
+	messages := []brain.ChatMessage{{Role: brain.RoleSystem, Text: e.prompt}}
 	if question.Style != "" {
 		messages = append(messages, brain.ChatMessage{Role: brain.RoleUser, Text: "助手的性格（spoken 用这个口吻）：\n" + question.Style})
 	}
@@ -242,27 +238,40 @@ func (e *Expert) answerCalls(ctx context.Context, messages []brain.ChatMessage, 
 	return messages
 }
 
-// reportIn 从这一轮的工具调用里取出 report_frame 交的结论；没有、或两段都空时 ok = false。
+// decodeReport 解出 report_frame 交的结论：参数按定义校验（缺了必填的、类型不对都报错，不落成空的照收），两段都空也算没交。
+func decodeReport(call brain.ToolCall) (brain.FrameReport, error) {
+	args, err := brain.DecodeArguments[reportArgs](call.Arguments)
+	if err != nil {
+		return brain.FrameReport{}, err
+	}
+	report := brain.FrameReport{Spoken: strings.TrimSpace(args.Spoken), Details: strings.TrimSpace(args.Details)}
+	if report.Spoken == "" && report.Details == "" {
+		return brain.FrameReport{}, errors.New("spoken 和 details 都是空的")
+	}
+	return report, nil
+}
+
+// reportIn 从这一轮的工具调用里取出 report_frame 交的结论（第一份交对了的）；没有交对的时 ok = false，
+// 哪里不对由 runTool 交回给专家。
 func reportIn(calls []brain.ToolCall) (brain.FrameReport, bool) {
 	for _, call := range calls {
 		if call.Name != reportTool {
 			continue
 		}
-		var args reportArgs
-		data, err := json.Marshal(call.Arguments)
-		if err != nil || json.Unmarshal(data, &args) != nil {
-			return brain.FrameReport{}, false
+		if report, err := decodeReport(call); err == nil {
+			return report, true
 		}
-		report := brain.FrameReport{Spoken: strings.TrimSpace(args.Spoken), Details: strings.TrimSpace(args.Details)}
-		return report, report.Spoken != "" || report.Details != ""
 	}
 	return brain.FrameReport{}, false
 }
 
-// runTool 执行专家的一次工具调用；出错也作为文字交给专家，让它根据画面回答。
+// runTool 执行专家的一次工具调用；出错也作为文字交给专家，让它根据画面回答。参数不对时把哪里不对原样交回去。
 func (e *Expert) runTool(ctx context.Context, call brain.ToolCall, searches *int) string {
-	if call.Name == reportTool { // 交来的参数不对或两段都空
-		return "交来的结论是空的，或参数不对：按说明重新调用 " + reportTool + "。"
+	if call.Name == reportTool {
+		if _, err := decodeReport(call); err != nil {
+			return "交来的结论不对（" + err.Error() + "）：按说明重新调用 " + reportTool + "。"
+		}
+		return "结论收到了。"
 	}
 	if call.Name != searchTool || e.search == nil { // 没给它搜索时照着名字调用：不执行
 		return "没有叫 " + call.Name + " 的工具"
@@ -270,9 +279,9 @@ func (e *Expert) runTool(ctx context.Context, call brain.ToolCall, searches *int
 	if *searches >= e.rules.MaxSearches {
 		return fmt.Sprintf("搜索次数已经用完（上限 %d 次）。根据画面和已有资料回答。", e.rules.MaxSearches)
 	}
-	var args searchArgs
-	if data, err := json.Marshal(call.Arguments); err == nil {
-		_ = json.Unmarshal(data, &args)
+	args, err := brain.DecodeArguments[searchArgs](call.Arguments)
+	if err != nil {
+		return "搜索的参数不对（" + err.Error() + "）：按说明重新调用 " + searchTool + "。"
 	}
 	query := args.Query
 	if strings.TrimSpace(query) == "" {
