@@ -45,8 +45,9 @@ func NewDetector(modelPath, libPath string) (*Detector, error) {
 		return nil, err
 	}
 	defer options.Destroy()
-	_ = options.SetIntraOpNumThreads(2)
-	_ = options.SetInterOpNumThreads(1)
+	if err := setThreads(options); err != nil {
+		return nil, err
+	}
 	session, err := ort.NewDynamicAdvancedSession(modelPath,
 		[]string{inputs[0].Name}, []string{outputs[0].Name}, options)
 	if err != nil {
@@ -54,6 +55,24 @@ func NewDetector(modelPath, libPath string) (*Detector, error) {
 	}
 	return &Detector{features: NewFeatureExtractor(), session: session,
 		inputName: inputs[0].Name, outputName: outputs[0].Name}, nil
+}
+
+// sessionThreads 是会话选项里设推理线程数的那部分（*ort.SessionOptions 满足它）。
+type sessionThreads interface {
+	SetIntraOpNumThreads(n int) error
+	SetInterOpNumThreads(n int) error
+}
+
+// setThreads 设推理线程数：算子内 2 个、算子间 1 个（定值，没有单独实测）。设不上就报错、起不来：
+// 不报的话 onnxruntime 悄悄按默认线程数（所有核）跑，和识别抢 CPU，也没有日志。
+func setThreads(options sessionThreads) error {
+	if err := options.SetIntraOpNumThreads(2); err != nil {
+		return fmt.Errorf("设 Smart Turn 的推理线程数（算子内）: %w", err)
+	}
+	if err := options.SetInterOpNumThreads(1); err != nil {
+		return fmt.Errorf("设 Smart Turn 的推理线程数（算子间）: %w", err)
+	}
+	return nil
 }
 
 // EndOfTurnProbability 返回「已经说完」的概率（0–1）。samples 是 16kHz 单声道，取最后 8 秒。
