@@ -80,6 +80,7 @@ const (
 	typeTranscriptionCompleted = "conversation.item.input_audio_transcription.completed"
 	typeTranscriptionFailed    = "conversation.item.input_audio_transcription.failed"
 	typeHaroWakeWordDetected   = "haro.wake_word.detected"
+	typeHaroWakeWordState      = "haro.wake_word.state"
 	typeTranscriptDelta        = "response.output_audio_transcript.delta"
 	typeAudioDelta             = "response.output_audio.delta"
 	typeResponseCreated        = "response.created"
@@ -190,6 +191,11 @@ type wireWakeWordDetected struct {
 	AudioMs int64   `json:"audio_ms" jsonschema:"唤醒词结束处在会话音频时间轴上的位置（毫秒）"`
 	Score   float64 `json:"score,omitempty" jsonschema:"唤醒词的声纹分数"`
 	Level   float64 `json:"level,omitempty" jsonschema:"唤醒词那一段的音量（RMS，0–1）"`
+}
+
+type wireWakeWordState struct {
+	Type  string `json:"type"`
+	Awake bool   `json:"awake" jsonschema:"处理完请求之后醒着（true）还是睡着（false）"`
 }
 
 type wireTranscriptDelta struct {

@@ -11,9 +11,10 @@ import (
 
 // runWakeWord 是终端的对话循环：麦克风一直开着，语音前端从休眠开始。
 //   - 听到唤醒词（或按回车）→ 唤醒，进入对话窗口，自动轮流
-//   - 最后一次回答播完后安静 IdleTimeout（或再按回车）→ 通知语音前端休眠
+//   - 最后一次回答播完后安静 IdleTimeout（或再按回车）→ 请语音前端休眠
 //
-// 休眠时语音前端只认唤醒词，不识别、不上报任何内容（K2 ②）。
+// 休眠时语音前端只认唤醒词，不识别、不上报任何内容（K2 ②）。醒 / 睡由语音前端决定：
+// 终端只发请求，照服务端转来的 haro.wake_word.detected / haro.wake_word.state 改自己记的。
 func (a *Assistant) runWakeWord(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -36,7 +37,7 @@ func (a *Assistant) runWakeWord(ctx context.Context) error {
 	}()
 
 	window := &conversationWindow{idle: a.opts.WakeWord.IdleTimeout}
-	defer window.stop()
+	defer window.close()
 	a.logger.Info("💤 休眠中：叫「" + a.opts.WakeWord.Phrase + "」唤醒（或按回车）")
 
 	for {
@@ -56,15 +57,19 @@ func (a *Assistant) runWakeWord(ctx context.Context) error {
 				return err
 			}
 			if window.awake {
-				a.sleep(ctx, window, "手动休眠")
-			} else if err := a.deps.Brain.Send(ctx, realtimeproto.HaroWakeWordWake{}); err != nil {
-				a.logger.Error("手动唤醒失败", "err", err)
+				a.requestWakeState(ctx, window, false, "手动休眠")
 			} else {
-				window.wake()
-				a.logger.Info("👂 已唤醒（手动），直接说话就行")
+				a.requestWakeState(ctx, window, true, "手动")
 			}
 		case <-window.expired():
-			a.sleep(ctx, window, "对话窗口结束")
+			a.requestWakeState(ctx, window, false, "对话窗口结束")
+		case <-window.replyOverdue():
+			request := window.settle()
+			a.logger.Warn("语音前端没有回复这次切换：当作没切成", "awake", request.awake, "reason", request.reason,
+				"waited", a.opts.Timing.WakeConfirm)
+			if window.awake {
+				window.restart() // 还醒着：过一个对话窗口再试休眠，不能停在「醒着且永不到期」
+			}
 		case event := <-a.replay: // 打断后等取消确认期间收到的事件
 			a.handleWakeEvent(ctx, window, event)
 		case event := <-a.deps.Brain.Events():
@@ -79,6 +84,8 @@ func (a *Assistant) handleWakeEvent(ctx context.Context, window *conversationWin
 	case realtimeproto.HaroWakeWordDetected:
 		window.wake()
 		a.logger.Info("👂 已唤醒", "keyword", e.Keyword)
+	case realtimeproto.HaroWakeWordState:
+		a.applyWakeState(ctx, window, e.Awake)
 	case realtimeproto.InputAudioBufferSpeechStarted:
 		if window.awake {
 			a.hearing.Store(true)
@@ -110,18 +117,49 @@ func (a *Assistant) handleWakeEvent(ctx context.Context, window *conversationWin
 	}
 }
 
-func (a *Assistant) sleep(ctx context.Context, window *conversationWindow, reason string) {
-	if err := a.deps.Brain.Send(ctx, realtimeproto.HaroWakeWordSleep{}); err != nil {
-		if !errors.Is(err, context.Canceled) {
-			a.logger.Error("通知休眠失败：过一个对话窗口再试", "err", err)
-		}
-		window.restart() // 这次的计时已经用掉了：重新计时，否则窗口永远不再到期
+// requestWakeState 请语音前端醒（awake）或睡。发出去不等于切成了：终端记的醒 / 睡等回复（applyWakeState）才改，
+// 等不到（Timing.WakeConfirm）由主循环当作没切成。上一次的请求还没回复时不再发。
+func (a *Assistant) requestWakeState(ctx context.Context, window *conversationWindow, awake bool, reason string) {
+	if window.pending != nil {
+		a.logger.Info("上一次切换还在等语音前端回复：这次不发", "reason", reason)
 		return
 	}
-	window.sleep()
-	a.hearing.Store(false) // 说到一半休眠（例如按回车）：之后不会再有「说完」
-	a.logger.Info("💤 " + reason + "，休眠中：叫「" + a.opts.WakeWord.Phrase + "」唤醒（或按回车）")
-	a.playSleepTone(ctx)
+	var request realtimeproto.ClientEvent = realtimeproto.HaroWakeWordSleep{}
+	if awake {
+		request = realtimeproto.HaroWakeWordWake{}
+	}
+	if err := a.deps.Brain.Send(ctx, request); err != nil {
+		if !errors.Is(err, context.Canceled) {
+			a.logger.Error("切换醒 / 睡的请求没发出去", "awake", awake, "reason", reason, "err", err)
+		}
+		if window.awake {
+			window.restart() // 这次的计时已经用掉了：重新计时，过一个对话窗口再试，否则窗口永远不再到期
+		}
+		return
+	}
+	window.await(awake, reason, a.opts.Timing.WakeConfirm)
+}
+
+// applyWakeState 照语音前端的回复（haro.wake_word.state）改终端记的醒 / 睡；和在等的请求一致时这次请求就完成了。
+// 睡着了说一声：不出声的话，人不知道它已经睡了，接着说话会没反应。
+func (a *Assistant) applyWakeState(ctx context.Context, window *conversationWindow, awake bool) {
+	reason := "语音前端"
+	if request := window.pending; request != nil {
+		reason = request.reason
+		if request.awake == awake {
+			window.settle()
+		}
+	}
+	switch {
+	case awake && !window.awake:
+		window.wake()
+		a.logger.Info("👂 已唤醒（" + reason + "），直接说话就行")
+	case !awake && window.awake:
+		window.sleep()
+		a.hearing.Store(false) // 说到一半休眠（例如按回车）：之后不会再有「说完」
+		a.logger.Info("💤 " + reason + "，休眠中：叫「" + a.opts.WakeWord.Phrase + "」唤醒（或按回车）")
+		a.playSleepTone(ctx)
+	}
 }
 
 // playNotice 服务端有事告诉主人（例如后台调查查完了、语音识别断开了）：响一声。醒着、睡着都响。
@@ -164,8 +202,7 @@ func (a *Assistant) playHeldNotices(ctx context.Context, window *conversationWin
 	}
 }
 
-// playSleepTone 休眠时说一声：不出声的话，人不知道它已经睡了，接着说话会没反应。
-// 放在通知服务端休眠之后：这时语音前端只认唤醒词，提示音不会被当成用户说话。
+// playSleepTone 休眠时说一声。放在语音前端回复睡着了之后：这时它只认唤醒词，提示音不会被当成用户说话。
 func (a *Assistant) playSleepTone(ctx context.Context) {
 	a.playClip(ctx, a.opts.WakeWord.SleepTone, "休眠提示音")
 }
@@ -198,11 +235,20 @@ func (a *Assistant) playClip(ctx context.Context, tone realtimeproto.PCMAudio, w
 	}
 }
 
-// conversationWindow 是唤醒后的对话窗口计时（只在主循环里使用，不需要加锁）。
+// conversationWindow 是终端记的醒 / 睡和唤醒后的对话窗口计时（只在主循环里使用，不需要加锁）。
+// awake 只照语音前端报的改（haro.wake_word.detected / state）；终端要切换时发请求，pending 记着在等回复的那次。
 type conversationWindow struct {
-	idle  time.Duration
-	awake bool
-	timer *time.Timer
+	idle    time.Duration
+	awake   bool
+	timer   *time.Timer  // 对话窗口倒计时
+	pending *wakeRequest // 发出去、还没等到回复的醒 / 睡请求
+}
+
+// wakeRequest 是一次还没等到回复的醒 / 睡请求。
+type wakeRequest struct {
+	awake  bool        // 请求醒（true）还是睡
+	reason string      // 为什么切（手动、对话窗口结束），写日志用
+	timer  *time.Timer // 等回复的期限
 }
 
 func (w *conversationWindow) wake()    { w.awake = true; w.restart() }
@@ -217,10 +263,37 @@ func (w *conversationWindow) stop() {
 	}
 }
 
+// await 记下刚发出的请求、开始等回复；等回复期间对话窗口不倒计时（到期也不会再发一次）。
+func (w *conversationWindow) await(awake bool, reason string, timeout time.Duration) {
+	w.stop()
+	w.pending = &wakeRequest{awake: awake, reason: reason, timer: time.NewTimer(timeout)}
+}
+
+// settle 结束等回复，返回那次请求（没有在等时为 nil）。
+func (w *conversationWindow) settle() *wakeRequest {
+	request := w.pending
+	if request != nil {
+		request.timer.Stop()
+		w.pending = nil
+	}
+	return request
+}
+
+// close 停掉全部计时（主循环退出时）。
+func (w *conversationWindow) close() { w.stop(); w.settle() }
+
 // expired 返回本次倒计时的通道；没有在计时时返回 nil（select 里永远不会触发）。
 func (w *conversationWindow) expired() <-chan time.Time {
 	if w.timer == nil {
 		return nil
 	}
 	return w.timer.C
+}
+
+// replyOverdue 返回等回复的期限通道；没有在等时返回 nil。
+func (w *conversationWindow) replyOverdue() <-chan time.Time {
+	if w.pending == nil {
+		return nil
+	}
+	return w.pending.timer.C
 }

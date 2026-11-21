@@ -96,7 +96,7 @@ func waitOpened(t *testing.T, voice *braintest.Voice, n int) *braintest.Stream {
 	return voice.Stream()
 }
 
-// 识别流断开：按原来的设置自己重开，把会话记着的「醒着 / 正在播放」告诉新的流，之后照常对话。
+// 识别流断开：按原来的设置自己重开，把会话记着的「醒着还是睡着 / 正在播放」告诉新的流，之后照常对话。
 // 断开期间送来的音频丢掉、不逐块回错误；断开很快恢复时不提示终端。
 func TestStreamReopensAfterDisconnect(t *testing.T) {
 	voice := braintest.NewVoice()
@@ -106,6 +106,10 @@ func TestStreamReopensAfterDisconnect(t *testing.T) {
 	turn := realtimeproto.TurnDetection{Type: "server_vad", SilenceDurationMs: 600}
 	first := braintest.Open(t, session, voice, realtimeproto.SessionUpdate{TurnDetection: &turn, WakeWord: true})
 	_ = session.Send(ctx, realtimeproto.HaroWakeWordWake{})
+	if err := first.Emit(realtimeproto.HaroWakeWordState{Awake: true}); err != nil { // 识别服务处理完、回复醒着
+		t.Fatal(err)
+	}
+	braintest.Expect[realtimeproto.HaroWakeWordState](t, session)
 	_ = session.Send(ctx, realtimeproto.HaroPlaybackStarted{})
 
 	voice.FailNextOpen(errors.New("连不上 haro-asr"))
@@ -130,6 +134,12 @@ func TestStreamReopensAfterDisconnect(t *testing.T) {
 	}
 	if got := second.AwakeCalls(); !slices.Equal(got, []bool{true}) {
 		t.Errorf("重开后应恢复醒着：%v", got)
+	}
+	if err := second.Emit(realtimeproto.HaroWakeWordState{Awake: true}); err != nil {
+		t.Fatal(err)
+	}
+	if state := braintest.Expect[realtimeproto.HaroWakeWordState](t, session); !state.Awake {
+		t.Errorf("新的流的回复应转给终端：%+v", state)
 	}
 	if got := second.PlaybackCalls(); len(got) != 0 {
 		t.Errorf("断开期间播放已经停了，重开后不应再说在播放：%v", got)
@@ -309,7 +319,8 @@ func TestUnknownSpeakerIsIgnored(t *testing.T) {
 	}
 }
 
-// 两台终端同时听到唤醒词——只有质量高的那台把唤醒告诉终端，另一台的识别流被送回休眠。
+// 两台终端同时听到唤醒词——只有质量高的那台把唤醒告诉终端，另一台的识别流被送回休眠：
+// 它处理到休眠之前报的说话不转给终端、不回答；它回复睡着了，转给那台终端（本来就睡着）。
 func TestTwoTerminalsHearingWakeWordOnlyOneAnswers(t *testing.T) {
 	arbiter := brain.NewWakeArbiter(50 * time.Millisecond)
 	open := func() (*brain.Session, *braintest.Stream) {
@@ -320,7 +331,8 @@ func TestTwoTerminalsHearingWakeWordOnlyOneAnswers(t *testing.T) {
 	near, nearStream := open()
 	far, farStream := open()
 
-	_ = farStream.Emit(realtimeproto.HaroWakeWordDetected{Keyword: "哈罗哈罗", Score: 0.30, Level: 0.01})
+	_ = farStream.Emit(realtimeproto.HaroWakeWordDetected{Keyword: "哈罗哈罗", Score: 0.30, Level: 0.01},
+		realtimeproto.InputAudioBufferSpeechStarted{ItemID: "item_1"}, realtimeproto.InputAudioBufferSpeechStopped{ItemID: "item_1"})
 	_ = nearStream.Emit(realtimeproto.HaroWakeWordDetected{Keyword: "哈罗哈罗", Score: 0.55, Level: 0.04})
 
 	braintest.Expect[realtimeproto.HaroWakeWordDetected](t, near)
@@ -332,6 +344,8 @@ func TestTwoTerminalsHearingWakeWordOnlyOneAnswers(t *testing.T) {
 	if got := farStream.AwakeCalls(); !slices.Equal(got, []bool{false}) {
 		t.Errorf("远的那台的识别流应被送回休眠：%v", got)
 	}
+	_ = farStream.Emit(realtimeproto.HaroWakeWordState{Awake: false})
+	expectState(t, far, false, "识别流回复睡着了，应转给远的那台")
 }
 
 // 识别流还没打开（session.update 没带 turn_detection）时收到的音频无处可送：明确拒绝，不在服务端堆积。

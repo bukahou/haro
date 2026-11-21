@@ -357,7 +357,7 @@ func TestDialDetectsIncompatibleProtocol(t *testing.T) {
 // 服务端掉线（连接还在、但不再回应）：终端靠心跳发现，补发 error 并关闭 Done()。
 func TestSilentServerIsDetected(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{Subprotocols: []string{realtimeproto.ProtocolV2}})
+		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{Subprotocols: []string{realtimeproto.Protocol}})
 		if err != nil {
 			return
 		}

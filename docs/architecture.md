@@ -27,9 +27,9 @@ haro 是一个家用语音助手：家里每个房间放一台**终端**（麦�
 （例如终端上报现在用的麦克风和音箱）。服务端和 haro-asr 之间的转写会话用同一份定义。见 `internal/realtimeproto`：
 
 - 线上的 JSON 结构只定义一处（`wire.go`），编解码只有一处（`codec.go`）；
-- 由它生成 JSON Schema（`haro.realtime.v2.schema.json`），测试比对两者，结构改了而文件没更新就失败；
+- 由它生成 JSON Schema（`haro.realtime.v3.schema.json`），测试比对两者，结构改了而文件没更新就失败；
 - 错误事件带稳定的错误码（`errors.go`），调用方按码判断，不看说明文字。
-- 握手时用 WebSocket 子协议协商版本（`haro.realtime.v2`）：报了不认识的 haro 版本、或者旧版终端没报版本，服务端拒绝握手，
+- 握手时用 WebSocket 子协议协商版本（`haro.realtime.v3`）：报了不认识的 haro 版本、或者旧版终端没报版本，服务端拒绝握手，
   响应里给错误码和它支持的版本；什么都不报的当普通 Realtime 客户端（只用标准事件）。终端被拒后提示一次，隔几分钟才再试；
 - 两端各自每 10 秒 ping 一次，5 秒内等不到 pong 就断开（`internal/heartbeat`），终端的看守随即重连。
 - 终端的设备能力（现在是「拍一帧」）走 MCP：终端是 MCP 服务端，服务端是 MCP 客户端，消息装在 `haro.mcp.message` 事件里，
@@ -38,6 +38,10 @@ haro 是一个家用语音助手：家里每个房间放一台**终端**（麦�
 - 一轮对话由服务端开始：语音前端判定说完时，服务端马上开始回答（先发标准的 `response.created`），识别和准备回答同时进行；
   终端不上传画面、也不发 `response.create`，只负责播放（`create_response` 设成 false 的普通 Realtime 客户端照旧自己请求）。
   说完方式和积极度的取值只在 `realtimeproto` 定义一处，终端启动时和 haro-asr 收到会话设置时都按它查，写错就明确拒绝；
+- 醒 / 睡只由 haro-asr 的唤醒门决定：终端要休眠（对话窗口结束、按回车）或手动唤醒时只发请求（`haro.wake_word.sleep` / `wake`），
+  服务端转给 haro-asr，它处理完回 `haro.wake_word.state`，服务端原样转给终端；听到唤醒词时 haro-asr 自己醒、报 `haro.wake_word.detected`。
+  服务端和终端记的醒 / 睡只照这两个事件改，发请求时不改；终端等不到回复（`assistant.Timing.WakeConfirm`）就当没切成，醒着的话过一个对话窗口再试。
+  识别流断开时服务端记下终端要的状态，重开后告诉新的流，由它回复确认。
   semantic_vad 判定没说完时会把下一段并进同一句，最长并到 30 秒（`asrserver.Timing.MergeLimit`），再长就按说完交出、后面的另成一句。
 
 ## 服务端（`internal/brain` 与周边）
@@ -56,7 +60,7 @@ haro 是一个家用语音助手：家里每个房间放一台**终端**（麦�
 - **观测**：OpenTelemetry（`HARO_OTLP_ENDPOINT`，OTLP/HTTP）。大模型相关的按语义约定 `gen_ai.*` 记：每次请求一个 span
   「chat <模型>」（提供方、模型、用量含缓存读写、为什么停）和标准指标 `gen_ai.client.operation.duration`、`gen_ai.client.token.usage`；
   一轮回答记成 `invoke_agent`（代理名，交接记成事件），工具调用记成 `execute_tool`。haro 自己的（说完到第一个字、合成、打断、唤醒）用 `haro.` 前缀。
-- **坏了要出声**：服务端和 haro-asr 之间的识别流断了会自己重开（带退避），重开后把「醒着 / 正在播放」重新告诉它；
+- **坏了要出声**：服务端和 haro-asr 之间的识别流断了会自己重开（带退避），重开后把「醒着还是睡着 / 正在播放」重新告诉它；
   说到一半断开时，服务端替丢掉的那句补一个「说完」，这一轮按识别失败结束，终端照常收尾；
   断开超过 10 秒才提示终端一次（`haro.notice` 的 `transcription_lost`，终端播「断开」那一声），重开后再提示一次（`transcription_restored`）。
   存活检查 `/livez` 只看进程；就绪检查 `/readyz` 看识别、合成、模型凭证、账本，结果由后台定期检查（`internal/readiness`）。

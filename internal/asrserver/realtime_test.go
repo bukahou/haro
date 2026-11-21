@@ -428,14 +428,23 @@ func TestWakeGateIgnoresSpeechUntilKeyword(t *testing.T) {
 		t.Errorf("送去识别的音频 %s，应包含唤醒词与后面的话", got)
 	}
 
-	// 休眠后再说话：不应上报；再叫唤醒词：重新唤醒
-	_ = wsjson.Write(ctx, conn, map[string]string{"type": "haro.wake_word.sleep"})
+	// 休眠、手动唤醒、再休眠：每次处理完回复现在醒着还是睡着
+	for _, control := range []struct {
+		event string
+		awake bool
+	}{{"haro.wake_word.sleep", false}, {"haro.wake_word.wake", true}, {"haro.wake_word.sleep", false}} {
+		_ = wsjson.Write(ctx, conn, map[string]string{"type": control.event})
+		if state, ok := readEvents(t, ctx, conn, 1)[0].(realtimeproto.HaroWakeWordState); !ok || state.Awake != control.awake {
+			t.Fatalf("%s 之后应回复 awake=%v：%v", control.event, control.awake, state)
+		}
+	}
+	// 睡着后再说话：不应上报；再叫唤醒词：重新唤醒
 	sendPattern(t, ctx, conn, [2]int{500, 1}, [2]int{400, 0})
 	sendKeyword(t, ctx, conn)
 	sendPattern(t, ctx, conn, [2]int{400, 0})
 	events = readEvents(t, ctx, conn, 1)
 	if _, ok := events[0].(realtimeproto.HaroWakeWordDetected); !ok {
-		t.Fatalf("休眠后第一个事件应是再次唤醒：%v", events)
+		t.Fatalf("休眠后说的话不应上报，接下来应是再次唤醒：%v", events)
 	}
 	if spotter.resets.Load() == 0 {
 		t.Error("进入休眠时应重置唤醒词识别")
@@ -518,9 +527,12 @@ func TestSleepDuringPlaybackStaysAsleep(t *testing.T) {
 	}
 	sendPattern(t, ctx, conn, [2]int{500, 1}, [2]int{400, 0}) // 睡着了：这句不应上报
 	sendKeyword(t, ctx, conn)
-	events := readEvents(t, ctx, conn, 1)
-	if _, ok := events[0].(realtimeproto.HaroWakeWordDetected); !ok {
-		t.Fatalf("播放中收到休眠后应一直睡着，第一个事件应是再次唤醒：%v", events)
+	events := readEvents(t, ctx, conn, 2)
+	if state, ok := events[0].(realtimeproto.HaroWakeWordState); !ok || state.Awake {
+		t.Fatalf("播放中收到休眠也应回复睡着了：%v", events)
+	}
+	if _, ok := events[1].(realtimeproto.HaroWakeWordDetected); !ok {
+		t.Fatalf("播放中收到休眠后应一直睡着，接下来应是再次唤醒：%v", events)
 	}
 }
 

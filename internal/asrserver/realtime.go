@@ -212,7 +212,9 @@ func (s *transcriptionSession) run(ctx context.Context) error {
 					Message: event.Type() + ": 这个会话没有启用唤醒门"})
 				continue
 			}
-			s.applyWakeEvent(event)
+			if err := s.applyWakeEvent(ctx, event); err != nil {
+				return err
+			}
 		default:
 			_ = writeEvent(ctx, s.conn, realtimeproto.Error{Code: realtimeproto.CodeUnsupportedEvent,
 				Message: "转写会话不支持 " + event.Type()})
@@ -481,7 +483,8 @@ func (s *transcriptionSession) identifySpeaker(itemID string, pcm []byte) (strin
 }
 
 // applyWakeEvent 处理唤醒门的四个控制事件（会话启用了唤醒门时才会走到这里）。
-func (s *transcriptionSession) applyWakeEvent(event realtimeproto.ClientEvent) {
+// 休眠 / 手动唤醒处理完回 haro.wake_word.state：醒 / 睡只在这里改，服务端和终端照这个回复改它们记的。
+func (s *transcriptionSession) applyWakeEvent(ctx context.Context, event realtimeproto.ClientEvent) error {
 	switch event.(type) {
 	case realtimeproto.HaroWakeWordSleep:
 		s.sleep()
@@ -490,9 +493,12 @@ func (s *transcriptionSession) applyWakeEvent(event realtimeproto.ClientEvent) {
 		s.deps.Logger.Info("手动唤醒")
 	case realtimeproto.HaroPlaybackStarted:
 		s.startPlayback()
+		return nil
 	case realtimeproto.HaroPlaybackStopped:
 		s.stopPlayback()
+		return nil
 	}
+	return writeEvent(ctx, s.conn, realtimeproto.HaroWakeWordState{Awake: s.wake.awake})
 }
 
 // writeEvent 把一个服务端事件编码后发给对端。

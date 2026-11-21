@@ -498,6 +498,23 @@
         "audio_ms"
       ]
     },
+    "server.haro.wake_word.state": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "haro.wake_word.state"
+        },
+        "awake": {
+          "type": "boolean",
+          "description": "处理完请求之后醒着（true）还是睡着（false）"
+        }
+      },
+      "required": [
+        "type",
+        "awake"
+      ]
+    },
     "server.input_audio_buffer.speech_started": {
       "type": "object",
       "properties": {
@@ -689,7 +706,7 @@
       ]
     }
   },
-  "title": "haro.realtime.v2",
+  "title": "haro.realtime.v3",
   "description": "haro 的事件：终端 ↔ 服务端的对话会话、服务端 ↔ haro-asr 的转写会话。OpenAI Realtime 正式版的子集加 haro 扩展。",
   "oneOf": [
     {
@@ -742,6 +759,9 @@
     },
     {
       "$ref": "#/$defs/server.haro.wake_word.detected"
+    },
+    {
+      "$ref": "#/$defs/server.haro.wake_word.state"
     },
     {
       "$ref": "#/$defs/server.input_audio_buffer.speech_started"

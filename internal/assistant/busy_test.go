@@ -18,7 +18,7 @@ func TestBusyWhileOwnerSpeaks(t *testing.T) {
 	a := NewAssistant(Dependencies{Brain: brain}, Options{WakeWord: WakeWordOptions{Phrase: "哈罗哈罗"}},
 		slog.New(slog.NewTextHandler(io.Discard, nil)))
 	window := &conversationWindow{idle: time.Minute}
-	defer window.stop()
+	defer window.close()
 	window.wake()
 
 	if a.Busy() {
@@ -41,8 +41,12 @@ func TestBusyWhileOwnerSpeaks(t *testing.T) {
 	}
 
 	a.handleWakeEvent(ctx, window, realtimeproto.InputAudioBufferSpeechStarted{ItemID: "item_3"})
-	a.sleep(ctx, window, "手动休眠")
-	if a.Busy() {
-		t.Fatal("说到一半休眠：不该再忙")
+	a.requestWakeState(ctx, window, false, "手动休眠")
+	if !a.Busy() {
+		t.Fatal("休眠还没得到回复：还在说话，应算忙")
+	}
+	a.handleWakeEvent(ctx, window, realtimeproto.HaroWakeWordState{Awake: false})
+	if a.Busy() || window.awake || window.pending != nil {
+		t.Fatal("语音前端回复睡着了：说到一半的这句不会再有「说完」，不该再忙")
 	}
 }

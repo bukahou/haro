@@ -60,10 +60,11 @@ type ResponseCreate struct{}
 // ResponseCancel 取消正在生成的回答（被打断、终端退出时发出）。
 type ResponseCancel struct{}
 
-// HaroWakeWordSleep 让语音前端进入休眠：只认唤醒词（haro 扩展；终端在对话窗口结束时发出）。
+// HaroWakeWordSleep 请语音前端进入休眠：只认唤醒词（haro 扩展；终端在对话窗口结束时发出）。
+// 语音前端处理完回 haro.wake_word.state；发出去不等于已经睡了。
 type HaroWakeWordSleep struct{}
 
-// HaroWakeWordWake 让语音前端立即进入唤醒状态（haro 扩展；手动唤醒，例如按回车）。
+// HaroWakeWordWake 请语音前端立即进入唤醒状态（haro 扩展；手动唤醒，例如按回车）。处理完同样回 haro.wake_word.state。
 type HaroWakeWordWake struct{}
 
 // HaroPlaybackStarted 表示终端开始播放回答（haro 扩展，用于打断）：语音前端只听唤醒词，
@@ -126,6 +127,13 @@ type HaroWakeWordDetected struct {
 	// 唤醒质量：几台终端同时听到时，由质量最高的那台回答
 	Score float64 // 唤醒词的声纹分数（没比对声纹时为 0）
 	Level float64 // 唤醒词那一段的音量（RMS，0–1；离得近的那台大）
+}
+
+// HaroWakeWordState 是语音前端处理完一次 haro.wake_word.sleep / haro.wake_word.wake 之后醒着还是睡着（haro 扩展）。
+// 醒 / 睡只由语音前端（haro-asr 的唤醒门）改：它每处理完一次请求回一个，服务端原样转给终端。
+// 服务端和终端记的醒 / 睡只照这个事件和 haro.wake_word.detected 改，不在发请求时改。
+type HaroWakeWordState struct {
+	Awake bool
 }
 
 // HaroNotice 是服务端给终端的一个提示（haro 扩展）：终端播一声提示音、不说话（服务端还不能主动开口）。
@@ -205,6 +213,7 @@ type Error struct {
 }
 
 func (HaroWakeWordDetected) Type() string               { return typeHaroWakeWordDetected }
+func (HaroWakeWordState) Type() string                  { return typeHaroWakeWordState }
 func (HaroNotice) Type() string                         { return typeHaroNotice }
 func (InputAudioBufferSpeechStarted) Type() string      { return typeSpeechStarted }
 func (InputAudioBufferSpeechStopped) Type() string      { return typeSpeechStopped }
@@ -217,6 +226,7 @@ func (ResponseDone) Type() string                       { return typeResponseDon
 func (Error) Type() string                              { return typeError }
 
 func (HaroWakeWordDetected) serverEvent()               {}
+func (HaroWakeWordState) serverEvent()                  {}
 func (HaroNotice) serverEvent()                         {}
 func (InputAudioBufferSpeechStarted) serverEvent()      {}
 func (InputAudioBufferSpeechStopped) serverEvent()      {}

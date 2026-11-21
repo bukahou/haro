@@ -84,14 +84,32 @@ func (s *Session) winWake(stream RecognizerStream, wake realtimeproto.HaroWakeWo
 	s.logger.Info("几台终端同时听到唤醒词：另一台更合适，这台不回答",
 		"score", fmt.Sprintf("%.2f", wake.Score), "level", fmt.Sprintf("%.4f", wake.Level))
 	s.mu.Lock()
-	s.awake = false
+	s.awake = false // 识别流处理到休眠之前报来的说话事件不转给终端、不回答（asleepLocked）
 	s.mu.Unlock()
-	ctx, cancel := context.WithTimeout(context.Background(), wakeArbitrationTimeout)
+	ctx, cancel := context.WithTimeout(s.lifetime, wakeArbitrationTimeout)
 	defer cancel()
-	if err := stream.SetAwake(ctx, false); err != nil {
-		s.logger.Warn("让这台回去休眠失败", "err", err)
-	}
+	s.requestAwake(ctx, stream, false)
 	return false
+}
+
+// requestAwake 请识别流醒 / 睡。醒 / 睡由识别流（haro-asr 的唤醒门）决定：它处理完回 haro.wake_word.state，
+// 会话照回复改自己记的、转给终端（pumpStreamEvents）。
+// 发不出去说明这条流坏了：记下要的状态，关掉它（转发事件的循环随之重开），重开后告诉新的流。
+func (s *Session) requestAwake(ctx context.Context, stream RecognizerStream, awake bool) {
+	err := stream.SetAwake(ctx, awake)
+	if err == nil || ctx.Err() != nil { // ctx 结束：终端断开或会话结束，不用重开
+		return
+	}
+	s.logger.Warn("切换唤醒状态没发给识别流：重开后再告诉它", "awake", awake, "err", err)
+	s.mu.Lock()
+	s.awake = awake
+	s.mu.Unlock()
+	_ = stream.Close()
+}
+
+// asleepLocked：会话用唤醒门、现在记着睡着。调用方持有 s.mu。
+func (s *Session) asleepLocked() bool {
+	return s.streamConfig != nil && s.streamConfig.WakeWord && !s.awake
 }
 
 // pumpStreamEvents 把转写会话的事件翻译给终端：
@@ -108,12 +126,35 @@ func (s *Session) pumpStreamEvents(stream RecognizerStream) {
 			s.awake, s.lastWakeKeyword = true, e.Keyword // 识别流听到唤醒词时自己开了唤醒门
 			s.mu.Unlock()
 			s.emit(e)
-		case realtimeproto.InputAudioBufferSpeechStarted:
+		case realtimeproto.HaroWakeWordState: // 识别流处理完一次醒 / 睡的请求（终端的，或会话自己的）
 			s.mu.Lock()
-			s.speech = &e
+			s.awake = e.Awake
+			if !e.Awake {
+				s.speech = nil // 识别流睡着时丢掉说到一半的那句，不会再有「说完」
+			}
 			s.mu.Unlock()
 			s.emit(e)
+		case realtimeproto.InputAudioBufferSpeechStarted:
+			// 睡着时识别流不报说话；记着睡着时收到的，是输掉唤醒仲裁后、识别流处理到休眠之前报的：不转给终端
+			s.mu.Lock()
+			asleep := s.asleepLocked()
+			if !asleep {
+				s.speech = &e
+			}
+			s.mu.Unlock()
+			if asleep {
+				s.logger.Info("睡着时收到开始说话：识别流还没处理到休眠，不理", "item", e.ItemID)
+				continue
+			}
+			s.emit(e)
 		case realtimeproto.InputAudioBufferSpeechStopped:
+			s.mu.Lock()
+			asleep := s.asleepLocked()
+			s.mu.Unlock()
+			if asleep {
+				s.logger.Info("睡着时收到说完：识别流还没处理到休眠，不回答", "item", e.ItemID)
+				continue
+			}
 			s.speechStopped(e)
 		case realtimeproto.InputAudioTranscriptionCompleted:
 			if job := s.takeJob(e.ItemID); job != nil {
@@ -206,10 +247,10 @@ func (t ReopenTiming) orDefault() ReopenTiming {
 
 const (
 	streamOpenTimeout    = 5 * time.Second // 每次尝试重开最多等这么久（连上、发完设置）
-	streamRestoreTimeout = 3 * time.Second // 重开后把醒着 / 正在播放告诉新的流，最多等这么久
+	streamRestoreTimeout = 3 * time.Second // 重开后把醒着还是睡着 / 正在播放告诉新的流，最多等这么久
 )
 
-// reopenStream 按打开时的设置重开识别流；重开后把会话里记着的「醒着 / 正在播放」告诉新的流。会话结束时返回 nil。
+// reopenStream 按打开时的设置重开识别流；重开后把会话里记着的「醒着还是睡着 / 正在播放」告诉新的流。会话结束时返回 nil。
 // 断开超过 LostNoticeAfter 时提示终端一次「听不见了」，重开后再提示一次「恢复了」。
 func (s *Session) reopenStream() RecognizerStream {
 	select {
@@ -256,8 +297,8 @@ func (s *Session) reopenStream() RecognizerStream {
 	s.mu.Unlock()
 
 	ctx, cancel := context.WithTimeout(s.lifetime, streamRestoreTimeout)
-	if awake {
-		if err := stream.SetAwake(ctx, true); err != nil {
+	if config.WakeWord { // 醒着、睡着都告诉新的流：它的回复转给终端（断开期间终端要的切换这时才确认）
+		if err := stream.SetAwake(ctx, awake); err != nil {
 			s.logger.Warn("重开后恢复唤醒状态失败", "err", err)
 		}
 	}

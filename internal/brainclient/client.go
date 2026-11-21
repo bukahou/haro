@@ -74,7 +74,7 @@ const defaultEventBacklog = 5 * time.Second
 const eventQueueSize = 64
 
 // Dial 连接服务端一次；连不上直接返回错误（重试由终端的看守负责）。
-// 协议版本和服务端不兼容时（握手被拒，或者服务端没有选 realtimeproto.ProtocolV2），
+// 协议版本和服务端不兼容时（握手被拒，或者服务端没有选 realtimeproto.Protocol），
 // 返回的错误包着 realtimeproto.ErrIncompatibleProtocol：重连没用，要升级其中一端。
 func Dial(ctx context.Context, opts DialOptions, logger *slog.Logger) (*Client, error) {
 	address, err := conversationURL(opts.BaseURL)
@@ -83,7 +83,7 @@ func Dial(ctx context.Context, opts DialOptions, logger *slog.Logger) (*Client, 
 	}
 	// 握手时报上协议版本和终端的构建版本；服务端在响应里报它的构建版本，不一样时在日志里提醒升级
 	options := &websocket.DialOptions{
-		Subprotocols: []string{realtimeproto.ProtocolV2},
+		Subprotocols: []string{realtimeproto.Protocol},
 		HTTPHeader:   http.Header{"User-Agent": {buildinfo.UserAgent()}, buildinfo.Header: {buildinfo.Version}},
 	}
 	conn, response, err := websocket.Dial(ctx, address, options)
@@ -94,10 +94,10 @@ func Dial(ctx context.Context, opts DialOptions, logger *slog.Logger) (*Client, 
 		}
 		return nil, fmt.Errorf("%w %s: %w", ErrUnreachable, address, err)
 	}
-	if conn.Subprotocol() != realtimeproto.ProtocolV2 {
-		conn.Close(websocket.StatusProtocolError, "需要 "+realtimeproto.ProtocolV2)
+	if conn.Subprotocol() != realtimeproto.Protocol {
+		conn.Close(websocket.StatusProtocolError, "需要 "+realtimeproto.Protocol)
 		return nil, fmt.Errorf("%w：服务端没有选 %s（服务端是旧版本？）", realtimeproto.ErrIncompatibleProtocol,
-			realtimeproto.ProtocolV2)
+			realtimeproto.Protocol)
 	}
 	conn.SetReadLimit(realtimeproto.MaxMessageBytes)
 	readCtx, cancel := context.WithCancel(context.Background())

@@ -7,7 +7,7 @@
 // 本包只管协议和连接，会话由外部注入（haro-server 注入 brain.Session）。
 //
 // 握手时按 WebSocket 子协议协商版本（negotiate）：
-//   - 报了 realtimeproto.ProtocolV2：haro 终端；
+//   - 报了 realtimeproto.Protocol：haro 终端；
 //   - 报了别的 haro.realtime.* 版本，或者带着 haro 版本头却没报子协议（旧版终端）：拒绝握手，响应里给错误码和支持的版本；
 //   - 什么都没报：普通的 Realtime 客户端，只用标准事件。
 package brainserver
@@ -79,7 +79,7 @@ func negotiate(r *http.Request) (reason string, ok bool) {
 		return strings.HasPrefix(protocol, haroProtocolPrefix)
 	})
 	switch {
-	case slices.Contains(offered, realtimeproto.ProtocolV2):
+	case slices.Contains(offered, realtimeproto.Protocol):
 		return "", true
 	case haroOffered:
 		return "终端报的协议版本（" + strings.Join(offered, ", ") + "）服务端不支持", false
@@ -94,7 +94,7 @@ func negotiate(r *http.Request) (reason string, ok bool) {
 func reject(w http.ResponseWriter, reason string) {
 	body := realtimeproto.NewHTTPError(http.StatusBadRequest, realtimeproto.CodeUnsupportedProtocolVersion,
 		reason+"：把终端和服务端升到同一版本")
-	body.Error.SupportedProtocols = []string{realtimeproto.ProtocolV2}
+	body.Error.SupportedProtocols = []string{realtimeproto.Protocol}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusBadRequest)
 	_ = json.NewEncoder(w).Encode(body)
@@ -109,7 +109,7 @@ func serveConversation(w http.ResponseWriter, r *http.Request, newSession Sessio
 		reject(w, reason)
 		return
 	}
-	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{Subprotocols: []string{realtimeproto.ProtocolV2}})
+	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{Subprotocols: []string{realtimeproto.Protocol}})
 	if err != nil {
 		logger.Warn("WebSocket 握手失败", "remote", r.RemoteAddr, "err", err)
 		return
@@ -150,7 +150,7 @@ func serveConversation(w http.ResponseWriter, r *http.Request, newSession Sessio
 
 	var terminal Terminal
 	var tools *mcpbridge.Transport // haro 终端的设备能力（MCP）；普通客户端没有
-	if protocol == realtimeproto.ProtocolV2 {
+	if protocol == realtimeproto.Protocol {
 		tools = mcpbridge.NewTransport(func(_ context.Context, message json.RawMessage) error {
 			return write(realtimeproto.HaroMCPMessage{Message: message})
 		})

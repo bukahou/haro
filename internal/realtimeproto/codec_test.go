@@ -64,6 +64,8 @@ func TestServerEventsRoundTrip(t *testing.T) {
 			Language: "zh", Wake: true, BargeIn: true, AudioMs: 1500},
 		InputAudioTranscriptionFailed{ItemID: "item_4", Code: CodeTranscriptionFailed, Message: "识别失败"},
 		HaroWakeWordDetected{Keyword: "哈罗哈罗", AudioMs: 900, Score: 0.62, Level: 0.03},
+		HaroWakeWordState{Awake: true},
+		HaroWakeWordState{},
 		HaroNotice{Kind: NoticeResearchDone},
 		ResponseOutputAudioTranscriptDelta{Delta: "为什么数学老师离婚了？"},
 		ResponseOutputAudioDelta{Audio: PCMAudio{Format: AudioFormat{SampleRate: 32000, Channels: 1}, Data: []byte{9, 8, 7, 6}}},

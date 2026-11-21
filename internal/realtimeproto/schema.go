@@ -9,11 +9,12 @@ import (
 	"github.com/google/jsonschema-go/jsonschema"
 )
 
-// ProtocolV2 是 haro 对话会话的协议版本，即 WebSocket 子协议名。只有不兼容的改动才升版本。
-const ProtocolV2 = "haro.realtime.v2"
+// Protocol 是 haro 对话会话现在的协议版本，即 WebSocket 子协议名。只有不兼容的改动才升版本
+// （v3：终端记的醒 / 睡要等 haro.wake_word.state，v2 的服务端不发它）。
+const Protocol = "haro.realtime.v3"
 
 // SchemaFile 是仓库里由 Schema 生成的文件（相对本包目录）；测试比对它和线上结构，不一致就失败。
-const SchemaFile = "haro.realtime.v2.schema.json"
+const SchemaFile = Protocol + ".schema.json"
 
 // Schema 由线上结构（wire.go）和编解码的两张表（codec.go）生成协议的 JSON Schema：
 // 每种事件一个定义（$defs 里的 client.<事件名>、server.<事件名>），根上是全部事件的 oneOf。
@@ -21,7 +22,7 @@ const SchemaFile = "haro.realtime.v2.schema.json"
 func Schema() (*jsonschema.Schema, error) {
 	root := &jsonschema.Schema{
 		Schema:      "https://json-schema.org/draft/2020-12/schema",
-		Title:       ProtocolV2,
+		Title:       Protocol,
 		Description: "haro 的事件：终端 ↔ 服务端的对话会话、服务端 ↔ haro-asr 的转写会话。OpenAI Realtime 正式版的子集加 haro 扩展。",
 		Defs:        map[string]*jsonschema.Schema{},
 	}

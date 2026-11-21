@@ -43,6 +43,7 @@ var serverEvents = map[string]serverCodec{
 	typeTranscriptionCompleted: {wireTranscriptionCompleted{}, decodeTranscriptionCompleted},
 	typeTranscriptionFailed:    {wireTranscriptionFailed{}, decodeTranscriptionFailed},
 	typeHaroWakeWordDetected:   {wireWakeWordDetected{}, decodeWakeWordDetected},
+	typeHaroWakeWordState:      {wireWakeWordState{}, decodeWakeWordState},
 	typeTranscriptDelta:        {wireTranscriptDelta{}, decodeTranscriptDelta},
 	typeAudioDelta:             {wireAudioDelta{}, decodeAudioDelta},
 	typeResponseCreated:        {wireResponseCreated{}, decodeResponseCreated},
@@ -303,6 +304,16 @@ func decodeWakeWordDetected(data []byte) (ServerEvent, error) {
 	var wire wireWakeWordDetected
 	err := json.Unmarshal(data, &wire)
 	return HaroWakeWordDetected{Keyword: wire.Keyword, AudioMs: wire.AudioMs, Score: wire.Score, Level: wire.Level}, err
+}
+
+func (e HaroWakeWordState) toWire() (any, error) {
+	return wireWakeWordState{Type: typeHaroWakeWordState, Awake: e.Awake}, nil
+}
+
+func decodeWakeWordState(data []byte) (ServerEvent, error) {
+	var wire wireWakeWordState
+	err := json.Unmarshal(data, &wire)
+	return HaroWakeWordState{Awake: wire.Awake}, err
 }
 
 func (e ResponseOutputAudioTranscriptDelta) toWire() (any, error) {
