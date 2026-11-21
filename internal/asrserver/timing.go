@@ -33,8 +33,9 @@ type Timing struct {
 	MinWakeWindow time.Duration
 	// MinAfterEcho：语音段剪掉开头的回声后剩下不到这么长，就当整段都是回声。定值，没有单独实测
 	MinAfterEcho time.Duration
-	// VADThreshold / VADSilence：会话的 turn_detection 没给语音概率门槛 / 静音时长时用的值。门槛取自 Silero VAD
-	// 参考实现的默认值；静音时长是定值，和终端 HARO_VAD_SILENCE 的默认值相同
+	// VADThreshold / VADSilence：会话的 turn_detection 没给语音概率门槛 / 静音时长时用的值（终端不设 HARO_VAD_THRESHOLD、
+	// HARO_VAD_SILENCE 时就不给，用的是这里：默认值只写在这里）。门槛取自 Silero VAD 参考实现的默认值；静音时长是定值
+	// （实测：静音 700 ms 时判定说完要 716–788 ms，即它加上 VAD 的判定延迟）
 	VADThreshold float64
 	VADSilence   time.Duration
 	// VADMinSpeech：短于这么长的声音（咳嗽、碰桌子）不算说话。取自 Silero VAD 参考实现的默认值，没有单独实测

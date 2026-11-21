@@ -69,7 +69,8 @@ const (
 	cancelActionTool  = "cancel_action"
 )
 
-// DefaultConfirmationTimeout 是待确认的操作多久没确认就作废。
+// DefaultConfirmationTimeout 是待确认的操作多久没确认就作废：Options.ConfirmationTimeout 为零时用（服务端没设
+// HARO_CONFIRMATION_TIMEOUT 时就是它，默认值只写在这里）。
 const DefaultConfirmationTimeout = 60 * time.Second
 
 // pendingAction 是一条待确认的操作。

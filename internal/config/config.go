@@ -232,7 +232,7 @@ type TerminalSettings struct {
 	TurnDetection string `env:"HARO_TURN_DETECTION" envDefault:"semantic_vad"`
 	TurnEagerness string `env:"HARO_TURN_EAGERNESS" envDefault:"auto"` // semantic_vad：low / auto / high，判定没说完后最长等多久（数值见 asrserver.Timing）
 	// 语音概率门槛（0–1）、server_vad 时静音持续多久算说完：不设（0）= 不交给 haro-asr，用它的默认值
-	// （asrserver.Timing 的 VADThreshold、VADSilence，默认值只在那里写）。实测判定说完的时间 ≈ 静音时长 + VAD 的判定延迟
+	// （asrserver.Timing 的 VADThreshold、VADSilence，默认值和实测的来历只在那里写）
 	VADThreshold float64       `env:"HARO_VAD_THRESHOLD"`
 	VADSilence   time.Duration `env:"HARO_VAD_SILENCE"`
 	VADPrefix    time.Duration `env:"HARO_VAD_PREFIX" envDefault:"300ms"` // 识别时带上语音开始前的这段（定值，没有单独实测）

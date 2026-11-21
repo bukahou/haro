@@ -17,7 +17,8 @@ import (
 // toolFailedPrefix 是工具出错时交给模型的结果的开头（后面接错误）。
 const toolFailedPrefix = "工具执行失败："
 
-// DefaultToolTimeout 是单次工具执行最多多久的默认值：Options.ToolTimeout 为零时用（服务端从 HARO_TOOL_TIMEOUT 读）。
+// DefaultToolTimeout 是单次工具执行最多多久的默认值：Options.ToolTimeout 为零时用（服务端没设 HARO_TOOL_TIMEOUT 时就是它，
+// 默认值只写在这里）。
 const DefaultToolTimeout = 10 * time.Second
 
 // toolTimeout 是这次会话里单次工具执行最多多久（所有工具共用，包括远程 MCP）。

@@ -23,7 +23,8 @@ type Limits struct {
 	MaxPending  int           // 全家最多同时有几个任务（1 个在查 + 排队；默认 3）
 }
 
-// DefaultLimits 是 R2 裁定的默认值。
+// DefaultLimits 是 R2 裁定的默认值（服务端没设 HARO_RESEARCH_TIMEOUT、HARO_RESEARCH_MAX_* 时用它，默认值只写在这里）。
+// MaxRounds 10：搜一次、读一次各占一轮，实测 6 轮不够。
 var DefaultLimits = Limits{Timeout: 3 * time.Minute, MaxRounds: 10, MaxSearches: 5, MaxTokens: 80_000, PageRunes: 2000, MaxPending: 3}
 
 const (
