@@ -6,6 +6,9 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+
 	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
@@ -84,6 +87,8 @@ type Session struct {
 	awake        bool // 唤醒门开着（听到唤醒词、或终端手动唤醒之后，直到终端说休眠）
 	playing      bool // 终端正在播放回答（只听唤醒词；打断自己的唤醒在仲裁里最优先）
 	droppedAudio int  // 识别流断开期间收到、只能丢掉的音频块数（重开时记一次日志）
+	// speech 是识别流报了「开始说话」、还没报「说完」的那句；识别流在这时断开，这句就丢了（不会再有「说完」）
+	speech *realtimeproto.InputAudioBufferSpeechStarted
 
 	conversation       *Conversation   // 这一轮说话的人的对话（跟人走，不跟连接走）
 	spoken             []spokenSegment // 最近一次回答已经发给终端的句子（打断时按「听到多少」截断历史）
@@ -265,7 +270,11 @@ func (s *Session) startResponseLocked() error {
 	return nil
 }
 
-// emit 发出一个服务端事件；会话关闭后丢弃。
+// 发给终端的事件经一条有上限的队列（events）。两条路：
+//   - emit：一定要送到的（回答的文字和音频、这轮结束、出错……）—— 队列满了就等：终端读得慢，回答跟着慢，不丢；
+//   - tryEmit：可以丢的（别的 goroutine 发来的提示）—— 队列满了就丢、计数（haro.events.dropped），不拖住发的那一方。
+
+// emit 发出一个一定要送到的服务端事件；会话关闭后丢弃。
 func (s *Session) emit(event realtimeproto.ServerEvent) {
 	select {
 	case s.events <- event:
@@ -285,6 +294,7 @@ func (s *Session) tryEmit(event realtimeproto.ServerEvent) bool {
 		return true
 	default:
 		s.logger.Warn("终端积压的事件太多：这次提示不发了", "event", event.Type())
+		droppedEvents.Add(s.lifetime, 1, metric.WithAttributes(attribute.String("haro.event.type", event.Type())))
 		return false
 	}
 }

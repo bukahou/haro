@@ -10,7 +10,6 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -24,22 +23,15 @@ import (
 	"github.com/bukahou/haro/internal/brainserver"
 	"github.com/bukahou/haro/internal/buildinfo"
 	"github.com/bukahou/haro/internal/config"
-	"github.com/bukahou/haro/internal/conversationstore"
-	"github.com/bukahou/haro/internal/graceful"
 	"github.com/bukahou/haro/internal/llm"
-	"github.com/bukahou/haro/internal/notes"
 	"github.com/bukahou/haro/internal/persona"
 	"github.com/bukahou/haro/internal/pricecatalog"
-	"github.com/bukahou/haro/internal/profile"
 	"github.com/bukahou/haro/internal/readiness"
 	"github.com/bukahou/haro/internal/realtimeproto"
 	"github.com/bukahou/haro/internal/research"
 	"github.com/bukahou/haro/internal/speech"
 	"github.com/bukahou/haro/internal/spending"
-	"github.com/bukahou/haro/internal/telemetry"
-	"github.com/bukahou/haro/internal/terminaltools"
 	"github.com/bukahou/haro/internal/tools"
-	"github.com/bukahou/haro/internal/vision"
 	"github.com/bukahou/haro/internal/weather"
 )
 
@@ -72,195 +64,26 @@ func run(logger *slog.Logger) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// 关停时依次收尾（后开的先关）：会话都结束之后才停后台调查、关数据库，最后发出遥测
+	var shutdown shutdownSteps
+	defer shutdown.run()
 
-	shutdownTelemetry, err := telemetry.SetupTelemetry(ctx, settings.OTLPEndpoint)
+	if err := startTelemetry(ctx, settings, &shutdown); err != nil {
+		return err
+	}
+	deps, err := connectServices(ctx, settings, logger, &shutdown)
 	if err != nil {
 		return err
 	}
-	defer func() { // 最后一步：在期限内把还没发出的遥测发出去（采集器连不上时不卡住退出）
-		flushCtx, cancel := context.WithTimeout(context.Background(), shutdownTelemetryFlush)
-		defer cancel()
-		_ = shutdownTelemetry(flushCtx)
-	}()
-
-	httpClient := &http.Client{Timeout: settings.RequestTimeout}
-	// 模型的流式请求不用带总超时的客户端：客户端的总超时连读流也算在内，各用途要的长短不同 ⇒
-	// 每个模型按用途给请求设期限（cloudModelSpec.requestTimeout；调查受它自己的总时限管）
-	modelHTTP := &http.Client{}
-	// Claude 的客户端全进程只建一个，所有用途共用（见 llm.ClaudeAPI：多一个客户端 / HTTP 客户端就多一份令牌缓存，
-	// 集群令牌只能换一次 ⇒ 互相把令牌用掉）。不用 Claude 时为 nil
-	claude := newClaudeAPI(settings, modelHTTP)
-	if _, err := llm.ParseToolCallIDStyle(settings.CloudLLMToolCallIDs); err != nil {
-		return fmt.Errorf("HARO_CLOUD_LLM_TOOL_CALL_IDS: %w", err)
-	}
-
-	synthesizer, err := buildSynthesizer(settings, httpClient, logger)
+	kit, err := buildTooling(ctx, settings, deps, logger, &shutdown)
 	if err != nil {
 		return err
 	}
-	streaming := speech.NewRealtimeTranscriptionClient(settings.ASRURL)
-	logger.Info("语音识别：haro-asr", "url", settings.ASRURL)
-
-	// 用量账本与额度：先有刹车，再接搜索、后台调查
-	ledger, err := spending.OpenLedger(ctx, settings.UsageDB)
+	components, options, err := assembleBrain(ctx, settings, catalog, deps, kit, logger, &shutdown)
 	if err != nil {
 		return err
 	}
-	ledger = spending.WithChargeLog(ledger, logger)
-	defer ledger.Close()
-	if settings.UsageDB == "" {
-		logger.Warn("没设 HARO_USAGE_DB：用量只记在内存里，服务端重启后额度重新计算")
-	}
-	guard := spending.NewGuard(ledger, spending.Limits{ResearchDailyYen: settings.ResearchDailyYen,
-		MonthlyYen: settings.MonthlyYen, SearchDailyCredits: settings.SearchDailyCredits, WarnRatio: 0.8,
-		MonthlyRaiseYen: settings.MonthlyRaiseYen}, logger)
-	logger.Info("费用上限", "research_daily_yen", settings.ResearchDailyYen, "monthly_yen", settings.MonthlyYen,
-		"search_daily_credits", settings.SearchDailyCredits)
-	pricing, err := loadPricing(ctx, settings, httpClient, logger)
-	if err != nil {
-		return err
-	}
-	briefers := []brain.Briefer{brain.ClockBriefer{}, guard} // 每轮补充给模型的即时情况：现在几号几点、额度提醒、任务板
-	notices := brain.NewNoticeHub()                          // 给终端的提示（后台调查查完了让终端响一声）
-	var toolbox brain.Toolbox
-	var expertSearch vision.Search // 看画面的专家联网查：和主对话的快查同一套搜索与额度
-	if settings.Tools {
-		// 自研工具内置：记事本直接连数据库；MCP 只接第三方（现在还没有）
-		store, err := notes.Open(ctx, settings.NotesDB)
-		if err != nil {
-			return err
-		}
-		defer store.Close()
-		builtins := []tools.Builtin{tools.NoteTools(store, settings.NotesListLimit, logger)}
-		if settings.Weather { // 天气：Open-Meteo 为主，日本气象厅备用；都不用密钥
-			weatherHTTP := weather.NewHTTPClient() // 连接等得短：连不上就早点交给备用
-			home := weatherHome(ctx, settings, weatherHTTP, logger)
-			openMeteo := weather.NewClient(settings.WeatherForecastURL, settings.WeatherGeocodingURL, weatherHTTP)
-			forecaster := weatherForecaster(ctx, settings, openMeteo, home, weatherHTTP, logger)
-			builtins = append(builtins, tools.WeatherTools(openMeteo, forecaster, home, settings.WeatherGeocodingLanguage, logger))
-			if home != nil {
-				briefers = append(briefers, brain.BriefLines(weather.LocationNote{Home: home}.Brief)) // 每轮告诉模型主人家大致在哪（城市级）
-			}
-		}
-		if searcher := connectWebSearch(settings, httpClient, logger); searcher != nil {
-			defer searcher.Close()
-			meter := spending.NewSearchMeter(guard, ledger, pricing, spending.PurposeSearch, "tavily")
-			builtins = append(builtins, tools.WebSearchTools(searcher, meter, logger))
-			expertSearch = func(ctx context.Context, query string) (string, error) {
-				return tools.QuickSearch(ctx, searcher, meter, query, logger)
-			}
-			runner, closeRunner, err := startResearch(ctx, settings, claude, modelHTTP, pricing, searcher, ledger, guard, logger)
-			if err != nil {
-				return err
-			}
-			defer closeRunner()
-			builtins = append(builtins, runner.Tools())
-			briefers = append(briefers, runner)
-			runner.OnFinished(func(task research.Task) { // 查完了：让他最近说话的那台终端响一声，叫醒后任务板会先说结论
-				delivered := notices.Notify(task.Person, realtimeproto.HaroNotice{Kind: realtimeproto.NoticeResearchDone})
-				logger.Info("调查结束：通知终端", "id", task.ID, "status", task.Status, "terminals", delivered)
-			})
-		}
-		box, err := tools.NewToolbox(ctx, nil, logger, builtins...)
-		if err != nil {
-			return err
-		}
-		defer box.Close()
-		toolbox = box
-	}
-
-	options, err := buildBrainOptions(settings)
-	if err != nil {
-		return err
-	}
-	built, err := agentAssembly{settings: settings, catalog: catalog, claude: claude, client: modelHTTP, pricing: pricing,
-		ledger: ledger, guard: guard, logger: logger}.build(toolbox, expertSearch)
-	if err != nil {
-		return err
-	}
-	briefers = append(briefers, built.breaker) // 连不上之后刚恢复时，告诉模型断过多久
-	logger.Info("预热模型（本地第一次可能要几十秒；云端不用预热）", "model", activeModel(settings))
-	if err := brain.WarmUp(ctx, built.front.Model); err != nil {
-		logger.Warn("模型预热失败，第一轮对话会比较慢", "err", err)
-	}
-	components := brain.Components{
-		Streaming: streaming, Front: built.front, Handoff: built.handoff, FrameExpert: built.expert,
-		Synthesizer: synthesizer, Tools: toolbox, Briefers: briefers, Notices: notices,
-		NewSegmenter: func() brain.TextSegmenter {
-			return speech.NewSentenceSegmenter(settings.FirstSegmentMinRunes, settings.MaxSegmentRunes)
-		},
-	}
-	if settings.MonthlyYen > 0 && settings.MonthlyRaiseYen > 0 && settings.LLMProvider == config.LLMCloud {
-		// 月度上限到了以后，主人可以口头临时提高：判断用的小调用不受额度管（否则上限到了就没法判断），按天限次数、照样记账
-		components.MonthlyCap = guard
-		components.OverBudgetModel = spending.NewDailyCallLimit(spending.NewMeteredChatModel(newCloudChatModel(settings, claude,
-			cloudModelSpec{model: settings.CloudLLMModel, maxTokens: overBudgetMaxTokens, effort: settings.CloudLLMEffort,
-				thinking: settings.CloudLLMThinking, firstTokenTimeout: settings.CloudLLMTimeout, requestTimeout: settings.RequestTimeout},
-			modelHTTP), settings.CloudLLMModel, spending.PurposeChat, pricing, ledger, logger), settings.OverBudgetDailyCalls)
-		logger.Info("月度上限到了以后可以口头临时提高", "raise_yen", settings.MonthlyRaiseYen, "daily_checks", settings.OverBudgetDailyCalls)
-	}
-	// 对话簿所有终端连接共用：换终端、重连、服务端重启都接得上
-	var conversationStore brain.ConversationStore
-	if settings.ConversationsDB != "" {
-		store, err := conversationstore.OpenSQLite(ctx, settings.ConversationsDB)
-		if err != nil {
-			return err
-		}
-		defer store.Close()
-		if settings.ConversationsDir != "" { // 旧的对话文件：导入一次（出错就不启动，不带着空历史开始）
-			imported, err := conversationstore.ImportJSONDir(ctx, store, settings.ConversationsDir, logger)
-			if err != nil {
-				return fmt.Errorf("导入旧的对话文件: %w", err)
-			}
-			if imported > 0 {
-				logger.Info("旧的对话文件已导入对话库", "people", imported, "dir", settings.ConversationsDir)
-			}
-		}
-		conversationStore = store
-	}
-	components.Conversations = brain.NewConversationBook(conversationStore, options, logger)
-	if settings.ProfileDir != "" { // 主人资料：外部注入，改了文件下一轮就生效
-		profiles := profile.OpenDir(settings.ProfileDir, logger)
-		household, people := profiles.Summary()
-		logger.Info("主人资料", "dir", settings.ProfileDir, "household_runes", household, "people", people)
-		components.Profiles = profiles
-	}
-	if built.summary != nil { // 滚动摘要：代理「摘要」，按它自己的用途记账
-		components.Conversations.SummarizeWith(*built.summary)
-	}
-	if settings.WakeArbitration > 0 { // 多台终端同时听到唤醒词：只让最合适的那台回答
-		components.WakeArbiter = brain.NewWakeArbiter(settings.WakeArbitration)
-	}
-	newSession := func(terminal brainserver.Terminal) brainserver.Session {
-		parts := components
-		if terminal.DeviceTools != nil { // haro 终端：它的摄像头经 MCP 用（普通 Realtime 客户端没有）
-			parts.Camera = terminaltools.ConnectCamera(terminal.DeviceTools, buildinfo.Version, logger)
-		}
-		return brain.NewSession(parts, options, logger)
-	}
-
-	listener, err := net.Listen("tcp", settings.ServerListen)
-	if err != nil {
-		return err
-	}
-	checks, err := readinessChecks(settings, claude, ledger, httpClient)
-	if err != nil {
-		return err
-	}
-	monitor := readiness.NewMonitor(checks, readinessInterval, readinessTimeout, logger)
-	go monitor.Run(ctx)
-	handler, err := brainHandler(settings, newSession, monitor, logger)
-	if err != nil {
-		return err
-	}
-	logger.Info("haro-server 启动", "version", buildinfo.Version, "listen", listener.Addr().String(), "model", activeModel(settings), "tts", settings.TTS,
-		"personas", len(options.Personas))
-	// 收到退出信号：停止接新连接 → 结束会话（每一轮收尾、落盘）→ 返回后 defer 依次停后台调查、关数据库、发出遥测
-	if _, err := graceful.Serve(ctx, listener, handler, graceful.Timing{Shutdown: shutdownRequests, Drain: shutdownSessions},
-		logger); err != nil {
-		return err
-	}
-	return ctx.Err()
+	return serve(ctx, settings, components, options, deps, logger)
 }
 
 // 关停各步的期限（加起来 10 秒，比 k8s 的宽限期 30 秒短）：停止接新连接、等普通请求 2 秒 → 会话收尾 5 秒 →

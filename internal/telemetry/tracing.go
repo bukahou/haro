@@ -53,6 +53,15 @@ var latencyBucketsSeconds = []float64{0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 2.5, 3, 
 
 // MustLatencyHistogram 创建一个单位为秒的延迟直方图。
 // 在 SetupTelemetry 之前创建也可以：全局 MeterProvider 会在设置后自动接管。
+// MustCounter 创建一个计数器（只在启动时调用：参数写错就是程序错了）。
+func MustCounter(meter metric.Meter, name, description string) metric.Int64Counter {
+	counter, err := meter.Int64Counter(name, metric.WithDescription(description))
+	if err != nil {
+		panic(err)
+	}
+	return counter
+}
+
 func MustLatencyHistogram(meter metric.Meter, name, description string) metric.Float64Histogram {
 	histogram, err := meter.Float64Histogram(name,
 		metric.WithUnit("s"), metric.WithDescription(description),
