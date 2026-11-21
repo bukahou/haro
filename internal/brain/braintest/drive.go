@@ -32,9 +32,13 @@ func Open(t testing.TB, session *brain.Session, voice *Voice, update realtimepro
 // Utterance 是主人说的一句话（识别服务交给大脑的结果）。
 type Utterance struct {
 	Text           string
-	Speaker        string // 声纹认出的人
-	SpeakerChecked bool   // 比对过声纹；为 true 且 Speaker 为空表示不是登记的人
-	Wake           bool   // 这句话之前叫了唤醒词
+	Speaker        string        // 声纹认出的人
+	SpeakerChecked bool          // 比对过声纹；为 true 且 Speaker 为空表示不是登记的人
+	Tentative      string        // 声纹只过了唤醒的门槛时像是谁
+	Wake           bool          // 这句话之前叫了唤醒词（叫醒后的第一句）
+	BargeIn        bool          // 在 haro 说话时打断说的
+	Language       string        // 识别出的语种
+	Audio          time.Duration // 这句话多长
 }
 
 // Ask 让主人说一句话：识别流先报「开始说 / 说完了」，服务端随即自己开始回答（response.created），识别结果随后到达。
@@ -66,7 +70,8 @@ func Speak(t testing.TB, session *brain.Session, stream *Stream, u Utterance) {
 func Recognized(t testing.TB, stream *Stream, u Utterance) {
 	t.Helper()
 	emit(t, stream, realtimeproto.InputAudioTranscriptionCompleted{ItemID: stream.LastItemID(), Transcript: u.Text,
-		Speaker: u.Speaker, SpeakerChecked: u.SpeakerChecked})
+		Speaker: u.Speaker, SpeakerChecked: u.SpeakerChecked, SpeakerTentative: u.Tentative, Wake: u.Wake, BargeIn: u.BargeIn,
+		Language: u.Language, AudioMs: u.Audio.Milliseconds()})
 }
 
 // Next 等会话发出下一个事件。

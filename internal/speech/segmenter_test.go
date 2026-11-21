@@ -19,6 +19,8 @@ func TestSentenceSegmenter(t *testing.T) {
 			[]string{"你好，我是哈罗。", "我能看到你。"}},
 		{"第一句在逗号处提前切", 4, "我看到你坐在电脑前面，旁边有一个杯子。",
 			[]string{"我看到你坐在电脑前面，", "旁边有一个杯子。"}},
+		{"提前切的停顿处在句号之前：先在停顿处切（后面还有一句也一样）", 4, "我看到你坐在电脑前面，旁边有一个杯子。还有键盘。",
+			[]string{"我看到你坐在电脑前面，", "旁边有一个杯子。", "还有键盘。"}},
 		{"只有第一句提前切", 4, "好的。我看到你坐在电脑前面，旁边有杯子。",
 			[]string{"好的。", "我看到你坐在电脑前面，旁边有杯子。"}},
 		{"太短的并到下一句", 4, "嗯。好的，没问题。",
@@ -34,6 +36,16 @@ func TestSentenceSegmenter(t *testing.T) {
 		{"只有标点不输出", 4, "。", nil},
 		{"小数点不是边界", 4, "大约3.5米。", []string{"大约3.5米。"}},
 		{"保留要读的符号", 4, "现在25℃。", []string{"现在25℃。"}},
+		{"日语按句号切", 4, "今日はいい天気ですね。明日は雨かもしれません。",
+			[]string{"今日はいい天気ですね。", "明日は雨かもしれません。"}},
+		{"英语：句点后跟下一句才切，小数点不切", 4, "Sure. It is about 3.5 meters, I think. Bye!",
+			[]string{"Sure.", "It is about 3.5 meters, I think.", "Bye!"}},
+		{"撇号、千分位逗号不是停顿处", 4, "I don't know, it costs 1,000 yen.",
+			[]string{"I don't know,", "it costs 1,000 yen."}},
+		{"省略号后面不急着切，攒够了在停顿处切", 4, "嗯……让我想想，好的。",
+			[]string{"嗯……让我想想，", "好的。"}},
+		{"分号不是句子边界，只是停顿处", 0, "第一点是价格；第二点是质量。",
+			[]string{"第一点是价格；第二点是质量。"}},
 	}
 	// 同一段文字按不同粒度喂入（整段 / 逐字 / 每 3 个字），结果必须一致：模型的 token 边界不应影响切句。
 	chunkings := map[string]func(string) []string{
@@ -65,4 +77,18 @@ func chunkRunes(text string, size int) []string {
 		chunks = append(chunks, string(runes[start:min(start+size, len(runes))]))
 	}
 	return chunks
+}
+
+// 后面暂时没有字时：确定完了的句子马上交出去（调用工具前说的话不用等工具调用写完），英文句点要等下一个字（可能是小数点）。
+func TestSentenceSegmenterEmitsCertainEndsRightAway(t *testing.T) {
+	segmenter := NewSentenceSegmenter(4, 40)
+	if got := segmenter.Push("好的，我查一下天气。"); !slices.Equal(got, []string{"好的，我查一下天气。"}) {
+		t.Errorf("句号后面没有字也确定完了：应马上交出，得到 %q", got)
+	}
+	if got := segmenter.Push("It is about 3."); len(got) != 0 {
+		t.Errorf("英文句点后面还没来字（可能是小数点）：应先等，得到 %q", got)
+	}
+	if got := append(segmenter.Push("5 meters long."), segmenter.Flush()...); !slices.Equal(got, []string{"It is about 3.5 meters long."}) {
+		t.Errorf("小数不能切开：%q", got)
+	}
 }

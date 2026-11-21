@@ -143,8 +143,8 @@ func (e *RefusalError) Error() string {
 	return fmt.Sprintf("Claude 拒绝回答（%s）：%s", e.Category, e.Explanation)
 }
 
-// SpokenMessage 见 brain.SpokenError。
-func (e *RefusalError) SpokenMessage() string { return "这个问题我这边回答不了。" }
+// Phrase 见 brain.SpokenError。
+func (e *RefusalError) Phrase() (string, map[string]string) { return brain.PhraseRefused, nil }
 
 // StreamReply 流式产出文字；工具调用和用量在流结束时一次性产出（与 OpenAIChatModel 相同）。
 func (m *AnthropicChatModel) StreamReply(ctx context.Context, messages []brain.ChatMessage, tools []brain.ToolSpec) iter.Seq2[brain.ReplyDelta, error] {

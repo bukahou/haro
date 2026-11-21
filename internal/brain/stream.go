@@ -105,7 +105,7 @@ func (s *Session) pumpStreamEvents(stream RecognizerStream) {
 				continue
 			}
 			s.mu.Lock()
-			s.wakePending, s.awake = true, true // 识别流听到唤醒词时自己开了唤醒门
+			s.awake, s.lastWakeKeyword = true, e.Keyword // 识别流听到唤醒词时自己开了唤醒门
 			s.mu.Unlock()
 			s.emit(e)
 		case realtimeproto.InputAudioBufferSpeechStarted:
@@ -130,7 +130,9 @@ func (s *Session) pumpStreamEvents(stream RecognizerStream) {
 		case realtimeproto.InputAudioTranscriptionCompleted:
 			if job := s.takeJob(e.ItemID); job != nil {
 				job.text = strings.TrimSpace(e.Transcript)
-				job.speaker, job.speakerChecked = e.Speaker, e.SpeakerChecked
+				job.speaker, job.speakerChecked, job.tentative = e.Speaker, e.SpeakerChecked, e.SpeakerTentative
+				job.language, job.wake, job.bargeIn = e.Language, e.Wake, e.BargeIn
+				job.audio = time.Duration(e.AudioMs) * time.Millisecond
 				s.logger.Info("阶段耗时", "stage", "brain.recognize", "elapsed", since(job.started))
 				close(job.done)
 			}

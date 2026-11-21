@@ -117,13 +117,13 @@ func run(logger *slog.Logger) error {
 		}
 		defer store.Close()
 		checker := netdiag.NewChecker(settings.NetdiagDNSName, settings.NetdiagInternetTarget)
-		builtins := append(tools.NoteTools(store, logger), tools.NetworkDiagnostics(checker)...)
+		builtins := []tools.Builtin{tools.NoteTools(store, settings.NotesListLimit, logger), tools.NetworkDiagnostics(checker)}
 		if settings.Weather { // 天气：Open-Meteo 为主，日本气象厅备用；都不用密钥
 			weatherHTTP := weather.NewHTTPClient() // 连接等得短：连不上就早点交给备用
 			home := weatherHome(ctx, settings, weatherHTTP, logger)
 			openMeteo := weather.NewClient(settings.WeatherForecastURL, settings.WeatherGeocodingURL, weatherHTTP)
 			forecaster := weatherForecaster(ctx, settings, openMeteo, home, weatherHTTP, logger)
-			builtins = append(builtins, tools.WeatherTools(openMeteo, forecaster, home, logger)...)
+			builtins = append(builtins, tools.WeatherTools(openMeteo, forecaster, home, settings.WeatherGeocodingLanguage, logger))
 			if home != nil {
 				briefers = append(briefers, brain.BriefLines(weather.LocationNote{Home: home}.Brief)) // 每轮告诉模型主人家大致在哪（城市级）
 			}
@@ -131,7 +131,7 @@ func run(logger *slog.Logger) error {
 		if searcher := connectWebSearch(settings, httpClient, logger); searcher != nil {
 			defer searcher.Close()
 			meter := spending.NewSearchMeter(guard, ledger, pricingOf(settings), spending.PurposeSearch, "tavily")
-			builtins = append(builtins, tools.WebSearchTools(searcher, meter, logger)...)
+			builtins = append(builtins, tools.WebSearchTools(searcher, meter, logger))
 			expertSearch = func(ctx context.Context, query string) (string, error) {
 				return tools.QuickSearch(ctx, searcher, meter, query, logger)
 			}
@@ -140,7 +140,7 @@ func run(logger *slog.Logger) error {
 				return err
 			}
 			defer closeRunner()
-			builtins = append(builtins, runner.Tools()...)
+			builtins = append(builtins, runner.Tools())
 			briefers = append(briefers, runner)
 			runner.OnFinished(func(task research.Task) { // 查完了：让他最近说话的那台终端响一声，叫醒后任务板会先说结论
 				delivered := notices.Notify(task.Person, realtimeproto.HaroNotice{Kind: realtimeproto.NoticeResearchDone})
@@ -430,11 +430,7 @@ func weatherHome(ctx context.Context, settings config.Settings, httpClient *http
 		}
 		return locator
 	default:
-		name := settings.WeatherHomeName
-		if name == "" {
-			name = "家"
-		}
-		return weather.FixedHome{Place: weather.Place{Name: name, Latitude: home.Latitude, Longitude: home.Longitude}}
+		return weather.FixedHome{Place: weather.Place{Name: settings.WeatherHomeName, Latitude: home.Latitude, Longitude: home.Longitude}}
 	}
 }
 
@@ -552,8 +548,13 @@ func buildSynthesizer(settings config.Settings, httpClient *http.Client, logger 
 
 // buildBrainOptions 读取性格档案；没设 HARO_PERSONAS_DIR 时不分性格。
 func buildBrainOptions(settings config.Settings) (brain.Options, error) {
+	phrases, err := brain.LoadPhrases(settings.PhrasesFile) // 不经模型、直接念的固定的话；没配就用程序里带的
+	if err != nil {
+		return brain.Options{}, err
+	}
 	// 基础提示词：内置的永远生效，HARO_SYSTEM_PROMPT 只能追加
 	options := brain.Options{MaxHistoryTurn: settings.MaxHistoryTurn, Instructions: brain.ComposeInstructions(settings.ExtraSystemPrompt),
+		ConfirmationTimeout: settings.ConfirmationTimeout, Phrases: phrases,
 		Escalation: settings.StrongLLMFor(config.StrongForCorrection)} // 和 routeToStrong 配「重答」那条路的条件一致
 	if settings.PersonasDir == "" {
 		return options, nil

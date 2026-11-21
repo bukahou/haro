@@ -72,6 +72,10 @@ type Settings struct {
 	// 主人资料：household.md（全家）+ 每人一份 *.md（开头 front matter 写 person: <声纹名字>）；空 = 不用
 	ProfileDir     string `env:"HARO_PROFILE_DIR"`
 	MaxHistoryTurn int    `env:"HARO_MAX_HISTORY_TURN" envDefault:"6"`
+	// 会破坏的操作（删记事等）问了主人之后，多久没确认就作废
+	ConfirmationTimeout time.Duration `env:"HARO_CONFIRMATION_TIMEOUT" envDefault:"60s"`
+	// 不经模型、直接念的固定的话（每种语言一份，JSON）；空 = 用程序里带的那份
+	PhrasesFile string `env:"HARO_PHRASES_FILE"`
 	// 滚动摘要：掉出最近 N 轮的对话压成摘要放进提示词；false = 直接丢掉（旧行为）
 	ConversationSummary bool `env:"HARO_CONVERSATION_SUMMARY" envDefault:"true"`
 
@@ -145,6 +149,8 @@ type Settings struct {
 	// 工具（见 docs/architecture.md）：自研工具内置在服务端里，MCP 只接第三方服务
 	Tools   bool   `env:"HARO_TOOLS" envDefault:"true"`
 	NotesDB string `env:"HARO_NOTES_DB"` // 记事本存储：SQLite 文件路径（服务端直接连）
+	// 找记事时交给模型挑的最多条数（新的在前）；超过时结果里写明一共几条、只给了几条
+	NotesListLimit int `env:"HARO_NOTES_LIST_LIMIT" envDefault:"200"`
 	// 联网搜索：Tavily 官方远程 MCP。密钥不设 = 不提供联网搜索（凭证：无默认值，只来自环境变量）
 	TavilyAPIKey string `env:"HARO_TAVILY_API_KEY"`
 	TavilyMCPURL string `env:"HARO_TAVILY_MCP_URL" envDefault:"https://mcp.tavily.com/mcp/"`
@@ -159,10 +165,12 @@ type Settings struct {
 	// 或 "ip"（按家里的公网 IP 推定，城市级）；不设 = 查天气时必须说地名
 	Weather             bool   `env:"HARO_WEATHER" envDefault:"true"`
 	WeatherHome         string `env:"HARO_WEATHER_HOME"`
-	WeatherHomeName     string `env:"HARO_WEATHER_HOME_NAME"`                                         // 空 = 坐标时叫「家」，IP 定位时用城市名
+	WeatherHomeName     string `env:"HARO_WEATHER_HOME_NAME"`                                         // 家的名字；空 = 坐标时不写名字，IP 定位时用城市名
 	WeatherIPLocateURL  string `env:"HARO_WEATHER_IP_LOCATE_URL" envDefault:"https://ipinfo.io/json"` // IP 定位服务（HTTPS，不用密钥）
 	WeatherForecastURL  string `env:"HARO_WEATHER_FORECAST_URL" envDefault:"https://api.open-meteo.com/v1/forecast"`
 	WeatherGeocodingURL string `env:"HARO_WEATHER_GEOCODING_URL" envDefault:"https://geocoding-api.open-meteo.com/v1/search"`
+	// 按地名找坐标时用的语言（地名库返回的名字用这种语言写）
+	WeatherGeocodingLanguage string `env:"HARO_WEATHER_GEOCODING_LANGUAGE" envDefault:"ja"`
 	// Open-Meteo 查不到时的备用：jma = 日本气象厅网站的数据（只覆盖日本、按地区；地区按坐标自动找：
 	// 国土地理院的地址反查 + 气象厅的地区表，所以要查的坐标也会发给国土地理院）；none = 不用备用
 	WeatherBackup             string `env:"HARO_WEATHER_BACKUP" envDefault:"jma"`
@@ -316,6 +324,12 @@ func (settings Settings) validateBrain() error {
 	}
 	if settings.Tools && settings.NotesDB == "" {
 		return fmt.Errorf("HARO_TOOLS=true 时必须设 HARO_NOTES_DB（或设 HARO_TOOLS=false）")
+	}
+	if settings.ConfirmationTimeout <= 0 {
+		return fmt.Errorf("HARO_CONFIRMATION_TIMEOUT 要大于 0（会破坏的操作多久没确认就作废），现在是 %v", settings.ConfirmationTimeout)
+	}
+	if settings.Tools && settings.NotesListLimit <= 0 {
+		return fmt.Errorf("HARO_NOTES_LIST_LIMIT 要大于 0（找记事时交给模型挑的最多条数），现在是 %d", settings.NotesListLimit)
 	}
 	if settings.ServerListen == "" {
 		return fmt.Errorf("必须设 HARO_SERVER_LISTEN（haro-server 的监听地址）")

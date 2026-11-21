@@ -28,6 +28,10 @@ type transcriptionJob struct {
 	// 声纹：speakerChecked 为 true 时比对过，speaker 为空表示不是登记的人
 	speaker        string
 	speakerChecked bool
+	tentative      string        // 叫醒这句的声纹只过了唤醒的门槛、没确认时，像是谁
+	language       string        // 识别出的语种（固定的话用哪种语言念）
+	wake, bargeIn  bool          // 叫醒后的第一句；在 haro 说话时打断说的
+	audio          time.Duration // 这句话多长
 }
 
 // runResponse 执行一次回答：开始时发 response.created，结束时恰好发出一个 response.done。
@@ -78,7 +82,10 @@ func (s *Session) respond(ctx context.Context, job *transcriptionJob) (done real
 	}
 	s.emit(realtimeproto.InputAudioTranscriptionCompleted{Transcript: job.text, Speaker: job.speaker,
 		SpeakerChecked: job.speakerChecked})
-	if job.speakerChecked && job.speaker == "" { // 不是登记的人说的：不回答
+	if job.speakerChecked && job.speaker == "" { // 不是登记的人说的
+		if job.tentative != "" && job.wake && job.audio <= unverifiedShortUtterance { // 叫醒的短句：受限回答
+			return s.speakRestricted(ctx, job)
+		}
 		s.logger.Info("不是登记的人说的，不回答", "text", job.text)
 		return realtimeproto.ResponseDone{Status: realtimeproto.StatusIncomplete, Reason: realtimeproto.ReasonUnknownSpeaker}
 	}
@@ -87,24 +94,14 @@ func (s *Session) respond(ctx context.Context, job *transcriptionJob) (done real
 	} else {
 		s.useConversationOf(SharedPerson)
 	}
-	s.mu.Lock()
-	justWoken := s.wakePending
-	s.wakePending = false
-	s.mu.Unlock()
+	s.rememberLanguage(job.language)
 	if !hasSpokenText(job.text) {
-		if justWoken { // 只叫了唤醒词：不走大模型，直接回一句
-			return s.speakFixedReply(ctx, wakeAcknowledgement)
-		}
 		return realtimeproto.ResponseDone{Status: realtimeproto.StatusIncomplete, Reason: realtimeproto.ReasonEmptyTranscript}
 	}
-	if pending := s.takePendingConfirmation(); pending != nil { // 上一轮问了「确定要删掉吗」
-		if done, handled := s.handleConfirmation(ctx, job.text, pending); handled {
-			return done
-		}
-	}
-
 	// 画面不直接附在这句话上：模型需要看时调用 look_at_camera，闲聊时手里就没有画面
 	record := newTurnRecord(job.text)
+	record.voiceVerified = job.speakerChecked && job.speaker != ""
+	record.extraNotes = s.wakeNotes(job)
 	situation, input := s.userTurn(job.text, record) // 现在的情况单独成一条、不进历史；历史里只存原话
 	defer func() {
 		for _, round := range record.rounds {
@@ -129,7 +126,11 @@ func (s *Session) finishAnswer(ctx context.Context, record *turnRecord, answer s
 		var spoken SpokenError
 		if errors.As(err, &spoken) && answer == "" && record.executedTools() == 0 { // 例如额度用完了：直接告诉主人
 			s.logger.Warn("模型不可用，告诉主人原因", "err", err)
-			return s.speakFixedReply(ctx, spoken.SpokenMessage())
+			key, values := spoken.Phrase()
+			s.mu.Lock()
+			language := s.language
+			s.mu.Unlock()
+			return s.speakFixedReply(ctx, s.opts.Phrases.Say(language, key, values))
 		}
 		s.closeTurn(record, turnFailed)
 		return s.failed(realtimeproto.ReasonGenerationFailed, "生成回答", err)
@@ -146,14 +147,10 @@ func (s *Session) finishAnswer(ctx context.Context, record *turnRecord, answer s
 // 识别服务断开时等的回答立刻失败，这个期限只兜「它还连着却一直不给结果」的情况。
 var transcriptionWaitTimeout = 10 * time.Second
 
-// wakeAcknowledgement 是只叫了唤醒词时的回答。
-const wakeAcknowledgement = "我在。"
-
 // speakFixedReply 不经过大模型，直接合成一句固定的话。
 func (s *Session) speakFixedReply(ctx context.Context, text string) realtimeproto.ResponseDone {
 	text = stripEmotionTags(text)
-	if err := s.speakUtterance(ctx, 0, 0, Utterance{Text: text, Emotion: s.voiceEmotion(EmotionDefault),
-		Language: detectLanguage(text)}); err != nil {
+	if err := s.speakUtterance(ctx, 0, 0, Utterance{Text: text, Emotion: s.voiceEmotion(EmotionDefault)}); err != nil {
 		if ctx.Err() != nil {
 			return realtimeproto.ResponseDone{Status: realtimeproto.StatusCancelled}
 		}
@@ -189,8 +186,9 @@ type cameraView struct {
 
 // sentence 是切好的一句话，带着它属于这一轮回答的第几段（被打断时按段算听到了什么）。
 type sentence struct {
-	text  string
-	round int
+	text    string
+	round   int
+	emotion Emotion // 这句用的语气（情绪标记管到下一个标记为止）
 }
 
 // speakAnswer 并行执行「模型流式生成 → 切句」与「逐句合成 → 发给终端」，返回这一轮说的全部文字。
@@ -210,15 +208,11 @@ func (s *Session) speakAnswer(ctx context.Context, history []ChatMessage, input 
 	})
 	group.Go(func() error {
 		index := 0
-		emotion := EmotionDefault // 情绪标记管到下一个标记为止
 		for next := range sentences {
-			var text string
-			text, emotion = takeEmotion(next.text, emotion)
-			if !hasSpokenText(text) { // 只有标记（或只剩标点）：情绪留给下一句
+			if !hasSpokenText(next.text) { // 只剩标点：不念
 				continue
 			}
-			if err := s.speakUtterance(groupCtx, index, next.round, Utterance{Text: text, Emotion: s.voiceEmotion(emotion),
-				Language: detectLanguage(text)}); err != nil {
+			if err := s.speakUtterance(groupCtx, index, next.round, Utterance{Text: next.text, Emotion: s.voiceEmotion(next.emotion)}); err != nil {
 				return err
 			}
 			index++
@@ -239,6 +233,8 @@ func (s *Session) generateSentences(ctx context.Context, history []ChatMessage, 
 	defer span.End()
 	started := time.Now()
 	segmenter := s.parts.NewSegmenter()
+	tags := &emotionStream{} // 情绪标记在进切句器之前认出来
+	emotion := EmotionDefault
 	var usage *ReplyUsage
 	sawToken, sawSentence := false, false
 
@@ -256,17 +252,43 @@ func (s *Session) generateSentences(ctx context.Context, history []ChatMessage, 
 				s.logger.Info("模型切出第一句", "elapsed", elapsed.Round(time.Millisecond))
 			}
 			select {
-			case sentences <- sentence{text: text, round: segment}:
+			case sentences <- sentence{text: text, round: segment, emotion: emotion}:
 			case <-ctx.Done():
 				return ctx.Err()
 			}
 		}
 		return nil
 	}
+	// speak 把模型的文字交给切句器；遇到情绪标记，先把前面的文字收尾成句，之后的句子换成新的语气
+	speak := func(pieces []emotionPiece) error {
+		for _, piece := range pieces {
+			if !piece.tag {
+				if err := send(segmenter.Push(piece.text)); err != nil {
+					return err
+				}
+				continue
+			}
+			if err := send(segmenter.Flush()); err != nil {
+				return err
+			}
+			emotion = piece.emotion
+		}
+		return nil
+	}
+	pushText := func(text string) error { return speak(tags.Push(text)) }
+	flushText := func() error { // 剩下的文字都收尾成句（调用工具前、这一轮说完时）
+		if err := speak(tags.Flush()); err != nil {
+			return err
+		}
+		return send(segmenter.Flush())
+	}
 
 	messages := append(history, input)
 	inputIndex := len(history) // 这一轮主人那句话在 messages 里的位置（请更强的模型重答时在它上面做标记）
 	specs := s.toolSpecs()
+	if record.restricted { // 声纹没确认的叫醒短句：不给工具
+		specs = nil
+	}
 	for round := 0; ; round++ {
 		segment = baseRound + round
 		var tools []ToolSpec
@@ -289,7 +311,7 @@ func (s *Session) generateSentences(ctx context.Context, history []ChatMessage, 
 				}
 				answer.WriteString(delta.Text)
 				roundText.WriteString(delta.Text)
-				if err := send(segmenter.Push(delta.Text)); err != nil {
+				if err := pushText(delta.Text); err != nil {
 					return usage.add(roundUsage), err
 				}
 			}
@@ -304,19 +326,8 @@ func (s *Session) generateSentences(ctx context.Context, history []ChatMessage, 
 			break
 		}
 		s.assignToolCallIDs(calls)
-		if s.needsConfirmation(calls) {
-			s.setPendingConfirmation(calls)
-			record.askedConfirmation = true
-			question := confirmationQuestion(calls)
-			answer.WriteString(question)
-			record.final.WriteString(roundText.String() + question)
-			if err := send(segmenter.Push(question)); err != nil {
-				return usage, err
-			}
-			break
-		}
 		// 调用工具前说的话（「我查一下」）先说出去：工具执行时主人就能听到，也不和之后的回答拼成一句
-		if err := send(segmenter.Flush()); err != nil {
+		if err := flushText(); err != nil {
 			return usage, err
 		}
 		toolRoundIndex := record.beginRound(roundText.String(), calls)
@@ -336,6 +347,10 @@ func (s *Session) generateSentences(ctx context.Context, history []ChatMessage, 
 			case askStrongerTool:
 				result = s.escalate(&messages[inputIndex])
 				record.rememberAs(toolRoundIndex, call, escalatedRecord)
+			case confirmActionTool:
+				result = s.confirmAction(ctx, record, call)
+			case cancelActionTool:
+				result = s.cancelAction(call)
 			case lookAtCameraTool:
 				look := s.lookAtCamera(ctx, view)
 				direct := look.speakDirectly(calls)
@@ -348,7 +363,11 @@ func (s *Session) generateSentences(ctx context.Context, history []ChatMessage, 
 				frameMessages = append(frameMessages, frames...)
 				record.rounds[toolRoundIndex].frameShown = len(frames) > 0
 			default:
-				result = s.callTool(ctx, record, call)
+				if s.requiresConfirmation(call.Name) { // 会破坏的：先问主人（确认闸）
+					result = s.holdForConfirmation(record, call)
+				} else {
+					result = s.callTool(ctx, record, call)
+				}
 			}
 			record.recordResult(toolRoundIndex, call, result)
 			s.keepOpenTurn(record) // 做完了一个工具：这一轮中途服务端重启的话，重启后照实接进历史
@@ -368,13 +387,13 @@ func (s *Session) generateSentences(ctx context.Context, history []ChatMessage, 
 			segment++
 			answer.WriteString(directAnswer)
 			record.final.WriteString(directAnswer)
-			if err := send(segmenter.Push(directAnswer)); err != nil {
+			if err := pushText(directAnswer); err != nil {
 				return usage, err
 			}
 			break
 		}
 	}
-	if err := send(segmenter.Flush()); err != nil {
+	if err := flushText(); err != nil {
 		return usage, err
 	}
 	if usage != nil {
@@ -437,7 +456,6 @@ func (s *Session) speakUtterance(ctx context.Context, index, round int, utteranc
 		attribute.Int("haro.segment.index", index),
 		attribute.Int("haro.segment.chars", utf8.RuneCountInString(utterance.Text)),
 		attribute.String("haro.segment.emotion", string(utterance.Emotion)),
-		attribute.String("haro.segment.language", string(utterance.Language)),
 		attribute.Float64("haro.segment.first_chunk_seconds", firstChunk.Seconds()),
 		attribute.Float64("haro.segment.audio_seconds", total.Seconds()))
 	recordSpanError(span, err)
@@ -445,7 +463,7 @@ func (s *Session) speakUtterance(ctx context.Context, index, round int, utteranc
 		s.logger.Error("语音合成失败", "index", index, "text", utterance.Text, "err", err)
 		return err
 	}
-	s.logger.Info("合成一句", "index", index, "emotion", emotionLabel(utterance.Emotion), "language", utterance.Language,
+	s.logger.Info("合成一句", "index", index, "emotion", emotionLabel(utterance.Emotion),
 		"first_chunk", firstChunk.Round(time.Millisecond), "elapsed", since(started), "audio", total)
 	return ctx.Err()
 }

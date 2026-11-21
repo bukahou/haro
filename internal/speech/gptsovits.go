@@ -50,6 +50,9 @@ type GPTSoVITSReference struct {
 
 const defaultReference = "default"
 
+// autoLanguage 让 GPT-SoVITS 自己按文字判断用什么语言念（中日英夹杂也能分段念）。
+const autoLanguage = "auto"
+
 // LoadGPTSoVITSVoice 读取声音文件并校验：必须有 default，每段录音都要有文件名和文字。
 func LoadGPTSoVITSVoice(file string) (GPTSoVITSVoice, error) {
 	data, err := os.ReadFile(file)
@@ -64,8 +67,8 @@ func LoadGPTSoVITSVoice(file string) (GPTSoVITSVoice, error) {
 		return GPTSoVITSVoice{}, fmt.Errorf("声音文件 %s 缺少 default 参考录音", file)
 	}
 	for name, ref := range voice.References {
-		if ref.File == "" || strings.TrimSpace(ref.Text) == "" {
-			return GPTSoVITSVoice{}, fmt.Errorf("声音文件 %s 的 %s：file 和 text 都必须填", file, name)
+		if ref.File == "" || strings.TrimSpace(ref.Text) == "" || ref.Lang == "" {
+			return GPTSoVITSVoice{}, fmt.Errorf("声音文件 %s 的 %s：file、text、lang（参考录音的语言）都必须填", file, name)
 		}
 	}
 	return voice, nil
@@ -151,17 +154,9 @@ func (g *GPTSoVITSSynthesizer) Synthesize(ctx context.Context, utterance brain.U
 
 func (g *GPTSoVITSSynthesizer) post(ctx context.Context, utterance brain.Utterance) (*http.Response, error) {
 	ref := g.reference(utterance.Emotion)
-	language := string(utterance.Language)
-	if language == "" {
-		language = string(brain.LanguageChinese)
-	}
-	promptLang := ref.Lang
-	if promptLang == "" {
-		promptLang = string(brain.LanguageChinese)
-	}
 	payload, err := json.Marshal(gptSoVITSRequest{
-		Text: utterance.Text, TextLang: language,
-		RefAudioPath: path.Join(g.RefDir, ref.File), PromptText: ref.Text, PromptLang: promptLang,
+		Text: utterance.Text, TextLang: autoLanguage,
+		RefAudioPath: path.Join(g.RefDir, ref.File), PromptText: ref.Text, PromptLang: ref.Lang,
 		TextSplitMethod: "cut0", // 服务端已经切好句了，不再切（再切会在句中插入停顿）
 		BatchSize:       1, MediaType: "wav", StreamingMode: g.StreamingMode,
 	})

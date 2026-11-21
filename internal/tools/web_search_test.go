@@ -88,7 +88,7 @@ func TestTavilyQuickSearch(t *testing.T) {
 	defer searcher.Close()
 
 	meter := &countingMeter{}
-	box, err := NewToolbox(ctx, nil, logger, WebSearchTools(searcher, meter, logger)...)
+	box, err := NewToolbox(ctx, nil, logger, WebSearchTools(searcher, meter, logger))
 	if err != nil {
 		t.Fatal(err)
 	}

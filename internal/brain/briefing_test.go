@@ -191,20 +191,32 @@ type overBudgetModel struct{}
 
 type spokenErr struct{}
 
-func (spokenErr) Error() string         { return "over" }
-func (spokenErr) SpokenMessage() string { return "这个月的额度用完了。" }
+func (spokenErr) Error() string { return "over" }
+func (spokenErr) Phrase() (string, map[string]string) {
+	return brain.PhraseOverMonthlyBudget, map[string]string{"spent": "3100", "limit": "3000"}
+}
 
 func (overBudgetModel) StreamReply(context.Context, []brain.ChatMessage, []brain.ToolSpec) iter.Seq2[brain.ReplyDelta, error] {
 	return func(yield func(brain.ReplyDelta, error) bool) { yield(brain.ReplyDelta{}, spokenErr{}) }
 }
 func (overBudgetModel) Warmup(context.Context) error { return nil }
 
+// 念哪种语言跟着主人最近一句话识别出的语种：没有这种语言（或不知道）时用默认的。
 func TestSpokenErrorIsSaidAloud(t *testing.T) {
 	var said []brain.Utterance
 	k := newTestTalker(t, overBudgetModel{}, fakeSynthesizer{seen: &said})
-	done := braintest.Done(t, k.ask("你好"))
-	if done.Status != realtimeproto.StatusCompleted || len(said) != 1 || said[0].Text != "这个月的额度用完了。" {
-		t.Errorf("应念出原因：status=%v said=%+v", done.Status, said)
+	for _, c := range []struct {
+		language, text, want string
+	}{
+		{"", "你好", "这个月的费用（大模型和搜索）已经约 3100 日元，到上限 3000 日元了，这个月先不回答了。"},
+		{"ja", "こんにちは", "今月の費用（AI と検索）がおよそ 3100 円で、上限の 3000 円に達したので、今月はもうお答えできません。"},
+		{"ko", "안녕하세요", "这个月的费用（大模型和搜索）已经约 3100 日元，到上限 3000 日元了，这个月先不回答了。"},
+	} {
+		said = nil
+		done := braintest.Done(t, braintest.Ask(t, k.session, k.stream, braintest.Utterance{Text: c.text, Language: c.language}))
+		if done.Status != realtimeproto.StatusCompleted || len(said) != 1 || said[0].Text != c.want {
+			t.Errorf("语种 %q：应念出原因：status=%v said=%+v", c.language, done.Status, said)
+		}
 	}
 }
 

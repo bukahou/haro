@@ -17,82 +17,75 @@ func openTestStore(t *testing.T) *SQLiteStore {
 	return store
 }
 
-func TestSearchMatchesRephrasedQuery(t *testing.T) {
+// 列出：新的在前，最多 limit 条，并告诉一共有几条（没全给时调用方要说明）。
+func TestListNewestFirstWithTotal(t *testing.T) {
 	ctx := context.Background()
 	store := openTestStore(t)
-	for _, content := range []string{"车停在C3的7号位。", "周三下午去取干洗的衣服。", "钥匙放在玄关的抽屉里。"} {
-		if _, err := store.Save(ctx, content); err != nil {
-			t.Fatal(err)
-		}
-	}
-	cases := map[string]string{
-		"车停在哪":  "车停在C3的7号位。", // 实测里模型给的查询词
-		"干洗":    "周三下午去取干洗的衣服。",
-		"钥匙在哪里": "钥匙放在玄关的抽屉里。",
-		"C3":    "车停在C3的7号位。",
-	}
-	for query, want := range cases {
-		found, err := store.Search(ctx, query, 3)
+	var saved []Note
+	for _, content := range []string{"第一条", "第二条", "第三条"} {
+		note, err := store.Save(ctx, content)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(found) == 0 || found[0].Content != want {
-			t.Errorf("Search(%q) = %+v，第一条应为 %q", query, found, want)
-		}
+		saved = append(saved, note)
 	}
-	if found, _ := store.Search(ctx, "天气怎么样", 3); len(found) != 0 {
-		t.Errorf("不相关的查询应返回空，得到 %+v", found)
-	}
-}
-
-func TestRecentAndSoftDelete(t *testing.T) {
-	ctx := context.Background()
-	store := openTestStore(t)
-	first, _ := store.Save(ctx, "第一条")
-	second, _ := store.Save(ctx, "第二条")
-	recent, err := store.Recent(ctx, 5)
-	if err != nil || len(recent) != 2 || recent[0].ID != second.ID {
-		t.Fatalf("最近的应在前：%+v %v", recent, err)
-	}
-	deleted, err := store.Delete(ctx, first.ID)
-	if err != nil || deleted.Content != "第一条" {
-		t.Fatalf("删除返回 %+v %v", deleted, err)
-	}
-	if recent, _ := store.Recent(ctx, 5); len(recent) != 1 {
-		t.Errorf("删除后不应再列出：%+v", recent)
-	}
-	if _, err := store.Delete(ctx, first.ID); !errors.Is(err, ErrNotFound) {
-		t.Errorf("重复删除应返回 ErrNotFound，得到 %v", err)
-	}
-	// 软删除：数据还在
-	var count int
-	_ = store.db.QueryRow(`SELECT COUNT(*) FROM notes`).Scan(&count)
-	if count != 2 {
-		t.Errorf("软删除后表里应还有 2 行，实际 %d", count)
+	list, total, err := store.List(ctx, 2)
+	if err != nil || total != 3 || len(list) != 2 || list[0].ID != saved[2].ID || list[1].ID != saved[1].ID {
+		t.Fatalf("应给最近的 2 条（新的在前）、一共 3 条：%+v total=%d %v", list, total, err)
 	}
 	if _, err := store.Save(ctx, "  "); err == nil {
 		t.Error("空内容应被拒绝")
 	}
 }
 
-func TestOpenChoosesImplementation(t *testing.T) {
+// 删除是软删除：不再列出、数据还在、能在「最近删掉的」里看到并恢复；重复删、恢复没删的都报 ErrNotFound。
+func TestSoftDeleteAndRestore(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	first, _ := store.Save(ctx, "第一条")
+	second, _ := store.Save(ctx, "第二条")
+
+	deleted, err := store.Delete(ctx, first.ID)
+	if err != nil || deleted.Content != "第一条" || deleted.DeletedAt.IsZero() {
+		t.Fatalf("删除返回 %+v %v", deleted, err)
+	}
+	if list, total, _ := store.List(ctx, 10); total != 1 || len(list) != 1 || list[0].ID != second.ID {
+		t.Errorf("删除后不应再列出：%+v total=%d", list, total)
+	}
+	if _, err := store.Delete(ctx, first.ID); !errors.Is(err, ErrNotFound) {
+		t.Errorf("重复删除应返回 ErrNotFound，得到 %v", err)
+	}
+	var count int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM notes`).Scan(&count); err != nil || count != 2 {
+		t.Errorf("软删除后表里应还有 2 行，实际 %d（%v）", count, err)
+	}
+	if gone, err := store.Deleted(ctx, 10); err != nil || len(gone) != 1 || gone[0].ID != first.ID {
+		t.Errorf("最近删掉的应有这一条：%+v %v", gone, err)
+	}
+
+	restored, err := store.Restore(ctx, first.ID)
+	if err != nil || restored.ID != first.ID || !restored.DeletedAt.IsZero() {
+		t.Fatalf("恢复返回 %+v %v", restored, err)
+	}
+	if _, total, _ := store.List(ctx, 10); total != 2 {
+		t.Errorf("恢复后应重新列出：一共 %d 条", total)
+	}
+	if _, err := store.Restore(ctx, second.ID); !errors.Is(err, ErrNotFound) {
+		t.Errorf("恢复没删的应返回 ErrNotFound，得到 %v", err)
+	}
+	if _, err := store.Delete(ctx, 999); !errors.Is(err, ErrNotFound) {
+		t.Errorf("删除不存在的编号应返回 ErrNotFound，得到 %v", err)
+	}
+}
+
+func TestOpenNeedsLocation(t *testing.T) {
 	ctx := context.Background()
 	repo, err := Open(ctx, "sqlite:"+filepath.Join(t.TempDir(), "notes.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	repo.Close()
-	for _, location := range []string{"postgres://u@h/db", "mysql://u@h/db", ""} {
-		if _, err := Open(ctx, location); err == nil {
-			t.Errorf("Open(%q) 现在应返回「暂不支持」或「没有指定」", location)
-		}
-	}
-}
-
-func TestRankByRelevanceKeepsNewestFirstOnTies(t *testing.T) {
-	candidates := []Note{{ID: 2, Content: "钥匙在抽屉里"}, {ID: 1, Content: "钥匙在门口"}} // 按时间倒序
-	ranked := RankByRelevance(candidates, "钥匙", 5)
-	if len(ranked) != 2 || ranked[0].ID != 2 {
-		t.Errorf("同分时新的应在前：%+v", ranked)
+	if _, err := Open(ctx, ""); err == nil {
+		t.Error("没给存储位置应报错")
 	}
 }

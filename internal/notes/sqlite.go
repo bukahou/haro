@@ -13,7 +13,7 @@ import (
 	_ "modernc.org/sqlite" // 纯 Go 的 SQLite 驱动：编译进程序，不用装任何软件、不用起数据库服务
 )
 
-// SQLiteStore 是 Repository 的 SQLite 实现（开发阶段）。
+// SQLiteStore 是 Repository 的 SQLite 实现。
 type SQLiteStore struct {
 	db *sql.DB
 }
@@ -28,9 +28,6 @@ CREATE TABLE IF NOT EXISTS notes (
 	deleted_at TEXT
 );
 CREATE INDEX IF NOT EXISTS notes_created_at ON notes (created_at);`
-
-// searchWindow 是查找时最多拿出来打分的记录数（按时间倒序）。个人记事本远到不了这个量。
-const searchWindow = 2000
 
 // OpenSQLite 打开（必要时创建目录、文件与表）SQLite 数据库。
 func OpenSQLite(ctx context.Context, path string) (*SQLiteStore, error) {
@@ -70,32 +67,47 @@ func (s *SQLiteStore) Save(ctx context.Context, content string) (Note, error) {
 	return Note{ID: id, Content: content, CreatedAt: now}, err
 }
 
-// Recent 返回最近 limit 条（未删除的）。
-func (s *SQLiteStore) Recent(ctx context.Context, limit int) ([]Note, error) {
-	return s.query(ctx, `SELECT id, content, created_at FROM notes WHERE deleted_at IS NULL
-		ORDER BY created_at DESC, id DESC LIMIT ?`, limit)
-}
-
-// Search 取最近 searchWindow 条，交给 RankByRelevance 打分。
-func (s *SQLiteStore) Search(ctx context.Context, query string, limit int) ([]Note, error) {
-	candidates, err := s.Recent(ctx, searchWindow)
-	if err != nil {
-		return nil, err
+// List 返回最近 limit 条（没删掉的，新的在前）和一共有几条。
+func (s *SQLiteStore) List(ctx context.Context, limit int) ([]Note, int, error) {
+	var total int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM notes WHERE deleted_at IS NULL`).Scan(&total); err != nil {
+		return nil, 0, err
 	}
-	return RankByRelevance(candidates, query, limit), nil
+	notes, err := s.query(ctx, `SELECT id, content, created_at, deleted_at FROM notes WHERE deleted_at IS NULL
+		ORDER BY created_at DESC, id DESC LIMIT ?`, limit)
+	return notes, total, err
 }
 
-// Delete 软删除一条：只打标记，数据还在，需要时可以找回。
+// Deleted 返回最近删掉的 limit 条。
+func (s *SQLiteStore) Deleted(ctx context.Context, limit int) ([]Note, error) {
+	return s.query(ctx, `SELECT id, content, created_at, deleted_at FROM notes WHERE deleted_at IS NOT NULL
+		ORDER BY deleted_at DESC, id DESC LIMIT ?`, limit)
+}
+
+// Delete 软删除一条：只打标记，数据还在，可以恢复。
 func (s *SQLiteStore) Delete(ctx context.Context, id int64) (Note, error) {
-	notes, err := s.query(ctx, `SELECT id, content, created_at FROM notes WHERE id = ? AND deleted_at IS NULL`, id)
+	return s.mark(ctx, id, `deleted_at IS NULL`, sql.NullString{String: time.Now().Format(time.RFC3339), Valid: true})
+}
+
+// Restore 恢复一条删掉的。
+func (s *SQLiteStore) Restore(ctx context.Context, id int64) (Note, error) {
+	return s.mark(ctx, id, `deleted_at IS NOT NULL`, sql.NullString{})
+}
+
+// mark 把满足 state 的那一条的 deleted_at 改成 deletedAt；没有这样的一条时返回 ErrNotFound。
+func (s *SQLiteStore) mark(ctx context.Context, id int64, state string, deletedAt sql.NullString) (Note, error) {
+	result, err := s.db.ExecContext(ctx, `UPDATE notes SET deleted_at = ? WHERE id = ? AND `+state, deletedAt, id)
 	if err != nil {
 		return Note{}, err
 	}
-	if len(notes) == 0 {
-		return Note{}, ErrNotFound
+	if changed, err := result.RowsAffected(); err != nil || changed == 0 {
+		return Note{}, errors.Join(ErrNotFound, err)
 	}
-	_, err = s.db.ExecContext(ctx, `UPDATE notes SET deleted_at = ? WHERE id = ?`, time.Now().Format(time.RFC3339), id)
-	return notes[0], err
+	notes, err := s.query(ctx, `SELECT id, content, created_at, deleted_at FROM notes WHERE id = ?`, id)
+	if err != nil || len(notes) == 0 {
+		return Note{}, errors.Join(ErrNotFound, err)
+	}
+	return notes[0], nil
 }
 
 func (s *SQLiteStore) query(ctx context.Context, sqlText string, args ...any) ([]Note, error) {
@@ -108,10 +120,18 @@ func (s *SQLiteStore) query(ctx context.Context, sqlText string, args ...any) ([
 	for rows.Next() {
 		var note Note
 		var created string
-		if err := rows.Scan(&note.ID, &note.Content, &created); err != nil {
+		var deleted sql.NullString
+		if err := rows.Scan(&note.ID, &note.Content, &created, &deleted); err != nil {
 			return nil, err
 		}
-		note.CreatedAt, _ = time.Parse(time.RFC3339, created)
+		if note.CreatedAt, err = time.Parse(time.RFC3339, created); err != nil {
+			return nil, fmt.Errorf("记录 %d 的时间格式不对: %w", note.ID, err)
+		}
+		if deleted.Valid {
+			if note.DeletedAt, err = time.Parse(time.RFC3339, deleted.String); err != nil {
+				return nil, fmt.Errorf("记录 %d 的删除时间格式不对: %w", note.ID, err)
+			}
+		}
 		notes = append(notes, note)
 	}
 	return notes, rows.Err()

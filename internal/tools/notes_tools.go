@@ -2,143 +2,141 @@ package tools
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
-	"strings"
+	"time"
 
-	"github.com/bukahou/haro/internal/brain"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
 	"github.com/bukahou/haro/internal/notes"
 )
 
-// NoteTools 返回记事本的四个内置工具。
-// v5 裁定：自研工具直接内置到服务端（记事本只是一个数据库连接，没必要单独成程序），MCP 只用于第三方服务。
-// 工具名、说明、参数、结果格式与原 haro-notes（MCP 服务）完全一致，模型看到的东西不变。
-func NoteTools(store notes.Repository, logger *slog.Logger) []Builtin {
+// deletedListLimit 是「最近删掉的」最多列几条。
+const deletedListLimit = 20
+
+// NoteTools 是记事本的工具：记、找（把记录连编号交给模型挑）、按编号删、列出最近删掉的、按编号恢复。
+// 找哪一条由模型判断（说法可能和当初记的不一样），代码不按内容打分；删除只收编号。
+// listLimit 是一次最多交给模型的条数，超过时结果里写明一共几条、只给了几条。
+func NoteTools(store notes.Repository, listLimit int, logger *slog.Logger) Builtin {
 	logger = logger.With("tool", "notes")
-	return []Builtin{
-		{Spec: brain.ToolSpec{Name: "save_note", Description: "把主人要求记下的事情保存到记事本。",
-			Parameters: json.RawMessage(`{"type":"object","properties":{"content":{"type":"string","description":"要记的内容（主人的原话）"}},"required":["content"]}`)},
-			Run: func(ctx context.Context, arguments map[string]any) (string, error) {
-				var in struct {
-					Content string `json:"content"`
-				}
-				if err := decodeArguments(arguments, &in); err != nil {
-					return "", err
-				}
+	return func(server *mcp.Server) {
+		AddTool(server, &mcp.Tool{Name: "save_note", Description: "把主人要求记下的事情保存到记事本。", Annotations: Changes},
+			func(ctx context.Context, in saveNoteInput) (noteOutput, error) {
 				note, err := store.Save(ctx, in.Content)
 				logger.Info("记一条", "id", note.ID, "err", err)
+				return noteOutput{Note: noteView(note)}, err
+			})
+		AddTool(server, &mcp.Tool{Name: "search_notes", Annotations: ReadOnly,
+			Description: "列出记事本里的记录（带编号，新的在前）。主人问以前让你记过的事、要找或要删某一条时用：" +
+				"你自己从里面找出主人说的那条，说法可能和当初记的不一样，按意思找。"},
+			func(ctx context.Context, _ struct{}) (noteListOutput, error) {
+				list, total, err := store.List(ctx, listLimit)
 				if err != nil {
-					return "", err
+					return noteListOutput{}, err
 				}
-				return marshalResult(note)
-			}},
-		{Spec: brain.ToolSpec{Name: "search_notes", Description: "在记事本里查找以前记过的事情（按内容相关度，最多 5 条）。",
-			Parameters: json.RawMessage(`{"type":"object","properties":{"query":{"type":"string","description":"关键词或问题，例如「车停在哪」"}},"required":["query"]}`)},
-			Run: func(ctx context.Context, arguments map[string]any) (string, error) {
-				var in struct {
-					Query string `json:"query"`
+				out := noteListOutput{Notes: noteViews(list), Total: total}
+				if total > len(list) {
+					out.Note = "记事本里一共有这么多条，只给了最近的这些；更早的看不到。"
+					logger.Warn("记事超过一次能给的条数：只给了最近的", "total", total, "shown", len(list))
 				}
-				if err := decodeArguments(arguments, &in); err != nil {
-					return "", err
+				return out, nil
+			})
+		AddTool(server, &mcp.Tool{Name: "delete_note", Annotations: Destructive,
+			Description: "按编号删除记事本里的记录（可以恢复），一次可以删多条。先用 search_notes 找到要删的那几条的编号。" +
+				"结果里 not_found 是没有的编号，要如实告诉主人。"},
+			func(ctx context.Context, in deleteNotesInput) (deleteNotesOutput, error) {
+				if len(in.IDs) == 0 {
+					return deleteNotesOutput{}, errors.New("ids 不能为空：要说清楚删哪几条")
 				}
-				found, err := store.Search(ctx, in.Query, 5)
-				if err != nil {
-					return "", err
+				out := deleteNotesOutput{Deleted: []noteJSON{}, NotFound: []int64{}}
+				for _, id := range in.IDs {
+					note, err := store.Delete(ctx, id)
+					logger.Info("删除", "id", id, "err", err)
+					switch {
+					case errors.Is(err, notes.ErrNotFound):
+						out.NotFound = append(out.NotFound, id)
+					case err != nil:
+						return out, err
+					default:
+						out.Deleted = append(out.Deleted, noteView(note))
+					}
 				}
-				return marshalNotes(found)
-			}},
-		{Spec: brain.ToolSpec{Name: "list_recent_notes", Description: "列出记事本里最近记的几条。",
-			Parameters: json.RawMessage(`{"type":"object","properties":{"limit":{"type":"integer","description":"条数，默认 5，最多 20"}}}`)},
-			Run: func(ctx context.Context, arguments map[string]any) (string, error) {
-				var in struct {
-					Limit int `json:"limit"`
+				return out, nil
+			})
+		AddTool(server, &mcp.Tool{Name: "list_deleted_notes", Annotations: ReadOnly,
+			Description: "列出最近删掉的记录（带编号，最近删的在前）。主人想找回删掉的东西时用。"},
+			func(ctx context.Context, _ struct{}) (noteListOutput, error) {
+				list, err := store.Deleted(ctx, deletedListLimit)
+				return noteListOutput{Notes: noteViews(list), Total: len(list)}, err
+			})
+		AddTool(server, &mcp.Tool{Name: "restore_note", Annotations: Changes,
+			Description: "按编号恢复一条删掉的记录。先用 list_deleted_notes 找到它的编号。"},
+			func(ctx context.Context, in restoreNoteInput) (noteOutput, error) {
+				note, err := store.Restore(ctx, in.ID)
+				logger.Info("恢复", "id", in.ID, "err", err)
+				if errors.Is(err, notes.ErrNotFound) {
+					return noteOutput{}, errors.New("没有这个编号的已删除记录")
 				}
-				if err := decodeArguments(arguments, &in); err != nil {
-					return "", err
-				}
-				if in.Limit <= 0 || in.Limit > 20 {
-					in.Limit = 5
-				}
-				recent, err := store.Recent(ctx, in.Limit)
-				if err != nil {
-					return "", err
-				}
-				return marshalNotes(recent)
-			}},
-		// 按内容描述删除，而不是要求模型先查出 id：4B 小模型不愿意分两步做，实测会直接谎称「已删」（2026-11-15）
-		{Spec: brain.ToolSpec{Name: "delete_note", RequiresConfirmation: true, // 删除要主人口头确认（v2.5 T3）
-			Description: "删除记事本里的记录（可恢复的软删除），一次可以删多条：queries 里每个描述删掉和它最匹配的一条。" +
-				"删除前先用 search_notes 找到确切的记录，再用记录原文调用。主人要求删除时必须调用它。" +
-				"结果里 not_found 是没找到的描述，要如实告诉主人。",
-			Parameters: json.RawMessage(`{"type":"object","properties":{"queries":{"type":"array","items":{"type":"string"},"description":"要删的每一条的描述，一条一个；最好用 search_notes 查到的原文，例如「明天下午去取快递」"}},"required":["queries"]}`)},
-			Run: func(ctx context.Context, arguments map[string]any) (string, error) {
-				var in struct {
-					Queries []string `json:"queries"`
-				}
-				if err := decodeArguments(arguments, &in); err != nil {
-					return "", err
-				}
-				return deleteNotes(ctx, store, in.Queries, logger)
-			}},
+				return noteOutput{Note: noteView(note)}, err
+			})
 	}
 }
 
-// deleteNotes 按描述逐条删除：找到的删掉、找不到的写进 not_found（v3 D-1，不整体报错）。
-func deleteNotes(ctx context.Context, store notes.Repository, queries []string, logger *slog.Logger) (string, error) {
-	if len(queries) == 0 {
-		return "", errors.New("queries 不能为空：要说清楚删哪一条")
-	}
-	outcome := struct {
-		Deleted  []string `json:"deleted"`
-		NotFound []string `json:"not_found"`
-	}{Deleted: []string{}, NotFound: []string{}}
-	for _, query := range queries {
-		query = strings.TrimSpace(query)
-		if query == "" {
-			continue
-		}
-		matches, err := store.Search(ctx, query, 1)
-		if err != nil {
-			return "", err
-		}
-		if len(matches) == 0 {
-			outcome.NotFound = append(outcome.NotFound, query)
-			continue
-		}
-		note, err := store.Delete(ctx, matches[0].ID)
-		logger.Info("删除", "id", matches[0].ID, "query", query, "err", err)
-		if errors.Is(err, notes.ErrNotFound) { // 同一条被两个描述命中：第二次算没找到
-			outcome.NotFound = append(outcome.NotFound, query)
-			continue
-		}
-		if err != nil {
-			return "", err
-		}
-		outcome.Deleted = append(outcome.Deleted, note.Content)
-	}
-	return marshalResult(outcome)
+type saveNoteInput struct {
+	Content string `json:"content" jsonschema:"要记的内容（主人的原话）"`
 }
 
-func marshalNotes(list []notes.Note) (string, error) {
-	if list == nil {
-		list = []notes.Note{}
-	}
-	return marshalResult(map[string]any{"notes": list})
+type deleteNotesInput struct {
+	IDs []int64 `json:"ids" jsonschema:"要删的记录的编号（search_notes 结果里的 id），一次可以多个"`
 }
 
-// decodeArguments 把模型给的参数（JSON 对象）解到结构体里。
-func decodeArguments(arguments map[string]any, target any) error {
-	if arguments == nil {
-		return nil
+type restoreNoteInput struct {
+	ID int64 `json:"id" jsonschema:"要恢复的记录的编号（list_deleted_notes 结果里的 id）"`
+}
+
+// noteJSON 是交给模型的一条记录。
+type noteJSON struct {
+	ID        int64  `json:"id"`
+	Content   string `json:"content"`
+	CreatedAt string `json:"created_at"`
+	DeletedAt string `json:"deleted_at,omitempty"`
+}
+
+type noteOutput struct {
+	Note noteJSON `json:"note"`
+}
+
+type noteListOutput struct {
+	Notes []noteJSON `json:"notes"`
+	Total int        `json:"total"`          // 一共有几条
+	Note  string     `json:"note,omitempty"` // 没全给时的说明
+}
+
+type deleteNotesOutput struct {
+	Deleted  []noteJSON `json:"deleted"`
+	NotFound []int64    `json:"not_found"`
+}
+
+func noteView(note notes.Note) noteJSON {
+	view := noteJSON{ID: note.ID, Content: note.Content, CreatedAt: localTime(note.CreatedAt)}
+	if !note.DeletedAt.IsZero() {
+		view.DeletedAt = localTime(note.DeletedAt)
 	}
-	raw, err := json.Marshal(arguments)
-	if err != nil {
-		return err
+	return view
+}
+
+func noteViews(list []notes.Note) []noteJSON {
+	views := make([]noteJSON, 0, len(list))
+	for _, note := range list {
+		views = append(views, noteView(note))
 	}
-	if err := json.Unmarshal(raw, target); err != nil {
-		return fmt.Errorf("参数格式不对: %w", err)
+	return views
+}
+
+// localTime 是给模型看的时间（本地时区，到分钟）。
+func localTime(t time.Time) string {
+	if t.IsZero() {
+		return ""
 	}
-	return nil
+	return t.Local().Format("2006-01-02 15:04")
 }

@@ -6,25 +6,16 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"os"
-	"os/exec"
 	"strings"
-	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// ServerSpec 描述一个第三方 MCP 工具服务：本地子进程（Command）或远程服务（URL，Streamable HTTP）二选一。
+// ServerSpec 描述一个远程的第三方 MCP 工具服务（Streamable HTTP）。
+// 工具只有三种来源：进程内的（内置工具，见 builtinServer）、远程的（这里）、终端的（会话里的看画面）。
 type ServerSpec struct {
-	Name string // 用于日志
-
-	// 本地子进程
-	Command string
-	Args    []string
-	Env     []string // 额外的环境变量（KEY=VALUE）
-
-	// 远程服务（v5）
-	URL     string
+	Name    string            // 用于日志
+	URL     string            //
 	Headers map[string]string // 每个请求都带上（例如 Authorization: Bearer <密钥>；密钥放请求头而不是网址里，免得进日志）
 	Client  *http.Client      // 可选；默认 http.DefaultClient
 }
@@ -36,41 +27,37 @@ type MCPServer struct {
 	tools   []*mcp.Tool
 }
 
-// ConnectMCPServer 连接一个 MCP 服务并读出它的工具清单。
+// ConnectMCPServer 连接一个远程 MCP 服务并读出它的工具清单。
 func ConnectMCPServer(ctx context.Context, spec ServerSpec, logger *slog.Logger) (*MCPServer, error) {
-	client := mcp.NewClient(&mcp.Implementation{Name: "haro", Version: "0.1.0"}, nil)
-	var transport mcp.Transport
-	switch {
-	case spec.URL != "":
-		httpClient := spec.Client
-		if httpClient == nil {
-			httpClient = http.DefaultClient
-		}
-		if len(spec.Headers) > 0 {
-			httpClient = withHeaders(httpClient, spec.Headers)
-		}
-		// 不开常驻的 SSE 推送流：只用请求-响应，省一条长连接
-		transport = &mcp.StreamableClientTransport{Endpoint: spec.URL, HTTPClient: httpClient, DisableStandaloneSSE: true}
-	case spec.Command != "":
-		cmd := exec.Command(spec.Command, spec.Args...)
-		cmd.Env = append(os.Environ(), spec.Env...)
-		cmd.Stderr = os.Stderr // 工具服务的日志直接显示出来
-		cmd.SysProcAttr = childProcAttr()
-		transport = &mcp.CommandTransport{Command: cmd, TerminateDuration: 2 * time.Second}
-	default:
-		return nil, fmt.Errorf("工具服务 %s 既没有 Command 也没有 URL", spec.Name)
+	if spec.URL == "" {
+		return nil, fmt.Errorf("工具服务 %s 没有地址", spec.Name)
 	}
+	httpClient := spec.Client
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+	if len(spec.Headers) > 0 {
+		httpClient = withHeaders(httpClient, spec.Headers)
+	}
+	// 不开常驻的 SSE 推送流：只用请求-响应，省一条长连接
+	return connectMCP(ctx, spec.Name, &mcp.StreamableClientTransport{Endpoint: spec.URL, HTTPClient: httpClient,
+		DisableStandaloneSSE: true}, logger)
+}
+
+// connectMCP 经 transport 连上一个 MCP 服务并读出它的工具清单。
+func connectMCP(ctx context.Context, name string, transport mcp.Transport, logger *slog.Logger) (*MCPServer, error) {
+	client := mcp.NewClient(&mcp.Implementation{Name: "haro", Version: "0.1.0"}, nil)
 	session, err := client.Connect(ctx, transport, nil)
 	if err != nil {
-		return nil, fmt.Errorf("连接工具服务 %s: %w", spec.Name, err)
+		return nil, fmt.Errorf("连接工具服务 %s: %w", name, err)
 	}
 	listed, err := session.ListTools(ctx, nil)
 	if err != nil {
 		session.Close()
-		return nil, fmt.Errorf("读取 %s 的工具清单: %w", spec.Name, err)
+		return nil, fmt.Errorf("读取 %s 的工具清单: %w", name, err)
 	}
-	logger.Info("工具服务已连接", "server", spec.Name, "tools", len(listed.Tools))
-	return &MCPServer{name: spec.Name, session: session, tools: listed.Tools}, nil
+	logger.Info("工具服务已连接", "server", name, "tools", len(listed.Tools))
+	return &MCPServer{name: name, session: session, tools: listed.Tools}, nil
 }
 
 // Tool 返回名为 name 的工具；没有时返回 nil。
@@ -92,20 +79,41 @@ type ToolError struct {
 
 func (e *ToolError) Error() string { return e.Text }
 
-// Call 调用一个工具，返回文字结果；工具报错时返回 *ToolError，连接出问题时返回其他错误。
+// SpokenToolError 是工具报的、可以直接念给主人的错误（例如额度用完）：实现 brain.SpokenError。
+type SpokenToolError struct {
+	ToolError
+	Key    string            // 念给主人的那句话的键（brain.Phrase*）
+	Values map[string]string // 填进那句话里的值
+}
+
+// Phrase 实现 brain.SpokenError。
+func (e *SpokenToolError) Phrase() (string, map[string]string) { return e.Key, e.Values }
+
+// Call 调用一个工具，返回文字结果；工具报错时返回 *ToolError（可以念给主人的是 *SpokenToolError），连接出问题时返回其他错误。
 func (s *MCPServer) Call(ctx context.Context, name string, arguments map[string]any) (string, error) {
+	return s.callWithMeta(ctx, name, arguments, nil)
+}
+
+func (s *MCPServer) call(ctx context.Context, name string, arguments map[string]any) (string, error) {
+	return s.Call(ctx, name, arguments)
+}
+
+func (s *MCPServer) callWithMeta(ctx context.Context, name string, arguments map[string]any, meta mcp.Meta) (string, error) {
 	if arguments == nil {
 		arguments = map[string]any{}
 	}
-	result, err := s.session.CallTool(ctx, &mcp.CallToolParams{Name: name, Arguments: arguments})
+	result, err := s.session.CallTool(ctx, &mcp.CallToolParams{Name: name, Arguments: arguments, Meta: meta})
 	if err != nil {
 		return "", err
 	}
-	text := resultText(result)
 	if result.IsError {
-		return "", &ToolError{Tool: name, Text: text}
+		toolErr := ToolError{Tool: name, Text: contentText(result)}
+		if spoken, ok := spokenIn(result.Meta); ok {
+			return "", &SpokenToolError{ToolError: toolErr, Key: spoken.Phrase, Values: spoken.Values}
+		}
+		return "", &toolErr
 	}
-	return text, nil
+	return resultText(result), nil
 }
 
 // CallKnown 只带上工具清单里声明过的参数再调用：第三方服务改版删了某个可选参数时，不因多传而整个调用失败。
@@ -146,6 +154,20 @@ func declaredProperties(schema any) map[string]bool {
 // Close 断开（本地子进程会被结束）。
 func (s *MCPServer) Close() error { return s.session.Close() }
 
+// spokenIn 从结果元数据里取出「能念给主人的错误」（元数据是 JSON 解出来的，按 JSON 再解一次）。
+func spokenIn(meta mcp.Meta) (spokenMeta, bool) {
+	value, ok := meta[metaSpoken]
+	if !ok {
+		return spokenMeta{}, false
+	}
+	data, err := json.Marshal(value)
+	var spoken spokenMeta
+	if err != nil || json.Unmarshal(data, &spoken) != nil || spoken.Phrase == "" {
+		return spokenMeta{}, false
+	}
+	return spoken, true
+}
+
 // resultText 优先用结构化结果（JSON），没有就拼接文本内容。
 func resultText(result *mcp.CallToolResult) string {
 	if result.StructuredContent != nil {
@@ -153,6 +175,11 @@ func resultText(result *mcp.CallToolResult) string {
 			return string(data)
 		}
 	}
+	return contentText(result)
+}
+
+// contentText 拼接结果里的文本内容（出错时的说明在这里）。
+func contentText(result *mcp.CallToolResult) string {
 	var parts []string
 	for _, content := range result.Content {
 		if text, ok := content.(*mcp.TextContent); ok {

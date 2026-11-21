@@ -36,7 +36,7 @@ func streamingWAVHeader(rate, channels int) []byte {
 
 var testVoice = GPTSoVITSVoice{Name: "test", References: map[string]GPTSoVITSReference{
 	"default": {File: "ref-tease.wav", Text: "你问我冰箱里有什么？", Lang: "zh"},
-	"laugh":   {File: "ref-laugh.wav", Text: "哈哈哈，好问题。"},
+	"laugh":   {File: "ref-laugh.wav", Text: "哈哈哈，好问题。", Lang: "zh"},
 }}
 
 func TestGPTSoVITSStreamsChunks(t *testing.T) {
@@ -58,7 +58,7 @@ func TestGPTSoVITSStreamsChunks(t *testing.T) {
 	synth := NewGPTSoVITSSynthesizer(server.URL+"/", "/Users/haro/refs", testVoice, 2, 5*time.Second, server.Client())
 	var pcm []byte
 	for audio, err := range synth.Synthesize(context.Background(),
-		brain.Utterance{Text: "哈哈，又穿反了。", Emotion: brain.EmotionLaugh, Language: brain.LanguageChinese}) {
+		brain.Utterance{Text: "哈哈，又穿反了。", Emotion: brain.EmotionLaugh}) {
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -71,7 +71,7 @@ func TestGPTSoVITSStreamsChunks(t *testing.T) {
 		t.Errorf("PCM 应原样拼接，得到 %v", pcm)
 	}
 	if got.RefAudioPath != "/Users/haro/refs/ref-laugh.wav" || got.PromptText != "哈哈哈，好问题。" ||
-		got.PromptLang != "zh" || got.TextLang != "zh" || got.StreamingMode != 2 || got.MediaType != "wav" ||
+		got.PromptLang != "zh" || got.TextLang != "auto" || got.StreamingMode != 2 || got.MediaType != "wav" ||
 		got.TextSplitMethod != "cut0" {
 		t.Errorf("请求体 %+v", got)
 	}

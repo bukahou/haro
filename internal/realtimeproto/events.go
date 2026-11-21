@@ -164,11 +164,17 @@ type InputAudioTranscriptionFailed struct {
 // InputAudioTranscriptionCompleted 是用户这句话的识别结果。
 type InputAudioTranscriptionCompleted struct {
 	ItemID     string
-	Transcript string
+	Transcript string // 识别出的整句（唤醒词、打断时混进的回声也在里面：交给模型自己分）
 	// 声纹（haro 扩展）：SpeakerChecked 为 true 时比对过，Speaker 是认出来的人（没认出来为空）。
 	// 没有登记声纹时不比对（SpeakerChecked = false）。
 	Speaker        string
 	SpeakerChecked bool
+	// SpeakerTentative：叫醒这句的声纹只过了唤醒的门槛、没确认时，像是谁（Speaker 为空）
+	SpeakerTentative string
+	Language         string // 识别出的语种（例如 zh、ja、en）；不知道时为空
+	Wake             bool   // 这句话里叫了唤醒词（叫醒后的第一句）
+	BargeIn          bool   // 这句话是在 haro 说话时打断说的（开头可能混着回声）
+	AudioMs          int64  // 这句话的音频有多长（毫秒）
 }
 
 // ResponseOutputAudioTranscriptDelta 是接下来那段音频对应的文字（一次一整句，在这句的第一块音频之前发）。

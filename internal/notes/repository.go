@@ -1,52 +1,46 @@
-// Package notes 是 haro 的记事本存储（v2.5）。
+// Package notes 是 haro 的记事本存储。
 //
-// 对外：Open（Facade，按连接地址选择实现，形同 database/sql.Open）+ Repository（接口）。
-// 现在只有 SQLite 实现（开发阶段：数据就在项目的 data/ 下，随时可以清理）；
-// 以后可以新增 PostgreSQL / MySQL 实现，改配置即可切换，调用方（服务端里的记事本工具，v5 起内置）不用改。
+// 对外：Open（按连接地址选实现，形同 database/sql.Open）+ Repository（接口）。现在只有 SQLite 实现。
+// 找哪一条由模型从列出来的记录里挑（按编号）：这里不做按内容的检索。
 package notes
 
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 	"time"
 )
 
 // Note 是一条记录。
 type Note struct {
-	ID        int64     `json:"id"`
-	Content   string    `json:"content"`
-	CreatedAt time.Time `json:"created_at"`
+	ID        int64
+	Content   string
+	CreatedAt time.Time
+	DeletedAt time.Time // 没删掉的是零值
 }
 
 // Repository 是记事本存储的接口：每种数据库一个实现。
 type Repository interface {
 	// Save 记一条（内容为空时报错）。
 	Save(ctx context.Context, content string) (Note, error)
-	// Search 按内容相关度查找，返回最相关的 limit 条；一条都不相关时返回空。
-	Search(ctx context.Context, query string, limit int) ([]Note, error)
-	// Recent 返回最近 limit 条。
-	Recent(ctx context.Context, limit int) ([]Note, error)
-	// Delete 软删除一条（数据保留，可找回）；不存在或已删除时返回 ErrNotFound。
+	// List 返回最近的 limit 条（新的在前）和一共有几条（没删掉的）。
+	List(ctx context.Context, limit int) (notes []Note, total int, err error)
+	// Deleted 返回最近删掉的 limit 条（最近删的在前）。
+	Deleted(ctx context.Context, limit int) ([]Note, error)
+	// Delete 软删除一条（数据保留，可以恢复）；不存在或已删除时返回 ErrNotFound。
 	Delete(ctx context.Context, id int64) (Note, error)
+	// Restore 恢复一条删掉的；不存在或没删除时返回 ErrNotFound。
+	Restore(ctx context.Context, id int64) (Note, error)
 	Close() error
 }
 
-// ErrNotFound 表示要删除的记录不存在（或已经删过）。
+// ErrNotFound 表示要删除（恢复）的记录不存在，或者已经删过（没删过）。
 var ErrNotFound = errors.New("没有这条记录")
 
-// Open 按连接地址打开记事本存储：
-//   - 文件路径（或 sqlite:路径）→ SQLite
-//   - postgres:// / mysql:// → 以后实现
+// Open 按连接地址打开记事本存储：文件路径（或 sqlite:路径）→ SQLite。
 func Open(ctx context.Context, location string) (Repository, error) {
-	switch {
-	case strings.HasPrefix(location, "postgres://"), strings.HasPrefix(location, "postgresql://"),
-		strings.HasPrefix(location, "mysql://"):
-		return nil, fmt.Errorf("暂不支持 %s（现在只有 SQLite）", strings.SplitN(location, "://", 2)[0])
-	case location == "":
+	if location == "" {
 		return nil, errors.New("没有指定记事本存储位置")
-	default:
-		return OpenSQLite(ctx, strings.TrimPrefix(location, "sqlite:"))
 	}
+	return OpenSQLite(ctx, strings.TrimPrefix(location, "sqlite:"))
 }

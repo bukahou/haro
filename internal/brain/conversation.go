@@ -3,16 +3,17 @@ package brain
 import (
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
 	"time"
 )
 
-// 对话跟着人走（v4 D1）：历史、当前性格、等确认的操作属于「人」，不属于某一条终端连接。
+// 对话跟着人走：历史、当前性格、等确认的操作属于「人」，不属于某一条终端连接。
 // 换终端、断线重连、服务端重启，只要声纹认出是同一个人，接着的是同一段对话。
 //
 //	ConversationBook（服务端进程里一份，所有终端连接共用）
 //	  └ Conversation（每人一份；没开声纹时全家一份 SharedPerson）
-//	        ↕ ConversationStore（存盘的接口：第一版存成文件，以后可换 Redis 等）
+//	        ↕ ConversationStore（存盘的接口，现在存在 SQLite）
 
 // SharedPerson 是没开声纹（或这一轮没比对）时用的对话。声纹认不出的人不回答，不会建对话。
 const SharedPerson = "_shared"
@@ -135,15 +136,16 @@ type Conversation struct {
 
 	saveMu sync.Mutex // 同一个人的保存一个接一个（见 ConversationBook.save）
 
-	mu                  sync.Mutex
-	history             []ConversationTurn // 每一轮：说话的时间 + 用户的话、工具往来、最终回答（不含图片）
-	persona             *Persona           // 当前性格（没有性格档案时为 nil）
-	pendingConfirmation []ToolCall         // 上一轮问了「确定要删掉吗」、等回答的操作（只保留一轮）
-	toolCallCount       int                // 用来生成对话内唯一的工具调用 ID
-	summary             string             // 滚动摘要（v5 R4）
-	unsummarized        []ConversationTurn // 掉出窗口、还没压进摘要的几轮（照常带给模型，压完再去掉）
-	summarizing         bool               // 后台正在压缩
-	openTurn            *ConversationTurn  // 还没收尾的一轮（见 ConversationRecord.OpenTurn）
+	mu             sync.Mutex
+	history        []ConversationTurn // 每一轮：说话的时间 + 用户的话、工具往来、最终回答（不含图片）
+	persona        *Persona           // 当前性格（没有性格档案时为 nil）
+	pendingActions []pendingAction    // 等主人确认的操作（确认闸，见 confirmation.go）
+	actionCount    int                // 待确认操作编到第几个了
+	toolCallCount  int                // 用来生成对话内唯一的工具调用 ID
+	summary        string             // 滚动摘要（v5 R4）
+	unsummarized   []ConversationTurn // 掉出窗口、还没压进摘要的几轮（照常带给模型，压完再去掉）
+	summarizing    bool               // 后台正在压缩
+	openTurn       *ConversationTurn  // 还没收尾的一轮（见 ConversationRecord.OpenTurn）
 }
 
 // Person 是这份对话属于谁。
@@ -266,16 +268,62 @@ func (c *Conversation) nextToolCallID() string {
 	return fmt.Sprintf("call_%d", c.toolCallCount)
 }
 
-func (c *Conversation) takePendingConfirmation() []ToolCall {
+// nextActionID 给待确认的操作编号（这个人的对话里从 act_1 数起）。
+func (c *Conversation) nextActionID() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	pending := c.pendingConfirmation
-	c.pendingConfirmation = nil
-	return pending
+	c.actionCount++
+	return fmt.Sprintf("act_%d", c.actionCount)
 }
 
-func (c *Conversation) setPendingConfirmation(calls []ToolCall) {
+// addPendingAction 存下一条待确认的操作。
+func (c *Conversation) addPendingAction(action pendingAction) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.pendingConfirmation = calls
+	c.pendingActions = append(c.pendingActions, action)
+}
+
+// pendingAction 按编号找待确认的操作（不取走）。
+func (c *Conversation) pendingAction(id string) (pendingAction, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, action := range c.pendingActions {
+		if action.ID == id {
+			return action, true
+		}
+	}
+	return pendingAction{}, false
+}
+
+// takePendingAction 按编号取走一条待确认的操作。
+func (c *Conversation) takePendingAction(id string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.pendingActions = slices.DeleteFunc(c.pendingActions, func(action pendingAction) bool { return action.ID == id })
+}
+
+// dropPendingActions 作废所有待确认的操作，返回作废了几条。
+func (c *Conversation) dropPendingActions() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	dropped := len(c.pendingActions)
+	c.pendingActions = nil
+	return dropped
+}
+
+// dropPendingActionsFrom 作废在第 turn 轮存下的待确认操作，返回作废了几条。
+func (c *Conversation) dropPendingActionsFrom(turn int64) int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	before := len(c.pendingActions)
+	c.pendingActions = slices.DeleteFunc(c.pendingActions, func(action pendingAction) bool { return action.Turn == turn })
+	return before - len(c.pendingActions)
+}
+
+// hasPendingActions 去掉过期的，看还有没有待确认的操作。
+func (c *Conversation) hasPendingActions(now time.Time) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.pendingActions = slices.DeleteFunc(c.pendingActions, func(action pendingAction) bool { return now.After(action.ExpiresAt) })
+	return len(c.pendingActions) > 0
 }

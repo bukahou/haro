@@ -14,6 +14,7 @@ require (
 	github.com/openai/openai-go/v3 v3.103.0
 	github.com/pion/mediadevices v0.10.1
 	github.com/pressly/goose/v3 v3.29.0
+	github.com/rivo/uniseg v0.4.7
 	github.com/yalue/onnxruntime_go v1.32.1
 	go.opentelemetry.io/otel v1.47.0
 	go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp v1.47.0

@@ -161,10 +161,10 @@ type wireSpeechStopped struct {
 }
 
 type wireTranscriptionCompleted struct {
-	Type       string                 `json:"type"`
-	ItemID     string                 `json:"item_id"`
-	Transcript string                 `json:"transcript"`
-	Haro       *wireTranscriptSpeaker `json:"haro,omitempty" jsonschema:"haro 扩展：声纹比对结果；没比对时不带"`
+	Type       string               `json:"type"`
+	ItemID     string               `json:"item_id"`
+	Transcript string               `json:"transcript"`
+	Haro       *wireTranscriptExtra `json:"haro,omitempty" jsonschema:"haro 扩展：声纹、语种、唤醒、长度；都没有时不带"`
 }
 
 type wireTranscriptionFailed struct {
@@ -174,9 +174,14 @@ type wireTranscriptionFailed struct {
 	Error        wireErrorBody `json:"error"`
 }
 
-type wireTranscriptSpeaker struct {
-	Speaker string `json:"speaker" jsonschema:"认出来的人；没认出来为空"`
-	Checked bool   `json:"speaker_checked"`
+type wireTranscriptExtra struct {
+	Speaker   string `json:"speaker" jsonschema:"认出来的人；没认出来为空"`
+	Checked   bool   `json:"speaker_checked"`
+	Tentative string `json:"speaker_tentative,omitempty" jsonschema:"叫醒这句的声纹只过了唤醒的门槛、没确认时，像是谁"`
+	Language  string `json:"language,omitempty" jsonschema:"识别出的语种，例如 zh、ja、en"`
+	Wake      bool   `json:"wake,omitempty" jsonschema:"这句话里叫了唤醒词（叫醒后的第一句）"`
+	BargeIn   bool   `json:"barge_in,omitempty" jsonschema:"这句话是在 haro 说话时打断说的（开头可能混着回声）"`
+	AudioMs   int64  `json:"audio_ms,omitempty" jsonschema:"这句话的音频有多长（毫秒）"`
 }
 
 type wireWakeWordDetected struct {

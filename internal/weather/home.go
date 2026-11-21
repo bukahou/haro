@@ -13,12 +13,17 @@ import (
 // HomeLocator 给出「家」在哪（查天气不说地点时用）。
 type HomeLocator interface {
 	Home(ctx context.Context) (Place, error)
+	// Known 返回现在已经知道的位置（不发网络请求）：byIP = 按网络位置推定的（城市级，可能不准）；还不知道时 ok = false。
+	Known() (place Place, byIP, ok bool)
 }
 
-// FixedHome 是配置里写死的坐标。
+// FixedHome 是配置里写死的坐标（名字可以没有）。
 type FixedHome struct{ Place Place }
 
 func (h FixedHome) Home(context.Context) (Place, error) { return h.Place, nil }
+
+// Known 实现 HomeLocator。
+func (h FixedHome) Known() (Place, bool, bool) { return h.Place, false, true }
 
 // IPHome 按家里的公网 IP 推定位置。精度大约是城市级：
 // 运营商有时把 IP 登记在别的城市的机房，可能偏到别的城市 ⇒ 启动时把推定结果写进日志，偏了就改用 HARO_WEATHER_HOME 填坐标。
@@ -41,10 +46,10 @@ func NewIPHome(url, name string, httpClient *http.Client) *IPHome {
 }
 
 // Cached 返回已经定位好的位置（不发网络请求）；还没定位过时 ok=false。
-func (h *IPHome) Cached() (Place, bool) {
+func (h *IPHome) Known() (Place, bool, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	return h.cached, !h.fetched.IsZero()
+	return h.cached, true, !h.fetched.IsZero()
 }
 
 func (h *IPHome) Home(ctx context.Context) (Place, error) {

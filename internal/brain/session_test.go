@@ -252,10 +252,10 @@ func TestSessionEmotionTags(t *testing.T) {
 	events := k.ask("冰箱里有什么")
 
 	want := []brain.Utterance{
-		{Text: "你问我冰箱里有什么？", Emotion: brain.EmotionTease, Language: brain.LanguageChinese},
-		{Text: "我又不是冰箱。", Emotion: brain.EmotionTease, Language: brain.LanguageChinese},
-		{Text: "哈哈，开玩笑的。", Emotion: brain.EmotionLaugh, Language: brain.LanguageChinese},
-		{Text: "えっ、また寝坊したの？", Emotion: brain.EmotionLaugh, Language: brain.LanguageJapanese},
+		{Text: "你问我冰箱里有什么？", Emotion: brain.EmotionTease},
+		{Text: "我又不是冰箱。", Emotion: brain.EmotionTease},
+		{Text: "哈哈，开玩笑的。", Emotion: brain.EmotionLaugh},
+		{Text: "えっ、また寝坊したの？", Emotion: brain.EmotionLaugh}, // 用什么语言念由语音合成自己判断
 	}
 	if !slices.Equal(seen, want) {
 		t.Errorf("交给语音合成的句子\n got %+v\nwant %+v", seen, want)
@@ -321,4 +321,16 @@ func withoutSynthetic(messages []brain.ChatMessage) []brain.ChatMessage {
 		}
 	}
 	return kept
+}
+
+// 情绪标记前面的话没有句号：在标记处收尾成一句，用原来的语气；标记之后的才换语气（不并成一句）。
+func TestEmotionTagEndsTheSentenceBeforeIt(t *testing.T) {
+	model := &fakeModel{tokens: []string{"好的", "[笑]", "哈哈，开玩笑的。"}}
+	var seen []brain.Utterance
+	k := newTestTalker(t, model, fakeSynthesizer{seen: &seen})
+	k.ask("讲个笑话")
+	want := []brain.Utterance{{Text: "好的", Emotion: brain.EmotionDefault}, {Text: "哈哈，开玩笑的。", Emotion: brain.EmotionLaugh}}
+	if !slices.Equal(seen, want) {
+		t.Errorf("got %+v\nwant %+v", seen, want)
+	}
 }
