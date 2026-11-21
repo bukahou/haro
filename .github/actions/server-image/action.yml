@@ -65,7 +65,10 @@ runs:
       env:
         IMAGE: ${{ inputs.image }}
         VERSION: ${{ inputs.version }}
-      run: docker run --rm "${IMAGE}:${VERSION}" -version | grep -F "haro-server ${VERSION} "
+      # 按给机器读的 -version -json 比对（不在给人看的那一行里找字）
+      run: |
+        built=$(docker run --rm "${IMAGE}:${VERSION}" -version -json | jq -r .version)
+        [ "$built" = "$VERSION" ] || { echo "::error::镜像里的 haro-server 报的版本是 ${built}，应为 ${VERSION}"; exit 1; }
     # 用镜像自己的配置在镜像里起 haro-asr，等它就绪（/readyz 要在期限内真的识别完一小段静音）：模型文件名、动态库、
     # ENV 有一样和镜像里的东西对不上，它就起不来或不就绪，这一步失败（不用等到集群里才发现 Pod 一直重启）。
     # 阳性对照：故意把识别模型的文件名设错，同样的检查必须失败——证明这个检查真的在查
