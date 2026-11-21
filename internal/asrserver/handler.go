@@ -50,9 +50,9 @@ func NewHandler(deps Dependencies) http.Handler {
 	mux.HandleFunc(realtimeproto.VoiceprintRoute, func(w http.ResponseWriter, r *http.Request) {
 		handleEnrollment(w, r, deps.Speakers) // 远程登记声纹
 	})
-	// 模型在开始监听之前就加载好了：能响应就能接转写会话，存活和就绪是同一件事
+	// 存活只看进程能不能响应；就绪要在期限内真的识别完一小段静音（readiness.go）
 	mux.HandleFunc("GET /livez", readiness.Alive)
-	mux.HandleFunc("GET /readyz", readiness.Alive)
+	mux.Handle("GET /readyz", newRecognizerReadiness(deps.Transcriber, deps.Logger))
 	return mux
 }
 
