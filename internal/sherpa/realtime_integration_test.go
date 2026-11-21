@@ -1,9 +1,9 @@
 //go:build integration
 
-// 用真实的 SenseVoice + Silero VAD 跑一遍流式转写会话（默认不跑）：
+// 用真实的 SenseVoice + Silero VAD 跑一遍流式转写会话（默认不跑）。模型按 haro-asr 的配置加载
+// （同一套 HARO_* 环境变量，先在终端里载入），再指定录音：
 //
-//	HARO_ASR_MODEL_DIR=... HARO_VAD_MODEL=... HARO_TEST_WAVS=a.wav,b.wav \
-//	  go test -tags integration -run RealtimeLive -v ./internal/sherpa/
+//	HARO_TEST_WAVS=a.wav,b.wav go test -tags integration -run RealtimeLive -v ./internal/sherpa/
 package sherpa
 
 import (
@@ -20,17 +20,37 @@ import (
 	"github.com/coder/websocket/wsjson"
 
 	"github.com/bukahou/haro/internal/asrserver"
+	"github.com/bukahou/haro/internal/config"
 	"github.com/bukahou/haro/internal/pcmwav"
 	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
-func TestRealtimeLive(t *testing.T) {
-	recognizer, err := NewRecognizer(os.Getenv("HARO_ASR_MODEL_DIR"), 4, "auto")
+// liveSettings 读 haro-asr 的配置（和 haro-asr 用的是同一份）。
+func liveSettings(t *testing.T) config.ASRSettings {
+	t.Helper()
+	settings, err := config.LoadASRSettings()
 	if err != nil {
 		t.Fatal(err)
 	}
+	return settings
+}
+
+// liveRecognizer 按配置加载识别模型。
+func liveRecognizer(t *testing.T, settings config.ASRSettings) *Recognizer {
+	t.Helper()
+	recognizer, err := NewRecognizer(RecognizerConfig{ModelDir: settings.ModelDir, ModelFile: settings.ModelFile,
+		Threads: settings.Threads, Language: settings.Language})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return recognizer
+}
+
+func TestRealtimeLive(t *testing.T) {
+	settings := liveSettings(t)
+	recognizer := liveRecognizer(t, settings)
 	defer recognizer.Close()
-	factory, err := NewSileroDetectorFactory(os.Getenv("HARO_VAD_MODEL"))
+	factory, err := NewSileroDetectorFactory(settings.VADModel)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,19 +115,16 @@ func TestRealtimeLive(t *testing.T) {
 	t.Logf("输入 %d 段录音（%s），切出并识别 %d 段", len(wavNames), strings.Join(wavNames, ", "), completed)
 }
 
-// 唤醒门端到端（默认不跑）：HARO_KWS_MODEL_DIR / HARO_KWS_KEYWORDS 另需设置。
+// 唤醒门端到端（默认不跑）：唤醒词模型、关键词文件同样按 haro-asr 的配置。
 func TestWakeRealtimeLive(t *testing.T) {
-	recognizer, err := NewRecognizer(os.Getenv("HARO_ASR_MODEL_DIR"), 4, "auto")
-	if err != nil {
-		t.Fatal(err)
-	}
+	settings := liveSettings(t)
+	recognizer := liveRecognizer(t, settings)
 	defer recognizer.Close()
-	vad, err := NewSileroDetectorFactory(os.Getenv("HARO_VAD_MODEL"))
+	vad, err := NewSileroDetectorFactory(settings.VADModel)
 	if err != nil {
 		t.Fatal(err)
 	}
-	spotters, release, err := NewKeywordSpotterFactory(KeywordSpotterConfig{ModelDir: os.Getenv("HARO_KWS_MODEL_DIR"),
-		KeywordsFile: os.Getenv("HARO_KWS_KEYWORDS"), Score: 1.0, Threshold: 0.25})
+	spotters, release, err := NewKeywordSpotterFactory(liveKeywordSpotterConfig(settings))
 	if err != nil {
 		t.Fatal(err)
 	}

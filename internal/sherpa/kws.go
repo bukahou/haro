@@ -3,9 +3,7 @@ package sherpa
 import (
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
-	"strings"
 
 	sherpaonnx "github.com/k2-fsa/sherpa-onnx-go/v2/sherpa_onnx"
 
@@ -13,9 +11,13 @@ import (
 	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
-// KeywordSpotterConfig 是唤醒词识别的配置。
+// KeywordSpotterConfig 是唤醒词识别的配置。模型文件由调用方给出（来自配置），不按文件名猜。
 type KeywordSpotterConfig struct {
-	ModelDir     string  // sherpa-onnx KWS 模型目录（zipformer transducer：encoder / decoder / joiner + tokens.txt）
+	ModelDir string // sherpa-onnx 唤醒词模型目录（词表 tokens.txt 在这里）
+	// 模型（zipformer transducer）用目录里的哪三个文件
+	EncoderFile  string
+	DecoderFile  string
+	JoinerFile   string
 	KeywordsFile string  // 关键词文件：每行「拼音单元 … [:加分] [#门槛] @显示名」
 	Score        float32 // 默认加分（关键词行里没写时用）
 	Threshold    float32 // 默认触发门槛 0–1（越低越容易触发）
@@ -23,19 +25,13 @@ type KeywordSpotterConfig struct {
 
 // NewKeywordSpotterFactory 加载唤醒词模型，返回「每个转写会话一个流」的工厂。模型在会话之间共享。
 func NewKeywordSpotterFactory(config KeywordSpotterConfig) (asrserver.KeywordSpotterFactory, func(), error) {
-	encoder, err := findModelFile(config.ModelDir, "encoder")
-	if err != nil {
-		return nil, nil, err
+	transducer := sherpaonnx.OnlineTransducerModelConfig{Encoder: filepath.Join(config.ModelDir, config.EncoderFile),
+		Decoder: filepath.Join(config.ModelDir, config.DecoderFile), Joiner: filepath.Join(config.ModelDir, config.JoinerFile)}
+	tokens := filepath.Join(config.ModelDir, tokensFile)
+	if err := requireFiles(transducer.Encoder, transducer.Decoder, transducer.Joiner, tokens); err != nil {
+		return nil, nil, fmt.Errorf("唤醒词模型文件不可用: %w", err)
 	}
-	decoder, err := findModelFile(config.ModelDir, "decoder")
-	if err != nil {
-		return nil, nil, err
-	}
-	joiner, err := findModelFile(config.ModelDir, "joiner")
-	if err != nil {
-		return nil, nil, err
-	}
-	if _, err := os.Stat(config.KeywordsFile); err != nil {
+	if err := requireFiles(config.KeywordsFile); err != nil {
 		return nil, nil, fmt.Errorf("关键词文件不可用: %w", err)
 	}
 	spotterConfig := sherpaonnx.KeywordSpotterConfig{
@@ -45,8 +41,8 @@ func NewKeywordSpotterFactory(config KeywordSpotterConfig) (asrserver.KeywordSpo
 		KeywordsScore:     config.Score,
 		KeywordsThreshold: config.Threshold,
 	}
-	spotterConfig.ModelConfig.Transducer = sherpaonnx.OnlineTransducerModelConfig{Encoder: encoder, Decoder: decoder, Joiner: joiner}
-	spotterConfig.ModelConfig.Tokens = filepath.Join(config.ModelDir, "tokens.txt")
+	spotterConfig.ModelConfig.Transducer = transducer
+	spotterConfig.ModelConfig.Tokens = tokens
 	spotterConfig.ModelConfig.NumThreads = 1
 	spotterConfig.ModelConfig.Provider = "cpu"
 	spotter := sherpaonnx.NewKeywordSpotter(&spotterConfig)
@@ -57,28 +53,6 @@ func NewKeywordSpotterFactory(config KeywordSpotterConfig) (asrserver.KeywordSpo
 		return &keywordStream{spotter: spotter, stream: sherpaonnx.NewKeywordStream(spotter)}, nil
 	}
 	return factory, func() { sherpaonnx.DeleteKeywordSpotter(spotter) }, nil
-}
-
-// findModelFile 在模型目录里找 encoder / decoder / joiner：优先 chunk-16，其次优先 int8 量化版。
-func findModelFile(dir, part string) (string, error) {
-	matches, _ := filepath.Glob(filepath.Join(dir, part+"-*.onnx"))
-	best, bestScore := "", -1
-	for _, path := range matches {
-		score := 0
-		if strings.Contains(path, "chunk-16") {
-			score += 2
-		}
-		if strings.HasSuffix(path, ".int8.onnx") {
-			score++
-		}
-		if score > bestScore {
-			best, bestScore = path, score
-		}
-	}
-	if best == "" {
-		return "", fmt.Errorf("在 %s 里找不到 %s-*.onnx", dir, part)
-	}
-	return best, nil
 }
 
 // keywordStream 是一个转写会话专用的唤醒词识别流。

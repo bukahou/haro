@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -23,22 +22,28 @@ type Recognizer struct {
 	recognizer *sherpaonnx.OfflineRecognizer
 }
 
-// NewRecognizer 从模型目录（含 model.int8.onnx 与 tokens.txt）加载模型。language 为 "auto" 时自动判断语种。
-func NewRecognizer(modelDir string, threads int, language string) (*Recognizer, error) {
-	modelPath := filepath.Join(modelDir, "model.int8.onnx")
-	tokensPath := filepath.Join(modelDir, "tokens.txt")
-	for _, path := range []string{modelPath, tokensPath} {
-		if _, err := os.Stat(path); err != nil {
-			return nil, fmt.Errorf("模型文件不可用: %w", err)
-		}
+// RecognizerConfig 是识别器的配置。模型文件由调用方给出（来自配置），不按文件名猜。
+type RecognizerConfig struct {
+	ModelDir  string // SenseVoice 模型目录（词表 tokens.txt 在这里）
+	ModelFile string // 用目录里的哪个模型文件（例如 int8 量化版 model.int8.onnx）
+	Threads   int    // 推理线程数
+	Language  string // auto = 自动判断语种；也可以固定成 zh / en / ja / ko / yue
+}
+
+// NewRecognizer 加载模型。
+func NewRecognizer(recognizerConfig RecognizerConfig) (*Recognizer, error) {
+	modelPath := filepath.Join(recognizerConfig.ModelDir, recognizerConfig.ModelFile)
+	tokensPath := filepath.Join(recognizerConfig.ModelDir, tokensFile)
+	if err := requireFiles(modelPath, tokensPath); err != nil {
+		return nil, fmt.Errorf("识别模型文件不可用: %w", err)
 	}
 	config := sherpaonnx.OfflineRecognizerConfig{}
 	config.FeatConfig = sherpaonnx.FeatureConfig{SampleRate: 16000, FeatureDim: 80}
 	config.ModelConfig.SenseVoice = sherpaonnx.OfflineSenseVoiceModelConfig{
-		Model: modelPath, Language: language, UseInverseTextNormalization: 1, // 数字写成阿拉伯数字、加标点
+		Model: modelPath, Language: recognizerConfig.Language, UseInverseTextNormalization: 1, // 数字写成阿拉伯数字、加标点
 	}
 	config.ModelConfig.Tokens = tokensPath
-	config.ModelConfig.NumThreads = threads
+	config.ModelConfig.NumThreads = recognizerConfig.Threads
 	config.ModelConfig.Provider = "cpu"
 	recognizer := sherpaonnx.NewOfflineRecognizer(&config)
 	if recognizer == nil {

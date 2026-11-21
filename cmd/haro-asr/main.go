@@ -98,12 +98,14 @@ func run(settings config.ASRSettings, logger *slog.Logger) error {
 	}()
 
 	loadStarted := time.Now()
-	recognizer, err := sherpa.NewRecognizer(settings.ModelDir, settings.Threads, settings.Language)
+	recognizer, err := sherpa.NewRecognizer(sherpa.RecognizerConfig{ModelDir: settings.ModelDir, ModelFile: settings.ModelFile,
+		Threads: settings.Threads, Language: settings.Language})
 	if err != nil {
 		return err
 	}
 	models.add(func() { recognizer.Close() })
-	logger.Info("模型已加载", "elapsed", time.Since(loadStarted).Round(time.Millisecond), "threads", settings.Threads)
+	logger.Info("模型已加载", "elapsed", time.Since(loadStarted).Round(time.Millisecond), "model_file", settings.ModelFile,
+		"threads", settings.Threads)
 
 	newDetector, err := sherpa.NewSileroDetectorFactory(settings.VADModel)
 	if err != nil {
@@ -120,14 +122,16 @@ func run(settings config.ASRSettings, logger *slog.Logger) error {
 		logger.Info("说完判断（semantic_vad）已启用", "turn_model", settings.TurnModel)
 	}
 
-	kws := sherpa.KeywordSpotterConfig{ModelDir: settings.KWSModelDir, KeywordsFile: settings.WakeWordsFile,
+	kws := sherpa.KeywordSpotterConfig{ModelDir: settings.KWSModelDir, EncoderFile: settings.KWSEncoderFile,
+		DecoderFile: settings.KWSDecoderFile, JoinerFile: settings.KWSJoinerFile, KeywordsFile: settings.WakeWordsFile,
 		Threshold: float32(settings.KWSThreshold), Score: float32(settings.KWSScore)}
 	newKeywordSpotter, release, err := sherpa.NewKeywordSpotterFactory(kws)
 	if err != nil {
 		return err
 	}
 	models.add(release)
-	logger.Info("唤醒词已启用", "keywords_file", kws.KeywordsFile, "threshold", kws.Threshold)
+	logger.Info("唤醒词已启用", "keywords_file", kws.KeywordsFile, "threshold", kws.Threshold,
+		"model_files", []string{kws.EncoderFile, kws.DecoderFile, kws.JoinerFile})
 
 	speakers, closeSpeakers, err := loadSpeakerCheck(settings, logger)
 	if err != nil {
@@ -170,7 +174,7 @@ func loadSpeakerCheck(settings config.ASRSettings, logger *slog.Logger) (*asrser
 	if settings.SpeakerModel == "" {
 		return nil, func() {}, nil
 	}
-	embedder, err := sherpa.NewSpeakerEmbedder(settings.SpeakerModel, 2)
+	embedder, err := sherpa.NewSpeakerEmbedder(settings.SpeakerModel, settings.SpeakerThreads)
 	if err != nil {
 		return nil, nil, err
 	}
