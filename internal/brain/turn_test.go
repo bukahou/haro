@@ -2,6 +2,7 @@ package brain_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"iter"
 	"slices"
@@ -87,6 +88,10 @@ type slowToolbox struct {
 	once    sync.Once
 }
 
+func (b *slowToolbox) Specs() []brain.ToolSpec {
+	return append(b.fakeToolbox.Specs(), brain.ToolSpec{Name: "slow_tool", Parameters: json.RawMessage(`{}`)})
+}
+
 func (b *slowToolbox) Call(ctx context.Context, call brain.ToolCall) (string, error) {
 	if call.Name != "slow_tool" {
 		return b.fakeToolbox.Call(ctx, call)
@@ -163,7 +168,7 @@ func TestInterruptedConfirmationIsWithdrawn(t *testing.T) {
 		braintest.Reply{Chunks: []string{"要删掉第 3 条吗？"}, Hang: true},
 		braintest.Call("confirm_action", map[string]any{"action_id": "act_1"}), braintest.Say("好的。"))
 	toolbox := &fakeToolbox{}
-	k := newTalker(t, brain.Components{Model: model, Synthesizer: slowSynth{}, Tools: toolbox,
+	k := newTalker(t, brain.Components{Front: brain.Agent{Model: model}, Synthesizer: slowSynth{}, Tools: toolbox,
 		NewSegmenter: func() brain.TextSegmenter { return speech.NewSentenceSegmenter(0, 40) }}, brain.Options{MaxHistoryTurn: 6})
 
 	interruptWhen(t, k, func() bool { return len(model.Requests()) >= 2 }, 300) // 问题刚开始念就打断
@@ -210,7 +215,7 @@ func TestToolResultIsSavedBeforeTheTurnEnds(t *testing.T) {
 	store := &latestStore{}
 	model := braintest.NewModel(t, searchCarSpot, braintest.Reply{Chunks: []string{"查到了"}, Hang: true})
 	opts := brain.Options{MaxHistoryTurn: 6}
-	k := newTalker(t, brain.Components{Model: model, Synthesizer: fakeSynthesizer{}, Tools: &fakeToolbox{},
+	k := newTalker(t, brain.Components{Front: brain.Agent{Model: model}, Synthesizer: fakeSynthesizer{}, Tools: &fakeToolbox{},
 		Conversations: brain.NewConversationBook(store, opts, quiet)}, opts)
 
 	interruptWhen(t, k, func() bool {
@@ -234,7 +239,7 @@ func TestCloseWaitsForTheTurnToBeRecorded(t *testing.T) {
 	store := &latestStore{}
 	model := braintest.NewModel(t, braintest.Reply{Chunks: []string{"从前有座山。"}, Hang: true})
 	opts := brain.Options{MaxHistoryTurn: 6}
-	k := newTalker(t, brain.Components{Model: model, Synthesizer: fakeSynthesizer{},
+	k := newTalker(t, brain.Components{Front: brain.Agent{Model: model}, Synthesizer: fakeSynthesizer{},
 		Conversations: brain.NewConversationBook(store, opts, quiet)}, opts)
 
 	braintest.Speak(t, k.session, k.stream, braintest.Utterance{})

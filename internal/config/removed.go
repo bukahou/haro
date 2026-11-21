@@ -37,6 +37,11 @@ var removedSettings = []removedSetting{
 	{name: "HARO_NETDIAG_INTERNET_TARGET", removed: "网络诊断工具已删除"},
 	{name: "HARO_CONTEXT_SIZE", removed: "本地模型改走 Ollama 的 OpenAI 兼容端点，上下文长度在 Ollama 那边配（OLLAMA_CONTEXT_LENGTH）"},
 	{name: "HARO_MODEL_KEEP_ALIVE", removed: "本地模型改走 Ollama 的 OpenAI 兼容端点，模型常驻多久在 Ollama 那边配（OLLAMA_KEEP_ALIVE）"},
+	// 本机终端的环境里可能还写着 true：只提醒，不让终端起不来（终端和服务端现在共用一份配置）
+	{name: "HARO_LLM_FALLBACK", removed: "云端连不上时不再自动换本地模型，只念「连不上」和现在的时间"},
+	{name: "HARO_LLM_FALLBACK_COOLDOWN", removed: "不再自动换本地模型，这个冷却时间不再使用"},
+	{name: "HARO_RESEARCH_LLM", stillMeans: func(value string) bool { return value == "cloud" },
+		removed: "后台调查只用云端模型（本地小模型调工具不可靠）"},
 	{name: "HARO_CLOUD_LLM_PRICE_INPUT", removed: modelPricesFromCatalog},
 	{name: "HARO_CLOUD_LLM_PRICE_OUTPUT", removed: modelPricesFromCatalog},
 	{name: "HARO_CLOUD_LLM_PRICE_CACHE_READ", removed: modelPricesFromCatalog},

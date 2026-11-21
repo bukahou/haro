@@ -11,14 +11,15 @@ import (
 	"github.com/bukahou/haro/internal/brain"
 )
 
-// FallbackChatModel 先用主模型（云端）；主模型在**产出任何内容之前**就失败了（断网、超时、服务报错），
-// 改用备用模型（本地）。已经开始说了才失败的不切换（否则会说两遍），直接报错。
+// FallbackChatModel 先用主模型；主模型在**产出任何内容之前**就失败了（断网、超时、服务报错），改用备用模型。
+// 已经开始说了才失败的不切换（否则会说两遍），直接报错。现在只用在「更强的模型出错时由原来那套云端模型接手」：
+// 云端不再自动换本地模型（第 7 段）。
 //
 // 熔断：主模型失败后的 Cooldown 内直接用备用模型、不再试主模型；过了 Cooldown 再试一次，成功就切回去。
 // 否则一句话里每轮推理（用工具时有两三轮）都要先等主模型超时（2026-11-15 实测断网时等了 17 s）。
 type FallbackChatModel struct {
 	Primary, Secondary         brain.ChatModel
-	PrimaryName, SecondaryName string // 用于日志，例如 "cloud" / "local"
+	PrimaryName, SecondaryName string // 用于日志，例如 "strong" / "cloud"
 	Cooldown                   time.Duration
 	Logger                     *slog.Logger
 

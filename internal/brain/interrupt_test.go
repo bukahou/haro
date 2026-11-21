@@ -23,7 +23,7 @@ func (oneSecondSynth) Synthesize(_ context.Context, _ brain.Utterance) iter.Seq2
 
 func newInterruptTalker(t *testing.T, model brain.ChatModel) *talker {
 	t.Helper()
-	return newTalker(t, brain.Components{Model: model, Synthesizer: oneSecondSynth{},
+	return newTalker(t, brain.Components{Front: brain.Agent{Model: model}, Synthesizer: oneSecondSynth{},
 		NewSegmenter: func() brain.TextSegmenter { return speech.NewSentenceSegmenter(0, 40) }},
 		brain.Options{MaxHistoryTurn: 6})
 }

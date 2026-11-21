@@ -26,6 +26,7 @@ type ConversationRecord struct {
 	Summary       string             // 滚动摘要：掉出窗口的对话压成的一段话
 	Unsummarized  []ConversationTurn // 已经掉出窗口、还没压进摘要的几轮
 	ToolCallCount int
+	TurnCount     int // 轮次编到第几了（每一轮按它编号，完整的对话记录按编号存）
 	// OpenTurn 是还没收尾的一轮（做完了工具、还没说完）：已经整理成「服务端重启、没说完」的样子。
 	// 正常收尾时清掉；读到它说明上次服务端在这一轮中途重启，照实接进历史
 	OpenTurn  *ConversationTurn
@@ -36,6 +37,7 @@ type ConversationRecord struct {
 type ConversationTurn struct {
 	At       time.Time     `json:"at,omitzero"` // 零值 = 不知道（开始记时间之前的旧记录）
 	Messages []ChatMessage `json:"messages"`
+	Seq      int           `json:"seq,omitempty"` // 这个人的第几轮（从 1 起；0 = 还没编号）
 }
 
 // ConversationStore 存取对话（Go interface，实现在 internal/conversationstore）。
@@ -53,7 +55,7 @@ type ConversationBook struct {
 	mu       sync.Mutex
 	byPerson map[string]*Conversation
 
-	summaryModel ChatModel // 滚动摘要用的模型（SummarizeWith）；nil = 不写摘要
+	summaryAgent *Agent // 写滚动摘要的代理（SummarizeWith）；nil = 不写摘要
 }
 
 // NewConversationBook 创建对话簿。opts 提供性格档案、默认性格与历史轮数。
@@ -81,14 +83,17 @@ func (b *ConversationBook) Conversation(person string) *Conversation {
 		case ok:
 			conversation.history = record.History
 			conversation.summary, conversation.unsummarized = record.Summary, record.Unsummarized
-			conversation.toolCallCount = record.ToolCallCount
+			conversation.toolCallCount, conversation.turnCount = record.ToolCallCount, record.TurnCount
 			conversation.persona = findPersona(b.opts.Personas, record.PersonaID)
 			b.logger.Info("接上之前的对话", "person", person, "turns", len(record.History),
 				"since", record.UpdatedAt.Format(time.DateTime))
 			if record.OpenTurn != nil { // 上次在这一轮中途重启：做过的工具照实接进历史（模型才知道自己做过）
 				b.logger.Warn("上次服务端在一轮中途重启：这一轮照实接进历史", "person", person, "at", record.OpenTurn.At)
 				conversation.history = append(conversation.history, *record.OpenTurn)
-				conversation.trimLocked(b.opts.MaxHistoryTurn, b.summaryModel != nil) // 持有 b.mu：直接读，不经 summarizer()
+				conversation.trimLocked(b.opts.MaxHistoryTurn, b.summaryAgent != nil) // 持有 b.mu：直接读，不经 summarizer()
+				recovered = true
+			}
+			if conversation.numberTurnsLocked() { // 还没编号的（旧的记录）补上，写盘后进完整的对话记录
 				recovered = true
 			}
 		}
@@ -142,9 +147,11 @@ type Conversation struct {
 	pendingActions []pendingAction    // 等主人确认的操作（确认闸，见 confirmation.go）
 	actionCount    int                // 待确认操作编到第几个了
 	toolCallCount  int                // 用来生成对话内唯一的工具调用 ID
+	turnCount      int                // 轮次编到第几了（见 ConversationTurn.Seq）
 	summary        string             // 滚动摘要（v5 R4）
 	unsummarized   []ConversationTurn // 掉出窗口、还没压进摘要的几轮（照常带给模型，压完再去掉）
 	summarizing    bool               // 后台正在压缩
+	compacted      bool               // 上下文太长、提前移出了窗口：不等攒够一批就压缩
 	openTurn       *ConversationTurn  // 还没收尾的一轮（见 ConversationRecord.OpenTurn）
 }
 
@@ -154,7 +161,7 @@ func (c *Conversation) Person() string { return c.person }
 func (c *Conversation) record() ConversationRecord {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	record := ConversationRecord{Person: c.person, History: c.history, ToolCallCount: c.toolCallCount,
+	record := ConversationRecord{Person: c.person, History: c.history, ToolCallCount: c.toolCallCount, TurnCount: c.turnCount,
 		Summary: c.summary, Unsummarized: c.unsummarized, OpenTurn: c.openTurn, UpdatedAt: time.Now()}
 	if c.persona != nil {
 		record.PersonaID = c.persona.ID
@@ -193,16 +200,43 @@ func (c *Conversation) currentSummary() string {
 	return c.summary
 }
 
-// appendTurn 记下一轮（只留最近 maxTurns 轮）并写盘；这一轮收尾了，「没收尾」的记录随之清掉。
-func (c *Conversation) appendTurn(turn ConversationTurn, maxTurns int) {
+// compactKeepTurns：上下文太长时，提前移出窗口后留下最近几轮。
+const compactKeepTurns = 2
+
+// appendTurn 记下一轮（编上号，只留最近 maxTurns 轮）并写盘；这一轮收尾了，「没收尾」的记录随之清掉。
+// contextTokens 是这一轮请求模型时带的上下文（最大的那次请求的输入 token，模型报的）：到了 Options.CompactContextTokens，
+// 最近 compactKeepTurns 轮之前的提前移出窗口、马上压缩（完整的对话记录里都还在）。
+func (c *Conversation) appendTurn(turn ConversationTurn, maxTurns, contextTokens int) {
 	summarizing := c.book.summarizer() != nil // 先取：不在持有 Conversation.mu 时去锁对话簿
 	c.mu.Lock()
+	c.turnCount++
+	turn.Seq = c.turnCount
 	c.history = append(c.history, turn)
 	c.openTurn = nil
 	c.trimLocked(maxTurns, summarizing)
+	if threshold := c.book.opts.CompactContextTokens; threshold > 0 && contextTokens >= threshold && len(c.history) > compactKeepTurns {
+		c.book.logger.Info("上下文太长：提前移出窗口、压缩", "person", c.person, "context_tokens", contextTokens,
+			"threshold", threshold, "moved_turns", len(c.history)-compactKeepTurns)
+		c.trimLocked(compactKeepTurns, summarizing)
+		c.compacted = summarizing
+	}
 	c.mu.Unlock()
 	c.book.save(c)
 	c.book.maybeSummarize(c)
+}
+
+// numberTurnsLocked 给还没编号的轮次补上号（按先后：掉出窗口的在前），返回补没补。调用方持有锁（或对话还没交出去）。
+func (c *Conversation) numberTurnsLocked() bool {
+	numbered := false
+	for _, turns := range [][]ConversationTurn{c.unsummarized, c.history} {
+		for i := range turns {
+			if turns[i].Seq == 0 {
+				c.turnCount++
+				turns[i].Seq, numbered = c.turnCount, true
+			}
+		}
+	}
+	return numbered
 }
 
 // trimLocked 只留最近 maxTurns 轮；掉出窗口的在写摘要时攒着等压缩，否则丢掉。调用方持有 c.mu（或对话还没交出去）。
@@ -318,6 +352,14 @@ func (c *Conversation) dropPendingActionsFrom(turn int64) int {
 	before := len(c.pendingActions)
 	c.pendingActions = slices.DeleteFunc(c.pendingActions, func(action pendingAction) bool { return action.Turn == turn })
 	return before - len(c.pendingActions)
+}
+
+// unexpiredPendingActions 去掉过期的，返回剩下的待确认操作（副本）。
+func (c *Conversation) unexpiredPendingActions(now time.Time) []pendingAction {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.pendingActions = slices.DeleteFunc(c.pendingActions, func(action pendingAction) bool { return now.After(action.ExpiresAt) })
+	return slices.Clone(c.pendingActions)
 }
 
 // hasPendingActions 去掉过期的，看还有没有待确认的操作。

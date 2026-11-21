@@ -1,0 +1,122 @@
+package agents_test
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/bukahou/haro/internal/agents"
+)
+
+// 程序里带的四个代理都读得出来，调用方式、模型档、用途和程序用它们的方式一致。
+func TestBuiltinDefinitions(t *testing.T) {
+	catalog, err := agents.Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]struct {
+		mode           agents.Mode
+		model, purpose string
+	}{
+		agents.Front:   {agents.ModePrimary, agents.TierBase, "chat"},
+		agents.Strong:  {agents.ModeHandoff, agents.TierStrong, "strong"},
+		agents.Vision:  {agents.ModeSubtask, agents.TierStrong, "vision"},
+		agents.Summary: {agents.ModeSubtask, agents.TierBase, "summary"},
+	}
+	for name, w := range want {
+		definition, err := catalog.Get(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if definition.Mode != w.mode || definition.Model != w.model || definition.Purpose != w.purpose || !definition.Builtin() {
+			t.Errorf("%s：%+v", name, definition)
+		}
+	}
+	strong, _ := catalog.Get(agents.Strong)
+	if strong.Prompt != "" {
+		t.Errorf("接手的代理正文应为空：%q", strong.Prompt)
+	}
+}
+
+// 正文里引用的值由代码给；少给了就报错，不静默留空。
+func TestRenderPromptNeedsEveryValue(t *testing.T) {
+	catalog, err := agents.Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	front, _ := catalog.Get(agents.Front)
+	prompt, err := front.RenderPrompt(map[string]any{"EmotionTags": "[开心] [难过]"})
+	if err != nil || !strings.Contains(prompt, "只能用这几个：[开心] [难过]") || strings.Contains(prompt, "{{") {
+		t.Fatalf("应填好情绪标记：%v\n%s", err, prompt)
+	}
+	if _, err := front.RenderPrompt(nil); err == nil {
+		t.Error("没给 EmotionTags 时应报错")
+	}
+}
+
+func writeAgent(t *testing.T, dir, name, text string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name+".md"), []byte(text), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+const summaryOverride = "---\ntitle: 我的摘要\nmode: subtask\nmodel: base\npurpose: summary\nmax_steps: 1\n---\n只写一句话的摘要。\n"
+
+// 覆盖目录里同名的文件替换程序里带的那份；其余照旧。
+func TestOverrideDirectoryReplacesSameName(t *testing.T) {
+	dir := t.TempDir()
+	writeAgent(t, dir, agents.Summary, summaryOverride)
+	catalog, err := agents.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary, _ := catalog.Get(agents.Summary)
+	if summary.Title != "我的摘要" || summary.Prompt != "只写一句话的摘要。" || summary.Builtin() {
+		t.Errorf("应换成目录里的那份：%+v", summary)
+	}
+	if front, _ := catalog.Get(agents.Front); !front.Builtin() {
+		t.Errorf("没覆盖的应照旧：%+v", front)
+	}
+}
+
+// 写错了就起不来：不认识的字段、取值不对、程序不认识的代理、目录不存在。报错要说清是哪一处（want 是报错里该有的字）。
+func TestInvalidDefinitionsFailToLoad(t *testing.T) {
+	cases := map[string]struct{ name, text, want string }{
+		"拼错的可选字段":   {agents.Summary, strings.Replace(summaryOverride, "max_steps: 1", "max_steps: 1\nmax_output_token: 500", 1), "max_output_token"},
+		"模型档不对":     {agents.Summary, strings.Replace(summaryOverride, "model: base", "model: claude-haiku-5-5", 1), "model"},
+		"调用方式和程序不符": {agents.Summary, strings.Replace(summaryOverride, "mode: subtask", "mode: primary", 1), "mode"},
+		"步数为零":      {agents.Summary, strings.Replace(summaryOverride, "max_steps: 1", "max_steps: 0", 1), "max_steps"},
+		"死循环窗口太小":   {agents.Summary, strings.Replace(summaryOverride, "max_steps: 1", "max_steps: 1\nrepeat_limit: 3\nrepeat_window: 2", 1), "repeat_window"},
+		"没有用途":      {agents.Summary, strings.Replace(summaryOverride, "purpose: summary\n", "", 1), "purpose"},
+		"正文为空":      {agents.Summary, strings.Replace(summaryOverride, "只写一句话的摘要。\n", "", 1), "正文"},
+		"接手的代理有正文":  {agents.Strong, "---\ntitle: 强\nmode: handoff\nmodel: strong\npurpose: strong\nmax_steps: 8\n---\n多余的正文\n", "正文要留空"},
+		"重复的工具":     {agents.Summary, strings.Replace(summaryOverride, "max_steps: 1", "max_steps: 1\ntools: [a, a]", 1), "重复"},
+		"没有配置":      {agents.Summary, "只有正文\n", "---"},
+		"配置没结束":     {agents.Summary, "---\ntitle: 摘要\n", "---"},
+		"正文模板写错":    {agents.Summary, strings.Replace(summaryOverride, "只写一句话的摘要。", "{{.Broken", 1), "正文"},
+		"程序不认识的代理":  {"fornt", summaryOverride, "不认识叫 fornt 的代理"},
+	}
+	for label, c := range cases {
+		dir := t.TempDir()
+		writeAgent(t, dir, c.name, c.text)
+		_, err := agents.Load(dir)
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s：应读不进来、报错里有 %q：%v", label, c.want, err)
+		}
+	}
+	if _, err := agents.Load(filepath.Join(t.TempDir(), "missing")); err == nil {
+		t.Error("配了目录却不存在时应读不进来")
+	}
+}
+
+// 阳性对照：上面那组「写错」的文件只改了一处；原样的那份读得进来。
+func TestValidOverrideLoads(t *testing.T) {
+	dir := t.TempDir()
+	writeAgent(t, dir, agents.Summary, strings.Replace(summaryOverride, "max_steps: 1", "max_steps: 1\nrepeat_limit: 3\nrepeat_window: 4\ntools: [a]", 1))
+	writeAgent(t, dir, agents.Strong, "---\ntitle: 强\nmode: handoff\nmodel: strong\npurpose: strong\nmax_steps: 8\n---\n")
+	if _, err := agents.Load(dir); err != nil {
+		t.Fatal(err)
+	}
+}

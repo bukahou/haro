@@ -32,7 +32,7 @@ var deleteNoteThree = braintest.Call("delete_note", map[string]any{"ids": []any{
 
 func newGateTalker(t *testing.T, model brain.ChatModel, toolbox brain.Toolbox, timeout time.Duration) *talker {
 	t.Helper()
-	return newTalker(t, brain.Components{Model: model, Synthesizer: fakeSynthesizer{}, Tools: toolbox},
+	return newTalker(t, brain.Components{Front: brain.Agent{Model: model}, Synthesizer: fakeSynthesizer{}, Tools: toolbox},
 		brain.Options{MaxHistoryTurn: 6, ConfirmationTimeout: timeout})
 }
 

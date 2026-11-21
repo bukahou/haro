@@ -6,13 +6,19 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+
 	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
 // Components 是服务端需要的全部能力，由 cmd/haro-server 组装注入。
 type Components struct {
-	Streaming    StreamingRecognizer // 流式识别：服务端判断说完、唤醒词都靠它
-	Model        ChatModel
+	Streaming StreamingRecognizer // 流式识别：服务端判断说完、唤醒词都靠它
+	// Front 是前台：主对话的代理（模型、基础规则、能用的工具、步数）
+	Front Agent
+	// Handoff 是接手（可选）：哪些情况把这一轮剩下的部分交给更强的代理回答
+	Handoff      Handoff
 	Synthesizer  SpeechSynthesizer
 	Tools        Toolbox              // 可选：工具（内置 + MCP）
 	FrameExpert  FrameExpert          // 可选：看画面的幕后专家；nil = 画面直接交给前台模型
@@ -28,28 +34,30 @@ type Components struct {
 	Profiles ProfileSource
 	// Notices 是所有终端连接共用的提示中转（后台调查查完了让终端响一声）；nil = 不发提示
 	Notices *NoticeHub
+	// MonthlyCap、OverBudgetModel：月度上限到了以后，主人可以口头临时提高（见 monthly_cap.go）；
+	// 都设了才有这个能力。OverBudgetModel 不受额度管（否则上限到了就没法判断），由组装处限每天的次数
+	MonthlyCap      MonthlyCap
+	OverBudgetModel ChatModel
 }
 
 // Options 是服务端的可调参数。
 type Options struct {
 	MaxHistoryTurn int // 保留最近几轮（一问一答算一轮）的文字历史
+	// CompactContextTokens：一轮里请求模型带的上下文（输入 token）到了这么多，就提前把较早的几轮移出窗口、压缩；0 = 不看
+	CompactContextTokens int
 
 	StreamReopen ReopenTiming // 识别流断开后重开的节奏；零值 = DefaultReopenTiming
 	// ConfirmationTimeout：会破坏的操作问了主人之后，多久没确认就作废；零值 = DefaultConfirmationTimeout
 	ConfirmationTimeout time.Duration
 	// Phrases：不经模型、直接念的固定的话（每种语言一份）；零值 = 程序里带的那份
 	Phrases Phrases
-
-	// Instructions 是基础提示词（身份、能力、底线），只由服务端持有：客户端不能经 session.update 替换。
-	Instructions string
+	// MonthlyRaiseYen：口头提高月度上限时每次加多少（念给主人听的数，和额度那一层用同一个配置）
+	MonthlyRaiseYen float64
 
 	// 性格档案（可选）：两个以上时提供 switch_persona 工具
 	Personas       []Persona
 	DefaultPersona string       // 没记过当前性格时用哪个（ID）
 	PersonaState   PersonaState // 可选：记住当前性格，重启后保持
-
-	// Escalation：有更强的模型可以接手重答（选模型的包装层配了这条路）时为 true，提供 ask_stronger_model 工具
-	Escalation bool
 }
 
 // Session 是一次与终端的会话：接收 realtimeproto 客户端事件，经 Events() 发出服务端事件。
@@ -81,6 +89,8 @@ type Session struct {
 	awake        bool // 唤醒门开着（听到唤醒词、或终端手动唤醒之后，直到终端说休眠）
 	playing      bool // 终端正在播放回答（只听唤醒词；打断自己的唤醒在仲裁里最优先）
 	droppedAudio int  // 识别流断开期间收到、只能丢掉的音频块数（重开时记一次日志）
+	// speech 是识别流报了「开始说话」、还没报「说完」的那句；识别流在这时断开，这句就丢了（不会再有「说完」）
+	speech *realtimeproto.InputAudioBufferSpeechStarted
 
 	conversation       *Conversation   // 这一轮说话的人的对话（跟人走，不跟连接走）
 	spoken             []spokenSegment // 最近一次回答已经发给终端的句子（打断时按「听到多少」截断历史）
@@ -123,9 +133,9 @@ func NewSession(parts Components, opts Options, logger *slog.Logger) *Session {
 	return session
 }
 
-// Warmup 预热模型。只在部署侧调用（不是 Realtime 事件）。
+// Warmup 预热前台的模型。只在部署侧调用（不是 Realtime 事件）。
 func (s *Session) Warmup(ctx context.Context) error {
-	return WarmUp(ctx, s.parts.Model)
+	return WarmUp(ctx, s.parts.Front.Model)
 }
 
 // Events 返回服务端事件流（会话期间不关闭）。
@@ -262,7 +272,11 @@ func (s *Session) startResponseLocked() error {
 	return nil
 }
 
-// emit 发出一个服务端事件；会话关闭后丢弃。
+// 发给终端的事件经一条有上限的队列（events）。两条路：
+//   - emit：一定要送到的（回答的文字和音频、这轮结束、出错……）—— 队列满了就等：终端读得慢，回答跟着慢，不丢；
+//   - tryEmit：可以丢的（别的 goroutine 发来的提示）—— 队列满了就丢、计数（haro.events.dropped），不拖住发的那一方。
+
+// emit 发出一个一定要送到的服务端事件；会话关闭后丢弃。
 func (s *Session) emit(event realtimeproto.ServerEvent) {
 	select {
 	case s.events <- event:
@@ -282,6 +296,7 @@ func (s *Session) tryEmit(event realtimeproto.ServerEvent) bool {
 		return true
 	default:
 		s.logger.Warn("终端积压的事件太多：这次提示不发了", "event", event.Type())
+		droppedEvents.Add(s.lifetime, 1, metric.WithAttributes(attribute.String("haro.event.type", event.Type())))
 		return false
 	}
 }
@@ -317,17 +332,18 @@ func (s *Session) useConversationOf(person string) {
 	}
 }
 
-// rememberTurn 把整理好的一轮（closeTurn 的结果：主人的话、工具往来、最终回答）写进这个人的历史。
+// rememberTurn 把整理好的一轮（closeTurn 的结果：主人的话、工具往来、最终回答）写进这个人的历史；
+// contextTokens 是这一轮请求模型时带的上下文（见 Conversation.appendTurn）。
 //
 // 为什么要保留工具往来：只保留最终回答时，历史里全是「记下了」「网络正常」，小模型照着学，
 // 就不再调用工具、直接说办好了（实测：同一段历史，只留回答时 4 次里 0 次调用 save_note，
 // 保留工具往来时 4 次都调用）。
-func (s *Session) rememberTurn(at time.Time, messages []ChatMessage) {
+func (s *Session) rememberTurn(at time.Time, messages []ChatMessage, contextTokens int) {
 	s.mu.Lock()
 	s.answeredInResponse = true
 	conversation := s.conversation
 	s.mu.Unlock()
-	conversation.appendTurn(ConversationTurn{At: at, Messages: messages}, s.opts.MaxHistoryTurn)
+	conversation.appendTurn(ConversationTurn{At: at, Messages: messages}, s.opts.MaxHistoryTurn, contextTokens)
 }
 
 // deviceLabel 是日志里的设备名：没有时写「没有」。

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bukahou/haro/internal/agents"
 	"github.com/bukahou/haro/internal/brain"
 	"github.com/bukahou/haro/internal/brain/braintest"
 	"github.com/bukahou/haro/internal/realtimeproto"
@@ -83,6 +84,7 @@ func newTalker(t *testing.T, parts brain.Components, opts brain.Options) *talker
 	t.Helper()
 	voice := braintest.NewVoice()
 	parts.Streaming = voice
+	parts.Front = withTestSteps(parts.Front)
 	if parts.NewSegmenter == nil {
 		parts.NewSegmenter = func() brain.TextSegmenter { return speech.NewSentenceSegmenter(4, 40) }
 	}
@@ -92,10 +94,39 @@ func newTalker(t *testing.T, parts brain.Components, opts brain.Options) *talker
 		stream: braintest.Open(t, session, voice, realtimeproto.SessionUpdate{})}
 }
 
+// withTestSteps 给没写步数的代理补上测试用的步数（和前台的定义一样：8 步，最近 4 步里第 3 次算死循环）。
+func withTestSteps(agent brain.Agent) brain.Agent {
+	if agent.Name == "" {
+		agent.Name = "前台"
+	}
+	if agent.MaxSteps == 0 {
+		agent.MaxSteps = 8
+	}
+	if agent.RepeatLimit == 0 && agent.RepeatWindow == 0 {
+		agent.RepeatLimit, agent.RepeatWindow = 3, 4
+	}
+	return agent
+}
+
+// builtinFrontInstructions 是程序里带的前台的基础规则（填好值）。
+func builtinFrontInstructions(t *testing.T) string {
+	t.Helper()
+	catalog, err := agents.Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	front, _ := catalog.Get(agents.Front)
+	instructions, err := front.RenderPrompt(brain.PromptValues())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return instructions
+}
+
 // newTestTalker 是只有模型和语音合成的会话。
 func newTestTalker(t *testing.T, model brain.ChatModel, synth brain.SpeechSynthesizer) *talker {
 	t.Helper()
-	return newTalker(t, brain.Components{Model: model, Synthesizer: synth}, brain.Options{MaxHistoryTurn: 6})
+	return newTalker(t, brain.Components{Front: brain.Agent{Model: model}, Synthesizer: synth}, brain.Options{MaxHistoryTurn: 6})
 }
 
 // ask 让主人说 text，返回这一轮的事件（从识别结果到 response.done）。
@@ -124,8 +155,8 @@ func (k *talker) send(event realtimeproto.ClientEvent) {
 
 func TestSessionStreamsSentencesInOrder(t *testing.T) {
 	model := &fakeModel{tokens: []string{"我看到你", "坐在电脑前面，", "旁边有", "一个杯子。", "还有键盘。"}, delay: 5 * time.Millisecond}
-	k := newTalker(t, brain.Components{Model: model, Synthesizer: fakeSynthesizer{}},
-		brain.Options{MaxHistoryTurn: 6, Instructions: "你是测试助手"})
+	k := newTalker(t, brain.Components{Front: brain.Agent{Model: model, Instructions: "你是测试助手"}, Synthesizer: fakeSynthesizer{}},
+		brain.Options{MaxHistoryTurn: 6})
 
 	events := k.ask("你能看到我吗")
 
@@ -160,8 +191,8 @@ func TestSessionStreamsSentencesInOrder(t *testing.T) {
 
 	// 第二轮：历史里有系统提示词 + 上一轮问答，且不带图片
 	k.ask("你能看到我吗")
-	if history := withoutSynthetic(model.history); len(history) != 3 || history[0].Role != brain.RoleSystem ||
-		history[2].Text != "我看到你坐在电脑前面，旁边有一个杯子。还有键盘。" {
+	if history := withoutSynthetic(model.history); len(history) != 2 || model.history[0].Role != brain.RoleSystem ||
+		history[1].Text != "我看到你坐在电脑前面，旁边有一个杯子。还有键盘。" {
 		t.Errorf("第二轮历史 = %+v", model.history)
 	}
 	if model.lastInput.Image != nil {
@@ -220,7 +251,7 @@ func TestSessionRejectsConcurrentResponse(t *testing.T) {
 func TestSessionWaitsForResponseCreateWhenAsked(t *testing.T) {
 	model := braintest.NewModel(t, braintest.Say("好的。"))
 	voice := braintest.NewVoice()
-	session := brain.NewSession(brain.Components{Model: model, Synthesizer: fakeSynthesizer{}, Streaming: voice,
+	session := brain.NewSession(brain.Components{Front: brain.Agent{Model: model}, Synthesizer: fakeSynthesizer{}, Streaming: voice,
 		NewSegmenter: func() brain.TextSegmenter { return speech.NewSentenceSegmenter(4, 40) }},
 		brain.Options{MaxHistoryTurn: 6}, quiet)
 	defer session.Close()
@@ -299,7 +330,7 @@ func TestSessionSkipsSynthesisWithoutSpeaker(t *testing.T) {
 func TestConversationSurvivesReconnect(t *testing.T) {
 	model := &fakeModel{tokens: []string{"你好呀。"}}
 	opts := brain.Options{MaxHistoryTurn: 6}
-	parts := brain.Components{Model: model, Synthesizer: fakeSynthesizer{},
+	parts := brain.Components{Front: brain.Agent{Model: model}, Synthesizer: fakeSynthesizer{},
 		Conversations: brain.NewConversationBook(nil, opts, quiet)}
 
 	first := newTalker(t, parts, opts)
@@ -317,7 +348,7 @@ func TestConversationSurvivesReconnect(t *testing.T) {
 func withoutSynthetic(messages []brain.ChatMessage) []brain.ChatMessage {
 	var kept []brain.ChatMessage
 	for _, msg := range messages {
-		if !msg.Synthetic {
+		if !msg.Synthetic && msg.Role != brain.RoleSystem { // 只看对话本身：系统提示词（含工具介绍）另外测
 			kept = append(kept, msg)
 		}
 	}

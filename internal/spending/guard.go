@@ -88,20 +88,26 @@ type Limits struct {
 	MonthlyYen         float64 // 每月总费用上限：大模型 + 搜索，不分用途合计
 	SearchDailyCredits int     // 搜索积分每天最多用多少（默认封在 Tavily 免费额度内：每月 1,000 ≈ 每天 30）
 	WarnRatio          float64 // 月度用到这个比例时提醒一次（R5：0.8）
+	// MonthlyRaiseYen：主人口头确认一次，这个月的上限临时提高多少；0 = 不能口头提高（到上限就停到下个月）
+	MonthlyRaiseYen float64
 }
 
 // ErrOverBudget 表示额度用完了（errors.Is 判断）。
 var ErrOverBudget = errors.New("额度用完了")
 
-// budgetError 是额度用完的具体说明：Is(ErrOverBudget)；Phrase 让服务端按主人的语言念出原因，而不是报「出错了」。
+// budgetError 是额度用完的具体说明：Is(ErrOverBudget)；月度总上限的那种还 Is(brain.ErrMonthlyCapReached)。
+// Phrase 让服务端按主人的语言念出原因，而不是报「出错了」。
 type budgetError struct {
 	message string            // 日志、交给模型的工具结果里用
 	phrase  string            // 念给主人的那句（brain.Phrase*）
 	values  map[string]string // 填进那句话里的数
+	monthly bool              // 是每月总费用到了上限
 }
 
-func (e *budgetError) Error() string                       { return e.message }
-func (e *budgetError) Is(target error) bool                { return target == ErrOverBudget }
+func (e *budgetError) Error() string { return e.message }
+func (e *budgetError) Is(target error) bool {
+	return target == ErrOverBudget || (e.monthly && target == brain.ErrMonthlyCapReached)
+}
 func (e *budgetError) Phrase() (string, map[string]string) { return e.phrase, e.values }
 
 // overBudget 用花了多少、上限多少两个数造一个额度用完的错误：spentName 是那句话里「花了多少」的名字。
@@ -199,22 +205,56 @@ func (g *Guard) allowMonthly(ctx context.Context) error {
 	if err != nil {
 		return &ledgerUnavailable{err: err}
 	}
-	if spent.Yen >= g.limits.MonthlyYen {
-		return overBudget(brain.PhraseOverMonthlyBudget, "spent", yen(spent.Yen), yen(g.limits.MonthlyYen),
-			"这个月的费用（大模型和搜索）已经约 %.0f 日元，到上限 %.0f 日元了，这个月先不回答了。", spent.Yen, g.limits.MonthlyYen)
+	limit, err := g.monthlyLimit(ctx)
+	if err != nil {
+		return &ledgerUnavailable{err: err}
 	}
-	if g.limits.WarnRatio > 0 && spent.Yen >= g.limits.MonthlyYen*g.limits.WarnRatio {
+	if spent.Yen >= limit {
+		return g.overMonthly(spent.Yen, limit)
+	}
+	if g.limits.WarnRatio > 0 && spent.Yen >= limit*g.limits.WarnRatio {
 		month := g.startOfMonth().Format("2006-01")
 		g.mu.Lock()
 		if g.warnedFor != month {
 			g.warnedFor = month
-			g.pendingMsg = fmt.Sprintf("这个月的费用（大模型和搜索）已经用到约 %.0f 日元（上限 %.0f 日元，%.0f%%）。超过上限后改用本地模型或暂停回答。",
-				spent.Yen, g.limits.MonthlyYen, spent.Yen/g.limits.MonthlyYen*100)
-			g.logger.Warn("💴 "+g.pendingMsg, "spent_yen", spent.Yen, "limit_yen", g.limits.MonthlyYen)
+			g.pendingMsg = fmt.Sprintf("这个月的费用（大模型和搜索）已经用到约 %.0f 日元（上限 %.0f 日元，%.0f%%）。超过上限后暂停回答（主人可以口头临时提高上限）。",
+				spent.Yen, limit, spent.Yen/limit*100)
+			g.logger.Warn("💴 "+g.pendingMsg, "spent_yen", spent.Yen, "limit_yen", limit)
 		}
 		g.mu.Unlock()
 	}
 	return nil
+}
+
+// monthlyLimit 是这个月的上限：配置的上限 + 这个月主人口头提高的合计。
+func (g *Guard) monthlyLimit(ctx context.Context) (float64, error) {
+	raised, err := g.ledger.CapRaised(ctx, g.startOfMonth())
+	if err != nil {
+		return 0, err
+	}
+	return g.limits.MonthlyYen + raised, nil
+}
+
+// overMonthly 是月度总费用到了上限的错误：能口头提高时，念的那句顺带说怎么提高。
+func (g *Guard) overMonthly(spent, limit float64) error {
+	message := fmt.Sprintf("这个月的费用（大模型和搜索）已经约 %.0f 日元，到上限 %.0f 日元了，这个月先不回答了。", spent, limit)
+	values := map[string]string{"spent": yen(spent), "limit": yen(limit)}
+	phrase := brain.PhraseOverMonthlyBudget
+	if g.limits.MonthlyRaiseYen > 0 {
+		phrase, values["raise"] = brain.PhraseOverMonthlyBudgetRaisable, yen(g.limits.MonthlyRaiseYen)
+	}
+	return &budgetError{message: message, phrase: phrase, values: values, monthly: true}
+}
+
+// RaiseMonthlyCap 实现 brain.MonthlyCap：主人口头确认后，把这个月的上限提高 MonthlyRaiseYen（记进账本，重启后照样算）。
+func (g *Guard) RaiseMonthlyCap(ctx context.Context, person string) (float64, error) {
+	if g.limits.MonthlyYen <= 0 || g.limits.MonthlyRaiseYen <= 0 {
+		return 0, errors.New("没有设月度上限，或者不允许口头提高")
+	}
+	if err := g.ledger.RaiseCap(ctx, CapRaise{At: g.now(), Yen: g.limits.MonthlyRaiseYen, Person: person}); err != nil {
+		return 0, fmt.Errorf("记不下提高的上限: %w", err)
+	}
+	return g.monthlyLimit(ctx)
 }
 
 // Brief 实现 brain.Briefer：有还没告诉主人的额度提醒时附上；这一轮说完才算告诉了（被打断、出错时下一轮再附上）。

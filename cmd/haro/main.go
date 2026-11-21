@@ -154,7 +154,7 @@ func enroll(logger *slog.Logger, name string, appendMode bool, seconds time.Dura
 }
 
 // assistantOptions 由配置组装对话选项（系统提示词由服务端持有，终端不发）。
-func assistantOptions(settings config.Settings, sounds tones.Tones) assistant.Options {
+func assistantOptions(settings config.TerminalSettings, sounds tones.Tones) assistant.Options {
 	return assistant.Options{
 		TurnDetection: realtimeproto.TurnDetection{ // create_response 不填 = 服务端判定说完时自己开始回答
 			Type: settings.TurnDetection, Eagerness: settings.TurnEagerness,
@@ -175,7 +175,7 @@ func assistantOptions(settings config.Settings, sounds tones.Tones) assistant.Op
 
 // openCamera 选摄像头并准备好（这时不打开，要看的时候才打开）。HARO_CAMERA_DEVICE=none 时不用摄像头，返回 nil。
 // 列不出摄像头不退出；要的拍照方式这个系统上不支持时返回错误（配置写错了，启动失败）。
-func openCamera(ctx context.Context, settings config.Settings, local *platform.LocalDevices,
+func openCamera(ctx context.Context, settings config.TerminalSettings, local *platform.LocalDevices,
 	logger *slog.Logger) (terminal.Camera, error) {
 	if settings.CameraDevice == terminal.CameraNone {
 		logger.Info("📷 不用摄像头", "why", "配置关闭（HARO_CAMERA_DEVICE=none）")

@@ -20,7 +20,8 @@ const deletedListLimit = 20
 func NoteTools(store notes.Repository, listLimit int, logger *slog.Logger) Builtin {
 	logger = logger.With("tool", "notes")
 	return func(server *mcp.Server) {
-		AddTool(server, &mcp.Tool{Name: "save_note", Description: "把主人要求记下的事情保存到记事本。", Annotations: Changes},
+		AddTool(server, &mcp.Tool{Name: "save_note", Annotations: Changes,
+			Description: "把主人要求记下的事情保存到记事本。记下来不等于会提醒：记完只说「记下了」，不要说「到时候提醒你」。"},
 			func(ctx context.Context, in saveNoteInput) (noteOutput, error) {
 				note, err := store.Save(ctx, in.Content)
 				logger.Info("记一条", "id", note.ID, "err", err)
@@ -28,7 +29,7 @@ func NoteTools(store notes.Repository, listLimit int, logger *slog.Logger) Built
 			})
 		AddTool(server, &mcp.Tool{Name: "search_notes", Annotations: ReadOnly,
 			Description: "列出记事本里的记录（带编号，新的在前）。主人问以前让你记过的事、要找或要删某一条时用：" +
-				"你自己从里面找出主人说的那条，说法可能和当初记的不一样，按意思找。"},
+				"你自己从里面找出主人说的那条，说法可能和当初记的不一样，按意思找。主人问以前让你记过的事（东西放在哪、车停在哪、约了什么）时先查这里，不要凭画面或印象猜。"},
 			func(ctx context.Context, _ struct{}) (noteListOutput, error) {
 				list, total, err := store.List(ctx, listLimit)
 				if err != nil {

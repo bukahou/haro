@@ -36,8 +36,8 @@ func (m *memoryState) SavePersona(id string) error {
 
 func newPersonaTalker(t *testing.T, model brain.ChatModel, state brain.PersonaState, seen *[]brain.Utterance) *talker {
 	t.Helper()
-	k := newTalker(t, brain.Components{Model: model, Synthesizer: fakeSynthesizer{seen: seen}},
-		brain.Options{MaxHistoryTurn: 6, Instructions: "基础规则。", Personas: testPersonas, DefaultPersona: "buddy",
+	k := newTalker(t, brain.Components{Front: brain.Agent{Model: model, Instructions: "基础规则。"}, Synthesizer: fakeSynthesizer{seen: seen}},
+		brain.Options{MaxHistoryTurn: 6, Personas: testPersonas, DefaultPersona: "buddy",
 			PersonaState: state})
 	return k
 }
@@ -54,7 +54,7 @@ func TestSwitchPersona(t *testing.T) {
 	k := newPersonaTalker(t, model, state, &seen)
 
 	k.say("你好")
-	if got := model.LastRequest().System(); got != "基础规则。\n\n风格：毒舌。" {
+	if got := model.LastRequest().System(); got != "基础规则。\n\n你手边的工具：switch_persona。\n\n风格：毒舌。" {
 		t.Fatalf("默认性格的系统提示词 = %q", got)
 	}
 	if len(seen) != 1 || seen[0].Emotion != brain.EmotionTease {
@@ -89,7 +89,7 @@ func TestSwitchPersona(t *testing.T) {
 // 只给了一个性格、或者没有性格档案时，不提供 switch_persona。
 func TestSwitchPersonaToolOnlyWithChoices(t *testing.T) {
 	model := &specRecorder{}
-	k := newTalker(t, brain.Components{Model: model, Synthesizer: fakeSynthesizer{}},
+	k := newTalker(t, brain.Components{Front: brain.Agent{Model: model}, Synthesizer: fakeSynthesizer{}},
 		brain.Options{MaxHistoryTurn: 6, Personas: testPersonas[:1]})
 	k.say("你好")
 	if slices.Contains(model.names, "switch_persona") {

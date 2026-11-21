@@ -7,6 +7,7 @@ package brain
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"iter"
 
 	"github.com/bukahou/haro/internal/realtimeproto"
@@ -27,6 +28,11 @@ type ChatRequest struct {
 	// 例如最后一轮逼模型直接回答。各适配用厂商的「不许调用工具」选项实现；服务端不认这个选项的，这一轮不带工具。
 	ForbidToolCalls bool
 }
+
+// ErrModelUnavailable 表示连不上模型服务（网络不通、等不到回答、认证失败、限流、服务端出错或过载）：
+// 不是请求本身有问题，过一会儿再试可能就好了。适配层把厂商的错误标成它（errors.Is 判断）；
+// 大脑据此进入最低能力：不调用模型，念「连不上」和现在的时间（第 7 段）。
+var ErrModelUnavailable = errors.New("连不上模型服务")
 
 // ModelWarmer 是需要预热的模型（可选）：按需加载模型的服务（本地 Ollama）在第一轮对话前先把模型装进显存，
 // 免得第一轮等几十秒；云端不用实现。包装别的模型的那几层用 WarmUp 转发。
@@ -59,10 +65,11 @@ type TerminalCamera interface {
 	Capture(ctx context.Context) ([]byte, error)
 }
 
-// FrameExpert 是看画面的幕后专家（可选）：设了它，look_at_camera 不把画面交给前台模型，
+// FrameExpert 是看画面的幕后专家（可选，代理「看画面」，以子任务方式调用）：设了它，look_at_camera 不把画面交给前台模型，
 // 而是把画面和主人这一轮的原话交给专家，前台拿到的是专家的判断（文字），再用自己的口吻转述。
 // 专家出错时退回把画面直接交给前台。
 type FrameExpert interface {
+	AgentName() string // 日志、代理链里的名字
 	ExamineFrame(ctx context.Context, question FrameQuestion) (FrameReport, error)
 }
 
@@ -195,8 +202,6 @@ type ChatMessage struct {
 	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`   // assistant：这一轮模型要求调用的工具
 	ToolName   string     `json:"tool_name,omitempty"`    // tool：这条是哪个工具的结果
 	ToolCallID string     `json:"tool_call_id,omitempty"` // tool：对应哪一次调用（ToolCall.ID）
-	// Escalate：这一句交给更强的模型重答（前台模型调用了 ask_stronger_model），选模型的包装层据此换模型。只标在本轮输入上，不存盘
-	Escalate bool `json:"-"`
 	// Synthetic：用户角色里系统合成的消息，不是主人说的话（每轮附带的「现在的情况」、历史里「当时看了画面」的替身）。
 	// 怎么交给模型由各适配层决定；找「本轮主人那句话」时跳过它
 	Synthetic bool `json:"synthetic,omitempty"`

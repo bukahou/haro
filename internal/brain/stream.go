@@ -109,24 +109,12 @@ func (s *Session) pumpStreamEvents(stream RecognizerStream) {
 			s.mu.Unlock()
 			s.emit(e)
 		case realtimeproto.InputAudioBufferSpeechStarted:
+			s.mu.Lock()
+			s.speech = &e
+			s.mu.Unlock()
 			s.emit(e)
 		case realtimeproto.InputAudioBufferSpeechStopped:
-			job := &transcriptionJob{item: e.ItemID, done: make(chan struct{}), started: time.Now()}
-			s.mu.Lock()
-			s.pendingJobs[e.ItemID] = job
-			s.transcription = job
-			s.mu.Unlock()
-			s.emit(e)
-			s.mu.Lock()
-			var err error
-			if s.autoRespond {
-				err = s.startResponseLocked()
-			}
-			s.mu.Unlock()
-			if err != nil {
-				s.logger.Warn("判定说完时没能开始回答", "item", e.ItemID, "err", err)
-				s.emit(realtimeproto.ErrorEventFor("", err))
-			}
+			s.speechStopped(e)
 		case realtimeproto.InputAudioTranscriptionCompleted:
 			if job := s.takeJob(e.ItemID); job != nil {
 				job.text = strings.TrimSpace(e.Transcript)
@@ -147,7 +135,21 @@ func (s *Session) pumpStreamEvents(stream RecognizerStream) {
 		}
 	}
 
-	// 识别流结束：让还在等识别结果的回答失败，而不是一直卡住
+	// 识别流结束。说到一半断的：这句不会再有「说完」，替它补一个，这一轮跟着下面按识别失败结束 ——
+	// 终端照常收尾（不再算在说话、对话窗口照常倒计时），不用等主人下一次开口。会话结束时关掉的不算
+	s.mu.Lock()
+	speech := s.speech
+	s.speech = nil
+	s.mu.Unlock()
+	select {
+	case <-s.closed:
+	default:
+		if speech != nil {
+			s.logger.Warn("说到一半识别流断开：这句丢了", "item", speech.ItemID)
+			s.speechStopped(realtimeproto.InputAudioBufferSpeechStopped{ItemID: speech.ItemID, AudioEndMs: speech.AudioStartMs})
+		}
+	}
+	// 让还在等识别结果的回答失败，而不是一直卡住
 	s.mu.Lock()
 	jobs := s.pendingJobs
 	s.pendingJobs = map[string]*transcriptionJob{}
@@ -160,6 +162,29 @@ func (s *Session) pumpStreamEvents(stream RecognizerStream) {
 		close(job.done)
 	}
 	_ = stream.Close()
+}
+
+// speechStopped 是识别流判定说完：登记一个识别任务，告诉终端，并（默认）马上开始回答。
+func (s *Session) speechStopped(e realtimeproto.InputAudioBufferSpeechStopped) {
+	job := &transcriptionJob{item: e.ItemID, done: make(chan struct{}), started: time.Now()}
+	s.mu.Lock()
+	if s.speech != nil && s.speech.ItemID == e.ItemID {
+		s.speech = nil
+	}
+	s.pendingJobs[e.ItemID] = job
+	s.transcription = job
+	s.mu.Unlock()
+	s.emit(e)
+	s.mu.Lock()
+	var err error
+	if s.autoRespond {
+		err = s.startResponseLocked()
+	}
+	s.mu.Unlock()
+	if err != nil {
+		s.logger.Warn("判定说完时没能开始回答", "item", e.ItemID, "err", err)
+		s.emit(realtimeproto.ErrorEventFor("", err))
+	}
 }
 
 // ReopenTiming 是识别流意外断开后重开的节奏（Options.StreamReopen；零值 = DefaultReopenTiming）。

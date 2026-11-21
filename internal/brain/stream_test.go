@@ -16,7 +16,7 @@ import (
 
 func newStreamSession(t *testing.T, voice *braintest.Voice, model brain.ChatModel, arbiter *brain.WakeArbiter) *brain.Session {
 	t.Helper()
-	parts := brain.Components{Model: model, Synthesizer: fakeSynthesizer{}, WakeArbiter: arbiter,
+	parts := brain.Components{Front: brain.Agent{Model: model}, Synthesizer: fakeSynthesizer{}, WakeArbiter: arbiter,
 		NewSegmenter: func() brain.TextSegmenter { return speech.NewSentenceSegmenter(4, 40) }}
 	if voice != nil {
 		parts.Streaming = voice
@@ -76,7 +76,7 @@ func TestSessionHandsFreeTurn(t *testing.T) {
 
 func newReopenSession(t *testing.T, voice *braintest.Voice, timing brain.ReopenTiming) *brain.Session {
 	t.Helper()
-	parts := brain.Components{Model: &fakeModel{tokens: []string{"好的。"}}, Synthesizer: fakeSynthesizer{}, Streaming: voice,
+	parts := brain.Components{Front: brain.Agent{Model: &fakeModel{tokens: []string{"好的。"}}}, Synthesizer: fakeSynthesizer{}, Streaming: voice,
 		NewSegmenter: func() brain.TextSegmenter { return speech.NewSentenceSegmenter(4, 40) }}
 	session := brain.NewSession(parts, brain.Options{MaxHistoryTurn: 6, StreamReopen: timing}, quiet)
 	t.Cleanup(func() { _ = session.Close() })
@@ -145,6 +145,58 @@ func TestStreamReopensAfterDisconnect(t *testing.T) {
 	case event := <-session.Events():
 		t.Errorf("断开很快恢复时不应再有别的事件（提示、错误）：%+v", event)
 	default:
+	}
+}
+
+// 说到一半识别流断开、很快又重开（不提示终端）：这句不会再有「说完」——替它补一个，这一轮按识别失败结束，
+// 终端照常收尾，不会一直算在说话、对话窗口不倒计时。重开后照常对话。
+func TestSpeechCutByStreamDisconnectEndsTheTurn(t *testing.T) {
+	voice := braintest.NewVoice()
+	session := newReopenSession(t, voice, brain.ReopenTiming{Delay: time.Millisecond, MaxDelay: 5 * time.Millisecond,
+		LostNoticeAfter: time.Hour})
+	turn := realtimeproto.TurnDetection{Type: "server_vad"}
+	first := braintest.Open(t, session, voice, realtimeproto.SessionUpdate{TurnDetection: &turn})
+	item := first.NextItemID()
+	if err := first.Emit(realtimeproto.InputAudioBufferSpeechStarted{ItemID: item, AudioStartMs: 1200}); err != nil {
+		t.Fatal(err)
+	}
+	braintest.Expect[realtimeproto.InputAudioBufferSpeechStarted](t, session)
+	_ = first.Close()
+	stopped := braintest.Expect[realtimeproto.InputAudioBufferSpeechStopped](t, session)
+	if stopped.ItemID != item || stopped.AudioEndMs != 1200 {
+		t.Fatalf("应替丢掉的那句补「说完」：%+v", stopped)
+	}
+	if done := braintest.Done(t, braintest.CollectUntilDone(t, session)); done.Status != realtimeproto.StatusFailed ||
+		done.Reason != realtimeproto.ReasonTranscriptionFailed {
+		t.Fatalf("这一轮应按识别失败结束：%+v", done)
+	}
+	second := waitOpened(t, voice, 2)
+	if done := braintest.Done(t, braintest.Ask(t, session, second, braintest.Utterance{Text: "你好"})); done.Status != realtimeproto.StatusCompleted {
+		t.Errorf("重开后应照常对话：%+v", done)
+	}
+}
+
+// 说完之后才断开（这句已经在等识别结果）：不重复补「说完」。
+func TestStreamDisconnectAfterSpeechStoppedDoesNotRepeatIt(t *testing.T) {
+	voice := braintest.NewVoice()
+	session := newReopenSession(t, voice, brain.ReopenTiming{Delay: time.Millisecond, MaxDelay: 5 * time.Millisecond,
+		LostNoticeAfter: time.Hour})
+	turn := realtimeproto.TurnDetection{Type: "server_vad"}
+	first := braintest.Open(t, session, voice, realtimeproto.SessionUpdate{TurnDetection: &turn})
+	item := first.NextItemID()
+	_ = first.Emit(realtimeproto.InputAudioBufferSpeechStarted{ItemID: item},
+		realtimeproto.InputAudioBufferSpeechStopped{ItemID: item, AudioEndMs: 2000})
+	braintest.Expect[realtimeproto.InputAudioBufferSpeechStarted](t, session)
+	braintest.Expect[realtimeproto.InputAudioBufferSpeechStopped](t, session)
+	_ = first.Close()
+	events := braintest.CollectUntilDone(t, session)
+	if done := braintest.Done(t, events); done.Status != realtimeproto.StatusFailed {
+		t.Fatalf("等识别结果时断开：这一轮按识别失败结束：%+v", done)
+	}
+	for _, event := range events {
+		if _, ok := event.(realtimeproto.InputAudioBufferSpeechStopped); ok {
+			t.Errorf("已经说完的不应再补「说完」：%v", braintest.Types(events))
+		}
 	}
 }
 
@@ -346,7 +398,7 @@ func (w warnSignal) Handle(_ context.Context, record slog.Record) error {
 func TestClosingSessionIsNotAStreamDisconnect(t *testing.T) {
 	voice := braintest.NewVoice()
 	warned := make(warnSignal, 8)
-	session := brain.NewSession(brain.Components{Model: &fakeModel{tokens: []string{"好。"}}, Synthesizer: fakeSynthesizer{},
+	session := brain.NewSession(brain.Components{Front: brain.Agent{Model: &fakeModel{tokens: []string{"好。"}}}, Synthesizer: fakeSynthesizer{},
 		Streaming: voice}, brain.Options{MaxHistoryTurn: 6, StreamReopen: brain.ReopenTiming{Delay: time.Millisecond,
 		MaxDelay: 5 * time.Millisecond, LostNoticeAfter: time.Hour}}, slog.New(warned))
 	turn := realtimeproto.TurnDetection{Type: "server_vad"}

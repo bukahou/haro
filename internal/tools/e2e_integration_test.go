@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bukahou/haro/internal/agents"
 	"github.com/bukahou/haro/internal/brain"
 	"github.com/bukahou/haro/internal/brain/braintest"
 	"github.com/bukahou/haro/internal/llm"
@@ -51,13 +52,13 @@ func TestConversationLive(t *testing.T) {
 	voice := braintest.NewVoice()
 	parts := brain.Components{
 		Streaming: voice, Synthesizer: textSynthesizer{}, Tools: box,
-		Model:        testChatModel(t),
+		Front:        builtinFront(t, testChatModel(t)),
 		NewSegmenter: func() brain.TextSegmenter { return speech.NewSentenceSegmenter(4, 40) },
 	}
 	if image, _ := os.ReadFile(os.Getenv("HARO_TEST_IMAGE")); len(image) > 0 { // 终端的摄像头每次拍到这张
 		parts.Camera = braintest.NewCamera(image)
 	}
-	session := brain.NewSession(parts, brain.Options{MaxHistoryTurn: 6, Instructions: brain.DefaultInstructions}, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	session := brain.NewSession(parts, brain.Options{MaxHistoryTurn: 6}, slog.New(slog.NewTextHandler(os.Stderr, nil)))
 	defer session.Close()
 	turns := []string{"帮我记一下，车停在C3的7号位。", "我的车停在哪了？", "现在几点了？",
 		"我最近都记了些什么？", "把车停车位那条记录删了。", "确认", "你能看到我吗？"}
@@ -107,4 +108,20 @@ func testChatModel(t *testing.T) brain.ChatModel {
 	}
 	t.Logf("模型：%s", model)
 	return llm.NewAnthropicChatModel(llm.AnthropicOptions{API: llm.NewClaudeAPI(key, "", nil), Model: model, MaxTokens: 800})
+}
+
+// builtinFront 是按程序里带的定义组的前台（真模型）。
+func builtinFront(t *testing.T, model brain.ChatModel) brain.Agent {
+	t.Helper()
+	catalog, err := agents.Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	front, _ := catalog.Get(agents.Front)
+	instructions, err := front.RenderPrompt(brain.PromptValues())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return brain.Agent{Name: front.Title, Model: model, Instructions: instructions, MaxSteps: front.MaxSteps,
+		RepeatLimit: front.RepeatLimit, RepeatWindow: front.RepeatWindow}
 }

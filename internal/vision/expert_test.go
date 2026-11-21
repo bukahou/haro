@@ -13,6 +13,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/bukahou/haro/internal/agents"
 	"github.com/bukahou/haro/internal/brain"
 )
 
@@ -83,7 +84,7 @@ func toolNames(specs []brain.ToolSpec) []string {
 func TestExpertReportsSpokenAndDetails(t *testing.T) {
 	model := &scriptedModel{replies: []brain.ReplyDelta{reportCall("看着像硬盘盒的包装。", "蓝色盒子，印着 M.2。")}}
 	searches := &recordedSearch{}
-	report, err := NewExpert(model, "strong", searches.search, discard).ExamineFrame(context.Background(), question)
+	report, err := newExpert(t, model, searches.search).ExamineFrame(context.Background(), question)
 	if err != nil || report != (brain.FrameReport{Spoken: "看着像硬盘盒的包装。", Details: "蓝色盒子，印着 M.2。"}) {
 		t.Fatalf("应交出两段结论：%+v %v", report, err)
 	}
@@ -99,7 +100,7 @@ func TestExpertReportsSpokenAndDetails(t *testing.T) {
 func TestExpertSearchesThenReports(t *testing.T) {
 	model := &scriptedModel{replies: []brain.ReplyDelta{searchCall("蓝色 包装盒 M.2 Groovy"), reportCall("是 Groovy 的 M.2 硬盘盒。", "查到了型号。")}}
 	searches := &recordedSearch{}
-	report, err := NewExpert(model, "strong", searches.search, discard).ExamineFrame(context.Background(), question)
+	report, err := newExpert(t, model, searches.search).ExamineFrame(context.Background(), question)
 	if err != nil || report.Spoken != "是 Groovy 的 M.2 硬盘盒。" {
 		t.Fatalf("搜完应交出结论：%+v %v", report, err)
 	}
@@ -116,7 +117,7 @@ func TestExpertSearchesThenReports(t *testing.T) {
 // 专家直接用文字回答、没交结论：提醒一次，它再交。
 func TestExpertRemindsOnceToReport(t *testing.T) {
 	model := &scriptedModel{replies: []brain.ReplyDelta{{Text: "看着像硬盘盒。"}, reportCall("看着像硬盘盒。", "蓝色盒子。")}}
-	report, err := NewExpert(model, "strong", nil, discard).ExamineFrame(context.Background(), question)
+	report, err := newExpert(t, model, nil).ExamineFrame(context.Background(), question)
 	if err != nil || report.Spoken != "看着像硬盘盒。" {
 		t.Fatalf("提醒后应交出结论：%+v %v", report, err)
 	}
@@ -129,7 +130,7 @@ func TestExpertRemindsOnceToReport(t *testing.T) {
 // 提醒后仍只用文字回答：把它说的话当细节交给前台（前台自己压短），不报错。
 func TestExpertFallsBackToDetails(t *testing.T) {
 	model := &scriptedModel{final: "蓝色盒子，印着 M.2，看着像硬盘盒的包装。"}
-	report, err := NewExpert(model, "strong", nil, discard).ExamineFrame(context.Background(), question)
+	report, err := newExpert(t, model, nil).ExamineFrame(context.Background(), question)
 	if err != nil || report != (brain.FrameReport{Details: "蓝色盒子，印着 M.2，看着像硬盘盒的包装。"}) || len(model.requests) != 2 {
 		t.Fatalf("应提醒一次后用它的话当细节：%+v %v，请求了 %d 次", report, err, len(model.requests))
 	}
@@ -138,12 +139,12 @@ func TestExpertFallsBackToDetails(t *testing.T) {
 func TestExpertSearchLimit(t *testing.T) {
 	model := &scriptedModel{replies: []brain.ReplyDelta{searchCall("一"), searchCall("二"), searchCall("三")}, final: "看着像硬盘盒。"}
 	searches := &recordedSearch{}
-	report, err := NewExpert(model, "strong", searches.search, discard).ExamineFrame(context.Background(), question)
+	report, err := newExpert(t, model, searches.search).ExamineFrame(context.Background(), question)
 	if err != nil || report.Details != "看着像硬盘盒。" {
 		t.Fatalf("搜到上限后应停下：%+v %v", report, err)
 	}
-	if len(searches.queries) != maxSearches || len(model.requests) != maxRounds {
-		t.Errorf("最多搜 %d 次、最多请求 %d 次：搜了 %v，请求了 %d 次", maxSearches, maxRounds, searches.queries, len(model.requests))
+	if len(searches.queries) != maxSearches || len(model.requests) != builtinRules(t).MaxSteps {
+		t.Errorf("最多搜 %d 次、最多请求 %d 次：搜了 %v，请求了 %d 次", maxSearches, builtinRules(t).MaxSteps, searches.queries, len(model.requests))
 	}
 	for _, specs := range model.specs[maxSearches:] {
 		if slices.Contains(toolNames(specs), searchTool) {
@@ -154,7 +155,7 @@ func TestExpertSearchLimit(t *testing.T) {
 
 func TestExpertWithoutSearch(t *testing.T) {
 	model := &scriptedModel{replies: []brain.ReplyDelta{reportCall("白色的小盒子。", "")}}
-	if _, err := NewExpert(model, "strong", nil, discard).ExamineFrame(context.Background(), question); err != nil {
+	if _, err := newExpert(t, model, nil).ExamineFrame(context.Background(), question); err != nil {
 		t.Fatal(err)
 	}
 	if names := toolNames(model.specs[0]); !slices.Equal(names, []string{reportTool}) {
@@ -164,11 +165,11 @@ func TestExpertWithoutSearch(t *testing.T) {
 
 func TestExpertErrors(t *testing.T) {
 	failing := &scriptedModel{err: errors.New("503")}
-	if _, err := NewExpert(failing, "strong", nil, discard).ExamineFrame(context.Background(), question); err == nil {
+	if _, err := newExpert(t, failing, nil).ExamineFrame(context.Background(), question); err == nil {
 		t.Error("模型出错时应返回错误（由前台退回直接看画面）")
 	}
 	silent := &scriptedModel{final: "  "}
-	if _, err := NewExpert(silent, "strong", nil, discard).ExamineFrame(context.Background(), question); err == nil {
+	if _, err := newExpert(t, silent, nil).ExamineFrame(context.Background(), question); err == nil {
 		t.Error("专家没说出判断时应返回错误")
 	}
 }
@@ -178,14 +179,14 @@ func TestExpertGetsStyle(t *testing.T) {
 	model := &scriptedModel{replies: []brain.ReplyDelta{reportCall("看着像充电头哦。", "")}}
 	styled := question
 	styled.Style = "你现在的性格是「温柔陪伴」。"
-	if _, err := NewExpert(model, "strong", nil, discard).ExamineFrame(context.Background(), styled); err != nil {
+	if _, err := newExpert(t, model, nil).ExamineFrame(context.Background(), styled); err != nil {
 		t.Fatal(err)
 	}
 	if !slices.ContainsFunc(model.requests[0], func(msg brain.ChatMessage) bool { return strings.Contains(msg.Text, styled.Style) }) {
 		t.Errorf("专家应拿到性格说明：%+v", model.requests[0])
 	}
 	plain := &scriptedModel{replies: []brain.ReplyDelta{reportCall("看着像充电头。", "")}}
-	if _, err := NewExpert(plain, "strong", nil, discard).ExamineFrame(context.Background(), question); err != nil {
+	if _, err := newExpert(t, plain, nil).ExamineFrame(context.Background(), question); err != nil {
 		t.Fatal(err)
 	}
 	if len(plain.requests[0]) != len(model.requests[0])-1 {
@@ -197,7 +198,7 @@ func TestExpertGetsStyle(t *testing.T) {
 func TestExpertShortensLongSpoken(t *testing.T) {
 	long := strings.Repeat("长", brain.CameraAnswerChars+1)
 	model := &scriptedModel{replies: []brain.ReplyDelta{reportCall(long, "细节。"), reportCall("短的。", "细节。")}}
-	report, err := NewExpert(model, "strong", nil, discard).ExamineFrame(context.Background(), question)
+	report, err := newExpert(t, model, nil).ExamineFrame(context.Background(), question)
 	if err != nil || report.Spoken != "短的。" || len(model.requests) != 2 {
 		t.Fatalf("应压短一次后用短的：%+v %v，请求了 %d 次", report, err, len(model.requests))
 	}
@@ -212,12 +213,12 @@ func TestExpertKeepsLongSpokenAfterOneTry(t *testing.T) {
 	long := strings.Repeat("长", brain.CameraAnswerChars+1)
 	longer := strings.Repeat("长", brain.CameraAnswerChars+5)
 	model := &scriptedModel{replies: []brain.ReplyDelta{reportCall(long, ""), reportCall(longer, "")}}
-	report, err := NewExpert(model, "strong", nil, discard).ExamineFrame(context.Background(), question)
+	report, err := newExpert(t, model, nil).ExamineFrame(context.Background(), question)
 	if err != nil || report.Spoken != longer || len(model.requests) != 2 {
 		t.Fatalf("压短一次后应照用：%+v %v，请求了 %d 次", report, err, len(model.requests))
 	}
 	silent := &scriptedModel{replies: []brain.ReplyDelta{reportCall(long, "细节。")}, final: "好的。"}
-	report, err = NewExpert(silent, "strong", nil, discard).ExamineFrame(context.Background(), question)
+	report, err = newExpert(t, silent, nil).ExamineFrame(context.Background(), question)
 	if err != nil || report.Spoken != long {
 		t.Fatalf("压短时没再交结论，应用压短前的：%+v %v", report, err)
 	}
@@ -261,8 +262,74 @@ func (m *stubbornModel) Warmup(context.Context) error { return nil }
 
 func TestExpertStopsAfterMaxRounds(t *testing.T) {
 	model, searches := &stubbornModel{}, &recordedSearch{}
-	report, err := NewExpert(model, "strong", searches.search, discard).ExamineFrame(context.Background(), question)
-	if err != nil || report.Details != "看着像硬盘盒。" || model.requests != maxRounds {
+	report, err := newExpert(t, model, searches.search).ExamineFrame(context.Background(), question)
+	if err != nil || report.Details != "看着像硬盘盒。" || model.requests != builtinRules(t).MaxSteps {
 		t.Fatalf("到轮数上限应停下、用它的文字当细节：%+v %v，请求了 %d 次", report, err, model.requests)
+	}
+}
+
+// builtinRules 是按程序里带的「看画面」定义得到的规则。
+func builtinRules(t *testing.T) Rules {
+	t.Helper()
+	catalog, err := agents.Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition, _ := catalog.Get(agents.Vision)
+	rules, err := RulesFrom(definition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rules
+}
+
+// newExpert 是按程序里带的规则组的专家。
+func newExpert(t *testing.T, model brain.ChatModel, search Search) *Expert {
+	t.Helper()
+	expert, err := NewExpert(model, "strong", builtinRules(t), search, discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return expert
+}
+
+// 不能联网时模型照着名字调用 search_web：不执行（不会去调用不存在的搜索），照样交结论。
+func TestSearchCallWithoutSearchIsNotRun(t *testing.T) {
+	model := &scriptedModel{replies: []brain.ReplyDelta{searchCall("硬盘盒"), reportCall("看着像硬盘盒。", "蓝色盒子。")}}
+	report, err := newExpert(t, model, nil).ExamineFrame(context.Background(), question)
+	if err != nil || report.Spoken != "看着像硬盘盒。" {
+		t.Fatalf("应照样交结论：%+v %v", report, err)
+	}
+	if slices.Contains(toolNames(model.specs[0]), searchTool) {
+		t.Errorf("不能联网时不应提供 %s：%v", searchTool, toolNames(model.specs[0]))
+	}
+}
+
+// 规则不对时建不起来：工具名写错、没有交结论的工具、步数为零。规则里去掉 search_web 时不提供搜索。
+func TestExpertRulesAreChecked(t *testing.T) {
+	rules := builtinRules(t)
+	for label, change := range map[string]func(*Rules){
+		"不认识的工具":  func(r *Rules) { r.Tools = []string{reportTool, "web_search"} },
+		"不能交结论":   func(r *Rules) { r.Tools = []string{searchTool} },
+		"步数为零":    func(r *Rules) { r.MaxSteps = 0 },
+		"没有系统提示词": func(r *Rules) { r.Prompt = "" },
+	} {
+		broken := rules
+		change(&broken)
+		if _, err := NewExpert(&scriptedModel{}, "strong", broken, nil, discard); err == nil {
+			t.Errorf("%s：应建不起来", label)
+		}
+	}
+	rules.Tools = []string{reportTool}
+	model := &scriptedModel{replies: []brain.ReplyDelta{reportCall("是硬盘盒。", "蓝色盒子。")}}
+	expert, err := NewExpert(model, "strong", rules, (&recordedSearch{}).search, discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := expert.ExamineFrame(context.Background(), question); err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(toolNames(model.specs[0]), searchTool) {
+		t.Errorf("规则里没有 %s 时不应提供：%v", searchTool, toolNames(model.specs[0]))
 	}
 }

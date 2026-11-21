@@ -37,6 +37,7 @@ type Dependencies struct {
 	TurnDetector      TurnDetector
 	NewKeywordSpotter KeywordSpotterFactory // 为 nil 时不支持唤醒词（haro.wake_word）
 	Speakers          *SpeakerCheck         // 为 nil 或没有登记声纹时不比对
+	Timing            Timing                // 时长与门槛；零值 = DefaultTiming
 	Logger            *slog.Logger
 }
 

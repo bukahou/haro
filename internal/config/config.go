@@ -26,9 +26,6 @@ const (
 	CloudAPIAnthropic = "anthropic" // Claude API 的 Messages 接口（官方 Go SDK）
 )
 
-// claudeEfforts 是思考关掉时 Claude 接受的回答力度（xhigh / max 要开着思考）。
-var claudeEfforts = map[string]bool{"": true, "low": true, "medium": true, "high": true}
-
 // 语音合成引擎。
 const (
 	TTSPiper     = "piper"      // Piper 官方 HTTP 服务：开发用（不支持情绪、只会中文）
@@ -57,19 +54,31 @@ func (s *FrameSize) UnmarshalText(text []byte) error {
 	return nil
 }
 
-// Settings 是 haro 的运行配置。
-type Settings struct {
+// Common 是终端和服务端都用的配置。
+type Common struct {
 	// RemovedSettingNotes 是环境里还写着、但已经删掉的配置项的提醒（不从环境变量读；启动时写进日志）
 	RemovedSettingNotes []string
+	OTLPEndpoint        string `env:"HARO_OTLP_ENDPOINT"` // OTLP/HTTP 根地址，如 http://collector:4318；空 = 不导出，只打日志
+}
+
+// ServerSettings 是服务端（haro-server）的配置：模型、代理、识别与语音合成服务、工具、费用、对话。
+type ServerSettings struct {
+	Common
 
 	// 模型
 	OllamaURL string `env:"HARO_OLLAMA_URL" envDefault:"http://127.0.0.1:11434"`
 	Model     string `env:"HARO_MODEL" envDefault:"qwen3-vl:8b-instruct"` // 本地（ollama）模型；4b 是思考变体，每轮多等 1.5–3 秒
-	// 追加在内置基础提示词后面（内置的永远生效，外部只能追加；内置的见 brain.DefaultInstructions）
+	// 追加在前台的基础规则后面（前台的定义见 internal/agents/builtin/front.md）
 	ExtraSystemPrompt string `env:"HARO_SYSTEM_PROMPT"`
+	// 代理定义的覆盖目录：里面同名的 *.md 替换程序里带的那份（internal/agents/builtin/）；空 = 用程序里带的
+	AgentsDir string `env:"HARO_AGENTS_DIR"`
 	// 主人资料：household.md（全家）+ 每人一份 *.md（开头 front matter 写 person: <声纹名字>）；空 = 不用
 	ProfileDir     string `env:"HARO_PROFILE_DIR"`
 	MaxHistoryTurn int    `env:"HARO_MAX_HISTORY_TURN" envDefault:"6"`
+	// 一轮里请求模型带的上下文（最大的那次请求的输入 token，模型报的）到了这么多，就提前把较早的几轮移出窗口、压缩（0 = 不看）。
+	// 默认值是估算，没有实测：系统提示词加工具定义约 4k，最近 6 轮一般 5k–12k；24k 只在工具结果特别长时触发。
+	// 待用账本里实际的 prompt_tokens 校准
+	CompactContextTokens int `env:"HARO_CONTEXT_COMPACT_TOKENS" envDefault:"24000"`
 	// 会破坏的操作（删记事等）问了主人之后，多久没确认就作废
 	ConfirmationTimeout time.Duration `env:"HARO_CONFIRMATION_TIMEOUT" envDefault:"60s"`
 	// 不经模型、直接念的固定的话（每种语言一份，JSON）；空 = 用程序里带的那份
@@ -77,7 +86,7 @@ type Settings struct {
 	// 滚动摘要：掉出最近 N 轮的对话压成摘要放进提示词；false = 直接丢掉（旧行为）
 	ConversationSummary bool `env:"HARO_CONVERSATION_SUMMARY" envDefault:"true"`
 
-	// 服务端：local（ollama）/ cloud（云端，失败时这一轮退回 ollama）
+	// 服务端用哪个模型：local（ollama）/ cloud（云端）。两者不自动互相顶替：云端连不上时只保留最低能力（念「连不上」和现在的时间）
 	LLMProvider string `env:"HARO_LLM_PROVIDER" envDefault:"cloud"`
 	// 云端的接口格式：openai（OpenAI 兼容）/ anthropic（Claude API）
 	CloudLLMAPI    string `env:"HARO_CLOUD_LLM_API" envDefault:"anthropic"`
@@ -92,10 +101,8 @@ type Settings struct {
 	// anthropic 的回答力度（思考是关掉的，只能 low / medium / high）：聊天和摘要求快，调查多花点力气
 	CloudLLMEffort  string        `env:"HARO_CLOUD_LLM_EFFORT" envDefault:"low"`
 	ResearchEffort  string        `env:"HARO_RESEARCH_EFFORT" envDefault:"medium"`
-	CloudLLMTimeout time.Duration `env:"HARO_CLOUD_LLM_TIMEOUT" envDefault:"4s"`      // 等云端开始响应的上限，超过就退回本地（正常 2 s 内开始响应）
-	CloudMaxTokens  int           `env:"HARO_CLOUD_LLM_MAX_TOKENS" envDefault:"800"`  // 每次最多输出多少 token：要能装下约 300 字的详细回答
-	LLMFallback     bool          `env:"HARO_LLM_FALLBACK" envDefault:"true"`         // cloud 失败时退回本地 ollama
-	LLMCooldown     time.Duration `env:"HARO_LLM_FALLBACK_COOLDOWN" envDefault:"30s"` // cloud 失败后这么久内直接用本地（熔断）
+	CloudLLMTimeout time.Duration `env:"HARO_CLOUD_LLM_TIMEOUT" envDefault:"4s"`     // 等云端开始响应的上限，超过就当连不上（正常 2 s 内开始响应）
+	CloudMaxTokens  int           `env:"HARO_CLOUD_LLM_MAX_TOKENS" envDefault:"800"` // 每次最多输出多少 token：要能装下约 300 字的详细回答
 	// anthropic 的思考：disabled（关掉）/ between_tools（Sonnet 5.5 关掉思考的写法，它不接受 disabled）/ adaptive（思考关不掉的模型）
 	CloudLLMThinking string `env:"HARO_CLOUD_LLM_THINKING" envDefault:"disabled"`
 
@@ -119,27 +126,17 @@ type Settings struct {
 	ModelPricesURL      string  `env:"HARO_MODEL_PRICES_URL" envDefault:"https://models.dev/api.json"`
 	ModelPricesProvider string  `env:"HARO_MODEL_PRICES_PROVIDER" envDefault:"anthropic"`
 	ModelPricesCache    string  `env:"HARO_MODEL_PRICES_CACHE"`
-	ResearchDailyYen    float64 `env:"HARO_RESEARCH_DAILY_YEN" envDefault:"100"`  // 后台调查每天上限；0 = 不限
-	MonthlyYen          float64 `env:"HARO_MONTHLY_YEN"`                          // 每月总费用上限（大模型 + 搜索）；0 = 不限（未定）
-	SearchDailyCredits  int     `env:"HARO_SEARCH_DAILY_CREDITS" envDefault:"30"` // 搜索积分每天上限（封在 Tavily 免费额度内）；0 = 不限
-	SearchCreditUSD     float64 `env:"HARO_SEARCH_CREDIT_USD"`                    // 每个搜索积分的美元价；0 = 免费额度内
+	ResearchDailyYen    float64 `env:"HARO_RESEARCH_DAILY_YEN" envDefault:"100"` // 后台调查每天上限；0 = 不限
+	MonthlyYen          float64 `env:"HARO_MONTHLY_YEN"`                         // 每月总费用上限（大模型 + 搜索）；0 = 不限（未定）
+	// 月度上限到了以后：主人口头确认一次提高多少（0 = 不能口头提高，到上限就停到下个月）；
+	// 判断主人要不要提高的那次小调用每天最多几次（它不受额度管，靠这个封顶）
+	MonthlyRaiseYen      float64 `env:"HARO_MONTHLY_RAISE_YEN" envDefault:"500"`
+	OverBudgetDailyCalls int     `env:"HARO_OVER_BUDGET_DAILY_CALLS" envDefault:"30"`
+	SearchDailyCredits   int     `env:"HARO_SEARCH_DAILY_CREDITS" envDefault:"30"` // 搜索积分每天上限（封在 Tavily 免费额度内）；0 = 不限
+	SearchCreditUSD      float64 `env:"HARO_SEARCH_CREDIT_USD"`                    // 每个搜索积分的美元价；0 = 免费额度内
 
 	// 语音识别：haro-asr 单独运行（模型等配置见 ASRSettings），服务端只认它的地址
 	ASRURL string `env:"HARO_ASR_URL"` // 流式转写服务的根地址（协议照 OpenAI Realtime 的转写会话），例如 http://127.0.0.1:59126
-
-	// 说完判断与 VAD（每次打开识别流时随 session.update 交给 haro-asr）
-	// 说完判断：semantic_vad（默认，Smart Turn 判断语气；haro-asr 要配了 HARO_TURN_MODEL）/ server_vad（只等静音 HARO_VAD_SILENCE）
-	TurnDetection string        `env:"HARO_TURN_DETECTION" envDefault:"semantic_vad"`
-	TurnEagerness string        `env:"HARO_TURN_EAGERNESS" envDefault:"auto"` // semantic_vad：low 3s / auto 2s / high 1s 最长等待
-	VADThreshold  float64       `env:"HARO_VAD_THRESHOLD" envDefault:"0.5"`
-	VADSilence    time.Duration `env:"HARO_VAD_SILENCE" envDefault:"700ms"` // 静音持续多久算说完
-	VADPrefix     time.Duration `env:"HARO_VAD_PREFIX" envDefault:"300ms"`  // 识别时带上语音开始前的这段
-	EchoGuard     time.Duration `env:"HARO_ECHO_GUARD" envDefault:"300ms"`  // 播完后再静音这么久才恢复收音
-
-	// 唤醒词（唯一的对话方式）
-	WakePhrase string        `env:"HARO_WAKE_PHRASE" envDefault:"哈罗哈罗"` // 只用于提示；真正生效的是 haro-asr 的关键词文件
-	WakeIdle   time.Duration `env:"HARO_WAKE_IDLE" envDefault:"40s"`    // 对话窗口：回答播完后安静这么久就休眠（20 秒太快，接着问时已经睡了），休眠时说一声
-	BargeIn    bool          `env:"HARO_BARGE_IN" envDefault:"true"`    // 回答时喊唤醒词可以打断（需要唤醒词）
 
 	// 工具（见 docs/architecture.md）：自研工具内置在服务端里，MCP 只接第三方服务
 	Tools   bool   `env:"HARO_TOOLS" envDefault:"true"`
@@ -149,9 +146,8 @@ type Settings struct {
 	// 联网搜索：Tavily 官方远程 MCP。密钥不设 = 不提供联网搜索（凭证：无默认值，只来自环境变量）
 	TavilyAPIKey string `env:"HARO_TAVILY_API_KEY"`
 	TavilyMCPURL string `env:"HARO_TAVILY_MCP_URL" envDefault:"https://mcp.tavily.com/mcp/"`
-	// 后台调查（有搜索时才有）：任务账本、用哪个模型、每个任务的上限
+	// 后台调查（有搜索时才有，只用云端模型）：任务账本、每个任务的上限
 	ResearchDB          string        `env:"HARO_RESEARCH_DB"`                            // 任务账本（SQLite）；空 = 只在内存里
-	ResearchLLM         string        `env:"HARO_RESEARCH_LLM" envDefault:"cloud"`        // cloud / local：调查用哪个模型（默认云端：本地小模型调工具不可靠）
 	ResearchTimeout     time.Duration `env:"HARO_RESEARCH_TIMEOUT" envDefault:"3m"`       // 搜索阶段最多多久
 	ResearchMaxRounds   int           `env:"HARO_RESEARCH_MAX_ROUNDS" envDefault:"10"`    // 最多请求模型几轮（搜一次、读一次各占一轮；6 轮实测不够，2026-11-17 改 10）
 	ResearchMaxSearches int           `env:"HARO_RESEARCH_MAX_SEARCHES" envDefault:"5"`   // 最多搜几次
@@ -193,6 +189,31 @@ type Settings struct {
 	FirstSegmentMinRunes int `env:"HARO_FIRST_SEGMENT_MIN_RUNES" envDefault:"4"` // 0 = 第一句不在逗号处提前切
 	MaxSegmentRunes      int `env:"HARO_MAX_SEGMENT_RUNES" envDefault:"40"`
 
+	// 终端 ↔ 服务端：默认都在本机，服务端只监听本机；终端在别的机器上时改监听地址（只在可信网络里）
+	ServerListen string `env:"HARO_SERVER_LISTEN" envDefault:"127.0.0.1:59130"` // haro-server 监听地址
+
+	// 其他
+	RequestTimeout time.Duration `env:"HARO_REQUEST_TIMEOUT" envDefault:"120s"`
+}
+
+// TerminalSettings 是终端（haro）的配置：说完判断与唤醒、设备、服务端地址。
+type TerminalSettings struct {
+	Common
+
+	// 说完判断与 VAD（每次打开识别流时随 session.update 交给 haro-asr）
+	// 说完判断：semantic_vad（默认，Smart Turn 判断语气；haro-asr 要配了 HARO_TURN_MODEL）/ server_vad（只等静音 HARO_VAD_SILENCE）
+	TurnDetection string        `env:"HARO_TURN_DETECTION" envDefault:"semantic_vad"`
+	TurnEagerness string        `env:"HARO_TURN_EAGERNESS" envDefault:"auto"` // semantic_vad：low / auto / high，判定没说完后最长等多久（数值见 asrserver.Timing）
+	VADThreshold  float64       `env:"HARO_VAD_THRESHOLD" envDefault:"0.5"`
+	VADSilence    time.Duration `env:"HARO_VAD_SILENCE" envDefault:"700ms"` // server_vad：静音持续多久算说完（定值；实测判定说完要 716–788 ms，即它加上 VAD 的判定延迟）
+	VADPrefix     time.Duration `env:"HARO_VAD_PREFIX" envDefault:"300ms"`  // 识别时带上语音开始前的这段（定值，没有单独实测）
+	EchoGuard     time.Duration `env:"HARO_ECHO_GUARD" envDefault:"300ms"`  // 播完后再静音这么久才恢复收音（实测音箱的余音会被当成一句话；300 ms 是定值）
+
+	// 唤醒词（唯一的对话方式）
+	WakePhrase string        `env:"HARO_WAKE_PHRASE" envDefault:"哈罗哈罗"` // 只用于提示；真正生效的是 haro-asr 的关键词文件
+	WakeIdle   time.Duration `env:"HARO_WAKE_IDLE" envDefault:"40s"`    // 对话窗口：回答播完后安静这么久就休眠（20 秒太快，接着问时已经睡了），休眠时说一声
+	BargeIn    bool          `env:"HARO_BARGE_IN" envDefault:"true"`    // 回答时喊唤醒词可以打断（需要唤醒词）
+
 	// 硬件
 	// 设备一律自动检测（规则见 internal/terminal/device_rules.go）；只在要手动指定时才设，值是各系统自己的设备 ID
 	AudioSource  string `env:"HARO_AUDIO_SOURCE"`  // 空 = 自动：跟系统默认，但跳过蓝牙麦克风
@@ -207,44 +228,41 @@ type Settings struct {
 	// 送给模型的画面最大宽度：画面更宽就缩到这么宽，更窄就原样送（不放大）。1280×720 约 1,200 token，640×480 约 400
 	FrameWidth int `env:"HARO_FRAME_WIDTH" envDefault:"1280"`
 
-	// 终端 ↔ 服务端：默认都在本机，服务端只监听本机；终端在别的机器上时改监听地址（只在可信网络里）
-	ServerListen string `env:"HARO_SERVER_LISTEN" envDefault:"127.0.0.1:59130"`     // haro-server 监听地址
-	ServerURL    string `env:"HARO_SERVER_URL" envDefault:"http://127.0.0.1:59130"` // 终端连服务端的地址
-
-	// 其他
-	RequestTimeout time.Duration `env:"HARO_REQUEST_TIMEOUT" envDefault:"120s"`
-	OTLPEndpoint   string        `env:"HARO_OTLP_ENDPOINT"` // OTLP/HTTP 根地址，如 http://collector:4318；空 = 不导出，只打日志
+	ServerURL string `env:"HARO_SERVER_URL" envDefault:"http://127.0.0.1:59130"` // 终端连服务端的地址
 }
 
 // parseSettings 从环境变量读配置，并检查还写着的已删除配置项（提醒记在 RemovedSettingNotes 里）。
-func parseSettings() (Settings, error) {
-	settings, err := env.ParseAs[Settings]()
-	if err != nil {
-		return settings, err
+// parseSettings 从环境变量读出一种配置，并记下环境里还写着、但已经删掉的配置项。
+func parseSettings[T interface {
+	*ServerSettings | *TerminalSettings
+}](settings T, common *Common) error {
+	if err := env.Parse(settings); err != nil {
+		return err
 	}
-	settings.RemovedSettingNotes, err = checkRemovedSettings(os.LookupEnv)
-	return settings, err
+	notes, err := checkRemovedSettings(os.LookupEnv)
+	common.RemovedSettingNotes = notes
+	return err
 }
 
-// LoadBrainSettings 读取并校验服务端（haro-server）用到的配置：模型、识别、语音合成、工具。
-func LoadBrainSettings() (Settings, error) {
-	settings, err := parseSettings()
-	if err != nil {
+// LoadBrainSettings 读取并校验服务端（haro-server）的配置。
+func LoadBrainSettings() (ServerSettings, error) {
+	var settings ServerSettings
+	if err := parseSettings(&settings, &settings.Common); err != nil {
 		return settings, err
 	}
 	return settings, settings.validateBrain()
 }
 
-// LoadTerminalSettings 读取并校验终端（haro）用到的配置：说完判断、摄像头、服务端地址。
-func LoadTerminalSettings() (Settings, error) {
-	settings, err := parseSettings()
-	if err != nil {
+// LoadTerminalSettings 读取并校验终端（haro）的配置。
+func LoadTerminalSettings() (TerminalSettings, error) {
+	var settings TerminalSettings
+	if err := parseSettings(&settings, &settings.Common); err != nil {
 		return settings, err
 	}
 	return settings, settings.validateTerminal()
 }
 
-func (settings Settings) validateTerminal() error {
+func (settings TerminalSettings) validateTerminal() error {
 	if settings.TurnDetection != "server_vad" && settings.TurnDetection != "semantic_vad" {
 		return fmt.Errorf("HARO_TURN_DETECTION 只能是 semantic_vad 或 server_vad，现在是 %q", settings.TurnDetection)
 	}
@@ -261,7 +279,7 @@ func (settings Settings) validateTerminal() error {
 }
 
 // validateBrain 校验服务端的配置。判断说完、唤醒词要用到的模型由服务端（haro-asr）加载，所以也在这里看。
-func (settings Settings) validateBrain() error {
+func (settings ServerSettings) validateBrain() error {
 	if err := requireHTTPURL("HARO_TTS_URL", settings.TTSURL, "语音合成服务的地址；Piper 也要自己先运行起来，例如 python -m piper.http_server"); err != nil {
 		return err
 	}
@@ -289,20 +307,12 @@ func (settings Settings) validateBrain() error {
 	if err := requireHTTPURL("HARO_ASR_URL", settings.ASRURL, "语音识别服务 haro-asr 的地址；haro-asr 单独运行，见 ASRSettings"); err != nil {
 		return err
 	}
-	switch settings.TurnDetection {
-	case "server_vad", "semantic_vad":
-	default:
-		return fmt.Errorf("HARO_TURN_DETECTION 只能是 semantic_vad 或 server_vad，现在是 %q", settings.TurnDetection)
-	}
 	if err := settings.validateWeather(); err != nil {
 		return err
 	}
-	if settings.ResearchLLM != LLMLocal && settings.ResearchLLM != LLMCloud {
-		return fmt.Errorf("HARO_RESEARCH_LLM 只能是 %s 或 %s，现在是 %q", LLMLocal, LLMCloud, settings.ResearchLLM)
-	}
 	if settings.ResearchesWithCloud() {
 		if err := settings.cloudLLMReady(); err != nil {
-			return fmt.Errorf("后台调查用云端模型（HARO_RESEARCH_LLM=cloud）时%w（或改成 local）", err)
+			return fmt.Errorf("开着后台调查（设了搜索的密钥）时%w", err)
 		}
 	}
 	if settings.UsesCloudLLM() && (settings.USDToYen <= 0 || settings.ModelPricesURL == "" || settings.ModelPricesProvider == "") {
@@ -316,6 +326,10 @@ func (settings Settings) validateBrain() error {
 	}
 	if settings.Tools && settings.NotesDB == "" {
 		return fmt.Errorf("HARO_TOOLS=true 时必须设 HARO_NOTES_DB（或设 HARO_TOOLS=false）")
+	}
+	if settings.MonthlyRaiseYen < 0 || settings.OverBudgetDailyCalls < 0 || settings.CompactContextTokens < 0 {
+		return fmt.Errorf("HARO_MONTHLY_RAISE_YEN、HARO_OVER_BUDGET_DAILY_CALLS、HARO_CONTEXT_COMPACT_TOKENS 不能是负数（现在是 %v、%d、%d）",
+			settings.MonthlyRaiseYen, settings.OverBudgetDailyCalls, settings.CompactContextTokens)
 	}
 	if settings.ConfirmationTimeout <= 0 {
 		return fmt.Errorf("HARO_CONFIRMATION_TIMEOUT 要大于 0（会破坏的操作多久没确认就作废），现在是 %v", settings.ConfirmationTimeout)
@@ -342,7 +356,7 @@ func requireHTTPURL(name, value, what string) error {
 }
 
 // cloudLLMReady 按接口格式检查云端模型的配置齐不齐；返回的说明接在「…时」后面。
-func (s Settings) cloudLLMReady() error {
+func (s ServerSettings) cloudLLMReady() error {
 	switch s.CloudLLMAPI {
 	case CloudAPIOpenAI:
 		if s.CloudLLMURL == "" || s.CloudLLMModel == "" {
@@ -357,10 +371,6 @@ func (s Settings) cloudLLMReady() error {
 		}
 		if s.AnthropicAPIKey == "" && !anthropicAmbientCredentials() {
 			return fmt.Errorf("必须有 Claude 的凭证：开发机填 HARO_ANTHROPIC_API_KEY；集群里配 Workload Identity Federation（ANTHROPIC_FEDERATION_RULE_ID 等）")
-		}
-		if !claudeEfforts[s.CloudLLMEffort] || !claudeEfforts[s.ResearchEffort] {
-			return fmt.Errorf("HARO_CLOUD_LLM_EFFORT、HARO_RESEARCH_EFFORT 只能是 low、medium 或 high（思考是关掉的），现在是 %q、%q",
-				s.CloudLLMEffort, s.ResearchEffort)
 		}
 	default:
 		return fmt.Errorf("HARO_CLOUD_LLM_API 只能是 %s 或 %s，现在是 %q", CloudAPIOpenAI, CloudAPIAnthropic, s.CloudLLMAPI)
@@ -379,18 +389,18 @@ func anthropicAmbientCredentials() bool {
 	return false
 }
 
-// UsesCloudLLM 判断会不会调用云端模型（主用云端，或本地为主、失败退回云端，或后台调查用云端）。
-func (s Settings) UsesCloudLLM() bool {
-	return s.LLMProvider == LLMCloud || s.LLMFallback || s.ResearchesWithCloud()
+// UsesCloudLLM 判断会不会调用云端模型（主用云端，或开着后台调查）。
+func (s ServerSettings) UsesCloudLLM() bool {
+	return s.LLMProvider == LLMCloud || s.ResearchesWithCloud()
 }
 
-// ResearchesWithCloud 判断后台调查会不会用云端模型（有联网搜索才有后台调查）。
-func (s Settings) ResearchesWithCloud() bool {
-	return s.Tools && s.TavilyAPIKey != "" && s.ResearchLLM == LLMCloud
+// ResearchesWithCloud 判断开没开后台调查（有联网搜索才有；调查只用云端模型）。
+func (s ServerSettings) ResearchesWithCloud() bool {
+	return s.Tools && s.TavilyAPIKey != ""
 }
 
 // WeatherHomePlace 解析 HARO_WEATHER_HOME（「纬度,经度」）；没设时 Set=false。
-func (s Settings) WeatherHomePlace() (home WeatherHome, err error) {
+func (s ServerSettings) WeatherHomePlace() (home WeatherHome, err error) {
 	if strings.TrimSpace(s.WeatherHome) == "" {
 		return WeatherHome{}, nil
 	}
@@ -438,29 +448,22 @@ const (
 )
 
 // VisionExpert 判断看画面是否交给幕后专家（更强的模型）。
-func (s Settings) VisionExpert() bool {
+func (s ServerSettings) VisionExpert() bool {
 	return s.StrongLLMFor(StrongForVision) && s.StrongLLMVisionMode == VisionByExpert
 }
 
 // VisionTakeover 判断带画面的请求是否直接换更强的模型回答。
-func (s Settings) VisionTakeover() bool {
+func (s ServerSettings) VisionTakeover() bool {
 	return s.StrongLLMFor(StrongForVision) && s.StrongLLMVisionMode == VisionByTakeover
 }
 
-// claudeThinking 是 HARO_CLOUD_LLM_THINKING / HARO_STRONG_LLM_THINKING 的取值。
-var claudeThinking = map[string]bool{"disabled": true, "between_tools": true, "adaptive": true}
-
 // StrongLLMFor 判断更强的模型是否用在 use（StrongForVision 等）上。
-func (s Settings) StrongLLMFor(use string) bool {
+func (s ServerSettings) StrongLLMFor(use string) bool {
 	return s.StrongLLMModel != "" && slices.Contains(s.StrongLLMUse, use)
 }
 
-// validateStrongLLM 检查思考写法与更强的模型的配置。
-func (s Settings) validateStrongLLM() error {
-	if !claudeThinking[s.CloudLLMThinking] || !claudeThinking[s.StrongLLMThinking] {
-		return fmt.Errorf("HARO_CLOUD_LLM_THINKING、HARO_STRONG_LLM_THINKING 只能是 disabled、between_tools 或 adaptive，现在是 %q、%q",
-			s.CloudLLMThinking, s.StrongLLMThinking)
-	}
+// validateStrongLLM 检查更强的模型的配置（回答力度、思考写法这类厂商的取值由各自的适配层检查，见 llm 包）。
+func (s ServerSettings) validateStrongLLM() error {
 	if s.StrongLLMVisionMode != VisionByExpert && s.StrongLLMVisionMode != VisionByTakeover {
 		return fmt.Errorf("HARO_STRONG_LLM_VISION_MODE 只能是 %s 或 %s，现在是 %q", VisionByExpert, VisionByTakeover, s.StrongLLMVisionMode)
 	}
@@ -475,9 +478,6 @@ func (s Settings) validateStrongLLM() error {
 	if err := s.cloudLLMReady(); err != nil {
 		return fmt.Errorf("设了 HARO_STRONG_LLM_MODEL（它和云端模型用同一个接口）时%w", err)
 	}
-	if s.CloudLLMAPI == CloudAPIAnthropic && !claudeEfforts[s.StrongLLMEffort] {
-		return fmt.Errorf("HARO_STRONG_LLM_EFFORT 只能是 low、medium 或 high，现在是 %q", s.StrongLLMEffort)
-	}
 	if s.USDToYen <= 0 {
 		return fmt.Errorf("设了 HARO_STRONG_LLM_MODEL 时必须设 HARO_USD_JPY（费用上限要靠它折算；单价从模型价格目录取）")
 	}
@@ -485,7 +485,7 @@ func (s Settings) validateStrongLLM() error {
 }
 
 // validateWeather 检查天气相关的配置：家的位置、备用来源。
-func (s Settings) validateWeather() error {
+func (s ServerSettings) validateWeather() error {
 	if _, err := s.WeatherHomePlace(); err != nil {
 		return err
 	}

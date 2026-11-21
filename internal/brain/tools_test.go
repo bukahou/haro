@@ -4,10 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/bukahou/haro/internal/brain"
 	"github.com/bukahou/haro/internal/brain/braintest"
@@ -52,7 +55,7 @@ func (f *fakeToolbox) argumentsOf(i int) map[string]any {
 
 func newToolTalker(t *testing.T, model brain.ChatModel, toolbox brain.Toolbox) *talker {
 	t.Helper()
-	parts := brain.Components{Model: model, Synthesizer: fakeSynthesizer{}}
+	parts := brain.Components{Front: brain.Agent{Model: model}, Synthesizer: fakeSynthesizer{}}
 	if toolbox != nil {
 		parts.Tools = toolbox
 	}
@@ -95,11 +98,22 @@ func TestToolLoopUsageAddsUpAllRequests(t *testing.T) {
 	}
 }
 
-// 模型每一轮都要求调用工具：第 4 轮工具定义照给（提示词缓存不失效），但声明不许调用，逼它直接回答。
+// stepTalker 是步数上限设成 4 的会话（测步数，不碰死循环检测：每次调用的参数都不一样）。
+func stepTalker(t *testing.T, model brain.ChatModel, toolbox brain.Toolbox) *talker {
+	t.Helper()
+	return newTalker(t, brain.Components{Front: brain.Agent{Model: model, MaxSteps: 4}, Synthesizer: fakeSynthesizer{}, Tools: toolbox},
+		brain.Options{MaxHistoryTurn: 6})
+}
+
+// searchFor 是一次参数不同的查找（不会被当成死循环）。
+func searchFor(query string) braintest.Reply {
+	return braintest.Call("search_notes", map[string]any{"query": query})
+}
+
+// 模型每一步都要求调用工具：到最后一步（第 4 步）工具定义照给（提示词缓存不失效），但声明不许调用，逼它直接回答。
 func TestToolLoopStopsAfterMaxRounds(t *testing.T) {
-	search := braintest.Call("search_notes", nil)
-	model := braintest.NewModel(t, search, search, search, braintest.Say("没查到。"))
-	k := newToolTalker(t, model, &fakeToolbox{})
+	model := braintest.NewModel(t, searchFor("车"), searchFor("停车"), searchFor("车位"), braintest.Say("没查到。"))
+	k := stepTalker(t, model, &fakeToolbox{})
 	k.say("查一下")
 	requests := model.Requests()
 	if len(requests) != 4 {
@@ -113,13 +127,12 @@ func TestToolLoopStopsAfterMaxRounds(t *testing.T) {
 	}
 }
 
-// 不许调用工具的一轮模型还是要求调用：不执行，说了的话就是这一轮的回答。
+// 不许调用工具的一步模型还是要求调用：不执行，说了的话就是这一轮的回答。
 func TestToolCallsInForbiddenRoundAreNotExecuted(t *testing.T) {
-	search := braintest.Call("search_notes", nil)
-	stubborn := braintest.Reply{Chunks: []string{"没查到。"}, ToolCalls: search.ToolCalls}
-	model := braintest.NewModel(t, search, search, search, stubborn)
+	stubborn := braintest.Reply{Chunks: []string{"没查到。"}, ToolCalls: searchFor("车库").ToolCalls}
+	model := braintest.NewModel(t, searchFor("车"), searchFor("停车"), searchFor("车位"), stubborn)
 	toolbox := &fakeToolbox{}
-	k := newToolTalker(t, model, toolbox)
+	k := stepTalker(t, model, toolbox)
 	if answer := k.say("查一下"); answer != "没查到。" {
 		t.Errorf("说了的话就是回答：%q", answer)
 	}
@@ -166,8 +179,8 @@ var lookAtCamera = braintest.Call("look_at_camera", nil)
 
 func newCameraTalker(t *testing.T, model brain.ChatModel, camera brain.TerminalCamera, expert brain.FrameExpert) *talker {
 	t.Helper()
-	return newTalker(t, brain.Components{Model: model, Synthesizer: fakeSynthesizer{}, Camera: camera, FrameExpert: expert},
-		brain.Options{MaxHistoryTurn: 6, Instructions: "基础规则。"})
+	return newTalker(t, brain.Components{Front: brain.Agent{Model: model, Instructions: "基础规则。"}, Synthesizer: fakeSynthesizer{},
+		Camera: camera, FrameExpert: expert}, brain.Options{MaxHistoryTurn: 6})
 }
 
 // 模型调用 look_at_camera 时才经 MCP 让终端拍：拍到的画面交给模型；闲聊时不拍，历史里不留图片。
@@ -199,18 +212,22 @@ func TestLookAtCameraCapturesOnDemand(t *testing.T) {
 	}
 }
 
-// fakeExpert 是看画面的专家：记下拿到的问题，交出设好的结论。
+// fakeExpert 是看画面的专家：记下拿到的问题（和当时的代理链），交出设好的结论。
 type fakeExpert struct {
 	mu        sync.Mutex
 	questions []brain.FrameQuestion
+	chains    [][]string
 	report    brain.FrameReport
 	err       error
 }
 
-func (e *fakeExpert) ExamineFrame(_ context.Context, question brain.FrameQuestion) (brain.FrameReport, error) {
+func (e *fakeExpert) AgentName() string { return "看画面" }
+
+func (e *fakeExpert) ExamineFrame(ctx context.Context, question brain.FrameQuestion) (brain.FrameReport, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.questions = append(e.questions, question)
+	e.chains = append(e.chains, brain.AgentChain(ctx))
 	if e.err != nil {
 		return brain.FrameReport{}, e.err
 	}
@@ -233,6 +250,9 @@ func TestLookAtCameraSpeaksExpertSentence(t *testing.T) {
 	}
 	if len(expert.questions) != 1 || string(expert.questions[0].Frame) != "充电头" || expert.questions[0].Request != "我手里拿着什么？" {
 		t.Fatalf("专家应拿到画面和主人的原话：%+v", expert.questions)
+	}
+	if !slices.Equal(expert.chains[0], []string{"前台", "看画面"}) {
+		t.Errorf("看画面是前台开的子任务，应记进代理链：%v", expert.chains[0])
 	}
 
 	k.ask("插脚是几根？")
@@ -324,7 +344,7 @@ func TestLookAtCameraFallsBackWhenExpertFails(t *testing.T) {
 }
 
 // 终端能拍时才给模型 look_at_camera：没有摄像头（普通客户端）、或终端的工具清单里没有「拍一帧」都不给；
-// 系统提示词不随摄像头变化（看画面的说明在工具说明里），提示词缓存不受影响。
+// 系统提示词里的工具介绍按实际提供的生成：能拍时才出现它的名字，别的部分不变（看画面的说明在工具说明里）。
 func TestLookAtCameraOnlyWhileTerminalCanCapture(t *testing.T) {
 	offered := func(camera brain.TerminalCamera) (bool, string) {
 		model := braintest.NewModel(t, braintest.Say("好的。"))
@@ -340,8 +360,9 @@ func TestLookAtCameraOnlyWhileTerminalCanCapture(t *testing.T) {
 	if !withCamera || unplugged || none {
 		t.Errorf("能拍时才给：能拍 %v，拔掉 %v，没有摄像头 %v", withCamera, unplugged, none)
 	}
-	if system != unpluggedSystem || system != noneSystem {
-		t.Errorf("系统提示词不该随摄像头变化：\n%q\n%q\n%q", system, unpluggedSystem, noneSystem)
+	if !strings.Contains(system, "look_at_camera") || strings.Contains(unpluggedSystem, "look_at_camera") ||
+		strings.Contains(noneSystem, "look_at_camera") || unpluggedSystem != noneSystem {
+		t.Errorf("工具介绍里只在能拍时出现 look_at_camera，别的部分不变：\n%q\n%q\n%q", system, unpluggedSystem, noneSystem)
 	}
 }
 
@@ -371,8 +392,9 @@ func TestLookAtCameraUsesPersonaStyle(t *testing.T) {
 	expert := &fakeExpert{report: brain.FrameReport{Spoken: "充电头，没跑了。"}}
 	var seen []brain.Utterance
 	model := braintest.NewModel(t, lookAtCamera)
-	k := newTalker(t, brain.Components{Model: model, Synthesizer: fakeSynthesizer{seen: &seen}, Camera: braintest.NewCamera([]byte("充电头")),
-		FrameExpert: expert}, brain.Options{MaxHistoryTurn: 6, Instructions: "基础规则。", Personas: testPersonas, DefaultPersona: "buddy"})
+	k := newTalker(t, brain.Components{Front: brain.Agent{Model: model, Instructions: "基础规则。"}, Synthesizer: fakeSynthesizer{seen: &seen},
+		Camera: braintest.NewCamera([]byte("充电头")), FrameExpert: expert},
+		brain.Options{MaxHistoryTurn: 6, Personas: testPersonas, DefaultPersona: "buddy"})
 
 	k.ask("我手里拿着什么？")
 	if len(expert.questions) != 1 || expert.questions[0].Style != testPersonas[0].Prompt {
@@ -380,5 +402,76 @@ func TestLookAtCameraUsesPersonaStyle(t *testing.T) {
 	}
 	if len(seen) != 1 || seen[0].Text != "充电头，没跑了。" || seen[0].Emotion != testPersonas[0].DefaultEmotion {
 		t.Errorf("直接念的那句应用性格的语气：%+v", seen)
+	}
+}
+
+// 连不上模型服务（最低能力）：不再调用模型，念固定的话：连不上 + 现在的时间。
+func TestModelUnavailableSpeaksStatusAndTime(t *testing.T) {
+	down := fmt.Errorf("%w: 请求 Claude: connection refused", brain.ErrModelUnavailable)
+	model := braintest.NewModel(t, braintest.Reply{Err: down})
+	k := newToolTalker(t, model, &fakeToolbox{})
+	answer := k.say("今天天气怎么样")
+	if !strings.Contains(answer, "连不上") || !regexp.MustCompile(`\d{2}:\d{2}`).MatchString(answer) {
+		t.Errorf("应念「连不上」和现在的时间：%q", answer)
+	}
+	if n := len(model.Requests()); n != 1 {
+		t.Errorf("只请求了那一次：%d", n)
+	}
+}
+
+// 基础提示词不点名任何工具（工具怎么用只写在工具自己的说明里）；系统提示词里的工具介绍只列这一轮实际提供的（P5）。
+func TestSystemPromptListsOnlyOfferedTools(t *testing.T) {
+	everyTool := []string{"look_at_camera", "switch_persona", "ask_stronger_model", "raise_monthly_cap", "confirm_action",
+		"cancel_action", "web_search", "start_research", "research_status", "cancel_research", "save_note", "search_notes",
+		"delete_note", "list_deleted_notes", "restore_note", "get_weather"}
+	instructions := builtinFrontInstructions(t)
+	for _, name := range everyTool {
+		if strings.Contains(instructions, name) {
+			t.Errorf("基础提示词不该点名工具 %s", name)
+		}
+	}
+	model := braintest.NewModel(t, braintest.Say("好的。"))
+	k := newTalker(t, brain.Components{Front: brain.Agent{Model: model, Instructions: instructions}, Synthesizer: fakeSynthesizer{},
+		Tools: &fakeToolbox{}}, brain.Options{MaxHistoryTurn: 6})
+	k.say("你好")
+	request := model.LastRequest()
+	for _, name := range everyTool {
+		offered := slices.Contains(request.ToolNames(), name)
+		if strings.Contains(request.System(), name) != offered {
+			t.Errorf("%s：提供了 %v，但系统提示词里出现 %v", name, offered, !offered)
+		}
+	}
+}
+
+// 只在待确认时才出现的确认、取消：工具里有，但不写进系统提示词（免得提示词跟着变）。
+func TestConfirmationToolsStayOutOfSystemPrompt(t *testing.T) {
+	model := braintest.NewModel(t, deleteNoteThree, braintest.Say("要删掉 3 号吗？"), braintest.Say("嗯？"))
+	k := newGateTalker(t, model, &fakeToolbox{}, time.Minute)
+	k.owner("把 3 号记事删了")
+	k.owner("你说什么")
+	request := model.LastRequest()
+	if !slices.Contains(request.ToolNames(), "confirm_action") || strings.Contains(request.System(), "confirm_action") {
+		t.Errorf("确认工具应在工具里、不在系统提示词里：%v\n%s", request.ToolNames(), request.System())
+	}
+}
+
+// 死循环：同一个工具、同样的参数第 3 次出现就不再执行，告诉模型为什么停，下一步不许再调用工具；参数不同的照常执行。
+func TestRepeatedToolCallIsStopped(t *testing.T) {
+	same := searchFor("车停在哪")
+	model := braintest.NewModel(t, same, searchFor("车位"), same, same, braintest.Say("没查到。"))
+	toolbox := &fakeToolbox{}
+	k := newToolTalker(t, model, toolbox)
+	if answer := k.say("我的车停在哪了？"); answer != "没查到。" {
+		t.Errorf("停下之后用文字回答：%q", answer)
+	}
+	if calls := toolbox.called(); len(calls) != 3 {
+		t.Errorf("前两次一样的和参数不同的照常执行，第三次一样的不执行：执行了 %v", calls)
+	}
+	requests := model.Requests()
+	if len(requests) != 5 || !requests[4].ForbidToolCalls || requests[3].ForbidToolCalls {
+		t.Fatalf("停下死循环之后的那一步不许调用工具：%d 次请求", len(requests))
+	}
+	if result := requests[4].Last(); result.Role != brain.RoleTool || !strings.Contains(result.Text, "stopped") {
+		t.Errorf("要告诉模型为什么停：%+v", result)
 	}
 }

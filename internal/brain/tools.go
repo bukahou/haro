@@ -5,17 +5,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
+	"strings"
 	"time"
 	"unicode/utf8"
 
-	"go.opentelemetry.io/otel/attribute"
+	semconv "go.opentelemetry.io/otel/semconv/v1.41.0"
 )
 
-const (
-	maxToolRounds = 3                // 一句话最多几轮工具调用（防止小模型陷入循环）
-	toolTimeout   = 10 * time.Second // 单次工具执行的超时
-)
+const toolTimeout = 10 * time.Second // 单次工具执行的超时
 
 // lookAtCameraTool 是服务端内置的「看画面」工具：模型调用时才经 MCP 向终端要一帧（终端能拍时才提供）。
 // 怎么看、怎么说都写在工具说明里，不写进系统提示词：没有摄像头时这些说明随工具一起不出现，系统提示词不变。
@@ -26,7 +25,7 @@ const CameraAnswerChars = 50
 
 var lookAtCameraSpec = ToolSpec{Name: lookAtCameraTool,
 	Description: "看摄像头拍到的当前画面（调用时才拍）。只有主人问到看得见的东西时才用（例如：你能看到我吗、我旁边有什么、" +
-		"我手里拿着什么、我穿的什么）；没看画面就不要说看到了什么。" +
+		"我手里拿着什么、我穿的什么）；没看画面就不要说看到了什么，闲聊时也不要提画面。" +
 		fmt.Sprintf("看清形状、颜色和上面的字再下判断。回答一两句、不超过 %d 个字：是什么、把握多大（确定 / 看着像 / 不确定）；", CameraAnswerChars) +
 		"外观细节主人问到才说；画面里没有的东西不要编。看不清就说看不清，请主人拿近一点或换个角度。" +
 		"画面里直接看到的比搜到的资料可靠，两者对不上时以画面为准，并说不确定。认东西要联网查时，搜索词用外观特征加上画面里读到的字。" +
@@ -39,7 +38,8 @@ const (
 	frameRecalledNote = "（当时看了摄像头画面；画面不保留，现在要看需要重新调用 look_at_camera）"
 )
 
-// toolSpecs 返回可用的工具清单：内置的看画面 + 工具箱（内置时间 + MCP）。
+// toolSpecs 返回会话这一轮提供的工具：会话自己的（看画面、换性格、交给强模型、提高上限）+ 工具箱（内置 + MCP）
+// + 有待确认的操作时的确认、取消。交给哪个代理时再按它的允许名单筛（Agent.offer）。
 func (s *Session) toolSpecs() []ToolSpec {
 	var specs []ToolSpec
 	if s.parts.Camera != nil && s.parts.Camera.Available() {
@@ -48,13 +48,37 @@ func (s *Session) toolSpecs() []ToolSpec {
 	if spec, ok := switchPersonaSpec(s.opts.Personas); ok {
 		specs = append(specs, spec)
 	}
-	if s.opts.Escalation {
+	if s.parts.Handoff.corrections() {
 		specs = append(specs, askStrongerSpec)
+	}
+	if s.parts.MonthlyCap != nil { // 平时也能口头提高上限（照样过确认闸）
+		specs = append(specs, raiseMonthlyCapSpec)
 	}
 	if s.parts.Tools != nil {
 		specs = append(specs, s.parts.Tools.Specs()...)
 	}
 	return append(specs, s.confirmationSpecs()...) // 有待确认的操作时才有
+}
+
+// offeredTools 是系统提示词里介绍的工具：这一轮实际提供的，不含只在待确认时才出现的确认、取消（它们来来去去，
+// 写进系统提示词会让提示词跟着变；它们的用法在自己的说明里）。
+func (s *Session) offeredTools() []ToolSpec {
+	specs := s.toolSpecs()
+	return slices.DeleteFunc(specs, func(spec ToolSpec) bool {
+		return spec.Name == confirmActionTool || spec.Name == cancelActionTool
+	})
+}
+
+// toolOverview 是系统提示词里「手边有哪些工具」那一行：从实际提供的清单生成，没提供的不出现（P5）。
+func toolOverview(specs []ToolSpec) string {
+	if len(specs) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(specs))
+	for _, spec := range specs {
+		names = append(names, spec.Name)
+	}
+	return "你手边的工具：" + strings.Join(names, "、") + "。"
 }
 
 // expertReport 是专家看完后交给前台的工具结果（转述的要求只放在这条结果里，不改系统提示词，免得提示词缓存失效）。
@@ -117,7 +141,7 @@ func (s *Session) lookAtCamera(ctx context.Context, view cameraView) cameraLook 
 		if persona := s.currentPersona(); persona != nil {
 			question.Style = persona.Prompt
 		}
-		report, err := s.parts.FrameExpert.ExamineFrame(ctx, question)
+		report, err := s.examineFrame(ctx, question)
 		if err == nil {
 			s.logger.Info("调用工具", "tool", lookAtCameraTool, "frame_bytes", len(frame), "by", "专家",
 				"spoken_chars", utf8.RuneCountInString(report.Spoken))
@@ -130,6 +154,15 @@ func (s *Session) lookAtCamera(ctx context.Context, view cameraView) cameraLook 
 	}
 	s.logger.Info("调用工具", "tool", lookAtCameraTool, "frame_bytes", len(frame))
 	return cameraLook{frame: frame, result: "已拿到摄像头当前画面，见下一条消息。"}
+}
+
+// examineFrame 把画面交给看画面的专家（子任务，经 EnterAgent 记进代理链）。
+func (s *Session) examineFrame(ctx context.Context, question FrameQuestion) (FrameReport, error) {
+	ctx, err := EnterAgent(ctx, s.logger, s.parts.FrameExpert.AgentName(), Subtask)
+	if err != nil {
+		return FrameReport{}, err
+	}
+	return s.parts.FrameExpert.ExamineFrame(ctx, question)
 }
 
 // frameMessages 是承载画面的用户消息：只有画面要交给前台模型看时才有（由专家看了、或没拍成时为空）。
@@ -176,7 +209,7 @@ func (s *Session) callTool(ctx context.Context, record *turnRecord, call ToolCal
 	defer cancel()
 	started := time.Now()
 	result, err := s.parts.Tools.Call(ctx, call)
-	span.SetAttributes(attribute.String("haro.tool.name", call.Name))
+	span.SetAttributes(semconv.GenAIOperationNameExecuteTool, semconv.GenAIToolName(call.Name), semconv.GenAIToolCallID(call.ID))
 	recordSpanError(span, err)
 	arguments, _ := json.Marshal(call.Arguments)
 	s.logger.Info("调用工具", "tool", call.Name, "arguments", string(arguments), "elapsed", since(started), "err", err)

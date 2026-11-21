@@ -122,16 +122,16 @@ func (s *Session) switchPersona(arguments map[string]any) string {
 	return fmt.Sprintf("已切换为「%s」，从这句起按新的性格说话。", persona.Name)
 }
 
-// systemPrompt 拼出系统提示词：基础提示词 + 当前性格的风格。
+// systemPrompt 拼出系统提示词：前台的基础规则 + 工具介绍 + 主人资料 + 当前性格的风格（+ 之前聊过的摘要）。
 func (s *Session) systemPrompt() string {
 	s.mu.Lock()
-	instructions, conversation := s.opts.Instructions, s.conversation
+	conversation := s.conversation
 	s.mu.Unlock()
 	profile := ""
 	if s.parts.Profiles != nil {
 		profile = s.parts.Profiles.Profile(conversation.Person())
 	}
-	prompt := composeSystemPrompt(instructions, profile, conversation.currentPersona())
+	prompt := composeSystemPrompt(s.parts.Front.Instructions, toolOverview(s.offeredTools()), profile, conversation.currentPersona())
 	if note := summaryNote(conversation.currentSummary()); note != "" {
 		prompt += "\n\n" + note
 	}
@@ -181,9 +181,9 @@ func joinLines(lines []string) string { return strings.Join(lines, "\n") }
 // composeSystemPrompt 的顺序：内置规矩（+ 外部追加）→ 主人资料 → 性格。
 // 规矩在最前面优先级最高；这几段都很少变，每轮的即时情况不在这里（见 userTurn）。
 // 有没有摄像头不在这里：看画面的说明随 look_at_camera 工具一起出现或消失，系统提示词不变。
-func composeSystemPrompt(instructions, profile string, persona *Persona) string {
-	parts := make([]string, 0, 3)
-	for _, part := range []string{instructions, profile, personaPrompt(persona)} {
+func composeSystemPrompt(instructions, tools, profile string, persona *Persona) string {
+	parts := make([]string, 0, 4)
+	for _, part := range []string{instructions, tools, profile, personaPrompt(persona)} {
 		if part != "" {
 			parts = append(parts, part)
 		}

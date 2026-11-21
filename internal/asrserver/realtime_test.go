@@ -201,8 +201,8 @@ func (s *scriptedTurnDetector) EndOfTurnProbability([]float32) (float64, error) 
 // semanticFactory 让替身 VAD 按 session 传来的静音时长切段（semantic_vad 时应为 300ms，v3 D-2）。
 func semanticFactory(t *testing.T) VoiceDetectorFactory {
 	return func(turn realtimeproto.TurnDetection) (VoiceDetector, error) {
-		if turn.SilenceDurationMs != semanticSilenceMs {
-			t.Errorf("semantic_vad 时 VAD 静音应为 %dms，实际 %d", semanticSilenceMs, turn.SilenceDurationMs)
+		if want := int(DefaultTiming.SemanticSilence.Milliseconds()); turn.SilenceDurationMs != want {
+			t.Errorf("semantic_vad 时 VAD 静音应为 %dms，实际 %d", want, turn.SilenceDurationMs)
 		}
 		return &energyDetector{silenceSamples: turn.SilenceDurationMs * 16}, nil
 	}

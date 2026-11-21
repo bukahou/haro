@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -31,7 +30,7 @@ type toolCaller interface {
 // 任何一个起不来、或者工具重名，就整体失败（并清理已连上的）。ctx 是服务端的运行期。
 func NewToolbox(ctx context.Context, remote []ServerSpec, logger *slog.Logger, builtins ...Builtin) (*Toolbox, error) {
 	box := &Toolbox{callers: map[string]toolCaller{}}
-	builtin, err := startBuiltinServer(ctx, append([]Builtin{timeTools}, builtins...), logger)
+	builtin, err := startBuiltinServer(ctx, builtins, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -101,20 +100,3 @@ func (b *Toolbox) Close() {
 		_ = server.Close()
 	}
 }
-
-// timeTools 是「现在几点」。
-func timeTools(server *mcp.Server) {
-	AddTool(server, &mcp.Tool{Name: "get_current_time", Description: "获取现在的日期、时间和星期。", Annotations: ReadOnly},
-		func(context.Context, struct{}) (currentTime, error) {
-			now := time.Now()
-			return currentTime{Now: now.Format("2006-01-02 15:04"), Weekday: weekdays[now.Weekday()], Timezone: now.Format("MST")}, nil
-		})
-}
-
-type currentTime struct {
-	Now      string `json:"now"`
-	Weekday  string `json:"weekday"`
-	Timezone string `json:"timezone"`
-}
-
-var weekdays = []string{"星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"}

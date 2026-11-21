@@ -45,19 +45,33 @@ haro 是一个家用语音助手：家里每个房间放一台**终端**（麦�
 | 接口 | 实现 |
 |---|---|
 | `StreamingRecognizer` | `internal/speech`：按 `HARO_ASR_URL` 连 haro-asr（或其他照 OpenAI Realtime 转写会话的服务） |
-| `ChatModel` | `internal/llm`：Claude API（官方 SDK）、OpenAI 兼容接口（官方 openai-go；本地 Ollama 走它的兼容端点）；主备切换（`FallbackChatModel`）。请求可以「工具照给、这轮不许调用」（提示词缓存不失效）；输出到上限时明确报「被截断」；需要预热的模型另实现 `ModelWarmer`。三个适配跑同一组契约测试（`internal/llm/contract_test.go`） |
+| `ChatModel` | `internal/llm`：Claude API（官方 SDK）、OpenAI 兼容接口（官方 openai-go；本地 Ollama 走它的兼容端点），本地和云端按配置二选一、不自动互相顶替。请求可以「工具照给、这轮不许调用」（提示词缓存不失效）；输出到上限时明确报「被截断」；需要预热的模型另实现 `ModelWarmer`。三个适配跑同一组契约测试（`internal/llm/contract_test.go`） |
 | `SpeechSynthesizer` | `internal/speech`：GPT-SoVITS（边合成边播放）、Piper |
 | `Toolbox` | `internal/tools`：内置工具 + 第三方 MCP 服务 |
 | `ConversationStore` | `internal/conversationstore`：SQLite（goose 迁移）；每一轮带说话的时间，发给模型时每轮前标日期和时刻 |
 | `Briefer` | 每轮补充给模型的即时情况：现在几号几点、主人家大致在哪（城市级）、额度提醒、后台调查的任务板 |
 
+- **观测**：OpenTelemetry（`HARO_OTLP_ENDPOINT`，OTLP/HTTP）。大模型相关的按语义约定 `gen_ai.*` 记：每次请求一个 span
+  「chat <模型>」（提供方、模型、用量含缓存读写、为什么停）和标准指标 `gen_ai.client.operation.duration`、`gen_ai.client.token.usage`；
+  一轮回答记成 `invoke_agent`（代理名，交接记成事件），工具调用记成 `execute_tool`。haro 自己的（说完到第一个字、合成、打断、唤醒）用 `haro.` 前缀。
 - **坏了要出声**：服务端和 haro-asr 之间的识别流断了会自己重开（带退避），重开后把「醒着 / 正在播放」重新告诉它；
+  说到一半断开时，服务端替丢掉的那句补一个「说完」，这一轮按识别失败结束，终端照常收尾；
   断开超过 10 秒才提示终端一次（`haro.notice` 的 `transcription_lost`，终端播「断开」那一声），重开后再提示一次（`transcription_restored`）。
   存活检查 `/livez` 只看进程；就绪检查 `/readyz` 看识别、合成、模型凭证、账本，结果由后台定期检查（`internal/readiness`）。
 - **对话跟着人走**：开了声纹时，服务端认出是谁在说话，用这个人自己的对话历史；换终端、断线重连、服务端重启都接得上。
-  只保留最近几轮；更早的对话在后台压成一段摘要，放进系统提示词（`internal/brain/summary.go`）。
+  发给模型的只有最近几轮加一段摘要：更早的对话在后台交给代理「摘要」压成一段，放进系统提示词（`internal/brain/summary.go`）；
+  一轮里请求模型带的上下文（模型报的输入 token）到了 `HARO_CONTEXT_COMPACT_TOKENS`，较早的几轮提前压缩。
+  完整的对话记录另存一份（对话库的 `transcript` 表，每人每轮一行、按轮次编号，只增不删），留作以后的长期记忆。
+- **代理**（`internal/agents`）：交给模型做的事按「代理」定义——名字、模型档（`base` = 云端模型 / 本地模型，`strong` = 更强的模型；
+  具体的模型 ID 和思考写法只在配置里）、系统提示词、能用的工具（允许名单）、步数上限与死循环判定、记账用途。
+  每个代理一个 markdown 文件（开头 YAML 是配置，正文是系统提示词；正文用 `{{.名字}}` 引用代码里定义的值，例如情绪标记的列表）。
+  程序里带一套（`internal/agents/builtin/`）：前台（主对话）、强模型（接手）、看画面（子任务）、摘要（子任务）；
+  `HARO_AGENTS_DIR` 里同名的文件替换程序里带的那份（启动日志写明用了哪份；字段写错、文件名不认识、工具名不认识都起不来）。
+  交出去只有一个入口（`brain.EnterAgent`）：**接手**带着完整的对话历史回答这一轮剩下的部分（主人纠正时交给强模型），
+  **子任务**不带历史、交回一份结果（看画面、摘要）；代理链最多 3 层。模型只执行这一步给了它的工具（确认、取消除外：它们自己核对并说明为什么不执行）。
 - **提示词的结构**（从前到后）：
-  1. 内置的基础提示词（身份、能力、规矩；`brain.DefaultInstructions`）——永远生效；`HARO_SYSTEM_PROMPT` 只能在后面追加；
+  1. 前台的基础规则（身份、能力、规矩；`internal/agents/builtin/front.md`），`HARO_SYSTEM_PROMPT` 接在后面；
+     接着是按这一轮实际提供的工具生成的工具介绍（工具怎么用只写在工具自己的说明里）；
   2. 主人资料（`HARO_PROFILE_DIR`，外部注入：全家一份 `household.md` + 每人一份，按声纹认出的名字选；模板见 `assets/profile.example`）；
   3. 当前性格；
   4. 对话摘要。
@@ -74,7 +88,6 @@ haro 是一个家用语音助手：家里每个房间放一台**终端**（麦�
 
 | 工具 | 说明 |
 |---|---|
-| `get_current_time` | 现在的时间 |
 | `save_note` / `search_notes` / `delete_note` / `list_deleted_notes` / `restore_note` | 记事本（SQLite）；按编号删，删掉的可以恢复 |
 | `confirm_action` / `cancel_action` | 会破坏的操作（删记事）先存成待确认的操作（有时效），主人算不算同意由模型判断后调用；只在有待确认的操作时提供 |
 | `get_weather` | 天气（Open-Meteo，不用密钥）；家的位置可以配坐标，或按公网 IP 推定。Open-Meteo 查不到时改用日本气象厅（见下） |
@@ -105,12 +118,21 @@ Open-Meteo 连不上或报错时，日本境内的地点改查日本气象厅网
 - 调查必须先搜：模型想不搜就下结论时会被退回去。
 - 查完时，服务端给主人最近说话的那台终端发一个提示（`haro.notice`），终端响一声「叮咚」（睡着也响）；
   主人叫醒后，服务端先说结论。服务端还不能主动开口说话。
-- 调查用的模型可以单独配置（例如聊天用本地模型、调查用云端模型）。
+- 调查只用云端模型（本地小模型调工具不可靠）。
 
 ### 费用（`internal/spending`）
 
-大模型和搜索按量计费时：每次调用都记账（token、搜索积分，按单价与汇率折成本地货币），
-按天、按月封顶。超过月度上限后改用本地模型；没有本地模型时直接告诉主人额度用完了。
+大模型和搜索按量计费时：每次调用都记账（token、搜索积分，按单价与汇率折成本地货币），按用途分开记
+（每个代理定义里写自己的用途：前台 `chat`、强模型 `strong`、看画面 `vision`、摘要 `summary`；另有快查 `search`、后台调查 `research`），
+按天、按月封顶。超过月度上限后不再回答，念一句固定的话（到上限了、下个月一号恢复）；主人可以口头临时提高这个月的上限
+（`HARO_MONTHLY_RAISE_YEN`，每次加多少），要过确认闸（登记过的声纹 + 有时效的确认）。听懂「要提高」靠一次很小的模型调用
+（不带历史，只给提高上限和确认的工具，模型说的话不念），它不受额度管，按天限次数（`HARO_OVER_BUDGET_DAILY_CALLS`）。
+
+### 连不上云端时（最低能力）
+
+适配层把连不上（网络错误、等不到开始回答、超时、认证失败、限流、服务端出错）标成带类型的错误。这时不调用任何模型，
+无论主人说什么，都念一句固定的话：连不上 + 现在的时间（中日英各一份）。连不上一次就熔断：之后马上告诉主人，
+不用每句都等超时；30 秒后放一个请求去试，通了就恢复，下一轮由模型顺带交代刚才断过。
 
 云端模型的单价来自公共的模型价格目录（`internal/pricecatalog`，默认 [models.dev](https://models.dev)，`HARO_MODEL_PRICES_*`）：
 服务端启动时拉取（含缓存读写的单价、按上下文大小分的档），拉到的那一家存一份到 `HARO_MODEL_PRICES_CACHE`，
@@ -150,21 +172,22 @@ systemd 用户服务从 `~/.config/haro/haro.env` 读取（`deploy/systemd/`）�
   SDK 按「客户端 × HTTP 客户端」各存一份令牌，而集群的服务账号令牌只能换一次，多一份就会被拒（401）。
 - `openai`：任意 OpenAI 兼容的 `/chat/completions`（`HARO_CLOUD_LLM_URL`、`HARO_CLOUD_LLM_API_KEY`）。
 
-**按规则选模型**（可选，`HARO_STRONG_LLM_MODEL`，例如 `claude-sonnet-5-5`；和云端模型同一个接口与凭证）：
-换哪个模型写在代码里（`llm.RouterChatModel`）：看画面按规则、重答由前台模型认出主人在纠正后标记，不让模型凭自己有没有把握决定换不换。`HARO_STRONG_LLM_USE` 选用在哪些地方：
+**更强的模型**（可选，`HARO_STRONG_LLM_MODEL`，例如 `claude-sonnet-5-5`；和云端模型同一个接口与凭证）：
+用 `strong` 档的代理（强模型、看画面）用它。什么时候交给它由前台的工具和规则定（看画面按配置、重答由前台模型认出主人在纠正后交出去），
+不让模型凭自己有没有把握决定换不换。`HARO_STRONG_LLM_USE` 选用在哪些地方：
 
 - `vision`：看摄像头画面。`HARO_STRONG_LLM_VISION_MODE` 选怎么用：
   - `expert`（默认）：**前台始终是云端模型**，它当幕后专家（`internal/vision`）。模型调用 `look_at_camera` 时，
     画面和主人这一轮的原话交给专家（不带性格和对话记录，输入约 1.6k token）；主人问到画面上看不全的信息时专家自己联网查（最多 2 次）——
     只有它看得到画面，才能按「画面比搜到的资料可靠」取舍。前台拿到专家的判断（文字）后用自己的口吻转述，判断留在历史里；
     专家出错或超时时退回把画面直接交给前台。按 `vision` 用途单独记账。
-  - `takeover`：带画面的那次请求直接换它回答（画面只在本轮输入里，下一轮自然回到云端模型）
+  - `takeover`：画面要交给前台看时，这一轮剩下的部分交给强模型接手（画面只在本轮输入里，下一轮自然回到前台）
 - `correction`：主人纠正（说它答错了、让它重新想）或明说要想清楚时，前台模型调用内置工具 `ask_stronger_model`（`brain/escalation.go`），
-  这一轮剩下的请求交给它重答。「是不是在纠正」由模型认（任何语言、任何说法），不靠写死的词表；工具说明要求一认出就交、不争辩
+  这一轮剩下的部分交给强模型接手重答（按 `strong` 用途单独记账）。「是不是在纠正」由模型认（任何语言、任何说法），不靠写死的词表；工具说明要求一认出就交、不争辩
   （实测：只写「纠正时调用」时，Haiku 觉得自己没错就会争辩、不交）
 - `research`：后台调查由云端模型搜索、读网页，搜完把资料交给它写结论（不给工具）
 
-直接换它回答时，它出错或等太久（`HARO_STRONG_LLM_TIMEOUT`）由云端模型接手。单价同样来自模型价格目录（目录里没有它就起不来）。
+接手时它出错或等太久（`HARO_STRONG_LLM_TIMEOUT`）由前台的模型接着回答。单价同样来自模型价格目录（目录里没有它就起不来）。
 Claude 各模型「关掉思考」的写法不同：`HARO_CLOUD_LLM_THINKING` / `HARO_STRONG_LLM_THINKING`，Haiku 5.5 用 `disabled`，
 Sonnet 5.5 只认 `between_tools`（两次工具调用之间会返回几句进度说明，haro 不回传；实测后续请求照样被接受）。
 

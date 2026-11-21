@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"iter"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -92,6 +93,25 @@ const (
 	ThinkingAdaptive = "adaptive"
 )
 
+// claudeEfforts 是思考关掉时 Claude 接受的回答力度（xhigh / max 要开着思考）；空 = 模型默认。
+var claudeEfforts = []string{"", "low", "medium", "high"}
+
+// ValidateClaudeEffort 检查回答力度（启动时按配置检查，写错了起不来）。
+func ValidateClaudeEffort(effort string) error {
+	if !slices.Contains(claudeEfforts, effort) {
+		return fmt.Errorf("只能是 low、medium 或 high（思考是关掉的），现在是 %q", effort)
+	}
+	return nil
+}
+
+// ValidateClaudeThinking 检查思考的写法（ThinkingDisabled 等）。
+func ValidateClaudeThinking(thinking string) error {
+	if !slices.Contains([]string{ThinkingDisabled, ThinkingBetweenTools, ThinkingAdaptive}, thinking) {
+		return fmt.Errorf("只能是 %s、%s 或 %s，现在是 %q", ThinkingDisabled, ThinkingBetweenTools, ThinkingAdaptive, thinking)
+	}
+	return nil
+}
+
 // AnthropicOptions 是创建 AnthropicChatModel 的参数。
 type AnthropicOptions struct {
 	API       *ClaudeAPI // 全进程共用的客户端（必填，见 ClaudeAPI）
@@ -99,7 +119,7 @@ type AnthropicOptions struct {
 	MaxTokens int        // 每次最多输出多少 token
 	Effort    string     // low / medium / high（思考关掉时只能用这三档）；空 = 模型默认
 	Thinking  string     // 见 ThinkingDisabled 等；空 = disabled
-	// MaxRetries 是 SDK 在 429 / 5xx / 断线时自己重试几次。当主模型时用 0：等不到就退回本地，
+	// MaxRetries 是 SDK 在 429 / 5xx / 断线时自己重试几次。当主模型时用 0：等不到就早点告诉主人连不上，
 	// 不要在这里多等；后台调查不急，可以重试。
 	MaxRetries int
 	// FirstTokenTimeout 是等 Claude 开始回答（第一个流式事件）最多多久，超时就取消这次请求、交给退路；0 = 不限。
@@ -175,10 +195,11 @@ func (m *AnthropicChatModel) StreamReply(ctx context.Context, request brain.Chat
 		}
 		if err := stream.Err(); err != nil { // 出错、被取消：照样交出知道的那部分用量（记账不漏）
 			if deadline.noFirstToken() {
-				yield(brain.ReplyDelta{Usage: partialUsage(message)}, fmt.Errorf("请求 Claude: %w（等了 %v）", errNoFirstToken, m.firstTokenTimeout))
+				yield(brain.ReplyDelta{Usage: partialUsage(message)},
+					markUnavailable(ctx, fmt.Errorf("请求 Claude: %w（等了 %v）", errNoFirstToken, m.firstTokenTimeout)))
 				return
 			}
-			yield(brain.ReplyDelta{Usage: partialUsage(message)}, fmt.Errorf("请求 Claude: %w", err))
+			yield(brain.ReplyDelta{Usage: partialUsage(message)}, markUnavailable(ctx, fmt.Errorf("请求 Claude: %w", err)))
 			return
 		}
 		usage := usageOf(message.Usage)

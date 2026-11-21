@@ -14,33 +14,27 @@ import (
 	"github.com/bukahou/haro/internal/llm"
 )
 
-// escalationProbe 包住真模型，记下这一轮有没有请更强的模型重答（本轮主人那句话被标上 Escalate）。
-type escalationProbe struct {
+// handoffProbe 包住接手的代理用的真模型，记下这一轮有没有交给它（被调用过就是交出去了）。
+type handoffProbe struct {
 	inner brain.ChatModel
 
-	mu        sync.Mutex
-	escalated bool
+	mu     sync.Mutex
+	called bool
 }
 
-func (p *escalationProbe) StreamReply(ctx context.Context, request brain.ChatRequest) iter.Seq2[brain.ReplyDelta, error] {
-	messages := request.Messages
-	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Role == brain.RoleUser && len(messages[i].Image) == 0 {
-			p.mu.Lock()
-			p.escalated = p.escalated || messages[i].Escalate
-			p.mu.Unlock()
-			break
-		}
-	}
+func (p *handoffProbe) StreamReply(ctx context.Context, request brain.ChatRequest) iter.Seq2[brain.ReplyDelta, error] {
+	p.mu.Lock()
+	p.called = true
+	p.mu.Unlock()
 	return p.inner.StreamReply(ctx, request)
 }
 
-func (p *escalationProbe) takeEscalated() bool {
+func (p *handoffProbe) takeCalled() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	escalated := p.escalated
-	p.escalated = false
-	return escalated
+	called := p.called
+	p.called = false
+	return called
 }
 
 // 真 Haiku 认不认得出「主人在纠正」（花钱很少：每种说法两轮，约 ¥0.1）：
@@ -66,13 +60,14 @@ func TestLiveAskStronger(t *testing.T) {
 		{"那北海道的首府呢？", false},
 	}
 	for _, c := range cases {
-		probe := &escalationProbe{inner: model}
-		k := newTalker(t, brain.Components{Model: probe, Synthesizer: fakeSynthesizer{}},
-			brain.Options{MaxHistoryTurn: 6, Instructions: brain.DefaultInstructions, Escalation: true})
+		probe := &handoffProbe{inner: model} // 接手的也用 Haiku：这里只看前台交不交出去
+		k := newTalker(t, brain.Components{Front: brain.Agent{Model: model, Instructions: builtinFrontInstructions(t)},
+			Handoff: brain.Handoff{Agent: strongAgent(probe, 8), OnCorrection: true}, Synthesizer: fakeSynthesizer{}},
+			brain.Options{MaxHistoryTurn: 6})
 		k.ask("日本的首都是哪里？")
-		probe.takeEscalated()
+		probe.takeCalled()
 		spoken := braintest.Spoken(k.ask(c.reply))
-		got := probe.takeEscalated()
+		got := probe.takeCalled()
 		t.Logf("%q → 交给更强的模型=%v，回答：%s", c.reply, got, spoken)
 		if got != c.want {
 			t.Errorf("%q：应 %v，实际 %v", c.reply, c.want, got)

@@ -254,3 +254,25 @@ func marshalMessages(t *testing.T, messages any) string {
 	sorted, _ := json.Marshal(generic)
 	return string(sorted)
 }
+
+// Claude 的回答力度（思考关掉时只有三档，空 = 模型默认）和思考写法：认识的通过，别的报错。
+func TestValidateClaudeValues(t *testing.T) {
+	for _, effort := range []string{"", "low", "medium", "high"} {
+		if err := ValidateClaudeEffort(effort); err != nil {
+			t.Errorf("力度 %q 应通过：%v", effort, err)
+		}
+	}
+	for _, effort := range []string{"xhigh", "max", "Low"} {
+		if err := ValidateClaudeEffort(effort); err == nil {
+			t.Errorf("力度 %q 应报错", effort)
+		}
+	}
+	for _, thinking := range []string{ThinkingDisabled, ThinkingBetweenTools, ThinkingAdaptive} {
+		if err := ValidateClaudeThinking(thinking); err != nil {
+			t.Errorf("思考 %q 应通过：%v", thinking, err)
+		}
+	}
+	if err := ValidateClaudeThinking(""); err == nil {
+		t.Error("思考的写法要写明（空的不认）")
+	}
+}

@@ -144,7 +144,7 @@ func (m *OpenAIChatModel) StreamReply(ctx context.Context, request brain.ChatReq
 			if deadline.noFirstToken() {
 				err = fmt.Errorf("%w（等了 %v）", errNoFirstToken, m.firstTokenTimeout)
 			}
-			yield(brain.ReplyDelta{Usage: unknownUsage()}, fmt.Errorf("请求模型（%s）: %w", m.model, err))
+			yield(brain.ReplyDelta{Usage: unknownUsage()}, markUnavailable(ctx, fmt.Errorf("请求模型（%s）: %w", m.model, err)))
 			return
 		}
 		usage := usageFromOpenAI(accumulated.Usage, usageSeen, thinkingChars)
