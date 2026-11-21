@@ -111,9 +111,7 @@ func TestRealtimeTranscriptionSession(t *testing.T) {
 	conn, ctx := dialRealtime(t, factory, transcriber, nil)
 
 	turn := realtimeproto.TurnDetection{Type: "server_vad", PrefixPaddingMs: 100, SilenceDurationMs: 300}
-	if err := writeClientEvent(ctx, conn, transcriptionUpdate(turn, false)); err != nil {
-		t.Fatal(err)
-	}
+	startSession(t, ctx, conn, turn, false)
 	// 200ms 静音 → 500ms 说话 → 400ms 静音，每 20ms 一块
 	for _, part := range []struct {
 		ms   int
@@ -263,8 +261,7 @@ func TestSemanticVADMergesPauseIntoOneUtterance(t *testing.T) {
 	turnDetector := &scriptedTurnDetector{probabilities: []float64{0.2, 0.9}} // 第一次停顿：没说完；第二次：说完
 	transcriber := &lengthTranscriber{}
 	conn, ctx := dialRealtime(t, semanticFactory(t), transcriber, turnDetector)
-	turn := realtimeproto.TurnDetection{Type: "semantic_vad", Eagerness: "auto"}
-	_ = writeClientEvent(ctx, conn, transcriptionUpdate(turn, false))
+	startSession(t, ctx, conn, realtimeproto.TurnDetection{Type: "semantic_vad", Eagerness: "auto"}, false)
 
 	// 0.2s 静音 → 0.5s 说话 → 0.4s 停顿 → 0.4s 说话 → 0.4s 静音
 	sendPattern(t, ctx, conn, [2]int{200, 0}, [2]int{500, 1}, [2]int{400, 0}, [2]int{400, 1}, [2]int{400, 0})
@@ -293,8 +290,7 @@ func TestSemanticVADMergesPauseIntoOneUtterance(t *testing.T) {
 func TestSemanticVADTimesOutWhenUserStopsTalking(t *testing.T) {
 	turnDetector := &scriptedTurnDetector{probabilities: []float64{0.1}} // 一直判断「没说完」
 	conn, ctx := dialRealtime(t, semanticFactory(t), &lengthTranscriber{}, turnDetector)
-	turn := realtimeproto.TurnDetection{Type: "semantic_vad", Eagerness: "high"} // 最多再等 1s
-	_ = writeClientEvent(ctx, conn, transcriptionUpdate(turn, false))
+	startSession(t, ctx, conn, realtimeproto.TurnDetection{Type: "semantic_vad", Eagerness: "high"}, false) // 最多再等 1s
 
 	sendPattern(t, ctx, conn, [2]int{200, 0}, [2]int{500, 1}, [2]int{600, 0}) // 停顿 0.6s：还没到 1s
 	sendPattern(t, ctx, conn, [2]int{600, 0})                                 // 再静 0.6s：超时
@@ -304,12 +300,21 @@ func TestSemanticVADTimesOutWhenUserStopsTalking(t *testing.T) {
 	}
 }
 
+// 没有说完判断模型时拒绝 semantic_vad：回带码的 error（不发 session.updated），自己也记一条带码的警告。
 func TestSemanticVADRequiresTurnModel(t *testing.T) {
-	conn, ctx := dialRealtime(t, semanticFactory(t), &lengthTranscriber{}, nil)
+	logs := &recordingHandler{}
+	conn, ctx := dialRealtimeWith(t, Dependencies{Transcriber: &lengthTranscriber{}, NewVoiceDetector: semanticFactory(t),
+		Logger: slog.New(logs)})
 	_ = writeClientEvent(ctx, conn, transcriptionUpdate(realtimeproto.TurnDetection{Type: "semantic_vad"}, false))
 	events := readEvents(t, ctx, conn, 1)
 	if e, ok := events[0].(realtimeproto.Error); !ok || e.Code != realtimeproto.CodeUnsupportedFeature {
 		t.Errorf("没有 Smart Turn 模型时应拒绝 semantic_vad：%v", events)
+	}
+	if _, _, err := conn.Read(ctx); websocket.CloseStatus(err) != websocket.StatusPolicyViolation {
+		t.Errorf("拒绝之后应断开：%v", err)
+	}
+	if code, ok := logs.attr(slog.LevelWarn, "code"); !ok || code.String() != string(realtimeproto.CodeUnsupportedFeature) {
+		t.Errorf("拒绝时 haro-asr 自己应记一条带码的警告：%v %v", code, ok)
 	}
 }
 
@@ -368,10 +373,7 @@ func dialWakeSessionWith(t *testing.T, transcriber Transcriber, spotter *fakeSpo
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { conn.CloseNow() })
-	turn := realtimeproto.TurnDetection{Type: "server_vad", SilenceDurationMs: 300}
-	if err := writeClientEvent(ctx, conn, transcriptionUpdate(turn, true)); err != nil {
-		t.Fatal(err)
-	}
+	startSession(t, ctx, conn, realtimeproto.TurnDetection{Type: "server_vad", SilenceDurationMs: 300}, true)
 	return conn, ctx
 }
 
@@ -686,6 +688,24 @@ func transcriptionUpdate(turn realtimeproto.TurnDetection, wakeWord bool) realti
 		InputFormat: realtimeproto.TranscriptionFormat}
 }
 
+// startSession 发出转写会话的第一条 session.update，并要求它被接受：先收到确认（session.updated，带着接受的设置），
+// 之后才有别的事件。
+func startSession(t *testing.T, ctx context.Context, conn *websocket.Conn, turn realtimeproto.TurnDetection, wakeWord bool) {
+	t.Helper()
+	if err := writeClientEvent(ctx, conn, transcriptionUpdate(turn, wakeWord)); err != nil {
+		t.Fatal(err)
+	}
+	events := readEvents(t, ctx, conn, 1)
+	updated, ok := events[0].(realtimeproto.SessionUpdated)
+	if !ok {
+		t.Fatalf("接受设置后第一个事件应是 session.updated：%v", events)
+	}
+	if accepted := updated.Session; accepted.Kind != realtimeproto.SessionTranscription || accepted.TurnDetection == nil ||
+		*accepted.TurnDetection != turn || accepted.WakeWord != wakeWord || accepted.InputFormat != realtimeproto.TranscriptionFormat {
+		t.Errorf("session.updated 应带着接受的设置：%+v", accepted)
+	}
+}
+
 // audioChunk 是一块 16 kHz 的音频。
 func audioChunk(pcm []byte) realtimeproto.InputAudioBufferAppend {
 	return realtimeproto.InputAudioBufferAppend{Audio: realtimeproto.PCMAudio{Format: realtimeproto.TranscriptionFormat, Data: pcm}}
@@ -722,10 +742,7 @@ func TestRealtimeTranscriptionFailureNamesTheItem(t *testing.T) {
 		return &energyDetector{silenceSamples: 300 * 16}, nil
 	}
 	conn, ctx := dialRealtime(t, factory, failingTranscriber{}, nil)
-	turn := realtimeproto.TurnDetection{Type: "server_vad", SilenceDurationMs: 300}
-	if err := writeClientEvent(ctx, conn, transcriptionUpdate(turn, false)); err != nil {
-		t.Fatal(err)
-	}
+	startSession(t, ctx, conn, realtimeproto.TurnDetection{Type: "server_vad", SilenceDurationMs: 300}, false)
 	for _, part := range []struct {
 		ms   int
 		loud bool

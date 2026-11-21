@@ -38,6 +38,7 @@ var clientEvents = map[string]clientCodec{
 }
 
 var serverEvents = map[string]serverCodec{
+	typeSessionUpdated:         {wireSessionUpdated{}, decodeSessionUpdated},
 	typeSpeechStarted:          {wireSpeechStarted{}, decodeSpeechStarted},
 	typeSpeechStopped:          {wireSpeechStopped{}, decodeSpeechStopped},
 	typeTranscriptionCompleted: {wireTranscriptionCompleted{}, decodeTranscriptionCompleted},
@@ -241,6 +242,23 @@ func typeOnlyClient(event ClientEvent) clientCodec {
 }
 
 // ——— 服务端事件 ———
+
+// session.updated 的 session 和 session.update 的同一形状：编解码借用 session.update 的那一份。
+func (e SessionUpdated) toWire() (any, error) {
+	update, err := e.Session.toWire()
+	if err != nil {
+		return nil, err
+	}
+	return wireSessionUpdated{Type: typeSessionUpdated, Session: update.(wireSessionUpdate).Session}, nil
+}
+
+func decodeSessionUpdated(data []byte) (ServerEvent, error) {
+	update, err := decodeSessionUpdate(data, AudioFormat{})
+	if err != nil {
+		return nil, err
+	}
+	return SessionUpdated{Session: update.(SessionUpdate)}, nil
+}
 
 func (e InputAudioBufferSpeechStarted) toWire() (any, error) {
 	return wireSpeechStarted{Type: typeSpeechStarted, AudioStartMs: e.AudioStartMs, ItemID: e.ItemID}, nil

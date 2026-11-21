@@ -1,6 +1,7 @@
 package brain
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -16,9 +17,15 @@ import (
 // streamFormat 是识别流要求的音频格式（与转写会话一致）。
 var streamFormat = realtimeproto.TranscriptionFormat
 
+// ErrStreamRejected：转写服务不接受识别流的设置（例如要 semantic_vad 而它没有说完判断模型）。
+// StreamingRecognizer.OpenStream 返回的错误包着它（同时包着带错误码的 *realtimeproto.ProtocolError）时，
+// 会话不再重开（同样的设置再连多少次都被拒，要改配置），把同一个错误码告诉终端一次。
+var ErrStreamRejected = errors.New("识别流的设置被拒绝（原样再连没用，要改配置）")
+
 // openStream 打开流式转写会话并开始转发它的事件。调用方持有 s.mu。
-// 这次打不开（例如服务端先起来、haro-asr 还在加载模型）时不报错：记下设置，在后台按断开后重开的办法接着连，
-// 连上之前送来的音频丢掉；一直连不上时按重开的规则提示终端。
+// 这次打不开（例如服务端先起来、haro-asr 还在加载模型、它卡住了没在期限内确认）时不报错：记下设置，在后台按断开后
+// 重开的办法接着连，连上之前送来的音频丢掉；一直连不上时按重开的规则提示终端。
+// 设置被拒（ErrStreamRejected）时返回这个错误：连接层把同一个错误码回给终端；会话不再去连。
 func (s *Session) openStream(ctx context.Context, config StreamConfig) error {
 	if s.parts.Streaming == nil {
 		return realtimeproto.ProtocolErrorf(realtimeproto.CodeNoTranscriptionStream, "服务端没有配置流式识别，打不开识别流")
@@ -29,15 +36,31 @@ func (s *Session) openStream(ctx context.Context, config StreamConfig) error {
 	if config.WakeWord && s.parts.WakeArbiter != nil { // 参加多终端唤醒仲裁
 		s.parts.WakeArbiter.join(s)
 	}
-	stream, err := s.parts.Streaming.OpenStream(ctx, config)
-	if err != nil {
+	openCtx, cancel := context.WithTimeout(ctx, s.opts.StreamReopen.orDefault().OpenTimeout)
+	defer cancel()
+	stream, err := s.parts.Streaming.OpenStream(openCtx, config)
+	switch {
+	case err == nil:
+		s.stream = stream
+		go s.runStream(stream)
+	case errors.Is(err, ErrStreamRejected):
+		s.streamRefused(err, false)
+		return err
+	default:
 		s.logger.Warn("打不开识别流：在后台接着连", "err", err)
 		go s.runStream(nil)
-		return nil
 	}
-	s.stream = stream
-	go s.runStream(stream)
 	return nil
+}
+
+// streamRefused 是识别流的设置被拒之后：不再重开（识别流一直是 nil，送来的音频照断开期间那样丢掉，不逐块回错误），
+// 记一条错误日志，提示终端一次「听不见了」（lostNotified：这次断开已经提示过了就不再提示）。
+// 错误码由调用方告诉终端：第一次打开时连接层把 openStream 返回的错误回给终端，重开时 reopenStream 自己发。
+func (s *Session) streamRefused(err error, lostNotified bool) {
+	s.logger.Error("识别服务不接受识别流的设置：不再重开，改好配置后让终端重连", "err", err)
+	if !lostNotified {
+		s.tryEmit(realtimeproto.HaroNotice{Kind: realtimeproto.NoticeTranscriptionLost})
+	}
 }
 
 // runStream 转发识别流的事件；流意外结束（或一开始就没打开）时重开并接着转发，直到会话结束。
@@ -228,29 +251,34 @@ func (s *Session) speechStopped(e realtimeproto.InputAudioBufferSpeechStopped) {
 	}
 }
 
-// ReopenTiming 是识别流意外断开后重开的节奏（Options.StreamReopen；零值 = DefaultReopenTiming）。
+// ReopenTiming 是打开识别流、意外断开后重开的节奏（Options.StreamReopen；零值 = DefaultReopenTiming）。
 type ReopenTiming struct {
 	Delay, MaxDelay time.Duration // 重试间隔：从 Delay 开始翻倍，最长 MaxDelay
 	LostNoticeAfter time.Duration // 断开超过这么久还没重开，才提示终端一次（一闪而过的断开不打扰）
+	// OpenTimeout：每次打开（第一次和重开）最多等这么久：连上、发完设置、等到转写服务确认。零值 = DefaultReopenTiming 的
+	OpenTimeout time.Duration
 }
 
 // DefaultReopenTiming：haro-asr 在本机（同一个 Pod），重试间隔不用拉得很长；
 // 提示的门槛和终端「服务端断开超过 10 秒才说一声」一致。
-var DefaultReopenTiming = ReopenTiming{Delay: 500 * time.Millisecond, MaxDelay: 5 * time.Second, LostNoticeAfter: 10 * time.Second}
+// 打开的期限是定值（haro-asr 在本机，正常几毫秒就确认）：第一次打开是在终端连接的读循环里等的，这期间读不到终端的
+// 心跳回应，所以不能比心跳的超时（heartbeat.Default.Timeout）长。
+var DefaultReopenTiming = ReopenTiming{Delay: 500 * time.Millisecond, MaxDelay: 5 * time.Second, LostNoticeAfter: 10 * time.Second,
+	OpenTimeout: 3 * time.Second}
 
 func (t ReopenTiming) orDefault() ReopenTiming {
 	if t == (ReopenTiming{}) {
 		return DefaultReopenTiming
 	}
+	t.OpenTimeout = cmp.Or(t.OpenTimeout, DefaultReopenTiming.OpenTimeout)
 	return t
 }
 
-const (
-	streamOpenTimeout    = 5 * time.Second // 每次尝试重开最多等这么久（连上、发完设置）
-	streamRestoreTimeout = 3 * time.Second // 重开后把醒着还是睡着 / 正在播放告诉新的流，最多等这么久
-)
+// streamRestoreTimeout：重开后把醒着还是睡着 / 正在播放告诉新的流，最多等这么久。
+const streamRestoreTimeout = 3 * time.Second
 
-// reopenStream 按打开时的设置重开识别流；重开后把会话里记着的「醒着还是睡着 / 正在播放」告诉新的流。会话结束时返回 nil。
+// reopenStream 按打开时的设置重开识别流；重开后把会话里记着的「醒着还是睡着 / 正在播放」告诉新的流。
+// 会话结束、或者设置被拒（ErrStreamRejected：不再重开，把同一个错误码告诉终端）时返回 nil。
 // 断开超过 LostNoticeAfter 时提示终端一次「听不见了」，重开后再提示一次「恢复了」。
 func (s *Session) reopenStream() RecognizerStream {
 	select {
@@ -267,6 +295,8 @@ func (s *Session) reopenStream() RecognizerStream {
 		WithBackoff(timing.Delay, timing.MaxDelay).
 		WithJitterFactor(0.1).
 		WithMaxRetries(-1).
+		// 设置被拒：再连多少次都一样
+		AbortOnErrors(ErrStreamRejected).
 		OnRetryScheduled(func(event failsafe.ExecutionScheduledEvent[RecognizerStream]) { // 失败的当下就记（OnRetry 要等完间隔才调用）
 			s.logger.Warn("重开识别流失败", "attempt", event.Attempts(), "retry_in", event.Delay.Round(time.Millisecond), "err", event.LastError())
 			if !lostNotified && time.Since(lostAt) >= timing.LostNoticeAfter {
@@ -276,11 +306,16 @@ func (s *Session) reopenStream() RecognizerStream {
 			}
 		}).Build()
 	stream, err := failsafe.With(policy).WithContext(s.lifetime).Get(func() (RecognizerStream, error) {
-		ctx, cancel := context.WithTimeout(s.lifetime, streamOpenTimeout)
+		ctx, cancel := context.WithTimeout(s.lifetime, timing.OpenTimeout)
 		defer cancel()
 		return s.parts.Streaming.OpenStream(ctx, config)
 	})
-	if err != nil { // 只有会话结束才会走到这里（一直重试）
+	if errors.Is(err, ErrStreamRejected) && s.lifetime.Err() == nil {
+		s.emit(realtimeproto.ErrorEventFor("", err)) // 只这一次：之后不再重开，也就不会再报
+		s.streamRefused(err, lostNotified)
+		return nil
+	}
+	if err != nil { // 会话结束了（其余的错误一直重试）
 		return nil
 	}
 	s.mu.Lock()

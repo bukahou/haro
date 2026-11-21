@@ -120,6 +120,13 @@ func (HaroMCPMessage) clientEvent()           {}
 
 // ——— 服务端 → 终端 ———
 
+// SessionUpdated 表示对端接受了 session.update，Session 是接受之后的设置（照 Realtime 的 session.updated）。
+// 转写会话里 haro-asr 接受第一条 session.update 后先发它，之后才处理音频；不接受时改发带码的 Error 并断开。
+// 对话会话现在不发它。
+type SessionUpdated struct {
+	Session SessionUpdate
+}
+
 // HaroWakeWordDetected 表示听到了唤醒词，语音前端已进入唤醒状态（haro 扩展）。
 type HaroWakeWordDetected struct {
 	Keyword string
@@ -145,7 +152,8 @@ type HaroNotice struct {
 const (
 	// NoticeResearchDone：后台调查结束了（查完、没查完或失败）。
 	NoticeResearchDone = "research_done"
-	// NoticeTranscriptionLost：服务端和语音识别之间断开了一阵还没重开，这期间说的话听不见。
+	// NoticeTranscriptionLost：服务端和语音识别之间断开了一阵还没重开，这期间说的话听不见；
+	// 或者语音识别拒绝了识别流的设置（不再重开，改好配置之前一直听不见）。
 	NoticeTranscriptionLost = "transcription_lost"
 	// NoticeTranscriptionRestored：语音识别重开了（只在提示过断开之后才发）。
 	NoticeTranscriptionRestored = "transcription_restored"
@@ -212,6 +220,7 @@ type Error struct {
 	Message string    // 给人看的说明：措辞会变，不要拿来判断
 }
 
+func (SessionUpdated) Type() string                     { return typeSessionUpdated }
 func (HaroWakeWordDetected) Type() string               { return typeHaroWakeWordDetected }
 func (HaroWakeWordState) Type() string                  { return typeHaroWakeWordState }
 func (HaroNotice) Type() string                         { return typeHaroNotice }
@@ -225,6 +234,7 @@ func (ResponseCreated) Type() string                    { return typeResponseCre
 func (ResponseDone) Type() string                       { return typeResponseDone }
 func (Error) Type() string                              { return typeError }
 
+func (SessionUpdated) serverEvent()                     {}
 func (HaroWakeWordDetected) serverEvent()               {}
 func (HaroWakeWordState) serverEvent()                  {}
 func (HaroNotice) serverEvent()                         {}

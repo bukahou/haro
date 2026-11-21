@@ -26,7 +26,12 @@ func NewRealtimeTranscriptionClient(baseURL string) *RealtimeTranscriptionClient
 	return &RealtimeTranscriptionClient{BaseURL: baseURL}
 }
 
-// OpenStream 建立连接并发送 session.update。ctx 只用于建立连接；会话持续到 Close。
+// OpenStream 建立连接、发送 session.update，等到转写服务确认（session.updated）才返回。ctx 管建立连接和等确认；
+// 会话持续到 Close。
+//
+// 转写服务不接受这份设置时（回请求类错误码的 error，例如要 semantic_vad 而它没有说完判断模型）返回的错误包着
+// brain.ErrStreamRejected 和带那个码的 *realtimeproto.ProtocolError：原样再连也一样被拒，要改配置。
+// 它自己的问题（server_error 类）和连接出错返回普通的错误，由会话按断开重开的办法再试。
 func (c *RealtimeTranscriptionClient) OpenStream(ctx context.Context, config brain.StreamConfig) (brain.RecognizerStream, error) {
 	address, err := realtimeproto.TranscriptionURL(c.BaseURL)
 	if err != nil {
@@ -37,19 +42,50 @@ func (c *RealtimeTranscriptionClient) OpenStream(ctx context.Context, config bra
 		return nil, fmt.Errorf("连接转写服务 %s: %w", address, err)
 	}
 	conn.SetReadLimit(realtimeproto.MaxMessageBytes)
-	streamCtx, cancel := context.WithCancel(context.Background())
-	stream := &realtimeTranscriptionStream{conn: conn, cancel: cancel,
-		events: make(chan realtimeproto.ServerEvent, 32)}
+	stream := &realtimeTranscriptionStream{conn: conn, events: make(chan realtimeproto.ServerEvent, 32)}
 	turn := config.TurnDetection
 	if err := stream.send(ctx, realtimeproto.SessionUpdate{Kind: realtimeproto.SessionTranscription, TurnDetection: &turn,
 		WakeWord: config.WakeWord, InputFormat: realtimeproto.TranscriptionFormat}); err != nil {
-		cancel()
 		conn.CloseNow()
 		return nil, fmt.Errorf("发送 session.update: %w", err)
 	}
+	if err := stream.awaitSessionUpdated(ctx); err != nil {
+		conn.CloseNow()
+		return nil, err
+	}
+	streamCtx, cancel := context.WithCancel(context.Background())
+	stream.cancel = cancel
 	go stream.readEvents(streamCtx)
 	go stream.keepAlive(streamCtx, c.Heartbeat.OrDefault())
 	return stream, nil
+}
+
+// awaitSessionUpdated 读到转写服务对 session.update 的答复：session.updated = 接受；error = 不接受。
+// 不认识的事件跳过（别的实现可能先发 session.created）；确认之前发来别的事件算对端不守协议。
+func (s *realtimeTranscriptionStream) awaitSessionUpdated(ctx context.Context) error {
+	for {
+		_, data, err := s.conn.Read(ctx)
+		if err != nil {
+			return fmt.Errorf("等转写服务确认 session.update: %w", err)
+		}
+		event, err := realtimeproto.DecodeServerEvent(data)
+		if err != nil {
+			return fmt.Errorf("转写服务对 session.update 的答复解不开: %w", err)
+		}
+		switch reply := event.(type) {
+		case nil:
+		case realtimeproto.SessionUpdated:
+			return nil
+		case realtimeproto.Error:
+			refusal := &realtimeproto.ProtocolError{Code: reply.Code, Message: "转写服务: " + reply.Message}
+			if reply.Code.ServerSide() { // 它自己的问题（例如出错、忙不过来）：过一会儿再连可能就好了
+				return refusal
+			}
+			return fmt.Errorf("%w: %w", brain.ErrStreamRejected, refusal)
+		default:
+			return fmt.Errorf("转写服务在确认 session.update 之前发来了 %s", event.Type())
+		}
+	}
 }
 
 // keepAlive 定时 ping 转写服务；等不到回应就断开连接（读循环随之结束、事件通道关闭，会话当作断开去重开）。

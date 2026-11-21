@@ -18,7 +18,8 @@ import (
 // 两种会话共用这份定义：
 //   - 对话会话（session.type = realtime）：终端 ↔ haro-server，路径 ConversationPath；
 //   - 转写会话（session.type = transcription）：haro-server ↔ haro-asr，路径 TranscriptionPath、带 intent=TranscriptionIntent，
-//     只用其中一部分事件。
+//     只用其中一部分事件。haro-asr 接受第一条 session.update 后回 session.updated，之后才处理音频；
+//     不接受时回带码的 error 并断开（码是请求类的 = 这份设置它做不到，原样再连没用）。
 
 // ConversationPath 是对话会话的 WebSocket 路径（haro-server 提供）。
 const ConversationPath = "/v1/realtime"
@@ -75,6 +76,7 @@ const (
 	typeHaroTerminalDevices      = "haro.terminal.devices"
 	typeHaroMCPMessage           = "haro.mcp.message"
 
+	typeSessionUpdated         = "session.updated"
 	typeSpeechStarted          = "input_audio_buffer.speech_started"
 	typeSpeechStopped          = "input_audio_buffer.speech_stopped"
 	typeTranscriptionCompleted = "conversation.item.input_audio_transcription.completed"
@@ -148,6 +150,11 @@ type wireItemTruncate struct {
 }
 
 // ——— 服务端事件 ———
+
+type wireSessionUpdated struct {
+	Type    string      `json:"type"`
+	Session wireSession `json:"session" jsonschema:"对端接受之后的会话设置（和 session.update 的 session 同一形状）"`
+}
 
 type wireSpeechStarted struct {
 	Type         string `json:"type"`

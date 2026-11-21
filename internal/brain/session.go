@@ -236,6 +236,9 @@ func (s *Session) Send(ctx context.Context, event realtimeproto.ClientEvent) err
 	switch e := event.(type) {
 	case realtimeproto.SessionUpdate:
 		if e.TurnDetection != nil {
+			if err := e.TurnDetection.Validate(); err != nil { // 写错的取值在这里就拒绝，不等识别服务拒
+				return realtimeproto.ProtocolErrorf(realtimeproto.CodeInvalidEvent, "%v", err)
+			}
 			s.autoRespond = e.TurnDetection.CreateResponse == nil || *e.TurnDetection.CreateResponse
 		}
 		if e.TurnDetection != nil && s.streamConfig == nil {

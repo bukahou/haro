@@ -55,6 +55,8 @@ func TestClientWireShape(t *testing.T) {
 
 func TestServerEventsRoundTrip(t *testing.T) {
 	events := []ServerEvent{
+		SessionUpdated{Session: SessionUpdate{Kind: SessionTranscription, InputFormat: input16k, WakeWord: true,
+			TurnDetection: &TurnDetection{Type: "semantic_vad", Eagerness: "low"}}}, // haro-asr → 服务端：接受了设置
 		InputAudioBufferSpeechStarted{AudioStartMs: 1200, ItemID: "item_1"},
 		InputAudioBufferSpeechStopped{AudioEndMs: 3400, ItemID: "item_1"},
 		InputAudioTranscriptionCompleted{ItemID: "item_1", Transcript: "讲个冷笑话"},
@@ -107,6 +109,18 @@ func TestErrorWireShape(t *testing.T) {
 		_ = json.Unmarshal(data, &wire)
 		if wire.Error.Code != c.code || wire.Error.Type != c.errType {
 			t.Errorf("%+v 编码成 %s", c.event, data)
+		}
+	}
+}
+
+// 对端自己的问题（server_error 类）过一会儿再试可能就好；请求类的码原样再发也一样被拒。没有码的按 server_error。
+func TestErrorCodeServerSide(t *testing.T) {
+	for code, want := range map[ErrorCode]bool{
+		CodeServerError: true, CodeTranscriptionFailed: true, "": true,
+		CodeUnsupportedFeature: false, CodeInvalidEvent: false, CodeUnsupportedAudioFormat: false,
+	} {
+		if got := code.ServerSide(); got != want {
+			t.Errorf("%q.ServerSide() = %v，应为 %v", code, got, want)
 		}
 	}
 }

@@ -1,6 +1,7 @@
 package realtimeproto
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 )
@@ -30,6 +31,12 @@ func (c ErrorCode) errorType() string {
 	default:
 		return "invalid_request_error"
 	}
+}
+
+// ServerSide 表示错误出在对端自己（error.type = server_error）：同样的请求过一会儿再发可能就好了。
+// 其他码是请求本身的问题，原样再发也一样被拒。没有码的按 server_error（和编码时一样）。
+func (c ErrorCode) ServerSide() bool {
+	return cmp.Or(c, CodeServerError).errorType() == "server_error"
 }
 
 // ProtocolError 是带错误码的 error。处理事件时返回它，连接层把码原样发给对端；其他 error 一律按 server_error。

@@ -74,14 +74,20 @@ func handleRealtimeTranscription(w http.ResponseWriter, r *http.Request, deps De
 	ctx := r.Context()
 
 	session, err := startTranscriptionSession(ctx, conn, deps)
-	if err != nil {
-		_ = writeEvent(ctx, conn, realtimeproto.ErrorEventFor("", err))
+	if err != nil { // 不接受这份设置（或者没开起来）：回带码的 error 再断开，对端据码判断要不要再连
+		refusal := realtimeproto.ErrorEventFor("", err)
+		deps.Logger.Warn("转写会话没有开始", "code", refusal.Code, "err", err)
+		_ = writeEvent(ctx, conn, refusal)
 		conn.Close(websocket.StatusPolicyViolation, "bad session.update")
 		return
 	}
 	defer session.vad.detector.Close()
 	defer session.wake.close()
 	turn := session.turnDetection
+	if err := writeEvent(ctx, conn, realtimeproto.SessionUpdated{Session: session.accepted()}); err != nil {
+		deps.Logger.Warn("转写会话：确认设置的 session.updated 没发出去", "err", err)
+		return
+	}
 	deps.Logger.Info("转写会话开始", "type", turn.Type, "silence_ms", turn.SilenceDurationMs,
 		"eagerness", turn.Eagerness, "prefix_ms", turn.PrefixPaddingMs, "threshold", turn.Threshold,
 		"wake_word", session.wake.enabled)
@@ -187,6 +193,13 @@ func startTranscriptionSession(ctx context.Context, conn *websocket.Conn, deps D
 	}
 	session.vad.detector = detector
 	return session, nil
+}
+
+// accepted 是这个会话接受之后的设置（session.updated 里回给对端）。
+func (s *transcriptionSession) accepted() realtimeproto.SessionUpdate {
+	turn := s.turnDetection
+	return realtimeproto.SessionUpdate{Kind: realtimeproto.SessionTranscription, TurnDetection: &turn,
+		WakeWord: s.wake.enabled, InputFormat: realtimeproto.TranscriptionFormat}
 }
 
 func (s *transcriptionSession) run(ctx context.Context) error {
