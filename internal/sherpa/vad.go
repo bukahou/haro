@@ -3,7 +3,7 @@ package sherpa
 import (
 	"errors"
 	"fmt"
-	"os"
+	"time"
 
 	sherpaonnx "github.com/k2-fsa/sherpa-onnx-go/v2/sherpa_onnx"
 
@@ -11,44 +11,53 @@ import (
 	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
+// sileroWindowSize 是 Silero VAD 在 16 kHz 下的固定窗口（采样点，模型本身的要求）。
+const sileroWindowSize = 512
+
+// vadBufferPerMaxSpeech：VAD 内部的采样缓冲开成最长语音段的几倍。要装得下正在切的那一段（超过最长语音段之后
+// 还会再长一点才切开）。定值：3 倍，最长语音段 20 s 时是 60 s
+const vadBufferPerMaxSpeech = 3
+
 // SileroDetector 是 sherpa-onnx 的 Silero VAD，一个转写会话一个实例。
 type SileroDetector struct {
 	vad *sherpaonnx.VoiceActivityDetector
 }
 
-// NewSileroDetectorFactory 返回按会话 turn_detection 创建 VAD 的工厂。
+// NewSileroDetectorFactory 返回按会话参数创建 VAD 的工厂（参数来自 asrserver.Timing 和会话的 turn_detection）。
 func NewSileroDetectorFactory(modelPath string) (asrserver.VoiceDetectorFactory, error) {
-	if _, err := os.Stat(modelPath); err != nil {
+	if err := requireFiles(modelPath); err != nil {
 		return nil, fmt.Errorf("VAD 模型不可用: %w", err)
 	}
-	return func(turn realtimeproto.TurnDetection) (asrserver.VoiceDetector, error) {
-		threshold := turn.Threshold
-		if threshold <= 0 {
-			threshold = 0.5
-		}
-		silence := turn.SilenceDurationMs
-		if silence <= 0 {
-			silence = 700
-		}
-		config := sherpaonnx.VadModelConfig{
-			SileroVad: sherpaonnx.SileroVadModelConfig{
-				Model:              modelPath,
-				Threshold:          float32(threshold),
-				MinSilenceDuration: float32(silence) / 1000,
-				MinSpeechDuration:  0.25, // 短于 0.25 秒的声音（咳嗽、碰桌子）不算说话
-				WindowSize:         512,  // Silero 在 16kHz 下的固定窗口
-				MaxSpeechDuration:  20,   // 一口气说超过 20 秒就强制切段
-			},
-			SampleRate: realtimeproto.TranscriptionSampleRate,
-			NumThreads: 1,
-			Provider:   "cpu",
-		}
-		vad := sherpaonnx.NewVoiceActivityDetector(&config, 60)
+	return func(detectorConfig asrserver.VoiceDetectorConfig) (asrserver.VoiceDetector, error) {
+		config := sileroConfig(modelPath, detectorConfig)
+		vad := sherpaonnx.NewVoiceActivityDetector(&config, float32(vadBuffer(detectorConfig).Seconds()))
 		if vad == nil {
 			return nil, errors.New("sherpa-onnx 创建 VAD 失败")
 		}
 		return &SileroDetector{vad: vad}, nil
 	}, nil
+}
+
+// sileroConfig 把一个会话的 VAD 参数换成 sherpa-onnx 的配置。
+func sileroConfig(modelPath string, config asrserver.VoiceDetectorConfig) sherpaonnx.VadModelConfig {
+	return sherpaonnx.VadModelConfig{
+		SileroVad: sherpaonnx.SileroVadModelConfig{
+			Model:              modelPath,
+			Threshold:          float32(config.Threshold),
+			MinSilenceDuration: float32(config.MinSilence.Seconds()),
+			MinSpeechDuration:  float32(config.MinSpeech.Seconds()),
+			WindowSize:         sileroWindowSize,
+			MaxSpeechDuration:  float32(config.MaxSpeech.Seconds()),
+		},
+		SampleRate: realtimeproto.TranscriptionSampleRate,
+		NumThreads: 1,
+		Provider:   "cpu",
+	}
+}
+
+// vadBuffer 是 VAD 内部采样缓冲的大小。
+func vadBuffer(config asrserver.VoiceDetectorConfig) time.Duration {
+	return vadBufferPerMaxSpeech * config.MaxSpeech
 }
 
 // AcceptWaveform 喂入 16kHz 单声道采样。

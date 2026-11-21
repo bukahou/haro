@@ -27,8 +27,16 @@ type SpeechSegment struct {
 	SampleCount int
 }
 
-// VoiceDetectorFactory 按会话的 turn_detection 配置创建 VAD（SilenceDurationMs 即 VAD 的最短静音）。
-type VoiceDetectorFactory func(turnDetection realtimeproto.TurnDetection) (VoiceDetector, error)
+// VoiceDetectorConfig 是创建一个会话的 VAD 用的参数（由会话的 turn_detection 和 Timing 算出，见 Timing.voiceDetectorConfig）。
+type VoiceDetectorConfig struct {
+	Threshold  float64       // 语音概率到这么高算在说话（0–1）
+	MinSilence time.Duration // 静音这么久，一段语音才算结束
+	MinSpeech  time.Duration // 短于这么长的声音不算说话
+	MaxSpeech  time.Duration // 一段说到这么长时，VAD 设法在下一个短停顿处切开（软上限：一段可能略长）
+}
+
+// VoiceDetectorFactory 按一个会话的参数创建 VAD。
+type VoiceDetectorFactory func(config VoiceDetectorConfig) (VoiceDetector, error)
 
 // KeywordSpotter 是一个会话专用的唤醒词识别流（有状态）。
 type KeywordSpotter interface {
@@ -169,7 +177,7 @@ func startTranscriptionSession(ctx context.Context, conn *websocket.Conn, deps D
 		}
 		session.wake = wakeGate{enabled: true, spotter: spotter}
 	}
-	detector, err := deps.NewVoiceDetector(vadConfig)
+	detector, err := deps.NewVoiceDetector(timing.voiceDetectorConfig(vadConfig))
 	if err != nil {
 		session.wake.close()
 		return nil, fmt.Errorf("创建 VAD: %w", err)
@@ -386,6 +394,12 @@ func (s *transcriptionSession) handleSegment(ctx context.Context, segment Speech
 	if !s.turn.semantic {
 		return s.finishUtterance(ctx)
 	}
+	// 并到上限就不再等接着说：一句话不能无限长，否则保留的音频装不下它的开头
+	if length := s.current.endSample - s.current.startSample; length >= samplesIn(s.timing.MergeLimit) {
+		s.deps.Logger.Info("这句话并到了上限，不再等接着说，按说完处理", "item", s.current.itemID,
+			"length_ms", length/samplesPerMs, "merge_limit", s.timing.MergeLimit)
+		return s.finishUtterance(ctx)
+	}
 
 	// semantic_vad：把这句话（含刚才的短暂静音）交给模型判断
 	started := time.Now()
@@ -415,6 +429,10 @@ func (s *transcriptionSession) finishUtterance(ctx context.Context) error {
 	audio := realtimeproto.PCMAudio{
 		Format: realtimeproto.TranscriptionFormat,
 		Data:   s.timeline.slice(s.echo.paddedStart(current.startSample, s.turnDetection.PrefixPaddingMs), current.endSample),
+	}
+	if lost := s.timeline.lostFrom(current.startSample); lost > 0 { // History 装不下这句话：开头已经丢了，照样识别剩下的
+		s.deps.Logger.Warn("这句话的开头已经不在保留的音频里，截掉了", "item", current.itemID, "lost_ms", lost/samplesPerMs,
+			"length_ms", (current.endSample-current.startSample)/samplesPerMs, "history", s.timing.History)
 	}
 	started := time.Now()
 	transcript, err := s.deps.Transcriber.Transcribe(ctx, audio)

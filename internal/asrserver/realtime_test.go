@@ -82,8 +82,16 @@ func (l *lengthTranscriber) Transcribe(_ context.Context, audio realtimeproto.PC
 
 func dialRealtime(t *testing.T, factory VoiceDetectorFactory, transcriber Transcriber, turnDetector TurnDetector) (*websocket.Conn, context.Context) {
 	t.Helper()
-	server := httptest.NewServer(NewHandler(Dependencies{Transcriber: transcriber, NewVoiceDetector: factory,
-		TurnDetector: turnDetector, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}))
+	return dialRealtimeWith(t, Dependencies{Transcriber: transcriber, NewVoiceDetector: factory, TurnDetector: turnDetector})
+}
+
+// dialRealtimeWith 用给定的依赖起一个转写服务并连上（没给 Logger 时丢掉日志）。
+func dialRealtimeWith(t *testing.T, deps Dependencies) (*websocket.Conn, context.Context) {
+	t.Helper()
+	if deps.Logger == nil {
+		deps.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	}
+	server := httptest.NewServer(NewHandler(deps))
 	t.Cleanup(server.Close)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	t.Cleanup(cancel)
@@ -96,7 +104,7 @@ func dialRealtime(t *testing.T, factory VoiceDetectorFactory, transcriber Transc
 }
 
 func TestRealtimeTranscriptionSession(t *testing.T) {
-	factory := func(realtimeproto.TurnDetection) (VoiceDetector, error) {
+	factory := func(VoiceDetectorConfig) (VoiceDetector, error) {
 		return &energyDetector{silenceSamples: 300 * 16}, nil // 300ms 静音算说完
 	}
 	transcriber := &lengthTranscriber{}
@@ -149,7 +157,7 @@ func TestRealtimeTranscriptionSession(t *testing.T) {
 }
 
 func TestRealtimeRejectsBadSessionUpdate(t *testing.T) {
-	factory := func(realtimeproto.TurnDetection) (VoiceDetector, error) { return &energyDetector{}, nil }
+	factory := func(VoiceDetectorConfig) (VoiceDetector, error) { return &energyDetector{}, nil }
 	conn, ctx := dialRealtime(t, factory, &lengthTranscriber{}, nil)
 	update := transcriptionUpdate(realtimeproto.TurnDetection{Type: "server_vad"}, false)
 	update.InputFormat = realtimeproto.AudioFormat{SampleRate: 24000, Channels: 1}
@@ -198,13 +206,17 @@ func (s *scriptedTurnDetector) EndOfTurnProbability([]float32) (float64, error) 
 	return probability, nil
 }
 
-// semanticFactory 让替身 VAD 按 session 传来的静音时长切段（semantic_vad 时应为 300ms，v3 D-2）。
+// semanticFactory 让替身 VAD 按会话的静音时长切段（semantic_vad 时应为 Timing.SemanticSilence），
+// 并核对最短 / 最长语音段来自 Timing。
 func semanticFactory(t *testing.T) VoiceDetectorFactory {
-	return func(turn realtimeproto.TurnDetection) (VoiceDetector, error) {
-		if want := int(DefaultTiming.SemanticSilence.Milliseconds()); turn.SilenceDurationMs != want {
-			t.Errorf("semantic_vad 时 VAD 静音应为 %dms，实际 %d", want, turn.SilenceDurationMs)
+	return func(config VoiceDetectorConfig) (VoiceDetector, error) {
+		if want := DefaultTiming.SemanticSilence; config.MinSilence != want {
+			t.Errorf("semantic_vad 时 VAD 静音应为 %v，实际 %v", want, config.MinSilence)
 		}
-		return &energyDetector{silenceSamples: turn.SilenceDurationMs * 16}, nil
+		if config.MinSpeech != DefaultTiming.VADMinSpeech || config.MaxSpeech != DefaultTiming.VADMaxSpeech {
+			t.Errorf("最短 / 最长语音段应来自 Timing：%+v", config)
+		}
+		return &energyDetector{silenceSamples: samplesIn(config.MinSilence)}, nil
 	}
 }
 
@@ -330,7 +342,7 @@ func dialWakeSession(t *testing.T, transcriber Transcriber, spotter *fakeSpotter
 func dialWakeSessionWith(t *testing.T, transcriber Transcriber, spotter *fakeSpotter, speakers *SpeakerCheck) (*websocket.Conn, context.Context) {
 	t.Helper()
 	server := httptest.NewServer(NewHandler(Dependencies{Transcriber: transcriber, Speakers: speakers,
-		NewVoiceDetector: func(realtimeproto.TurnDetection) (VoiceDetector, error) {
+		NewVoiceDetector: func(VoiceDetectorConfig) (VoiceDetector, error) {
 			return &energyDetector{silenceSamples: 300 * 16}, nil
 		},
 		NewKeywordSpotter: func() (KeywordSpotter, error) { return spotter, nil },
@@ -431,7 +443,7 @@ func TestWakeWordOnlyIsPassedThrough(t *testing.T) {
 }
 
 func TestWakeWordRequiresSpotter(t *testing.T) {
-	conn, ctx := dialRealtime(t, func(realtimeproto.TurnDetection) (VoiceDetector, error) { return &energyDetector{}, nil },
+	conn, ctx := dialRealtime(t, func(VoiceDetectorConfig) (VoiceDetector, error) { return &energyDetector{}, nil },
 		&lengthTranscriber{}, nil)
 	_ = writeClientEvent(ctx, conn, transcriptionUpdate(realtimeproto.TurnDetection{Type: "server_vad"}, true))
 	events := readEvents(t, ctx, conn, 1)
@@ -661,7 +673,7 @@ func (failingTranscriber) Transcribe(context.Context, realtimeproto.PCMAudio) (T
 
 // 识别失败：发带编号的 transcription.failed（和 speech_stopped 的编号一致），服务端据此结束等这句的回答。
 func TestRealtimeTranscriptionFailureNamesTheItem(t *testing.T) {
-	factory := func(realtimeproto.TurnDetection) (VoiceDetector, error) {
+	factory := func(VoiceDetectorConfig) (VoiceDetector, error) {
 		return &energyDetector{silenceSamples: 300 * 16}, nil
 	}
 	conn, ctx := dialRealtime(t, factory, failingTranscriber{}, nil)

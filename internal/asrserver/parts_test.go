@@ -1,12 +1,14 @@
 package asrserver
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
 	"io"
 	"log/slog"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -24,21 +26,39 @@ func pcmOf(n int, value int16) []byte {
 	return pcm
 }
 
-// 时间轴：累计采样点一直往前走；只保留最近 historySeconds 秒，取超出范围的部分时自动截掉。
-func TestAudioTimelineKeepsRecentHistory(t *testing.T) {
-	timeline := audioTimeline{keep: samplesIn(DefaultTiming.History)}
-	historySeconds := int(DefaultTiming.History.Seconds())
-	second := realtimeproto.TranscriptionSampleRate
-	samples := timeline.append(pcmOf(second, 16384))
-	if timeline.now() != second || len(samples) != second || samples[0] != 0.5 {
-		t.Fatalf("一秒之后：now=%d，采样 %d 个、第一个 %v", timeline.now(), len(samples), samples[0])
+// countingPCM 是从第 from 个采样点起的 n 个采样点，每个的值是它在时间轴上的位置（对 30000 取余），用来核对取出来的是哪一段。
+func countingPCM(from, n int) []byte {
+	pcm := make([]byte, 2*n)
+	for i := range n {
+		binary.LittleEndian.PutUint16(pcm[2*i:], uint16(int16((from+i)%30000)))
 	}
-	for range historySeconds + 1 {
-		timeline.append(pcmOf(second, 0))
+	return pcm
+}
+
+// 时间轴：累计采样点一直往前走；至少保留最近 keep 个采样点（攒到 1.5 倍才丢一次），取出来的位置和内容对得上，
+// 取超出范围的部分时自动截掉，并能说出开头丢了多少。
+func TestAudioTimelineKeepsRecentHistory(t *testing.T) {
+	const keep, chunk = 10000, 320
+	timeline := audioTimeline{keep: keep}
+	samples := timeline.append(pcmOf(chunk, 16384))
+	if timeline.now() != chunk || len(samples) != chunk || samples[0] != 0.5 {
+		t.Fatalf("第一块之后：now=%d，采样 %d 个、第一个 %v", timeline.now(), len(samples), samples[0])
+	}
+	for timeline.now() < 5*keep {
+		timeline.append(countingPCM(timeline.now(), chunk))
+		if kept := len(timeline.pcm) / 2; kept < min(keep, timeline.now()) || kept > keep+keep/2 {
+			t.Fatalf("now=%d：保留了 %d 个采样点，应在 %d 到 %d 之间", timeline.now(), kept, keep, keep+keep/2)
+		}
 	}
 	now := timeline.now()
-	if got := len(timeline.slice(0, now)) / 2; got != historySeconds*second {
-		t.Errorf("只保留最近 %d 秒：取到 %d 个采样点", historySeconds, got)
+	if got := timeline.slice(now-keep, now); !bytes.Equal(got, countingPCM(now-keep, keep)) {
+		t.Error("最近 keep 个采样点应原样取得出来（位置和内容都对）")
+	}
+	if got := len(timeline.slice(0, now)) / 2; got != now-timeline.start || timeline.lostFrom(0) != timeline.start {
+		t.Errorf("从头取：只取得到保留的 %d 个，开头丢了 %d 个（lostFrom %d）", got, timeline.start, timeline.lostFrom(0))
+	}
+	if timeline.lostFrom(now-keep) != 0 {
+		t.Errorf("保留范围以内没有丢：%d", timeline.lostFrom(now-keep))
 	}
 	if got := len(timeline.slice(now-100, now+100)) / 2; got != 100 {
 		t.Errorf("取到「现在」为止：%d 个采样点", got)
@@ -175,6 +195,120 @@ func TestTimingDefaultsAndEagerness(t *testing.T) {
 	}
 }
 
+// 保留的音频要装得下可能合并出的最长句，不然长句的开头会被截掉。
+func TestDefaultHistoryCoversLongestUtterance(t *testing.T) {
+	if longest := DefaultTiming.longestUtterance(); DefaultTiming.History < longest {
+		t.Errorf("History %v 装不下可能合并出的最长句 %v", DefaultTiming.History, longest)
+	}
+}
+
+// VAD 的参数：门槛、静音时长按会话（没给时用 Timing 的默认值），最短 / 最长语音段按 Timing。
+func TestVoiceDetectorConfig(t *testing.T) {
+	timing := DefaultTiming
+	timing.VADMinSpeech, timing.VADMaxSpeech = 400*time.Millisecond, 12*time.Second
+	given := timing.voiceDetectorConfig(realtimeproto.TurnDetection{Threshold: 0.6, SilenceDurationMs: 500})
+	if want := (VoiceDetectorConfig{Threshold: 0.6, MinSilence: 500 * time.Millisecond, MinSpeech: 400 * time.Millisecond,
+		MaxSpeech: 12 * time.Second}); given != want {
+		t.Errorf("会话给了门槛、静音时长就用会话的：%+v，应为 %+v", given, want)
+	}
+	fallback := timing.voiceDetectorConfig(realtimeproto.TurnDetection{})
+	if fallback.Threshold != timing.VADThreshold || fallback.MinSilence != timing.VADSilence {
+		t.Errorf("会话没给时用 Timing 的默认值：%+v", fallback)
+	}
+}
+
+// recordingHandler 记下所有日志（测试按级别和属性名核对，不看日志的文字）。
+type recordingHandler struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func (h *recordingHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *recordingHandler) Handle(_ context.Context, record slog.Record) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.records = append(h.records, record.Clone())
+	return nil
+}
+func (h *recordingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *recordingHandler) WithGroup(string) slog.Handler      { return h }
+
+// attr 是 level 级别、带 key 属性的第一条日志里这个属性的值（没有时 ok = false）。
+func (h *recordingHandler) attr(level slog.Level, key string) (value slog.Value, ok bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, record := range h.records {
+		if record.Level != level {
+			continue
+		}
+		record.Attrs(func(attr slog.Attr) bool {
+			if attr.Key == key {
+				value, ok = attr.Value, true
+			}
+			return !ok
+		})
+		if ok {
+			return value, true
+		}
+	}
+	return slog.Value{}, false
+}
+
+// 一句话比保留的音频还长（History 设得比它短）：开头丢了要记一条警告、说出丢了多少，剩下的照样识别。
+func TestTruncatedUtteranceIsLogged(t *testing.T) {
+	timing := DefaultTiming
+	timing.History = 500 * time.Millisecond
+	logs := &recordingHandler{}
+	transcriber := &lengthTranscriber{}
+	factory := func(VoiceDetectorConfig) (VoiceDetector, error) {
+		return &energyDetector{silenceSamples: 300 * 16}, nil
+	}
+	conn, ctx := dialRealtimeWith(t, Dependencies{Transcriber: transcriber, Timing: timing, Logger: slog.New(logs),
+		NewVoiceDetector: factory})
+	turn := realtimeproto.TurnDetection{Type: "server_vad", SilenceDurationMs: 300}
+	if err := writeClientEvent(ctx, conn, transcriptionUpdate(turn, false)); err != nil {
+		t.Fatal(err)
+	}
+	sendPattern(t, ctx, conn, [2]int{200, 0}, [2]int{1500, 1}, [2]int{400, 0}) // 一句 1.5 s，只保留 0.5 s（最多 0.75 s）
+	if _, ok := readEvents(t, ctx, conn, 3)[2].(realtimeproto.InputAudioTranscriptionCompleted); !ok {
+		t.Fatal("剩下的部分照样识别")
+	}
+	if lost, ok := logs.attr(slog.LevelWarn, "lost_ms"); !ok || lost.Int64() < 500 {
+		t.Errorf("开头丢了应记警告并说出丢了多少：%v %v", lost, ok)
+	}
+	if got := time.Duration(transcriber.lastAudio.Load()); got >= 1500*time.Millisecond {
+		t.Errorf("保留不下的开头送不去识别：%v", got)
+	}
+}
+
+// semantic_vad 并到 MergeLimit 就不再等接着说：这一句马上交出去，不再问说完判断模型。
+func TestSemanticVADStopsMergingAtLimit(t *testing.T) {
+	timing := DefaultTiming
+	timing.MergeLimit = time.Second
+	turnDetector := &scriptedTurnDetector{probabilities: []float64{0.1}} // 一直判断「没说完」
+	transcriber := &lengthTranscriber{}
+	conn, ctx := dialRealtimeWith(t, Dependencies{Transcriber: transcriber, Timing: timing, TurnDetector: turnDetector,
+		NewVoiceDetector: semanticFactory(t)})
+	if err := writeClientEvent(ctx, conn, transcriptionUpdate(realtimeproto.TurnDetection{Type: "semantic_vad", Eagerness: "auto"}, false)); err != nil {
+		t.Fatal(err)
+	}
+	// 0.2s 静音 → 0.6s 说话 → 0.4s 停顿（没说完，等接着说）→ 0.6s 说话（并起来 1.6s，到了上限）→ 0.4s 静音
+	sendPattern(t, ctx, conn, [2]int{200, 0}, [2]int{600, 1}, [2]int{400, 0}, [2]int{600, 1}, [2]int{400, 0})
+	events := readEvents(t, ctx, conn, 3)
+	if stopped, ok := events[1].(realtimeproto.InputAudioBufferSpeechStopped); !ok || stopped.AudioEndMs < 1790 || stopped.AudioEndMs > 1810 {
+		t.Fatalf("并到上限应马上按说完处理（第二段结束处 1.8s）：%v", events)
+	}
+	if got := time.Duration(transcriber.lastAudio.Load()); got < 1590*time.Millisecond || got > 1610*time.Millisecond {
+		t.Errorf("识别的是并起来的整句（0.2s → 1.8s）：%v", got)
+	}
+	turnDetector.mu.Lock()
+	calls := turnDetector.calls
+	turnDetector.mu.Unlock()
+	if calls != 1 {
+		t.Errorf("到了上限不再问说完判断模型：调用了 %d 次，应为 1 次", calls)
+	}
+}
+
 // quietDetector 是从不报告在说话的 VAD（唤醒词响了、但 VAD 没把它当成一段话）。
 type quietDetector struct{}
 
@@ -188,7 +322,7 @@ func TestWakeOnlyWaitComesFromTiming(t *testing.T) {
 	timing := DefaultTiming
 	timing.WakeOnlyWait = 200 * time.Millisecond
 	server := httptest.NewServer(NewHandler(Dependencies{Transcriber: &fixedTranscriber{text: "哈罗哈罗。"}, Timing: timing,
-		NewVoiceDetector:  func(realtimeproto.TurnDetection) (VoiceDetector, error) { return quietDetector{}, nil },
+		NewVoiceDetector:  func(VoiceDetectorConfig) (VoiceDetector, error) { return quietDetector{}, nil },
 		NewKeywordSpotter: func() (KeywordSpotter, error) { return &fakeSpotter{}, nil },
 		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil))}))
 	t.Cleanup(server.Close)
