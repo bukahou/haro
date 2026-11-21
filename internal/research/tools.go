@@ -147,14 +147,20 @@ func (r *Runner) markReported(ids []int64) {
 	}
 }
 
+// boardUnreadableNote 是任务板这一轮没读出来时给模型的附注（不知道有没有查完的调查，不能当成没有）。
+const boardUnreadableNote = "后台调查的任务板这一轮没读出来（存储出错）：不知道有没有查完的调查，不用主动提；" +
+	"主人问起时照实说，可以用 " + researchStatusTool + " 再查一次。"
+
 // Brief 实现 brain.Briefer：任务板。在查的列出来；查完还没告诉的，让模型这一轮先用 research_status 取结论讲给主人
 // （结论不放在这里：取了、主人也听完了才标已汇报，见 status）；没完成的，原因短，直接附上，主人听完这一轮就算告诉了。
+// 读不出来时记警告，告诉模型这一轮不知道调查的情况。
 func (r *Runner) Brief(person string) brain.Briefing {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	board, err := r.store.Board(ctx, person)
 	if err != nil {
-		return brain.Briefing{}
+		r.logger.Warn("任务板没读出来：这一轮告诉模型不知道调查的情况", "person", person, "err", err)
+		return brain.Briefing{Lines: []string{boardUnreadableNote}}
 	}
 	var lines []string
 	var told []int64

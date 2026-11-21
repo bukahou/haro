@@ -182,7 +182,20 @@ func (r *Runner) Cancel(ctx context.Context, person string, id int64) (Task, err
 
 func (r *Runner) runTask(ctx context.Context, id int64) {
 	task, err := r.store.Get(ctx, id)
-	if err != nil || task.Status != StatusQueued { // 排队时被取消了
+	switch {
+	case errors.Is(err, ErrTaskNotFound):
+		r.logger.Warn("排队的调查在任务账本里找不到了：跳过", "id", id)
+		return
+	case err != nil:
+		if ctx.Err() != nil { // 服务端在关：下次启动时标成被中断
+			return
+		}
+		// 读不出来就查不了：记成失败（任务板上告诉主人），不让它一直「排队中」、占着名额
+		r.logger.Error("读不出排队的调查：记成失败", "id", id, "err", err)
+		r.finishFailed(ctx, id, "读不出这个调查任务："+err.Error())
+		return
+	case task.Status != StatusQueued: // 排队时被取消了（Cancel 已经记过）
+		r.logger.Info("排队时已经结束的调查：跳过", "id", id, "status", task.Status)
 		return
 	}
 	taskCtx, cancel := context.WithCancel(ctx)
@@ -195,8 +208,13 @@ func (r *Runner) runTask(ctx context.Context, id int64) {
 		delete(r.cancels, id)
 		r.mu.Unlock()
 	}()
-	if err := r.store.MarkRunning(ctx, id); err != nil {
-		r.logger.Warn("标记在查失败", "id", id, "err", err)
+	running, err := r.store.MarkRunning(ctx, id)
+	switch {
+	case err != nil: // 状态没改成在查（任务板会说还在排队），照样开查：Finish 对排队中的也认
+		r.logger.Warn("标记在查失败：照样开查", "id", id, "err", err)
+	case !running: // 读到任务之后、登记取消之前被取消了（Cancel 已经记过）：不开查，不白花调查的额度
+		r.logger.Info("开查之前被取消了", "id", id)
+		return
 	}
 	started := time.Now()
 	report := r.investigate(taskCtx, task.Question)
@@ -207,25 +225,53 @@ func (r *Runner) runTask(ctx context.Context, id int64) {
 	if ctx.Err() != nil { // 服务端在关：下次启动时标成被中断
 		return
 	}
-	finished, err := r.store.Finish(context.WithoutCancel(ctx), id, report.status, report.conclusion, report.sources, report.reason)
-	switch {
-	case err != nil:
-		r.logger.Warn("调查结果没存上", "id", id, "err", err)
-	case !finished: // 查完的同时主人取消了：以取消为准，不报查完
+	status := report.status
+	finished, err := r.store.Finish(context.WithoutCancel(ctx), id, status, report.conclusion, report.sources, report.reason)
+	if err != nil {
+		// 结论没存上就不报「查完了」（任务板上没有它）：改记成失败（只写原因，写得进的可能大些），记上了才通知，
+		// 主人能从任务板听到；也记不上时不通知（重启后标成被中断）
+		r.logger.Error("调查结果没存上：改记成失败", "id", id, "status", status, "err", err)
+		status = StatusFailed
+		if finished, err = r.store.Finish(context.WithoutCancel(ctx), id, status, "", nil, "调查结果没存上："+err.Error()); err != nil {
+			r.logger.Error("调查结果没存上，也没能记成失败：不通知", "id", id, "err", err)
+			return
+		}
+	}
+	if !finished { // 查完的同时主人取消了：以取消为准，不报查完
 		r.logger.Info("调查已取消（结果作废）", "id", id)
 		return
 	}
-	r.logger.Info("调查结束", "id", id, "status", report.status, "reason", report.reason, "rounds", report.rounds,
+	r.logger.Info("调查结束", "id", id, "status", status, "reason", report.reason, "rounds", report.rounds,
 		"searches", report.searches, "reads", report.reads, "gathered", report.gathered, "tokens", report.tokens,
 		"elapsed", time.Since(started).Round(time.Second))
+	r.notifyFinished(ctx, id)
+}
+
+// finishFailed 把还没开查的任务记成失败；记上了就通知（任务板上告诉主人）。
+func (r *Runner) finishFailed(ctx context.Context, id int64, reason string) {
+	finished, err := r.store.Finish(context.WithoutCancel(ctx), id, StatusFailed, "", nil, reason)
+	switch {
+	case err != nil:
+		r.logger.Error("调查也没能记成失败：不通知", "id", id, "err", err)
+	case finished:
+		r.notifyFinished(ctx, id)
+	}
+}
+
+// notifyFinished 把结束的任务（按账本里存下的样子）交给 OnFinished 的回调。
+func (r *Runner) notifyFinished(ctx context.Context, id int64) {
 	r.mu.Lock()
 	callback := r.finished
 	r.mu.Unlock()
-	if callback != nil {
-		if finished, err := r.store.Get(context.WithoutCancel(ctx), id); err == nil {
-			callback(finished)
-		}
+	if callback == nil {
+		return
 	}
+	task, err := r.store.Get(context.WithoutCancel(ctx), id)
+	if err != nil {
+		r.logger.Warn("调查结束了，但读不出这个任务：没通知终端", "id", id, "err", err)
+		return
+	}
+	callback(task)
 }
 
 // investigationReport 是一次调查的经过和结果。
