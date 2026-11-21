@@ -111,23 +111,18 @@ type Settings struct {
 	// takeover = 带画面的那次请求直接换它回答。都要 HARO_STRONG_LLM_USE 里有 vision
 	StrongLLMVisionMode string `env:"HARO_STRONG_LLM_VISION_MODE" envDefault:"expert"`
 
-	// 费用：用量账本与上限。价格、汇率都来自配置（云端价格会变，不写死在代码里）
-	UsageDB          string  `env:"HARO_USAGE_DB"`               // 用量账本（SQLite 文件）；空 = 只在内存里，重启清零
-	USDToYen         float64 `env:"HARO_USD_JPY"`                // 1 美元折多少日元；用到云端模型时必填
-	CloudLLMPriceIn  float64 `env:"HARO_CLOUD_LLM_PRICE_INPUT"`  // 云端模型每百万输入 token 的美元价；用到云端时必填
-	CloudLLMPriceOut float64 `env:"HARO_CLOUD_LLM_PRICE_OUTPUT"` // 同上，输出 token
-	// 提示词缓存（Claude）：读缓存 / 写缓存每百万 token 的美元价；不设 = 按普通输入价算（记多不记少）
-	CloudLLMPriceCacheRead  float64 `env:"HARO_CLOUD_LLM_PRICE_CACHE_READ"`
-	CloudLLMPriceCacheWrite float64 `env:"HARO_CLOUD_LLM_PRICE_CACHE_WRITE"`
-	// 更强的模型的单价（设了 HARO_STRONG_LLM_MODEL 时输入、输出必填）
-	StrongLLMPriceIn         float64 `env:"HARO_STRONG_LLM_PRICE_INPUT"`
-	StrongLLMPriceOut        float64 `env:"HARO_STRONG_LLM_PRICE_OUTPUT"`
-	StrongLLMPriceCacheRead  float64 `env:"HARO_STRONG_LLM_PRICE_CACHE_READ"`
-	StrongLLMPriceCacheWrite float64 `env:"HARO_STRONG_LLM_PRICE_CACHE_WRITE"`
-	ResearchDailyYen         float64 `env:"HARO_RESEARCH_DAILY_YEN" envDefault:"100"`  // 后台调查每天上限；0 = 不限
-	MonthlyYen               float64 `env:"HARO_MONTHLY_YEN"`                          // 每月总费用上限（大模型 + 搜索）；0 = 不限（未定）
-	SearchDailyCredits       int     `env:"HARO_SEARCH_DAILY_CREDITS" envDefault:"30"` // 搜索积分每天上限（封在 Tavily 免费额度内）；0 = 不限
-	SearchCreditUSD          float64 `env:"HARO_SEARCH_CREDIT_USD"`                    // 每个搜索积分的美元价；0 = 免费额度内
+	// 费用：用量账本与上限。汇率来自配置；云端模型的单价来自公共的模型价格目录（启动时拉取，见 pricecatalog）
+	UsageDB  string  `env:"HARO_USAGE_DB"` // 用量账本（SQLite 文件）；空 = 只在内存里，重启清零
+	USDToYen float64 `env:"HARO_USD_JPY"`  // 1 美元折多少日元；用到云端模型时必填
+	// 模型价格目录（models.dev 的格式）：地址、取哪一家厂商的价格（目录里的 provider，和云端接口对应）、
+	// 拉到的那份存在哪（下次拉不到时用；空 = 不存，拉不到就起不来）
+	ModelPricesURL      string  `env:"HARO_MODEL_PRICES_URL" envDefault:"https://models.dev/api.json"`
+	ModelPricesProvider string  `env:"HARO_MODEL_PRICES_PROVIDER" envDefault:"anthropic"`
+	ModelPricesCache    string  `env:"HARO_MODEL_PRICES_CACHE"`
+	ResearchDailyYen    float64 `env:"HARO_RESEARCH_DAILY_YEN" envDefault:"100"`  // 后台调查每天上限；0 = 不限
+	MonthlyYen          float64 `env:"HARO_MONTHLY_YEN"`                          // 每月总费用上限（大模型 + 搜索）；0 = 不限（未定）
+	SearchDailyCredits  int     `env:"HARO_SEARCH_DAILY_CREDITS" envDefault:"30"` // 搜索积分每天上限（封在 Tavily 免费额度内）；0 = 不限
+	SearchCreditUSD     float64 `env:"HARO_SEARCH_CREDIT_USD"`                    // 每个搜索积分的美元价；0 = 免费额度内
 
 	// 语音识别：haro-asr 单独运行（模型等配置见 ASRSettings），服务端只认它的地址
 	ASRURL string `env:"HARO_ASR_URL"` // 流式转写服务的根地址（协议照 OpenAI Realtime 的转写会话），例如 http://127.0.0.1:59126
@@ -310,8 +305,8 @@ func (settings Settings) validateBrain() error {
 			return fmt.Errorf("后台调查用云端模型（HARO_RESEARCH_LLM=cloud）时%w（或改成 local）", err)
 		}
 	}
-	if settings.UsesCloudLLM() && (settings.USDToYen <= 0 || settings.CloudLLMPriceIn <= 0 || settings.CloudLLMPriceOut <= 0) {
-		return fmt.Errorf("用到云端模型时必须设 HARO_USD_JPY、HARO_CLOUD_LLM_PRICE_INPUT、HARO_CLOUD_LLM_PRICE_OUTPUT（费用上限要靠它们折算，v5 R5）")
+	if settings.UsesCloudLLM() && (settings.USDToYen <= 0 || settings.ModelPricesURL == "" || settings.ModelPricesProvider == "") {
+		return fmt.Errorf("用到云端模型时必须设 HARO_USD_JPY、HARO_MODEL_PRICES_URL、HARO_MODEL_PRICES_PROVIDER（费用上限要靠汇率和单价折算，v5 R5）")
 	}
 	if err := settings.validateStrongLLM(); err != nil {
 		return err
@@ -483,8 +478,8 @@ func (s Settings) validateStrongLLM() error {
 	if s.CloudLLMAPI == CloudAPIAnthropic && !claudeEfforts[s.StrongLLMEffort] {
 		return fmt.Errorf("HARO_STRONG_LLM_EFFORT 只能是 low、medium 或 high，现在是 %q", s.StrongLLMEffort)
 	}
-	if s.USDToYen <= 0 || s.StrongLLMPriceIn <= 0 || s.StrongLLMPriceOut <= 0 {
-		return fmt.Errorf("设了 HARO_STRONG_LLM_MODEL 时必须设 HARO_USD_JPY、HARO_STRONG_LLM_PRICE_INPUT、HARO_STRONG_LLM_PRICE_OUTPUT（费用上限要靠它们折算）")
+	if s.USDToYen <= 0 {
+		return fmt.Errorf("设了 HARO_STRONG_LLM_MODEL 时必须设 HARO_USD_JPY（费用上限要靠它折算；单价从模型价格目录取）")
 	}
 	return nil
 }

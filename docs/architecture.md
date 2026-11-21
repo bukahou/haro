@@ -109,8 +109,13 @@ Open-Meteo 连不上或报错时，日本境内的地点改查日本气象厅网
 
 ### 费用（`internal/spending`）
 
-大模型和搜索按量计费时：每次调用都记账（token、搜索积分，按配置的单价与汇率折成本地货币），
+大模型和搜索按量计费时：每次调用都记账（token、搜索积分，按单价与汇率折成本地货币），
 按天、按月封顶。超过月度上限后改用本地模型；没有本地模型时直接告诉主人额度用完了。
+
+云端模型的单价来自公共的模型价格目录（`internal/pricecatalog`，默认 [models.dev](https://models.dev)，`HARO_MODEL_PRICES_*`）：
+服务端启动时拉取（含缓存读写的单价、按上下文大小分的档），拉到的那一家存一份到 `HARO_MODEL_PRICES_CACHE`，
+下次拉不到时用它；都没有、或目录里没有用到的模型时服务端起不来（费用上限要靠单价折算，不按 0 记）。
+汇率（`HARO_USD_JPY`）和搜索积分的价格目录里没有，照旧在配置里写。
 
 ## 终端（`internal/terminal` 与 `internal/platform`）
 
@@ -135,7 +140,7 @@ systemd 用户服务从 `~/.config/haro/haro.env` 读取（`deploy/systemd/`）�
 
 - `anthropic`（默认）：Claude API（官方 Go SDK `anthropic-sdk-go`）。`HARO_CLOUD_LLM_MODEL` 例如 `claude-haiku-5-5`；
   思考关掉求快，回答力度用 `HARO_CLOUD_LLM_EFFORT`（聊天、摘要）/ `HARO_RESEARCH_EFFORT`（后台调查）；
-  开着提示词缓存，缓存读写的单价用 `HARO_CLOUD_LLM_PRICE_CACHE_READ` / `_WRITE` 记账（不设就按普通输入价，记多不记少）。
+  开着提示词缓存，缓存读写按模型价格目录里的单价分开记账。
   凭证：`HARO_ANTHROPIC_API_KEY`；不填时交给 SDK 自己找——在 Kubernetes 里可以用 Workload Identity Federation
   （服务账号令牌换短期令牌，不放长期密钥），配法见 Anthropic 文档「Use WIF with Kubernetes」。
   不要用 `ANTHROPIC_API_KEY` 放 haro 的 key：开发机上 Claude Code 也读这个变量。
@@ -157,7 +162,7 @@ systemd 用户服务从 `~/.config/haro/haro.env` 读取（`deploy/systemd/`）�
   （实测：只写「纠正时调用」时，Haiku 觉得自己没错就会争辩、不交）
 - `research`：后台调查由云端模型搜索、读网页，搜完把资料交给它写结论（不给工具）
 
-直接换它回答时，它出错或等太久（`HARO_STRONG_LLM_TIMEOUT`）由云端模型接手。单价 `HARO_STRONG_LLM_PRICE_*` 必填（月度上限要靠它折算）。
+直接换它回答时，它出错或等太久（`HARO_STRONG_LLM_TIMEOUT`）由云端模型接手。单价同样来自模型价格目录（目录里没有它就起不来）。
 Claude 各模型「关掉思考」的写法不同：`HARO_CLOUD_LLM_THINKING` / `HARO_STRONG_LLM_THINKING`，Haiku 5.5 用 `disabled`，
 Sonnet 5.5 只认 `between_tools`（两次工具调用之间会返回几句进度说明，haro 不回传；实测后续请求照样被接受）。
 

@@ -29,6 +29,7 @@ import (
 	"github.com/bukahou/haro/internal/llm"
 	"github.com/bukahou/haro/internal/notes"
 	"github.com/bukahou/haro/internal/persona"
+	"github.com/bukahou/haro/internal/pricecatalog"
 	"github.com/bukahou/haro/internal/profile"
 	"github.com/bukahou/haro/internal/readiness"
 	"github.com/bukahou/haro/internal/realtimeproto"
@@ -110,6 +111,10 @@ func run(logger *slog.Logger) error {
 		MonthlyYen: settings.MonthlyYen, SearchDailyCredits: settings.SearchDailyCredits, WarnRatio: 0.8}, logger)
 	logger.Info("费用上限", "research_daily_yen", settings.ResearchDailyYen, "monthly_yen", settings.MonthlyYen,
 		"search_daily_credits", settings.SearchDailyCredits)
+	pricing, err := loadPricing(ctx, settings, httpClient, logger)
+	if err != nil {
+		return err
+	}
 	briefers := []brain.Briefer{brain.ClockBriefer{}, guard} // 每轮补充给模型的即时情况：现在几号几点、额度提醒、任务板
 	notices := brain.NewNoticeHub()                          // 给终端的提示（后台调查查完了让终端响一声）
 	var toolbox brain.Toolbox
@@ -134,12 +139,12 @@ func run(logger *slog.Logger) error {
 		}
 		if searcher := connectWebSearch(settings, httpClient, logger); searcher != nil {
 			defer searcher.Close()
-			meter := spending.NewSearchMeter(guard, ledger, pricingOf(settings), spending.PurposeSearch, "tavily")
+			meter := spending.NewSearchMeter(guard, ledger, pricing, spending.PurposeSearch, "tavily")
 			builtins = append(builtins, tools.WebSearchTools(searcher, meter, logger))
 			expertSearch = func(ctx context.Context, query string) (string, error) {
 				return tools.QuickSearch(ctx, searcher, meter, query, logger)
 			}
-			runner, closeRunner, err := startResearch(ctx, settings, claude, modelHTTP, searcher, ledger, guard, logger)
+			runner, closeRunner, err := startResearch(ctx, settings, claude, modelHTTP, pricing, searcher, ledger, guard, logger)
 			if err != nil {
 				return err
 			}
@@ -163,7 +168,7 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	model := buildChatModel(settings, claude, modelHTTP, ledger, guard, spending.PurposeChat, logger)
+	model := buildChatModel(settings, claude, modelHTTP, pricing, ledger, guard, spending.PurposeChat, logger)
 	logger.Info("预热模型（本地第一次可能要几十秒；云端不用预热）", "model", activeModel(settings))
 	if err := brain.WarmUp(ctx, model); err != nil {
 		logger.Warn("模型预热失败，第一轮对话会比较慢", "err", err)
@@ -176,7 +181,7 @@ func run(logger *slog.Logger) error {
 		},
 	}
 	if settings.VisionExpert() {
-		components.FrameExpert = newVisionExpert(settings, claude, modelHTTP, ledger, guard, expertSearch, logger)
+		components.FrameExpert = newVisionExpert(settings, claude, modelHTTP, pricing, ledger, guard, expertSearch, logger)
 	}
 	// 对话簿所有终端连接共用：换终端、重连、服务端重启都接得上
 	var conversationStore brain.ConversationStore
@@ -205,7 +210,7 @@ func run(logger *slog.Logger) error {
 		components.Profiles = profiles
 	}
 	if settings.ConversationSummary { // 滚动摘要：和主对话同一套模型，按 summary 用途记账
-		components.Conversations.SummarizeWith(buildChatModel(settings, claude, modelHTTP, ledger, guard, spending.PurposeSummary,
+		components.Conversations.SummarizeWith(buildChatModel(settings, claude, modelHTTP, pricing, ledger, guard, spending.PurposeSummary,
 			logger.With("model_use", "summary")))
 	}
 	if settings.WakeArbitration > 0 { // 多台终端同时听到唤醒词：只让最合适的那台回答
@@ -298,9 +303,8 @@ func readinessChecks(settings config.Settings, claude *llm.ClaudeAPI, ledger spe
 //   - local：本地 ollama 为主、云端退路（本地模型那台机器离线时自动改用云端）
 //
 // purpose 是记账用途：主对话（chat）与滚动摘要（summary，R4）各建一套，费用分开记。
-func buildChatModel(settings config.Settings, claude *llm.ClaudeAPI, client *http.Client, ledger spending.Ledger, guard *spending.Guard,
+func buildChatModel(settings config.Settings, claude *llm.ClaudeAPI, client *http.Client, pricing spending.Pricing, ledger spending.Ledger, guard *spending.Guard,
 	purpose spending.Purpose, logger *slog.Logger) brain.ChatModel {
-	pricing := pricingOf(settings)
 	maxTokens := settings.CloudMaxTokens
 	if purpose == spending.PurposeSummary && maxTokens < summaryMaxTokens {
 		maxTokens = summaryMaxTokens // 摘要最长 300 字，聊天的输出上限可能不够
@@ -376,12 +380,12 @@ func routeToStrong(settings config.Settings, claude *llm.ClaudeAPI, client *http
 
 // newVisionExpert 创建看画面的幕后专家（HARO_STRONG_LLM_VISION_MODE=expert）：用更强的模型，按 vision 用途记账、查月度额度。
 // 它出错或等太久时，brain 退回把画面直接交给前台模型（不经选模型的包装层，前台照常是云端模型）。
-func newVisionExpert(settings config.Settings, claude *llm.ClaudeAPI, client *http.Client, ledger spending.Ledger, guard *spending.Guard,
+func newVisionExpert(settings config.Settings, claude *llm.ClaudeAPI, client *http.Client, pricing spending.Pricing, ledger spending.Ledger, guard *spending.Guard,
 	search vision.Search, logger *slog.Logger) brain.FrameExpert {
 	model := spending.NewMeteredChatModel(newCloudChatModel(settings, claude, cloudModelSpec{model: settings.StrongLLMModel,
 		maxTokens: settings.CloudMaxTokens, effort: settings.StrongLLMEffort, thinking: settings.StrongLLMThinking,
 		firstTokenTimeout: settings.StrongLLMTimeout, requestTimeout: settings.RequestTimeout}, client),
-		settings.StrongLLMModel, spending.PurposeVision, pricingOf(settings), ledger, logger)
+		settings.StrongLLMModel, spending.PurposeVision, pricing, ledger, logger)
 	logger.Info("看画面：交给幕后专家，判断由前台转述", "model", settings.StrongLLMModel, "search", search != nil)
 	return vision.NewExpert(spending.NewBudgetedChatModel(model, nil, guard, logger), settings.StrongLLMModel, search, logger)
 }
@@ -417,17 +421,47 @@ func newCloudChatModel(settings config.Settings, claude *llm.ClaudeAPI, spec clo
 		MaxRetries: spec.retries, FirstTokenTimeout: spec.firstTokenTimeout, RequestTimeout: spec.requestTimeout})
 }
 
-// pricingOf 是把用量折成日元的单价（都来自配置）：云端模型、设了的话更强的模型；本地模型标成不花钱。
-func pricingOf(settings config.Settings) spending.Pricing {
-	models := map[string]spending.TokenPrice{settings.Model: {Free: true}, settings.CloudLLMModel: {
-		InputUSDPerMillion: settings.CloudLLMPriceIn, OutputUSDPerMillion: settings.CloudLLMPriceOut,
-		CacheReadUSDPerMillion: settings.CloudLLMPriceCacheRead, CacheWriteUSDPerMillion: settings.CloudLLMPriceCacheWrite}}
-	if settings.StrongLLMModel != "" {
-		models[settings.StrongLLMModel] = spending.TokenPrice{
-			InputUSDPerMillion: settings.StrongLLMPriceIn, OutputUSDPerMillion: settings.StrongLLMPriceOut,
-			CacheReadUSDPerMillion: settings.StrongLLMPriceCacheRead, CacheWriteUSDPerMillion: settings.StrongLLMPriceCacheWrite}
+// loadPricing 是把用量折成日元的单价表：云端模型（和设了的更强的模型）的单价从模型价格目录取（启动时拉取，拉不到用上次存的；
+// 都没有、或目录里没有用到的模型就起不来 —— 费用上限要靠单价折算），本地模型标成不花钱；汇率、搜索积分的价格来自配置。
+// 不用云端模型时不拉目录。
+func loadPricing(ctx context.Context, settings config.Settings, client *http.Client, logger *slog.Logger) (spending.Pricing, error) {
+	pricing := spending.Pricing{USDToYen: settings.USDToYen, SearchCreditUSD: settings.SearchCreditUSD,
+		Models: map[string]spending.TokenPrice{settings.Model: {Free: true}}}
+	var cloudModels []string
+	if settings.UsesCloudLLM() {
+		cloudModels = append(cloudModels, settings.CloudLLMModel)
 	}
-	return spending.Pricing{USDToYen: settings.USDToYen, SearchCreditUSD: settings.SearchCreditUSD, Models: models}
+	if settings.StrongLLMModel != "" {
+		cloudModels = append(cloudModels, settings.StrongLLMModel)
+	}
+	if len(cloudModels) == 0 {
+		return pricing, nil
+	}
+	catalog, report, err := pricecatalog.Load(ctx, client, settings.ModelPricesURL, settings.ModelPricesProvider, settings.ModelPricesCache)
+	if err != nil {
+		return pricing, fmt.Errorf("模型单价: %w", err)
+	}
+	switch {
+	case report.FromCache:
+		logger.Warn("模型价格目录拉不到：用上次存的那份", "err", report.FetchErr, "fetched_at", catalog.FetchedAt,
+			"cache", settings.ModelPricesCache)
+	case report.SaveErr != nil:
+		logger.Warn("模型价格目录拉到了，但没存到本地（下次拉不到时就没有可退的）", "err", report.SaveErr,
+			"cache", settings.ModelPricesCache)
+	case settings.ModelPricesCache == "":
+		logger.Warn("没设 HARO_MODEL_PRICES_CACHE：模型价格目录拉到的不存，下次拉不到时服务端起不来")
+	}
+	for _, model := range cloudModels {
+		price, err := catalog.Price(model)
+		if err != nil {
+			return pricing, fmt.Errorf("模型单价（%s）: %w", settings.ModelPricesURL, err)
+		}
+		pricing.Models[model] = price
+		logger.Info("模型单价（每百万 token 的美元价，来自模型价格目录）", "model", model, "provider", catalog.Provider,
+			"input", price.InputUSDPerMillion, "output", price.OutputUSDPerMillion, "cache_read", price.CacheReadUSDPerMillion,
+			"cache_write", price.CacheWriteUSDPerMillion, "tiers", len(price.Tiers), "fetched_at", catalog.FetchedAt)
+	}
+	return pricing, nil
 }
 
 // weatherHome 是家的位置（已在加载配置时校验过）：配置的坐标，或按公网 IP 定位；没设时为 nil。
@@ -494,7 +528,7 @@ func connectWebSearch(settings config.Settings, httpClient *http.Client, logger 
 }
 
 // startResearch 开启后台调查：任务账本、调查用的模型、上限，并在后台开始处理队列。
-func startResearch(ctx context.Context, settings config.Settings, claude *llm.ClaudeAPI, client *http.Client, searcher tools.WebSearcher,
+func startResearch(ctx context.Context, settings config.Settings, claude *llm.ClaudeAPI, client *http.Client, pricing spending.Pricing, searcher tools.WebSearcher,
 	ledger spending.Ledger, guard *spending.Guard, logger *slog.Logger) (*research.Runner, func(), error) {
 	store, err := research.OpenTaskStore(ctx, settings.ResearchDB)
 	if err != nil {
@@ -503,7 +537,6 @@ func startResearch(ctx context.Context, settings config.Settings, claude *llm.Cl
 	if settings.ResearchDB == "" {
 		logger.Warn("没设 HARO_RESEARCH_DB：调查任务只记在内存里，服务端重启后就忘了")
 	}
-	pricing := pricingOf(settings)
 	var model brain.ChatModel
 	if settings.ResearchLLM == config.LLMCloud {
 		// 调查在后台、不急：限流 / 服务端一时出错时让 SDK 重试两次；每次请求不另设期限，受调查自己的总时限管
