@@ -12,6 +12,7 @@ package platform
 import (
 	"context"
 	"log/slog"
+	"sync/atomic"
 
 	"github.com/bukahou/haro/internal/assistant"
 	"github.com/bukahou/haro/internal/platform/audio"
@@ -25,6 +26,8 @@ type LocalDevices struct {
 	audio  *audio.Backend
 	os     osdiff.Adapter
 	logger *slog.Logger
+
+	traitsWarned atomic.Bool // 认不出音频设备属性的提醒只写一次（设备清单每隔几秒查一次）
 }
 
 // 编译期检查：门面必须满足服务层的两个接口。
@@ -126,12 +129,19 @@ func (d *LocalDevices) OpenCamera(startup terminal.Choice, pick terminal.CameraP
 	return camera.NewFFmpegCamera(locate, startup.Name, options.OutputWidth, d.logger), nil
 }
 
-// describe 把 miniaudio 列出的设备转成服务层的描述（接口类型由各系统认）。
+// describe 把 miniaudio 列出的设备转成服务层的描述：接口类型由各系统认；回录源（录的是放出来的声音）不算麦克风，去掉。
+// 认不出属性的设备照常列出，接口类型当未知（第一次认不出时提醒一次）。
 func (d *LocalDevices) describe(devices []audio.Device) []terminal.Device {
-	described := make([]terminal.Device, len(devices))
-	for i, device := range devices {
-		described[i] = terminal.Device{ID: device.Key, Name: device.Name, Default: device.Default,
-			Bus: d.os.AudioBus(device.Key, device.Name)}
+	described := make([]terminal.Device, 0, len(devices))
+	for _, device := range devices {
+		traits, err := d.os.AudioTraits(context.Background(), device.Key, device.Name)
+		if err != nil && d.traitsWarned.CompareAndSwap(false, true) {
+			d.logger.Warn("认不出音频设备的接口类型和回录源：蓝牙麦克风、回录源分不出来（Linux 上要装 pactl）", "err", err)
+		}
+		if traits.Monitor {
+			continue
+		}
+		described = append(described, terminal.Device{ID: device.Key, Name: device.Name, Default: device.Default, Bus: traits.Bus})
 	}
 	return described
 }

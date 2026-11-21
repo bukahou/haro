@@ -2,7 +2,6 @@ package osdiff
 
 import (
 	"fmt"
-	"regexp"
 	"strconv"
 	"strings"
 )
@@ -11,14 +10,20 @@ import (
 //
 // V4L2 摄像头每种格式支持的分辨率不同（例如 EMEET C960：未压缩的 YUYV 最大 640×480，MJPEG 才有 1280×720），
 // 而 ffmpeg 不指定格式时用驱动的默认格式；要的分辨率那个格式没有，驱动会悄悄换成它有的，ffmpeg 不报错。
-// 所以先列出摄像头支持的格式与分辨率，再明确要一个。
+// 所以先按 V4L2 列出摄像头支持的格式、分辨率和帧率（listV4L2Formats），再明确要一个。
 
 // v4l2Format 是摄像头支持的一种格式，及它能出的分辨率。
 type v4l2Format struct {
 	name       string // ffmpeg 的 -input_format 名，如 mjpeg、yuyv422
 	compressed bool
-	sizes      []frameSize
+	modes      []frameMode
 	ranges     []frameSizeRange // 有的驱动报连续 / 步进的范围，而不是一个个分辨率
+}
+
+// frameMode 是一个分辨率和它最高的帧率（不知道时为 0）。
+type frameMode struct {
+	size frameSize
+	fps  float64
 }
 
 type frameSize struct{ width, height int }
@@ -34,48 +39,26 @@ func (r frameSizeRange) contains(s frameSize) bool {
 	return inside(s.width, r.minWidth, r.maxWidth, r.stepWidth) && inside(s.height, r.minHeight, r.maxHeight, r.stepHeight)
 }
 
-var (
-	frameSizePattern  = regexp.MustCompile(`(\d+)x(\d+)`)
-	frameRangePattern = regexp.MustCompile(`\{(\d+)-(\d+), ?(\d+)\}x\{(\d+)-(\d+), ?(\d+)\}`)
-)
+// v4l2FourCC 是 V4L2 像素格式的四字符码（内核 videodev2.h 的 v4l2_fourcc）。
+func v4l2FourCC(code string) uint32 {
+	return uint32(code[0]) | uint32(code[1])<<8 | uint32(code[2])<<16 | uint32(code[3])<<24
+}
 
-// parseV4L2Formats 解析 `ffmpeg -f v4l2 -list_formats all -i <设备>` 的输出，每种格式一行：
-//
-//	[video4linux2,v4l2 @ 0x…] Compressed:       mjpeg :          Motion-JPEG : 1920x1080 1280x720 640x480
-//	[video4linux2,v4l2 @ 0x…] Raw       :     yuyv422 :           YUYV 4:2:2 : 640x480 640x360
-//
-// 格式说明里也可能有冒号（YUYV 4:2:2），所以按「 : 」分段；ffmpeg 不认识的格式（Unsupported）跳过。
-func parseV4L2Formats(output string) []v4l2Format {
-	var formats []v4l2Format
-	for _, line := range strings.Split(output, "\n") {
-		_, rest, found := strings.Cut(line, "] ")
-		if !found {
-			continue
-		}
-		kind, fields, found := strings.Cut(rest, ":")
-		kind = strings.TrimSpace(kind)
-		if !found || (kind != "Raw" && kind != "Compressed") {
-			continue
-		}
-		parts := strings.Split(fields, " : ")
-		name := strings.TrimSpace(parts[0])
-		if len(parts) < 3 || name == "" || name == "Unsupported" {
-			continue
-		}
-		format := v4l2Format{name: name, compressed: kind == "Compressed"}
-		sizes := parts[len(parts)-1]
-		for _, match := range frameRangePattern.FindAllStringSubmatch(sizes, -1) {
-			format.ranges = append(format.ranges, frameSizeRange{atoi(match[1]), atoi(match[2]), atoi(match[3]),
-				atoi(match[4]), atoi(match[5]), atoi(match[6])})
-		}
-		for _, match := range frameSizePattern.FindAllStringSubmatch(frameRangePattern.ReplaceAllString(sizes, ""), -1) {
-			format.sizes = append(format.sizes, frameSize{atoi(match[1]), atoi(match[2])})
-		}
-		if len(format.sizes) > 0 || len(format.ranges) > 0 {
-			formats = append(formats, format)
-		}
-	}
-	return formats
+// ffmpegPixelFormat 是一种 V4L2 像素格式在 ffmpeg 的 v4l2 输入里叫什么、是不是压缩的。
+type ffmpegPixelFormat struct {
+	name       string
+	compressed bool
+}
+
+// ffmpegPixelFormats：ffmpeg 的 v4l2 输入认得的像素格式；别的格式不向摄像头要。
+var ffmpegPixelFormats = map[uint32]ffmpegPixelFormat{
+	v4l2FourCC("MJPG"): {"mjpeg", true},
+	v4l2FourCC("JPEG"): {"mjpeg", true},
+	v4l2FourCC("H264"): {"h264", true},
+	v4l2FourCC("YUYV"): {"yuyv422", false},
+	v4l2FourCC("UYVY"): {"uyvy422", false},
+	v4l2FourCC("NV12"): {"nv12", false},
+	v4l2FourCC("YU12"): {"yuv420p", false},
 }
 
 // chooseV4L2Capture 选向摄像头要的格式与分辨率：
@@ -83,7 +66,8 @@ func parseV4L2Formats(output string) []v4l2Format {
 //  2. 都出不了 → 宽度够（≥ 想要的宽）的里面最小的：够用就好，分辨率越大解码越费 CPU；
 //  3. 都不够宽 → 最大的那个。
 //
-// 同一个分辨率两种格式都能出时，未压缩的优先（之后还要压成 JPEG，少压一次）。
+// 同一个分辨率几种格式都能出时：帧率高的优先（帧率低的出第一帧慢，例如未压缩格式在高分辨率下常只有几帧），
+// 一样高时未压缩的优先（之后还要压成 JPEG，少压一次）。
 // 列不出格式、或想要的分辨率写法认不出时，format 为空：照旧只给分辨率，由驱动定格式。
 func chooseV4L2Capture(formats []v4l2Format, wanted string) (format, size string) {
 	want, ok := parseFrameSize(wanted)
@@ -93,16 +77,17 @@ func chooseV4L2Capture(formats []v4l2Format, wanted string) (format, size string
 	type candidate struct {
 		format string
 		size   frameSize
+		fps    float64
 		raw    bool
 	}
 	var candidates []candidate
 	for _, f := range formats {
-		for _, s := range f.sizes {
-			candidates = append(candidates, candidate{f.name, s, !f.compressed})
+		for _, m := range f.modes {
+			candidates = append(candidates, candidate{f.name, m.size, m.fps, !f.compressed})
 		}
 		for _, r := range f.ranges {
 			if r.contains(want) {
-				candidates = append(candidates, candidate{f.name, want, !f.compressed})
+				candidates = append(candidates, candidate{f.name, want, 0, !f.compressed})
 			}
 		}
 	}
@@ -121,6 +106,9 @@ func chooseV4L2Capture(formats []v4l2Format, wanted string) (format, size string
 		}
 		if area(a.size) != area(b.size) {
 			return (area(a.size) < area(b.size)) == aWide // 够宽的取小，不够宽的取大
+		}
+		if a.fps != b.fps {
+			return a.fps > b.fps
 		}
 		return a.raw && !b.raw
 	}
@@ -152,9 +140,4 @@ func parseFrameSize(text string) (frameSize, bool) {
 		return frameSize{}, false
 	}
 	return frameSize{w, h}, true
-}
-
-func atoi(text string) int {
-	number, _ := strconv.Atoi(text)
-	return number
 }

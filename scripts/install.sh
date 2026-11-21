@@ -204,6 +204,9 @@ fi
 if [ "$os" = Darwin ] && ! command -v ffmpeg >/dev/null 2>&1; then
 	warn "没找到 ffmpeg：macOS 上摄像头要用它（其他功能不受影响）。要用摄像头请先装 ffmpeg"
 fi
+if [ "$os" = Linux ] && ! command -v pactl >/dev/null 2>&1; then
+	warn "没找到 pactl：认不出蓝牙麦克风和回录源（会照系统默认选麦克风）。建议先装 pulseaudio-utils"
+fi
 case ":$PATH:" in
 *":$bin_dir:"*) ;;
 *) say "提示：$bin_dir 不在 PATH 里，手动运行时请写全路径 $binary" ;;

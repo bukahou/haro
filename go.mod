@@ -4,6 +4,7 @@ go 1.27
 
 require (
 	github.com/anthropics/anthropic-sdk-go/v2 v2.11.0
+	github.com/blackjack/webcam v0.6.2
 	github.com/caarlos0/env/v11 v11.4.2
 	github.com/coder/websocket v1.8.15
 	github.com/failsafe-go/failsafe-go v0.9.8
@@ -34,7 +35,6 @@ require (
 require (
 	github.com/bahlo/generic-list-go v0.2.0 // indirect
 	github.com/bits-and-blooms/bitset v1.24.4 // indirect
-	github.com/blackjack/webcam v0.6.2 // indirect
 	github.com/buger/jsonparser v1.1.2 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect

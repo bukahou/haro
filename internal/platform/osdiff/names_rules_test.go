@@ -1,48 +1,58 @@
 package osdiff
 
 import (
-	"os"
-	"path/filepath"
 	"reflect"
 	"testing"
 
 	"github.com/bukahou/haro/internal/terminal"
 )
 
-func TestLinuxAudioBus(t *testing.T) {
-	cases := map[string]terminal.Bus{
-		"bluez_input.00:00:5E:00:53:01":                        terminal.BusBluetooth,
-		"bluez_output.00_00_5E_00_53_01.1":                     terminal.BusBluetooth,
-		"alsa_input.usb-EMEET_HD_Webcam_C960-02.mono-fallback": terminal.BusUSB,
-		"alsa_output.pci-0000_0c_00.4.analog-stereo":           terminal.BusBuiltin,
-		"alsa_input.platform-snd_aloop.0.analog-stereo":        terminal.BusBuiltin,
-		"something-else": terminal.BusUnknown,
+// pactl -f json list sources 的一段（设备名用文档保留段的假地址）：蓝牙耳机、它的回录源、USB 摄像头的麦克风、板载声卡的回录源。
+const pulseSources = `[
+ {"index":1,"name":"bluez_input.00:00:5E:00:53:01","properties":{"device.api":"bluez5","device.bus":"bluetooth"}},
+ {"index":2,"name":"bluez_output.00:00:5E:00:53:01.monitor","properties":{"device.bus":"bluetooth","device.class":"monitor"}},
+ {"index":3,"name":"alsa_input.usb-Example_Camera-02.mono-fallback","properties":{"device.bus":"usb","device.class":"sound"}},
+ {"index":4,"name":"alsa_output.pci-0000_00_1f.3.analog-stereo.monitor","properties":{"device.bus":"pci","device.class":"monitor"}},
+ {"index":5,"name":"alsa_input.platform-soc_sound.stereo-fallback","properties":{"device.bus":"platform"}},
+ {"index":6,"name":"virtual_source","properties":{}}
+]`
+
+// 接口类型和回录源看 PipeWire / PulseAudio 报的属性，不看名字。
+func TestPulseAudioTraits(t *testing.T) {
+	traits, err := pulseAudioTraits([]byte(pulseSources))
+	if err != nil {
+		t.Fatal(err)
 	}
-	for id, want := range cases {
-		if got := linuxAudioBus(id); got != want {
-			t.Errorf("%s：认成 %v，应为 %v", id, got, want)
-		}
+	want := map[string]AudioTraits{
+		"bluez_input.00:00:5E:00:53:01":                      {Bus: terminal.BusBluetooth},
+		"bluez_output.00:00:5E:00:53:01.monitor":             {Bus: terminal.BusBluetooth, Monitor: true},
+		"alsa_input.usb-Example_Camera-02.mono-fallback":     {Bus: terminal.BusUSB},
+		"alsa_output.pci-0000_00_1f.3.analog-stereo.monitor": {Bus: terminal.BusBuiltin, Monitor: true},
+		"alsa_input.platform-soc_sound.stereo-fallback":      {Bus: terminal.BusBuiltin},
+		"virtual_source": {},
+	}
+	if !reflect.DeepEqual(traits, want) {
+		t.Errorf("得到 %+v\n应为 %+v", traits, want)
+	}
+	if _, err := pulseAudioTraits([]byte("Connection failure: Connection refused")); err == nil {
+		t.Error("不是 JSON 时应报错")
 	}
 }
 
-func TestListV4L2CamerasKeepsCaptureNodesOnly(t *testing.T) {
-	dir := t.TempDir()
-	write := func(node, index, name string) {
-		os.MkdirAll(filepath.Join(dir, node), 0o755)
-		os.WriteFile(filepath.Join(dir, node, "index"), []byte(index+"\n"), 0o644)
-		os.WriteFile(filepath.Join(dir, node, "name"), []byte(name+"\n"), 0o644)
+// 能列出视频采集格式的节点才是摄像头（元数据节点、打不开的不算），按设备号排。
+func TestCameraNodes(t *testing.T) {
+	nodes := []v4l2Node{
+		{path: "/dev/video11", name: "摄像头"},
+		{path: "/dev/video10", name: "摄像头", capture: true},
+		{path: "/dev/video2", name: "别的设备"},
+		{path: "/dev/video3", name: "第二个摄像头", capture: true},
 	}
-	if cameras, _ := listV4L2Cameras(dir); len(cameras) != 0 {
-		t.Errorf("没有设备时应为空：%+v", cameras)
-	}
-	write("video11", "1", "摄像头（元数据）")
-	write("video10", "0", "摄像头")
-	write("video2", "1", "别的元数据")
-	write("video3", "0", "第二个摄像头")
-	cameras, err := listV4L2Cameras(dir)
 	want := []terminal.Device{{ID: "/dev/video3", Name: "第二个摄像头"}, {ID: "/dev/video10", Name: "摄像头"}}
-	if err != nil || !reflect.DeepEqual(cameras, want) {
-		t.Errorf("应只列 index 为 0 的拍照节点、按编号排：%+v %v", cameras, err)
+	if got := cameraNodes(nodes); !reflect.DeepEqual(got, want) {
+		t.Errorf("应只列能拍照的节点、按编号排：%+v", got)
+	}
+	if got := cameraNodes(nil); len(got) != 0 {
+		t.Errorf("没有设备时应为空：%+v", got)
 	}
 }
 

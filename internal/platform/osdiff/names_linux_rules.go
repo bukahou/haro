@@ -1,53 +1,35 @@
 package osdiff
 
 import (
-	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/bukahou/haro/internal/terminal"
 )
 
-// 这个文件不带构建标签（文件名不以 _linux.go 结尾）：Linux 的解析规则在任何机器上都能测。
+// 这个文件不带构建标签（文件名不以 _linux.go 结尾）：Linux 上挑摄像头的规则在任何机器上都能测。
 
-// linuxAudioBus 按 PulseAudio / PipeWire 的节点名认接口类型：
-//
-//	bluez_input.XX:XX…  / bluez_output.…  → 蓝牙
-//	alsa_input.usb-…    / alsa_output.usb-… → USB
-//	alsa_input.pci-…    / …platform-…      → 内置（声卡、HDMI）
-func linuxAudioBus(id string) terminal.Bus {
-	switch {
-	case strings.HasPrefix(id, "bluez_"):
-		return terminal.BusBluetooth
-	case strings.Contains(id, ".usb-"):
-		return terminal.BusUSB
-	case strings.Contains(id, ".pci-"), strings.Contains(id, ".platform-"):
-		return terminal.BusBuiltin
-	default:
-		return terminal.BusUnknown
-	}
+// v4l2Node 是一个 /dev/video* 节点按 V4L2 查到的信息（查法见 probeV4L2Node）。
+type v4l2Node struct {
+	path    string
+	name    string // VIDIOC_QUERYCAP 报的设备名
+	capture bool   // 能当视频采集设备打开，并且列得出视频采集格式
 }
 
-// listV4L2Cameras 从 /sys/class/video4linux 列摄像头。一个摄像头常有好几个节点
-// （EMEET C960 有 video0 / video1），只有 index 为 0 的是拍照用的，其余是元数据。
-func listV4L2Cameras(sysVideo string) ([]terminal.Device, error) {
-	entries, err := filepath.Glob(filepath.Join(sysVideo, "video*"))
-	if err != nil {
-		return nil, err
-	}
-	sort.Slice(entries, func(i, j int) bool { return videoNumber(entries[i]) < videoNumber(entries[j]) })
+// cameraNodes 挑出能拍照的节点，按设备号排。一个摄像头常有好几个节点（UVC 摄像头另有一个元数据节点），
+// 只有能列出视频采集格式的那个是拍照用的。
+func cameraNodes(nodes []v4l2Node) []terminal.Device {
+	nodes = slices.Clone(nodes)
+	slices.SortFunc(nodes, func(a, b v4l2Node) int { return videoNumber(a.path) - videoNumber(b.path) })
 	var cameras []terminal.Device
-	for _, entry := range entries {
-		if index, err := os.ReadFile(filepath.Join(entry, "index")); err != nil || strings.TrimSpace(string(index)) != "0" {
-			continue
+	for _, node := range nodes {
+		if node.capture {
+			cameras = append(cameras, terminal.Device{ID: node.path, Name: node.name, Bus: terminal.BusUnknown})
 		}
-		name, _ := os.ReadFile(filepath.Join(entry, "name"))
-		cameras = append(cameras, terminal.Device{ID: "/dev/" + filepath.Base(entry),
-			Name: strings.TrimSpace(string(name)), Bus: terminal.BusUnknown})
 	}
-	return cameras, nil
+	return cameras
 }
 
 func videoNumber(path string) int {
