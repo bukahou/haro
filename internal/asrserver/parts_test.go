@@ -124,7 +124,8 @@ func (s *countingSpotter) AcceptWaveform([]float32) string { return "" }
 func (s *countingSpotter) Reset()                          { s.resets++ }
 func (s *countingSpotter) Close()                          {}
 
-// 唤醒门：没启用时一直在听；启用时醒着、且终端没在播放才听。播放前醒没醒，播完恢复。
+// 唤醒门：没启用时一直在听；启用时醒着、且终端没在播放才听。播完恢复播放前醒没醒；
+// 播放中收到休眠 / 手动唤醒时，播完按收到的来（不被播放前的状态盖回去）。
 func TestWakeGate(t *testing.T) {
 	var off wakeGate
 	if !off.listening(false) || off.listening(true) || off.spot(nil) != "" {
@@ -140,11 +141,25 @@ func TestWakeGate(t *testing.T) {
 		t.Errorf("醒了：不播放时听，播放时不听；距唤醒 %d 毫秒", gate.sinceWakeMs(32000))
 	}
 	gate.pauseForPlayback(true)
-	gate.sleep() // 播放中按回车休眠
-	gate.pauseForPlayback(false)
+	gate.pauseForPlayback(false) // 播放中又说一次开始：不改记下的状态
 	gate.resumeAfterPlayback()
-	if !gate.awake || spotter.resets != 3 {
-		t.Errorf("播完恢复播放前（醒着）；每次开始播放、休眠都重置唤醒词识别：awake=%v resets=%d", gate.awake, spotter.resets)
+	if !gate.awake {
+		t.Error("播完恢复播放前（醒着）")
+	}
+	gate.pauseForPlayback(true)
+	gate.sleep() // 播放中收到休眠
+	gate.resumeAfterPlayback()
+	if gate.awake {
+		t.Error("播放中收到休眠：播完不能又恢复成醒着")
+	}
+	gate.pauseForPlayback(true) // 睡着时开始播放，播放中手动唤醒
+	gate.wakeManually()
+	gate.resumeAfterPlayback()
+	if !gate.awake {
+		t.Error("播放中手动唤醒：播完保持醒着")
+	}
+	if spotter.resets != 5 {
+		t.Errorf("每次开始播放、休眠都重置唤醒词识别：重置了 %d 次，应为 5 次", spotter.resets)
 	}
 }
 

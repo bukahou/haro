@@ -22,7 +22,7 @@ type Timing struct {
 	MaxWaitLow, MaxWaitAuto, MaxWaitHigh time.Duration
 	// DefaultWait：不是 semantic_vad 时（例如刚唤醒、还没开口）等主人接着说的上限。定值，没有单独实测
 	DefaultWait time.Duration
-	// WakeOnlyWait：唤醒词说完就停了，等这么久没开口就按「只叫了唤醒词」处理（回「我在」）。
+	// WakeOnlyWait：唤醒词说完就停了，等这么久没开口就把这一句（只有唤醒词）交出去，由服务端的模型简短应一声。
 	// 真机上试过 2 s，显得迟钝；1 s 足够开口
 	WakeOnlyWait time.Duration
 	// WakeKeywordWindow：唤醒词识别报告时刻之前的这一段一定包含整个唤醒词，也是算唤醒词声纹用的那一段。

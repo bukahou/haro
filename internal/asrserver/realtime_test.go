@@ -491,7 +491,27 @@ func TestBargeInDuringPlayback(t *testing.T) {
 	}
 }
 
-// 回声（v3 E-1）：播放时开始、播完才结束的语音段是 haro 自己的声音——剩一点尾巴就整段丢掉；
+// 播放中收到休眠：播完不能按播放前的状态又醒过来——说话不上报，要再叫唤醒词才醒。
+func TestSleepDuringPlaybackStaysAsleep(t *testing.T) {
+	conn, ctx := dialWakeSession(t, &fixedTranscriber{text: "好的"}, &fakeSpotter{})
+	sendKeyword(t, ctx, conn) // 先唤醒、说一句，进入对话窗口
+	sendPattern(t, ctx, conn, [2]int{500, 1}, [2]int{400, 0})
+	readEvents(t, ctx, conn, 4)
+
+	for _, control := range []string{"haro.playback.started", "haro.wake_word.sleep", "haro.playback.stopped"} {
+		if err := wsjson.Write(ctx, conn, map[string]string{"type": control}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sendPattern(t, ctx, conn, [2]int{500, 1}, [2]int{400, 0}) // 睡着了：这句不应上报
+	sendKeyword(t, ctx, conn)
+	events := readEvents(t, ctx, conn, 1)
+	if _, ok := events[0].(realtimeproto.HaroWakeWordDetected); !ok {
+		t.Fatalf("播放中收到休眠后应一直睡着，第一个事件应是再次唤醒：%v", events)
+	}
+}
+
+// 回声：播放时开始、播完才结束的语音段是 haro 自己的声音——剩一点尾巴就整段丢掉；
 // 用户紧接着开口（和回声连成一段）时，只取播完之后的部分。
 func TestEchoTailAfterPlaybackIsClipped(t *testing.T) {
 	transcriber := &fixedTranscriber{text: "好的"}
@@ -534,7 +554,7 @@ func (e *switchableEmbedder) Embed([]float32) ([]float32, error) {
 	return e.current.Load().([]float32), nil
 }
 
-// 声纹（v3 H-3）：陌生人喊唤醒词叫不醒；登记过的人叫得醒，每句话标上是谁说的；醒着时陌生人的话标为没认出来。
+// 声纹：陌生人喊唤醒词叫不醒；登记过的人叫得醒，每句话标上是谁说的；醒着时陌生人的话标为没认出来。
 func TestVoiceprintGatesWakeAndLabelsSpeaker(t *testing.T) {
 	owner, stranger := []float32{1, 0, 0}, []float32{0, 1, 0}
 	embedder := &switchableEmbedder{}
@@ -570,7 +590,7 @@ func TestVoiceprintGatesWakeAndLabelsSpeaker(t *testing.T) {
 	}
 }
 
-// V-a：唤醒时认出来的人，这一句沿用——不让很短的唤醒句重新比对推翻它（真机：唤醒 0.52 认出、唤醒句重比 0.49 判成不认识）。
+// 唤醒时认出来的人，这一句沿用——不让很短的唤醒句重新比对推翻它（真机：唤醒 0.52 认出、唤醒句重比 0.49 判成不认识）。
 func TestWakeUtteranceKeepsWakeSpeaker(t *testing.T) {
 	owner, stranger := []float32{1, 0, 0}, []float32{0, 1, 0}
 	embedder := &switchableEmbedder{}
@@ -592,7 +612,7 @@ func TestWakeUtteranceKeepsWakeSpeaker(t *testing.T) {
 	}
 }
 
-// BV：唤醒词很短、声纹算不稳，唤醒用低一些的门槛；只过了唤醒门槛的，接着说的话还要再比对。
+// 唤醒词很短、声纹算不稳，唤醒用低一些的门槛；只过了唤醒门槛的，接着说的话还要再比对。
 func TestWeakWakeRechecksTheSentence(t *testing.T) {
 	owner, weak := []float32{1, 0, 0}, []float32{0.35, 0.94, 0} // weak 和主人的相似度约 0.35：过唤醒门槛 0.2、不到 0.5
 	embedder := &switchableEmbedder{}
@@ -616,7 +636,7 @@ func TestWeakWakeRechecksTheSentence(t *testing.T) {
 			if !ok {
 				t.Fatalf("过了唤醒门槛应能唤醒：%v", events)
 			}
-			if wake.Score < 0.3 || wake.Score > 0.4 || wake.Level <= 0 { // v4 D2：唤醒质量带给服务端做仲裁
+			if wake.Score < 0.3 || wake.Score > 0.4 || wake.Level <= 0 { // 唤醒质量带给服务端做仲裁
 				t.Errorf("唤醒事件应带上声纹分数和音量：%+v", wake)
 			}
 			completed, ok := events[3].(realtimeproto.InputAudioTranscriptionCompleted)

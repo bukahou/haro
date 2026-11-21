@@ -103,11 +103,13 @@ type utterance struct {
 	startSample    int
 	endSample      int
 	waiting        bool   // 模型判定没说完（或刚被唤醒还没开口），正在等用户接着说
-	wake           bool   // 这句话里有唤醒词：识别后在文字上去掉它
-	awaitingSpeech bool   // 唤醒词说完就停了，还没开口：最多等 Timing.WakeOnlyWait，等不到就按「只叫了唤醒词」处理
-	bargeIn        bool   // 终端播放回答时用唤醒词打断的：唤醒词前面混着 haro 自己的回声，去掉唤醒词时连前面一起去掉
+	wake           bool   // 这句话里有唤醒词：整句原样交出、标上 Wake（唤醒词由服务端的模型自己分）
+	awaitingSpeech bool   // 唤醒词说完就停了，还没开口：最多等 Timing.WakeOnlyWait，等不到就把这一句（只有唤醒词）交出去
+	bargeIn        bool   // 终端播放回答时用唤醒词打断的：前面可能混着 haro 自己的回声，整句原样交出、标上 BargeIn
 	wakeSpeaker    string // 唤醒时声纹认得很准的人（达到 Threshold）：这一句沿用它，不再用这句（多半很短）重新比对
-	wakeGuess      string // 唤醒时只过了唤醒门槛的人：这一句照常比对；只叫了唤醒词（去掉后没有文字）时才沿用，让 haro 回「我在」
+	// wakeGuess：唤醒时只过了唤醒门槛的人。这一句照常比对，没认出来时报成 SpeakerTentative（像是谁），
+	// 由服务端按这句话的长短决定怎么回
+	wakeGuess string
 }
 
 // transcriptionSession 是一个转写会话：把收到的音频按句切开、识别、报给服务端。由各管一件事的部件组成：
@@ -227,7 +229,7 @@ func (s *transcriptionSession) acceptAudio(ctx context.Context, pcm []byte) erro
 		}
 	}
 	speaking := s.vad.feed(samples)
-	// 醒着时也识别唤醒词：再叫一次同样去掉它，并让终端重新开始对话窗口计时
+	// 醒着时也识别唤醒词：再叫一次同样标上唤醒（文字原样交出），终端收到经服务端转来的唤醒事件后重新开始对话窗口计时
 	if keyword := s.wake.spot(samples); keyword != "" {
 		if err := s.wakeUp(ctx, keyword, speaking); err != nil {
 			return err
@@ -310,7 +312,7 @@ func (s *transcriptionSession) wakeUp(ctx context.Context, keyword string, speak
 		AudioMs: int64(now / samplesPerMs), Score: quality.score, Level: quality.level}); err != nil {
 		return err
 	}
-	if s.current != nil { // 醒着时这句话已经开始了：只需标记，识别后去掉唤醒词
+	if s.current != nil { // 醒着时这句话已经开始了：只需标上唤醒（整句原样交出）
 		s.current.wake = true
 		s.current.wakeSpeaker, s.current.wakeGuess = wakeSpeaker, wakeGuess
 		return nil
@@ -331,7 +333,7 @@ func (s *transcriptionSession) wakeUp(ctx context.Context, keyword string, speak
 	}
 	s.current.wake = true
 	s.current.wakeSpeaker, s.current.wakeGuess = wakeSpeaker, wakeGuess
-	s.current.waiting = !speaking // 唤醒词说完就停了：等用户开口，等不到就按「只叫了唤醒词」处理
+	s.current.waiting = !speaking // 唤醒词说完就停了：等用户开口，等不到就把只有唤醒词的这一句交出去
 	s.current.awaitingSpeech = !speaking
 	s.vad.settle(speaking)
 	return nil
@@ -483,7 +485,7 @@ func (s *transcriptionSession) applyWakeEvent(event realtimeproto.ClientEvent) {
 	case realtimeproto.HaroWakeWordSleep:
 		s.sleep()
 	case realtimeproto.HaroWakeWordWake:
-		s.wake.awake = true
+		s.wake.wakeManually()
 		s.deps.Logger.Info("手动唤醒")
 	case realtimeproto.HaroPlaybackStarted:
 		s.startPlayback()
