@@ -43,7 +43,7 @@ func TestConversationLive(t *testing.T) {
 	}
 	defer store.Close()
 	// 与正式运行一致：记事本、网络诊断都内置
-	builtins := append(NoteTools(store, logger), NetworkDiagnostics(netdiag.NewChecker("www.cloudflare.com", "1.1.1.1:443"))...)
+	builtins := []Builtin{NoteTools(store, 200, logger), NetworkDiagnostics(netdiag.NewChecker("www.cloudflare.com", "1.1.1.1:443"))}
 	box, err := NewToolbox(ctx, nil, logger, builtins...)
 	if err != nil {
 		t.Fatal(err)

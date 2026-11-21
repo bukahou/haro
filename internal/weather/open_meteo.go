@@ -2,8 +2,6 @@ package weather
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -21,12 +19,10 @@ func NewClient(forecastURL, geocodingURL string, httpClient *http.Client) *Clien
 		fetch: fetcher{http: httpClient, attemptTimeout: defaultAttemptTimeout, service: "天气服务（Open-Meteo）"}}
 }
 
-// ErrPlaceNotFound 表示找不到这个地名。
-var ErrPlaceNotFound = errors.New("找不到这个地方")
-
-// FindPlace 按地名找坐标（日本的地名在日本里找；language 决定返回的名字用什么语言）。
-func (c *Client) FindPlace(ctx context.Context, name, language string) (Place, error) {
-	query := url.Values{"name": {name}, "count": {"1"}, "language": {language}, "format": {"json"}}
+// FindPlaces 按地名找坐标：返回地名库里最多 limit 个候选（最相关的在前），一个都没有时返回空。
+// language 决定返回的名字用什么语言写。
+func (c *Client) FindPlaces(ctx context.Context, name, language string, limit int) ([]Place, error) {
+	query := url.Values{"name": {name}, "count": {strconv.Itoa(limit)}, "language": {language}, "format": {"json"}}
 	var response struct {
 		Results []struct {
 			Name      string  `json:"name"`
@@ -37,13 +33,14 @@ func (c *Client) FindPlace(ctx context.Context, name, language string) (Place, e
 		} `json:"results"`
 	}
 	if err := c.fetch.getJSON(ctx, c.geocodingURL+"?"+query.Encode(), &response); err != nil {
-		return Place{}, err
+		return nil, err
 	}
-	if len(response.Results) == 0 {
-		return Place{}, fmt.Errorf("%w：%s", ErrPlaceNotFound, name)
+	places := make([]Place, 0, len(response.Results))
+	for _, found := range response.Results {
+		places = append(places, Place{Name: found.Name, Latitude: found.Latitude, Longitude: found.Longitude,
+			Country: found.Country, Region: found.Admin1})
 	}
-	found := response.Results[0]
-	return Place{Name: found.Name, Latitude: found.Latitude, Longitude: found.Longitude, Country: found.Country, Region: found.Admin1}, nil
+	return places, nil
 }
 
 // ForecastFor 实现 Forecaster：现在的天气和未来 days 天（含今天，1–7）的预报，时间按当地时区。

@@ -16,8 +16,6 @@ import (
 	"time"
 
 	_ "modernc.org/sqlite" // 纯 Go 的 SQLite 驱动
-
-	"github.com/bukahou/haro/internal/notes"
 )
 
 // Status 是任务状态。
@@ -90,8 +88,6 @@ type TaskStore interface {
 	// 一次查询读出来，是同一时刻的快照：同一个任务不会既算在查、又算查完。
 	Board(ctx context.Context, person string) ([]Task, error)
 	MarkReported(ctx context.Context, ids ...int64) error
-	// Search 按问题或结论里的关键词找某人以前的任务（「上周让你查的那个」）。
-	Search(ctx context.Context, person, query string, limit int) ([]Task, error)
 	// InterruptActive 把排队中、在查的都标成被中断（服务端启动时调用）；返回条数。
 	InterruptActive(ctx context.Context) (int, error)
 	Close() error
@@ -251,28 +247,6 @@ func (s *sqliteTaskStore) MarkReported(ctx context.Context, ids ...int64) error 
 	}
 	return nil
 }
-
-// Search 用记事本同一套中文两字片段打分（notes.RankByRelevance），在这个人最近的任务里找。
-func (s *sqliteTaskStore) Search(ctx context.Context, person, query string, limit int) ([]Task, error) {
-	candidates, err := s.query(ctx, `WHERE person = ? ORDER BY id DESC LIMIT ?`, person, searchWindow)
-	if err != nil {
-		return nil, err
-	}
-	byID := map[int64]Task{}
-	asNotes := make([]notes.Note, 0, len(candidates))
-	for _, task := range candidates {
-		byID[task.ID] = task
-		asNotes = append(asNotes, notes.Note{ID: task.ID, Content: task.Question + " " + task.Conclusion, CreatedAt: task.CreatedAt})
-	}
-	var found []Task
-	for _, note := range notes.RankByRelevance(asNotes, query, limit) {
-		found = append(found, byID[note.ID])
-	}
-	return found, nil
-}
-
-// searchWindow 是查找时最多拿出来打分的任务数。
-const searchWindow = 500
 
 func (s *sqliteTaskStore) InterruptActive(ctx context.Context) (int, error) {
 	result, err := s.db.ExecContext(ctx, `UPDATE research_tasks SET status = ?, stop_reason = ?, finished_at = ? WHERE status IN (?, ?)`,

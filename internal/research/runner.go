@@ -2,14 +2,12 @@ package research
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
 	"time"
-	"unicode"
 
 	"github.com/bukahou/haro/internal/brain"
 	"github.com/bukahou/haro/internal/tools"
@@ -276,24 +274,29 @@ func (r *Runner) investigate(ctx context.Context, question string) outcome {
 			result.status, result.reason = StatusFailed, "模型出错："+err.Error()
 			return result
 		}
-		if len(calls) == 0 && result.searches == 0 && !nudged {
+		draft, submitted := submittedConclusion(calls, r.logger)
+		if !submitted && len(calls) == 0 && result.searches == 0 && !nudged {
 			// 一次都没搜就想交差（2026-11-17 真机：云端模型凭印象 1 秒给了结论）：退回去，要求先搜
 			nudged = true
 			messages = append(messages, brain.ChatMessage{Role: brain.RoleAssistant, Text: text},
 				brain.ChatMessage{Role: brain.RoleUser, Text: "你还没有搜索。这是调查任务，结论必须以搜到的资料为准：先用 search_web 搜，再下结论。"})
 			continue
 		}
-		if len(calls) == 0 { // 模型认为查够了，直接给出结论
+		if submitted || len(calls) == 0 { // 模型认为查够了，交出了结论
 			result.status = StatusDone
+			if !submitted { // 没用 submit_conclusion、直接写了文字：整段当结论（没有单独的来源）
+				draft = conclusionDraft{Conclusion: strings.TrimSpace(text)}
+				r.logger.Warn("调查模型没用 submit_conclusion 交结论：整段文字当结论")
+			}
 			if r.writer != nil { // 交给写结论的模型重写（不带调查模型的草稿，免得被它带偏）；写不成就用草稿
-				instruction := brain.ChatMessage{Role: brain.RoleUser, Text: "资料已经查够了。不要再搜索，根据上面查到的资料写结论。"}
+				instruction := brain.ChatMessage{Role: brain.RoleUser, Text: "资料已经查够了。不要再搜索，根据上面查到的资料写结论，用 submit_conclusion 交出来。"}
 				if written, err := r.writeConclusion(ctx, append(messages, instruction), &result, r.writer); err == nil {
-					text = written
+					draft = written
 				} else if ctx.Err() == nil {
 					r.logger.Warn("写结论的模型出错，用调查模型的草稿", "err", err)
 				}
 			}
-			result.conclusion, result.sources = splitSources(text)
+			result.conclusion, result.sources = draft.Conclusion, draft.Sources
 			if result.conclusion == "" {
 				result.status, result.reason = StatusFailed, "模型没有给出结论"
 			}
@@ -313,12 +316,12 @@ func (r *Runner) investigate(ctx context.Context, question string) outcome {
 
 	// 到上限：不再给工具，用已有材料写结论（写结论的时间单算；超出的这一点费用在额度上允许）
 	messages = append(messages, brain.ChatMessage{Role: brain.RoleUser,
-		Text: "调查到此为止（" + stop + "）。不要再搜索，根据上面已经查到的资料写结论；没查清的地方明确说没查完。"})
+		Text: "调查到此为止（" + stop + "）。不要再搜索，根据上面已经查到的资料写结论，用 submit_conclusion 交出来；没查清的地方明确说没查完。"})
 	writers := []brain.ChatModel{r.model}
 	if r.writer != nil {
 		writers = []brain.ChatModel{r.writer, r.model} // 写结论的模型出错时由调查模型写
 	}
-	text, err := r.writeConclusion(ctx, messages, &result, writers...)
+	draft, err := r.writeConclusion(ctx, messages, &result, writers...)
 	result.reason = stop
 	if err != nil {
 		if ctx.Err() != nil {
@@ -329,33 +332,61 @@ func (r *Runner) investigate(ctx context.Context, question string) outcome {
 		return result
 	}
 	result.status = StatusPartial
-	result.conclusion, result.sources = splitSources(text)
+	result.conclusion, result.sources = draft.Conclusion, draft.Sources
 	return result
 }
 
-// writeConclusion 依次让 writers 根据 messages 里的资料写结论（不给工具），第一个写成的为准；每个模型各有 writeUpTimeout。
-func (r *Runner) writeConclusion(ctx context.Context, messages []brain.ChatMessage, result *outcome, writers ...brain.ChatModel) (string, error) {
+// writeConclusion 依次让 writers 根据 messages 里的资料写结论（只给 submit_conclusion），第一个写成的为准；
+// 每个模型各有 writeUpTimeout。没用工具、直接写了文字的，整段当结论。
+func (r *Runner) writeConclusion(ctx context.Context, messages []brain.ChatMessage, result *outcome, writers ...brain.ChatModel) (conclusionDraft, error) {
 	var lastErr error
 	for i, writer := range writers {
 		writeCtx, cancel := context.WithTimeout(ctx, writeUpTimeout)
-		text, _, tokens, err := complete(writeCtx, writer, messages, nil)
+		text, calls, tokens, err := complete(writeCtx, writer, messages, []brain.ToolSpec{submitConclusionSpec})
 		cancel()
 		result.tokens += tokens
-		if err == nil && strings.TrimSpace(text) == "" {
+		if err == nil {
+			if draft, ok := submittedConclusion(calls, r.logger); ok && draft.Conclusion != "" {
+				return draft, nil
+			}
+			if text = strings.TrimSpace(text); text != "" {
+				r.logger.Warn("写结论的模型没用 submit_conclusion：整段文字当结论")
+				return conclusionDraft{Conclusion: text}, nil
+			}
 			err = errors.New("没写出结论")
 		}
-		if err == nil {
-			return text, nil
-		}
 		if ctx.Err() != nil {
-			return "", ctx.Err()
+			return conclusionDraft{}, ctx.Err()
 		}
 		lastErr = err
 		if i < len(writers)-1 {
 			r.logger.Warn("写结论的模型出错，换下一个写", "err", err)
 		}
 	}
-	return "", lastErr
+	return conclusionDraft{}, lastErr
+}
+
+// conclusionDraft 是模型用 submit_conclusion 交出的结论：结论会被念出来，来源只存档。
+type conclusionDraft struct {
+	Conclusion string   `json:"conclusion" jsonschema:"3 到 6 句中文口语的结论（会被念出来：不要列表、表格、网址、Markdown）；有不确定或没查到的地方直接说"`
+	Sources    []string `json:"sources,omitempty" jsonschema:"1 到 3 个最主要的来源网址"`
+}
+
+// submittedConclusion 找出这一轮里的 submit_conclusion 调用并解出参数；没有、或者参数不对时 ok = false。
+func submittedConclusion(calls []brain.ToolCall, logger *slog.Logger) (conclusionDraft, bool) {
+	for _, call := range calls {
+		if call.Name != submitConclusionSpec.Name {
+			continue
+		}
+		draft, err := brain.DecodeArguments[conclusionDraft](call.Arguments)
+		if err != nil {
+			logger.Warn("submit_conclusion 的参数不对", "err", err)
+			return conclusionDraft{}, false
+		}
+		draft.Conclusion = strings.TrimSpace(draft.Conclusion)
+		return draft, true
+	}
+	return conclusionDraft{}, false
 }
 
 // runTool 执行调查里的一次工具调用，返回给模型看的文字（出错也作为文字交给模型，让它换个办法）。
@@ -365,21 +396,22 @@ func (r *Runner) runTool(ctx context.Context, call brain.ToolCall, question stri
 		if result.searches >= r.limits.MaxSearches {
 			return fmt.Sprintf("搜索次数已经用完（上限 %d 次）。请根据已有资料写结论。", r.limits.MaxSearches)
 		}
-		query, _ := call.Arguments["query"].(string)
-		if strings.TrimSpace(query) == "" {
-			return "query 不能为空"
+		in, err := brain.DecodeArguments[searchInput](call.Arguments)
+		if err != nil || strings.TrimSpace(in.Query) == "" {
+			return orError("", errors.Join(errors.New("query 不能为空"), err))
 		}
 		text, err := r.metered(ctx, r.searcher.SearchCredits(), func() (string, error) {
-			return r.searcher.Search(ctx, query, searchResults)
+			return r.searcher.Search(ctx, in.Query, searchResults)
 		})
 		result.searches++
-		r.logger.Info("调查：搜索", "query", query, "err", err)
+		r.logger.Info("调查：搜索", "query", in.Query, "err", err)
 		return orError(text, err)
 	case "read_pages":
-		urls := stringList(call.Arguments["urls"])
-		if len(urls) == 0 {
-			return "urls 不能为空"
+		in, err := brain.DecodeArguments[readPagesInput](call.Arguments)
+		if err != nil || len(in.URLs) == 0 {
+			return orError("", errors.Join(errors.New("urls 不能为空"), err))
 		}
+		urls := in.URLs
 		if len(urls) > maxPagesPerRead {
 			urls = urls[:maxPagesPerRead]
 		}
@@ -416,25 +448,6 @@ func orError(text string, err error) string {
 	return text
 }
 
-func stringList(value any) []string {
-	var list []string
-	switch typed := value.(type) {
-	case []any:
-		for _, item := range typed {
-			if text, ok := item.(string); ok && strings.TrimSpace(text) != "" {
-				list = append(list, strings.TrimSpace(text))
-			}
-		}
-	case []string:
-		list = typed
-	case string:
-		if typed != "" {
-			list = []string{typed}
-		}
-	}
-	return list
-}
-
 // complete 请求模型一次，收齐文字、工具调用与 token 数。
 func complete(ctx context.Context, model brain.ChatModel, messages []brain.ChatMessage, specs []brain.ToolSpec) (string, []brain.ToolCall, int, error) {
 	var text strings.Builder
@@ -453,31 +466,23 @@ func complete(ctx context.Context, model brain.ChatModel, messages []brain.ChatM
 	return text.String(), calls, tokens, nil
 }
 
-// splitSources 把「结论 …… 来源：网址……」拆开：结论会被念出来，来源只存档。
-func splitSources(text string) (string, []string) {
-	text = strings.TrimSpace(text)
-	index := strings.LastIndex(text, "来源：")
-	if index < 0 {
-		index = strings.LastIndex(text, "来源:")
-	}
-	if index < 0 {
-		return text, nil
-	}
-	var sources []string
-	separators := func(r rune) bool { return unicode.IsSpace(r) || strings.ContainsRune("，,；;、()（）<>「」", r) }
-	for _, field := range strings.FieldsFunc(text[index:], separators) {
-		if i := strings.Index(field, "http"); i >= 0 {
-			sources = append(sources, field[i:])
-		}
-	}
-	return strings.TrimSpace(text[:index]), sources
+type searchInput struct {
+	Query string `json:"query" jsonschema:"搜索词，简洁具体"`
 }
 
+type readPagesInput struct {
+	URLs []string `json:"urls" jsonschema:"要读的网址，取自搜索结果"`
+}
+
+var submitConclusionSpec = brain.ToolSpec{Name: "submit_conclusion",
+	Description: "交出调查结论（结论和来源分开）。查够了就调用它，不要把结论直接写在回答里。",
+	Parameters:  brain.ParametersFor[conclusionDraft]()}
+
 var researchToolSpecs = []brain.ToolSpec{
-	{Name: "search_web", Description: "联网搜索，返回几条结果（标题、网址、摘要）。",
-		Parameters: json.RawMessage(`{"type":"object","properties":{"query":{"type":"string","description":"搜索词，简洁具体"}},"required":["query"]}`)},
+	{Name: "search_web", Description: "联网搜索，返回几条结果（标题、网址、摘要）。", Parameters: brain.ParametersFor[searchInput]()},
 	{Name: "read_pages", Description: "读网页正文（一次最多 3 个网址，每页只给开头一部分）。摘要不够用时才读。",
-		Parameters: json.RawMessage(`{"type":"object","properties":{"urls":{"type":"array","items":{"type":"string"},"description":"要读的网址，取自搜索结果"}},"required":["urls"]}`)},
+		Parameters: brain.ParametersFor[readPagesInput]()},
+	submitConclusionSpec,
 }
 
 func researchPrompt(limits Limits, now time.Time) string {
@@ -485,8 +490,7 @@ func researchPrompt(limits Limits, now time.Time) string {
 	today := fmt.Sprintf("今天是 %s（%s）。要查「现在」「最近」的事时按这个日期来，不要用别的年份。\n", now.Format("2006年1月2日"), weekdayNames[now.Weekday()])
 	return today + fmt.Sprintf(`你是调查助手，在后台替主人查资料。用 search_web 搜索、必要时用 read_pages 读正文，查清楚后直接给出结论。
 限制：最多搜索 %d 次、最多 %d 轮；够用就停，不要为了凑数多查。搜索词按资料最可能使用的语言写（日本的事用日语搜，其他按情况用英语或中文）。
-最后的回答格式：先用中文口语写 3 到 6 句结论（会被念出来：不要列表、表格、网址、Markdown），
-有不确定或没查到的地方直接说；然后另起一行写「来源：」，列出 1 到 3 个最主要的网址。`, limits.MaxSearches, limits.MaxRounds)
+查清楚后调用 submit_conclusion 交出结论和来源。`, limits.MaxSearches, limits.MaxRounds)
 }
 
 var weekdayNames = []string{"星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"}

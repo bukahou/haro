@@ -13,8 +13,7 @@ import (
 
 	"github.com/failsafe-go/failsafe-go"
 	"github.com/failsafe-go/failsafe-go/retrypolicy"
-
-	"github.com/bukahou/haro/internal/brain"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // WebSearcher 是联网搜索的能力（v5 E3）：主对话的快查（R1）与后台调查共用。
@@ -180,6 +179,12 @@ func (t *TavilySearcher) ReadPages(ctx context.Context, urls []string, maxRunesP
 	return marshalResult(map[string]any{"pages": pages})
 }
 
+// marshalResult 把整理好的结果编成 JSON 文本（交给调查和快查）。
+func marshalResult(value any) (string, error) {
+	data, err := json.Marshal(value)
+	return string(data), err
+}
+
 func (t *TavilySearcher) SearchCredits() int { return tavilySearchCredits }
 
 func (t *TavilySearcher) ReadCredits(pages int) int {
@@ -204,26 +209,23 @@ const (
 	quickSearchMaxRunes = 3000
 )
 
-// WebSearchTools 返回主对话的快查工具 web_search（R1）。
-func WebSearchTools(searcher WebSearcher, meter SearchMeter, logger *slog.Logger) []Builtin {
-	return []Builtin{{
-		Spec: brain.ToolSpec{Name: "web_search",
+// WebSearchTools 是主对话里的快查（web_search）：先查额度、搜一次、成功后记账（见 QuickSearch）。
+func WebSearchTools(searcher WebSearcher, meter SearchMeter, logger *slog.Logger) Builtin {
+	return func(server *mcp.Server) {
+		AddTextTool(server, &mcp.Tool{Name: "web_search", Annotations: ReadOnly,
 			Description: "联网搜索一次，查实时或最新的事实（新闻、价格、比分、营业时间、某件事的最新进展等）。" +
-				"你不确定、或者信息可能过时的时候用它，不要凭记忆回答。搜一次就能答的问题用它。",
-			Parameters: json.RawMessage(`{"type":"object","properties":{"query":{"type":"string","description":"搜索词，简洁具体，例如「日经平均 今日 终値」"}},"required":["query"]}`)},
-		Run: func(ctx context.Context, arguments map[string]any) (string, error) {
-			var in struct {
-				Query string `json:"query"`
-			}
-			if err := decodeArguments(arguments, &in); err != nil {
-				return "", err
-			}
-			if strings.TrimSpace(in.Query) == "" {
-				return "", errors.New("query 不能为空")
-			}
-			return QuickSearch(ctx, searcher, meter, in.Query, logger)
-		},
-	}}
+				"你不确定、或者信息可能过时的时候用它，不要凭记忆回答。搜一次就能答的问题用它。"},
+			func(ctx context.Context, in webSearchInput) (string, error) {
+				if strings.TrimSpace(in.Query) == "" {
+					return "", errors.New("query 不能为空")
+				}
+				return QuickSearch(ctx, searcher, meter, in.Query, logger)
+			})
+	}
+}
+
+type webSearchInput struct {
+	Query string `json:"query" jsonschema:"搜索词，简洁具体，例如「日经平均 今日 終値」"`
 }
 
 // QuickSearch 是一次快查（最多 quickSearchResults 条、截到 quickSearchMaxRunes 字）：先查额度、搜索、成功后记账。

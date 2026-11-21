@@ -31,18 +31,32 @@ type scriptedModel struct {
 	repeat    *brain.ReplyDelta
 	delay     time.Duration
 	gate      chan struct{}
-	toolsSeen []bool
+	toolsSeen []bool // 每次请求有没有给搜索工具（到上限后只给交结论的工具）
 	lastMsgs  []brain.ChatMessage
+}
+
+// submit 是用 submit_conclusion 交出结论的回答。
+func submit(conclusion string, sources ...string) brain.ReplyDelta {
+	arguments := map[string]any{"conclusion": conclusion}
+	if len(sources) > 0 {
+		arguments["sources"] = sources
+	}
+	return call("submit_conclusion", arguments)
+}
+
+// offers 判断这次请求给没给某个工具。
+func offers(specs []brain.ToolSpec, name string) bool {
+	return slices.ContainsFunc(specs, func(spec brain.ToolSpec) bool { return spec.Name == name })
 }
 
 func (m *scriptedModel) StreamReply(ctx context.Context, messages []brain.ChatMessage, specs []brain.ToolSpec) iter.Seq2[brain.ReplyDelta, error] {
 	m.mu.Lock()
-	m.toolsSeen = append(m.toolsSeen, len(specs) > 0)
+	m.toolsSeen = append(m.toolsSeen, offers(specs, "search_web"))
 	m.lastMsgs = messages
-	reply := brain.ReplyDelta{Text: "结论：A 比 B 便宜。\n来源：https://example.com/a"}
+	reply := submit("结论：A 比 B 便宜。", "https://example.com/a")
 	switch {
-	case len(specs) == 0:
-		reply = brain.ReplyDelta{Text: "目前查到 A 便宜一些，B 没查完。\n来源：https://example.com/a"}
+	case !offers(specs, "search_web"): // 到上限了，只让交结论
+		reply = submit("目前查到 A 便宜一些，B 没查完。", "https://example.com/a")
 	case len(m.replies) > 0:
 		reply, m.replies = m.replies[0], m.replies[1:]
 	case m.repeat != nil:
@@ -170,14 +184,18 @@ func TestResearchFindsAnswerAndBriefsOnce(t *testing.T) {
 		strings.Contains(board, "A 比 B 便宜") || briefing.Delivered != nil {
 		t.Errorf("任务板应只说查完了、让模型取结论，不带结论、不靠这一轮说完就算告诉了：%+v", briefing)
 	}
-	// 不在一轮回答里查（没有收集处）：不算告诉了
-	if found, _ := runner.status(ctx, "主人", "便宜"); !strings.Contains(found, "A 比 B 便宜") {
-		t.Errorf("按关键词找以前的调查：%s", found)
+	// 不在一轮回答里查（没有收集处）：不算告诉了；按编号查到那一个，别人的编号查不到
+	if found, err := runner.status(ctx, "主人", &task.ID); err != nil || len(found.Tasks) != 1 || found.Tasks[0].Conclusion != "结论：A 比 B 便宜。" {
+		t.Errorf("按编号查：%+v %v", found, err)
+	}
+	if found, err := runner.status(ctx, "别人", &task.ID); err != nil || len(found.Tasks) != 0 || found.Note == "" {
+		t.Errorf("别人的编号查不到：%+v %v", found, err)
 	}
 	// 一轮回答里取了结论：登记「主人听完才算告诉了」；还没确认听完之前，任务板照样附上
 	var heard deliveries
-	if found, _ := runner.status(brain.WithDeliveries(ctx, &heard), "主人", ""); !strings.Contains(found, "A 比 B 便宜") || len(heard) != 1 {
-		t.Fatalf("取结论：应带上结论，并登记一件听完才算数的事（%d 件）：%s", len(heard), found)
+	if found, err := runner.status(brain.WithDeliveries(ctx, &heard), "主人", nil); err != nil || len(found.Tasks) != 1 ||
+		found.Tasks[0].Conclusion != "结论：A 比 B 便宜。" || len(heard) != 1 {
+		t.Fatalf("取结论：应带上结论，并登记一件听完才算数的事（%d 件）：%+v %v", len(heard), found, err)
 	}
 	if again := runner.Brief("主人"); !strings.Contains(strings.Join(again.Lines, ""), "查完了") {
 		t.Errorf("主人还没听完（被打断、出错）：应一直附上：%v", again.Lines)
@@ -190,7 +208,7 @@ func TestResearchFindsAnswerAndBriefsOnce(t *testing.T) {
 		t.Errorf("不给别人看：%v", others.Lines)
 	}
 	var again deliveries
-	if _, err := runner.status(brain.WithDeliveries(ctx, &again), "主人", ""); err != nil || len(again) != 0 {
+	if _, err := runner.status(brain.WithDeliveries(ctx, &again), "主人", nil); err != nil || len(again) != 0 {
 		t.Errorf("已经告诉过的结论再取一次：不用再登记（%d 件，%v）", len(again), err)
 	}
 }
@@ -216,7 +234,7 @@ func TestResearchStopsAtLimitsAndWritesUp(t *testing.T) {
 	model.mu.Lock()
 	defer model.mu.Unlock()
 	if len(model.toolsSeen) != 5 || model.toolsSeen[4] {
-		t.Errorf("4 轮带工具 + 最后一轮不带工具：%v", model.toolsSeen)
+		t.Errorf("4 轮带搜索工具 + 最后一轮只让交结论：%v", model.toolsSeen)
 	}
 }
 
@@ -287,13 +305,28 @@ func TestResearchBudgetQueueCancelAndRestart(t *testing.T) {
 	}
 }
 
-func TestSplitSources(t *testing.T) {
-	conclusion, sources := splitSources("A 便宜。\n来源：https://a.example/x、https://b.example/y")
-	if conclusion != "A 便宜。" || len(sources) != 2 || sources[1] != "https://b.example/y" {
-		t.Errorf("%q %v", conclusion, sources)
-	}
-	if conclusion, sources := splitSources("没有来源"); conclusion != "没有来源" || sources != nil {
-		t.Errorf("%q %v", conclusion, sources)
+// 结论和来源由模型用 submit_conclusion 分开交出；模型没用工具、直接写了文字时整段当结论（代码不从文字里切来源）。
+func TestConclusionAndSourcesComeSeparately(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		final   brain.ReplyDelta
+		want    string
+		sources []string
+	}{
+		{"用工具交", submit("A 便宜，正文里也写了来源：两家店的报价。", "https://a.example/x", "https://b.example/y"),
+			"A 便宜，正文里也写了来源：两家店的报价。", []string{"https://a.example/x", "https://b.example/y"}},
+		{"直接写了文字", brain.ReplyDelta{Text: "A 便宜。\n来源：https://a.example/x"}, "A 便宜。\n来源：https://a.example/x", nil},
+	} {
+		model := &scriptedModel{replies: []brain.ReplyDelta{call("search_web", map[string]any{"query": "A B"}), c.final}}
+		runner, store, _, _ := newTestRunner(t, model, DefaultLimits)
+		ctx, cancel := context.WithCancel(context.Background())
+		go runner.Run(ctx)
+		task, _, _ := runner.Start(ctx, "主人", "A 和 B 哪个便宜")
+		done := waitFinished(t, store, task.ID)
+		cancel()
+		if done.Status != StatusDone || done.Conclusion != c.want || !slices.Equal(done.Sources, c.sources) {
+			t.Errorf("%s：%+v", c.name, done)
+		}
 	}
 }
 
@@ -364,13 +397,16 @@ type writerModel struct {
 	err      error
 	calls    int
 	lastMsgs []brain.ChatMessage
-	withTool bool
+	offered  []string // 最后一次给的工具
 }
 
 func (m *writerModel) StreamReply(_ context.Context, messages []brain.ChatMessage, specs []brain.ToolSpec) iter.Seq2[brain.ReplyDelta, error] {
 	m.mu.Lock()
 	m.calls++
-	m.lastMsgs, m.withTool = messages, len(specs) > 0
+	m.lastMsgs, m.offered = messages, nil
+	for _, spec := range specs {
+		m.offered = append(m.offered, spec.Name)
+	}
 	text, err := m.text, m.err
 	m.mu.Unlock()
 	return func(yield func(brain.ReplyDelta, error) bool) {
@@ -378,7 +414,9 @@ func (m *writerModel) StreamReply(_ context.Context, messages []brain.ChatMessag
 			yield(brain.ReplyDelta{}, err)
 			return
 		}
-		yield(brain.ReplyDelta{Text: text, Usage: &brain.ReplyUsage{PromptTokens: 2000, OutputTokens: 300}}, nil)
+		reply := submit(text, "https://example.com/b")
+		reply.Usage = &brain.ReplyUsage{PromptTokens: 2000, OutputTokens: 300}
+		yield(reply, nil)
 	}
 }
 
@@ -391,7 +429,7 @@ func TestResearchWriterWritesConclusion(t *testing.T) {
 		writer *writerModel
 		want   string
 	}{
-		{"写结论的模型写成", &writerModel{text: "B 其实更划算。\n来源：https://example.com/b"}, "B 其实更划算。"},
+		{"写结论的模型写成", &writerModel{text: "B 其实更划算。"}, "B 其实更划算。"},
 		{"写结论的模型出错：用草稿", &writerModel{err: errors.New("overloaded")}, "结论：A 比 B 便宜。"},
 	} {
 		model := &scriptedModel{replies: []brain.ReplyDelta{call("search_web", map[string]any{"query": "A B 价格"})}}
@@ -412,8 +450,8 @@ func TestResearchWriterWritesConclusion(t *testing.T) {
 				t.Errorf("%s：交给写结论的模型的资料里不该有调查模型的草稿", c.name)
 			}
 		}
-		if c.writer.calls != 1 || c.writer.withTool || !strings.Contains(last.Text, "不要再搜索") {
-			t.Errorf("%s：写结论的模型应被问 1 次、不给工具：%d 次、工具 %v、最后一条 %q", c.name, c.writer.calls, c.writer.withTool, last.Text)
+		if c.writer.calls != 1 || !slices.Equal(c.writer.offered, []string{"submit_conclusion"}) || !strings.Contains(last.Text, "不要再搜索") {
+			t.Errorf("%s：写结论的模型应被问 1 次、只给交结论的工具：%d 次、工具 %v、最后一条 %q", c.name, c.writer.calls, c.writer.offered, last.Text)
 		}
 		c.writer.mu.Unlock()
 	}
@@ -426,7 +464,7 @@ func TestResearchWriterAtLimits(t *testing.T) {
 		writer *writerModel
 		want   string
 	}{
-		{"写结论的模型写成", &writerModel{text: "查到一半：A 便宜。\n来源：https://example.com/a"}, "查到一半：A 便宜。"},
+		{"写结论的模型写成", &writerModel{text: "查到一半：A 便宜。"}, "查到一半：A 便宜。"},
 		{"写结论的模型出错：调查模型写", &writerModel{err: errors.New("overloaded")}, "目前查到 A 便宜一些，B 没查完。"},
 	} {
 		search := call("search_web", map[string]any{"query": "没完没了"})

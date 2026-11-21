@@ -26,8 +26,12 @@ func TestLocationNote(t *testing.T) {
 		strings.Contains(lines[0], "12.3") {
 		t.Errorf("只说城市级（不说坐标），并注明按网络推定：%v", lines)
 	}
-	if lines := (LocationNote{Home: FixedHome{Place: Place{Name: "家", Latitude: 1, Longitude: 2}}}).Brief(""); lines != nil {
+	if lines := (LocationNote{Home: FixedHome{Place: Place{Latitude: 1, Longitude: 2}}}).Brief(""); lines != nil {
 		t.Errorf("只有坐标、没有地名时不说：%v", lines)
+	}
+	lines = (LocationNote{Home: FixedHome{Place: Place{Name: "横浜市", Latitude: 1, Longitude: 2}}}).Brief("")
+	if len(lines) != 1 || !strings.Contains(lines[0], "横浜市") || strings.Contains(lines[0], "可能不准") {
+		t.Errorf("配置了名字的家：直接说，不注明推定：%v", lines)
 	}
 	if lines := (LocationNote{}).Brief(""); lines != nil {
 		t.Errorf("没设家的位置：%v", lines)

@@ -89,11 +89,17 @@ func WithDeliveries(ctx context.Context, deliveries Deliveries) context.Context 
 	return context.WithValue(ctx, deliveriesKey{}, deliveries)
 }
 
+// DeliveriesFrom 取出 ctx 里的收集处；没有时为 nil（工具不在一轮回答里执行，或经别的进程转交时要另外带过去）。
+func DeliveriesFrom(ctx context.Context) Deliveries {
+	deliveries, _ := ctx.Value(deliveriesKey{}).(Deliveries)
+	return deliveries
+}
+
 // OnDelivered 让工具登记一件「主人听完这一轮才算数」的事，例如把调查结论取出来讲了，听完才标已汇报：
 // 和 Briefing.Delivered 同一个时机调用（这一轮说完、播放没被打断）；被打断、出错时不调用。
 // ctx 用工具执行时收到的那个（工具在回答的那个 goroutine 里同步执行）；ctx 里没有收集处时不登记。
 func OnDelivered(ctx context.Context, delivered func()) {
-	if deliveries, ok := ctx.Value(deliveriesKey{}).(Deliveries); ok {
+	if deliveries := DeliveriesFrom(ctx); deliveries != nil {
 		deliveries.Add(delivered)
 	}
 }
