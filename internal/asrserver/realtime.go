@@ -45,13 +45,7 @@ type TurnDetector interface {
 	EndOfTurnProbability(samples []float32) (float64, error) // 16kHz 单声道，取最后 8 秒
 }
 
-const (
-	samplesPerMs   = realtimeproto.TranscriptionSampleRate / 1000
-	historySeconds = 30 // 只保留最近 30 秒音频，用于截取语音段（含前置缓冲）
-
-	wakeOnlyWaitMs      = 1000 // 只叫了唤醒词：等这么久没开口就回「我在。」
-	wakeKeywordWindowMs = 1500 // 唤醒词识别报告时刻之前的这段一定包含整个唤醒词（「哈罗哈罗」约 1 s + 报告延迟约 0.3 s）
-)
+const samplesPerMs = realtimeproto.TranscriptionSampleRate / 1000
 
 // handleRealtimeTranscription 实现 Realtime 转写会话的子集（事件定义见 realtimeproto）。
 func handleRealtimeTranscription(w http.ResponseWriter, r *http.Request, deps Dependencies) {
@@ -102,7 +96,7 @@ type utterance struct {
 	endSample      int
 	waiting        bool   // 模型判定没说完（或刚被唤醒还没开口），正在等用户接着说
 	wake           bool   // 这句话里有唤醒词：识别后在文字上去掉它
-	awaitingSpeech bool   // 唤醒词说完就停了，还没开口：最多等 wakeOnlyWaitMs，等不到就按「只叫了唤醒词」处理
+	awaitingSpeech bool   // 唤醒词说完就停了，还没开口：最多等 Timing.WakeOnlyWait，等不到就按「只叫了唤醒词」处理
 	bargeIn        bool   // 终端播放回答时用唤醒词打断的：唤醒词前面混着 haro 自己的回声，去掉唤醒词时连前面一起去掉
 	wakeSpeaker    string // 唤醒时声纹认得很准的人（达到 Threshold）：这一句沿用它，不再用这句（多半很短）重新比对
 	wakeGuess      string // 唤醒时只过了唤醒门槛的人：这一句照常比对；只叫了唤醒词（去掉后没有文字）时才沿用，让 haro 回「我在」
@@ -115,6 +109,7 @@ type transcriptionSession struct {
 	conn          *websocket.Conn
 	deps          Dependencies
 	turnDetection realtimeproto.TurnDetection
+	timing        Timing
 
 	timeline audioTimeline
 	vad      voiceActivity
@@ -147,7 +142,10 @@ func startTranscriptionSession(ctx context.Context, conn *websocket.Conn, deps D
 		return nil, realtimeproto.ProtocolErrorf(realtimeproto.CodeInvalidEvent, "必须指定 turn_detection")
 	}
 	turn := *update.TurnDetection
-	session := &transcriptionSession{conn: conn, deps: deps, turnDetection: turn}
+	timing := deps.Timing.orDefault()
+	session := &transcriptionSession{conn: conn, deps: deps, turnDetection: turn, timing: timing,
+		timeline: audioTimeline{keep: samplesIn(timing.History)}, echo: newEchoWindow(timing),
+		turn: turnEnd{cutoff: timing.EndOfTurnCutoff, defaultWait: samplesIn(timing.DefaultWait)}}
 	vadConfig := turn
 	switch turn.Type {
 	case "server_vad":
@@ -155,9 +153,9 @@ func startTranscriptionSession(ctx context.Context, conn *websocket.Conn, deps D
 		if deps.TurnDetector == nil {
 			return nil, realtimeproto.ProtocolErrorf(realtimeproto.CodeUnsupportedFeature, "haro-asr 启动时没有指定 -turn-model，不支持 semantic_vad")
 		}
-		session.turn = turnEnd{semantic: true, detector: deps.TurnDetector,
-			maxWait: int(semanticMaxWait(turn.Eagerness).Milliseconds()) * samplesPerMs}
-		vadConfig.SilenceDurationMs = semanticSilenceMs
+		session.turn.semantic, session.turn.detector = true, deps.TurnDetector
+		session.turn.maxWait = samplesIn(session.timing.maxWait(turn.Eagerness))
+		vadConfig.SilenceDurationMs = int(session.timing.SemanticSilence.Milliseconds())
 	default:
 		return nil, realtimeproto.ProtocolErrorf(realtimeproto.CodeInvalidEvent, "不支持的 turn_detection.type %q（支持 server_vad / semantic_vad）", turn.Type)
 	}
@@ -256,7 +254,7 @@ func (s *transcriptionSession) acceptAudio(ctx context.Context, pcm []byte) erro
 	// 判定「没说完」（或刚唤醒还没开口）后，等太久没有接着说，就按说完处理
 	limit := s.turn.waitLimit()
 	if s.current != nil && s.current.awaitingSpeech {
-		limit = wakeOnlyWaitMs * samplesPerMs
+		limit = samplesIn(s.timing.WakeOnlyWait)
 	}
 	if s.current != nil && s.current.waiting && !speaking && now-s.current.endSample >= limit {
 		s.deps.Logger.Info("等待接着说超时，按说完处理", "item", s.current.itemID)
@@ -315,9 +313,10 @@ func (s *transcriptionSession) wakeUp(ctx context.Context, keyword string, speak
 	// 往前多取一段，确保整个唤醒词都在识别范围内（整句交给服务端，唤醒词由模型自己分）；
 	// 但不越过唤醒词所在这段连续语音的开头——休眠时更早的话不能被带进来。
 	// 打断时这段「连续语音」其实是 haro 自己的回声，开头没有意义，只按窗口往前取。
-	s.current.startSample = max(now-wakeKeywordWindowMs*samplesPerMs, s.vad.speechStart, s.echo.until, 0)
+	keywordWindow := samplesIn(s.timing.WakeKeywordWindow)
+	s.current.startSample = max(now-keywordWindow, s.vad.speechStart, s.echo.until, 0)
 	if bargeIn {
-		s.current.startSample = max(now-wakeKeywordWindowMs*samplesPerMs, 0)
+		s.current.startSample = max(now-keywordWindow, 0)
 		s.echo.cutAt(s.current.startSample)
 		s.current.bargeIn = true
 		s.deps.Logger.Info("打断：播放回答时听到唤醒词", "item", s.current.itemID)

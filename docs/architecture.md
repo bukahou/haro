@@ -51,11 +51,17 @@ haro 是一个家用语音助手：家里每个房间放一台**终端**（麦�
 | `ConversationStore` | `internal/conversationstore`：SQLite（goose 迁移）；每一轮带说话的时间，发给模型时每轮前标日期和时刻 |
 | `Briefer` | 每轮补充给模型的即时情况：现在几号几点、主人家大致在哪（城市级）、额度提醒、后台调查的任务板 |
 
+- **观测**：OpenTelemetry（`HARO_OTLP_ENDPOINT`，OTLP/HTTP）。大模型相关的按语义约定 `gen_ai.*` 记：每次请求一个 span
+  「chat <模型>」（提供方、模型、用量含缓存读写、为什么停）和标准指标 `gen_ai.client.operation.duration`、`gen_ai.client.token.usage`；
+  一轮回答记成 `invoke_agent`（代理名，交接记成事件），工具调用记成 `execute_tool`。haro 自己的（说完到第一个字、合成、打断、唤醒）用 `haro.` 前缀。
 - **坏了要出声**：服务端和 haro-asr 之间的识别流断了会自己重开（带退避），重开后把「醒着 / 正在播放」重新告诉它；
+  说到一半断开时，服务端替丢掉的那句补一个「说完」，这一轮按识别失败结束，终端照常收尾；
   断开超过 10 秒才提示终端一次（`haro.notice` 的 `transcription_lost`，终端播「断开」那一声），重开后再提示一次（`transcription_restored`）。
   存活检查 `/livez` 只看进程；就绪检查 `/readyz` 看识别、合成、模型凭证、账本，结果由后台定期检查（`internal/readiness`）。
 - **对话跟着人走**：开了声纹时，服务端认出是谁在说话，用这个人自己的对话历史；换终端、断线重连、服务端重启都接得上。
-  只保留最近几轮；更早的对话在后台压成一段摘要，放进系统提示词（`internal/brain/summary.go`）。
+  发给模型的只有最近几轮加一段摘要：更早的对话在后台交给代理「摘要」压成一段，放进系统提示词（`internal/brain/summary.go`）；
+  一轮里请求模型带的上下文（模型报的输入 token）到了 `HARO_CONTEXT_COMPACT_TOKENS`，较早的几轮提前压缩。
+  完整的对话记录另存一份（对话库的 `transcript` 表，每人每轮一行、按轮次编号，只增不删），留作以后的长期记忆。
 - **代理**（`internal/agents`）：交给模型做的事按「代理」定义——名字、模型档（`base` = 云端模型 / 本地模型，`strong` = 更强的模型；
   具体的模型 ID 和思考写法只在配置里）、系统提示词、能用的工具（允许名单）、步数上限与死循环判定、记账用途。
   每个代理一个 markdown 文件（开头 YAML 是配置，正文是系统提示词；正文用 `{{.名字}}` 引用代码里定义的值，例如情绪标记的列表）。

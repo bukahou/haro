@@ -58,6 +58,9 @@ func run(logger *slog.Logger) error {
 	for _, note := range settings.RemovedSettingNotes {
 		logger.Warn(note)
 	}
+	if err := checkClaudeSettings(settings); err != nil {
+		return err
+	}
 	catalog, err := loadAgentDefinitions(settings, logger) // 代理的定义写错了就起不来：先读，免得连好一堆东西才发现
 	if err != nil {
 		return err
@@ -97,7 +100,7 @@ const (
 
 // brainHandler 是服务端的全部 HTTP 入口：对话（WebSocket）+ 远程登记声纹（转给 haro-asr）+ 存活 / 就绪检查。
 // 终端只认识服务端的地址；haro-asr 只监听本机（集群里在同一个 Pod）。
-func brainHandler(settings config.Settings, newSession brainserver.SessionFactory, monitor *readiness.Monitor,
+func brainHandler(settings config.ServerSettings, newSession brainserver.SessionFactory, monitor *readiness.Monitor,
 	logger *slog.Logger) (http.Handler, error) {
 	asrURL, err := url.Parse(settings.ASRURL)
 	if err != nil {
@@ -118,7 +121,7 @@ const (
 )
 
 // readinessChecks 是服务端的就绪检查：识别、合成连得上，云端模型的凭证能用，账本写得进去。
-func readinessChecks(settings config.Settings, claude *llm.ClaudeAPI, ledger spending.Ledger, httpClient *http.Client) ([]readiness.Check, error) {
+func readinessChecks(settings config.ServerSettings, claude *llm.ClaudeAPI, ledger spending.Ledger, httpClient *http.Client) ([]readiness.Check, error) {
 	asrReady, err := url.JoinPath(settings.ASRURL, "readyz")
 	if err != nil {
 		return nil, fmt.Errorf("HARO_ASR_URL: %w", err)
@@ -136,8 +139,30 @@ func readinessChecks(settings config.Settings, claude *llm.ClaudeAPI, ledger spe
 	return checks, nil
 }
 
+// checkClaudeSettings 检查 Claude 特有的取值（回答力度、思考写法；取值由 llm 包定义）：用 Claude 的接口时才检查。
+func checkClaudeSettings(settings config.ServerSettings) error {
+	if settings.CloudLLMAPI != config.CloudAPIAnthropic {
+		return nil
+	}
+	for _, check := range []struct {
+		name, value string
+		validate    func(string) error
+	}{
+		{"HARO_CLOUD_LLM_EFFORT", settings.CloudLLMEffort, llm.ValidateClaudeEffort},
+		{"HARO_RESEARCH_EFFORT", settings.ResearchEffort, llm.ValidateClaudeEffort},
+		{"HARO_STRONG_LLM_EFFORT", settings.StrongLLMEffort, llm.ValidateClaudeEffort},
+		{"HARO_CLOUD_LLM_THINKING", settings.CloudLLMThinking, llm.ValidateClaudeThinking},
+		{"HARO_STRONG_LLM_THINKING", settings.StrongLLMThinking, llm.ValidateClaudeThinking},
+	} {
+		if err := check.validate(check.value); err != nil {
+			return fmt.Errorf("%s %w", check.name, err)
+		}
+	}
+	return nil
+}
+
 // newClaudeAPI 创建全进程共用的 Claude 客户端（HARO_CLOUD_LLM_API=anthropic 时）；其余情况为 nil。
-func newClaudeAPI(settings config.Settings, httpClient *http.Client) *llm.ClaudeAPI {
+func newClaudeAPI(settings config.ServerSettings, httpClient *http.Client) *llm.ClaudeAPI {
 	if settings.CloudLLMAPI != config.CloudAPIAnthropic {
 		return nil
 	}
@@ -156,21 +181,23 @@ type cloudModelSpec struct {
 
 // newCloudChatModel 按 HARO_CLOUD_LLM_API 创建云端的 model：openai = OpenAI 兼容接口（用 client），
 // anthropic = Claude API（用共用的 claude）。
-func newCloudChatModel(settings config.Settings, claude *llm.ClaudeAPI, spec cloudModelSpec, client *http.Client) brain.ChatModel {
+// 每次请求都套上观测（gen_ai.* 的 span 与指标）。
+func newCloudChatModel(settings config.ServerSettings, claude *llm.ClaudeAPI, spec cloudModelSpec, client *http.Client) brain.ChatModel {
 	if settings.CloudLLMAPI == config.CloudAPIAnthropic {
-		return llm.NewAnthropicChatModel(llm.AnthropicOptions{API: claude, Model: spec.model, MaxTokens: spec.maxTokens,
-			Effort: spec.effort, Thinking: spec.thinking, MaxRetries: spec.retries, FirstTokenTimeout: spec.firstTokenTimeout,
-			RequestTimeout: spec.requestTimeout})
+		return llm.WithRequestTelemetry(llm.NewAnthropicChatModel(llm.AnthropicOptions{API: claude, Model: spec.model,
+			MaxTokens: spec.maxTokens, Effort: spec.effort, Thinking: spec.thinking, MaxRetries: spec.retries,
+			FirstTokenTimeout: spec.firstTokenTimeout, RequestTimeout: spec.requestTimeout}), llm.ProviderAnthropic, spec.model)
 	}
-	return llm.NewOpenAIChatModel(llm.OpenAIOptions{BaseURL: settings.CloudLLMURL, Model: spec.model, APIKey: settings.CloudLLMAPIKey,
-		MaxTokens: spec.maxTokens, HTTPClient: client, ToolCallIDs: llm.ToolCallIDStyle(settings.CloudLLMToolCallIDs),
-		MaxRetries: spec.retries, FirstTokenTimeout: spec.firstTokenTimeout, RequestTimeout: spec.requestTimeout})
+	return llm.WithRequestTelemetry(llm.NewOpenAIChatModel(llm.OpenAIOptions{BaseURL: settings.CloudLLMURL, Model: spec.model,
+		APIKey: settings.CloudLLMAPIKey, MaxTokens: spec.maxTokens, HTTPClient: client, ToolCallIDs: llm.ToolCallIDStyle(settings.CloudLLMToolCallIDs),
+		MaxRetries: spec.retries, FirstTokenTimeout: spec.firstTokenTimeout, RequestTimeout: spec.requestTimeout}),
+		llm.ProviderOpenAICompatible, spec.model)
 }
 
 // loadPricing 是把用量折成日元的单价表：云端模型（和设了的更强的模型）的单价从模型价格目录取（启动时拉取，拉不到用上次存的；
 // 都没有、或目录里没有用到的模型就起不来 —— 费用上限要靠单价折算），本地模型标成不花钱；汇率、搜索积分的价格来自配置。
 // 不用云端模型时不拉目录。
-func loadPricing(ctx context.Context, settings config.Settings, client *http.Client, logger *slog.Logger) (spending.Pricing, error) {
+func loadPricing(ctx context.Context, settings config.ServerSettings, client *http.Client, logger *slog.Logger) (spending.Pricing, error) {
 	pricing := spending.Pricing{USDToYen: settings.USDToYen, SearchCreditUSD: settings.SearchCreditUSD,
 		Models: map[string]spending.TokenPrice{settings.Model: {Free: true}}}
 	var cloudModels []string
@@ -212,7 +239,7 @@ func loadPricing(ctx context.Context, settings config.Settings, client *http.Cli
 
 // weatherHome 是家的位置（已在加载配置时校验过）：配置的坐标，或按公网 IP 定位；没设时为 nil。
 // IP 定位在启动时先做一次并写进日志：精度是城市级，偏了就改填坐标。
-func weatherHome(ctx context.Context, settings config.Settings, httpClient *http.Client, logger *slog.Logger) weather.HomeLocator {
+func weatherHome(ctx context.Context, settings config.ServerSettings, httpClient *http.Client, logger *slog.Logger) weather.HomeLocator {
 	home, _ := settings.WeatherHomePlace()
 	switch {
 	case !home.Set:
@@ -234,7 +261,7 @@ func weatherHome(ctx context.Context, settings config.Settings, httpClient *http
 
 // weatherForecaster 是查天气用的来源：Open-Meteo 为主；HARO_WEATHER_BACKUP=jma 时查不到改用日本气象厅（只覆盖日本）。
 // 家所在的预报地区在后台先找好并写进日志：地区是按坐标自动找的，偏了能从日志看出来；第一次用备用时也不用再下载地区表。
-func weatherForecaster(ctx context.Context, settings config.Settings, primary *weather.Client, home weather.HomeLocator,
+func weatherForecaster(ctx context.Context, settings config.ServerSettings, primary *weather.Client, home weather.HomeLocator,
 	httpClient *http.Client, logger *slog.Logger) weather.Forecaster {
 	if settings.WeatherBackup != config.WeatherBackupJMA {
 		return primary
@@ -264,7 +291,7 @@ func weatherForecaster(ctx context.Context, settings config.Settings, primary *w
 }
 
 // connectWebSearch 准备联网搜索（这时不连：用到时才连，断了自动重连）；没设密钥时返回 nil。
-func connectWebSearch(settings config.Settings, httpClient *http.Client, logger *slog.Logger) *tools.TavilySearcher {
+func connectWebSearch(settings config.ServerSettings, httpClient *http.Client, logger *slog.Logger) *tools.TavilySearcher {
 	if settings.TavilyAPIKey == "" {
 		logger.Info("联网搜索：没设 HARO_TAVILY_API_KEY，不提供")
 		return nil
@@ -274,7 +301,7 @@ func connectWebSearch(settings config.Settings, httpClient *http.Client, logger 
 }
 
 // startResearch 开启后台调查：任务账本、调查用的模型、上限，并在后台开始处理队列。
-func startResearch(ctx context.Context, settings config.Settings, claude *llm.ClaudeAPI, client *http.Client, pricing spending.Pricing, searcher tools.WebSearcher,
+func startResearch(ctx context.Context, settings config.ServerSettings, claude *llm.ClaudeAPI, client *http.Client, pricing spending.Pricing, searcher tools.WebSearcher,
 	ledger spending.Ledger, guard *spending.Guard, logger *slog.Logger) (*research.Runner, func(), error) {
 	store, err := research.OpenTaskStore(ctx, settings.ResearchDB)
 	if err != nil {
@@ -324,7 +351,7 @@ const overBudgetMaxTokens = 200
 const researchMaxTokens = 1000
 
 // buildSynthesizer 按 HARO_TTS 选择语音合成实现（服务都单独运行，只按 HARO_TTS_URL 连）。
-func buildSynthesizer(settings config.Settings, httpClient *http.Client, logger *slog.Logger) (brain.SpeechSynthesizer, error) {
+func buildSynthesizer(settings config.ServerSettings, httpClient *http.Client, logger *slog.Logger) (brain.SpeechSynthesizer, error) {
 	if settings.TTS == config.TTSGPTSoVITS {
 		voice, err := speech.LoadGPTSoVITSVoice(settings.TTSVoiceFile)
 		if err != nil {
@@ -340,13 +367,13 @@ func buildSynthesizer(settings config.Settings, httpClient *http.Client, logger 
 }
 
 // buildBrainOptions 读取性格档案；没设 HARO_PERSONAS_DIR 时不分性格。
-func buildBrainOptions(settings config.Settings) (brain.Options, error) {
+func buildBrainOptions(settings config.ServerSettings) (brain.Options, error) {
 	phrases, err := brain.LoadPhrases(settings.PhrasesFile) // 不经模型、直接念的固定的话；没配就用程序里带的
 	if err != nil {
 		return brain.Options{}, err
 	}
-	options := brain.Options{MaxHistoryTurn: settings.MaxHistoryTurn, ConfirmationTimeout: settings.ConfirmationTimeout,
-		Phrases: phrases, MonthlyRaiseYen: settings.MonthlyRaiseYen}
+	options := brain.Options{MaxHistoryTurn: settings.MaxHistoryTurn, CompactContextTokens: settings.CompactContextTokens,
+		ConfirmationTimeout: settings.ConfirmationTimeout, Phrases: phrases, MonthlyRaiseYen: settings.MonthlyRaiseYen}
 	if settings.PersonasDir == "" {
 		return options, nil
 	}
@@ -362,7 +389,7 @@ func buildBrainOptions(settings config.Settings) (brain.Options, error) {
 }
 
 // activeModel 返回实际在用的模型名（日志用）。
-func activeModel(settings config.Settings) string {
+func activeModel(settings config.ServerSettings) string {
 	if settings.LLMProvider == config.LLMLocal {
 		return settings.Model
 	}

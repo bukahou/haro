@@ -12,6 +12,7 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	semconv "go.opentelemetry.io/otel/semconv/v1.41.0"
 	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/errgroup"
 
@@ -304,6 +305,8 @@ func (s *Session) generateSentences(ctx context.Context, history []ChatMessage, 
 	// 这一轮先由前台回答；交给接手的代理后，剩下的请求都由它回答（带着同样的历史和系统提示词），步数从交接时重新算
 	agent, handedOver, firstRound := s.parts.Front, false, 0
 	ctx = startAgent(ctx, agent.Name)
+	span.SetAttributes(semconv.GenAIOperationNameInvokeAgent, semconv.GenAIAgentName(agent.Name))
+	defer func() { span.SetAttributes(semconv.GenAIAgentName(agent.Name)) }() // 交给了接手的代理时，记最后回答的那个
 	offered := agent.offer(specs)
 	steps, forceFinal := newToolSteps(agent), false
 	for round := 0; ; round++ {
@@ -338,6 +341,9 @@ func (s *Session) generateSentences(ctx context.Context, history []ChatMessage, 
 			truncated = truncated || delta.Stop == StopMaxTokens
 		}
 		usage = usage.add(roundUsage)
+		if roundUsage != nil {
+			record.contextTokens = max(record.contextTokens, roundUsage.PromptTokens)
+		}
 		if len(calls) > 0 && request.ForbidToolCalls { // 不许调用时还要调用：不执行，说了的话就是回答
 			s.logger.Warn("模型在不许调用工具的一轮要求调用工具：不执行", "tools", toolNames(calls))
 			calls = nil
@@ -448,6 +454,7 @@ func (s *Session) generateSentences(ctx context.Context, history []ChatMessage, 
 				continue
 			}
 			ctx, agent, handedOver, firstRound = delegated, next, true, round+1
+			span.AddEvent("handoff", trace.WithAttributes(semconv.GenAIAgentName(agent.Name)))
 			offered, steps, forceFinal = agent.offer(specs), newToolSteps(agent), false
 		}
 	}
@@ -455,11 +462,12 @@ func (s *Session) generateSentences(ctx context.Context, history []ChatMessage, 
 		return usage, err
 	}
 	if usage != nil {
+		// 这一轮所有请求加起来的用量（每次请求各自的 span「chat <模型>」在 llm 包里记）
 		span.SetAttributes(
-			attribute.Int("haro.llm.prompt_tokens", usage.PromptTokens),
-			attribute.Int("haro.llm.output_tokens", usage.OutputTokens),
-			attribute.Int("haro.llm.cache_read_tokens", usage.CacheReadTokens),
-			attribute.Int("haro.llm.cache_write_tokens", usage.CacheWriteTokens),
+			semconv.GenAIUsageInputTokens(usage.PromptTokens),
+			semconv.GenAIUsageOutputTokens(usage.OutputTokens),
+			semconv.GenAIUsageCacheReadInputTokens(usage.CacheReadTokens),
+			semconv.GenAIUsageCacheCreationInputTokens(usage.CacheWriteTokens),
 			attribute.Int("haro.llm.requests", usage.Requests),
 			attribute.Int("haro.llm.thinking_chars", usage.ThinkingChars))
 		s.logger.Info("模型用量", "agent", agent.Name, "requests", usage.Requests, "prompt_tokens", usage.PromptTokens, "output_tokens", usage.OutputTokens,

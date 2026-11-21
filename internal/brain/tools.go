@@ -11,7 +11,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"go.opentelemetry.io/otel/attribute"
+	semconv "go.opentelemetry.io/otel/semconv/v1.41.0"
 )
 
 const toolTimeout = 10 * time.Second // 单次工具执行的超时
@@ -209,7 +209,7 @@ func (s *Session) callTool(ctx context.Context, record *turnRecord, call ToolCal
 	defer cancel()
 	started := time.Now()
 	result, err := s.parts.Tools.Call(ctx, call)
-	span.SetAttributes(attribute.String("haro.tool.name", call.Name))
+	span.SetAttributes(semconv.GenAIOperationNameExecuteTool, semconv.GenAIToolName(call.Name), semconv.GenAIToolCallID(call.ID))
 	recordSpanError(span, err)
 	arguments, _ := json.Marshal(call.Arguments)
 	s.logger.Info("调用工具", "tool", call.Name, "arguments", string(arguments), "elapsed", since(started), "err", err)

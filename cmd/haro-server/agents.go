@@ -19,7 +19,7 @@ import (
 // 模型档（base / strong）换成具体模型、按代理的用途记账，都在这里一处。
 
 // loadAgentDefinitions 读代理定义；用了覆盖目录里的哪份写进日志（程序里带的那份以后更新了，覆盖的不会跟着变）。
-func loadAgentDefinitions(settings config.Settings, logger *slog.Logger) (agents.Catalog, error) {
+func loadAgentDefinitions(settings config.ServerSettings, logger *slog.Logger) (agents.Catalog, error) {
 	catalog, err := agents.Load(settings.AgentsDir)
 	if err != nil {
 		return nil, err
@@ -39,7 +39,7 @@ func loadAgentDefinitions(settings config.Settings, logger *slog.Logger) (agents
 
 // agentAssembly 是装配代理要用的东西。
 type agentAssembly struct {
-	settings config.Settings
+	settings config.ServerSettings
 	catalog  agents.Catalog
 	claude   *llm.ClaudeAPI
 	client   *http.Client
@@ -170,8 +170,8 @@ func (a agentAssembly) metered(definition agents.Definition) (brain.ChatModel, s
 			thinking: s.StrongLLMThinking, firstTokenTimeout: s.StrongLLMTimeout, requestTimeout: s.RequestTimeout}, a.client)
 	case s.LLMProvider == config.LLMLocal: // base 档、本地模型
 		id = s.Model
-		model = llm.NewOllamaChatModel(s.OllamaURL, id, maxTokens, llm.OpenAIOptions{HTTPClient: a.client,
-			FirstTokenTimeout: s.CloudLLMTimeout, RequestTimeout: s.RequestTimeout})
+		model = llm.WithRequestTelemetry(llm.NewOllamaChatModel(s.OllamaURL, id, maxTokens, llm.OpenAIOptions{HTTPClient: a.client,
+			FirstTokenTimeout: s.CloudLLMTimeout, RequestTimeout: s.RequestTimeout}), llm.ProviderOllama, id)
 	default: // base 档、云端模型
 		id = s.CloudLLMModel
 		model = newCloudChatModel(s, a.claude, cloudModelSpec{model: id, maxTokens: maxTokens, effort: s.CloudLLMEffort,

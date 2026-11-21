@@ -15,7 +15,7 @@ import (
 )
 
 // testAssembly 按 settings 和代理定义（overrides：文件名 → 内容，放进覆盖目录）组装；只建模型、不连网。
-func testAssembly(t *testing.T, settings config.Settings, overrides map[string]string) agentAssembly {
+func testAssembly(t *testing.T, settings config.ServerSettings, overrides map[string]string) agentAssembly {
 	t.Helper()
 	dir := ""
 	if len(overrides) > 0 {
@@ -42,8 +42,8 @@ func testAssembly(t *testing.T, settings config.Settings, overrides map[string]s
 }
 
 // cloudSettings 是用 OpenAI 兼容接口的云端配置（只建模型、不连网），更强的模型用在 uses 上。
-func cloudSettings(uses []string, visionMode string) config.Settings {
-	return config.Settings{LLMProvider: config.LLMCloud, CloudLLMAPI: config.CloudAPIOpenAI, CloudLLMURL: "http://127.0.0.1:9/v1",
+func cloudSettings(uses []string, visionMode string) config.ServerSettings {
+	return config.ServerSettings{LLMProvider: config.LLMCloud, CloudLLMAPI: config.CloudAPIOpenAI, CloudLLMURL: "http://127.0.0.1:9/v1",
 		CloudLLMModel: "base-model", CloudMaxTokens: 800, StrongLLMModel: "strong-model", StrongLLMUse: uses,
 		StrongLLMVisionMode: visionMode, ConversationSummary: true, ExtraSystemPrompt: "追加的一条规矩"}
 }
@@ -117,5 +117,32 @@ func TestBuildAgentsRejectsBadToolLists(t *testing.T) {
 		if (err == nil) != c.ok {
 			t.Errorf("%s：起得来应为 %v，实际错误 %v", label, c.ok, err)
 		}
+	}
+}
+
+// Claude 特有的取值（回答力度、思考写法）在启动时检查，报错写明是哪个环境变量；用别的接口时不查。
+func TestCheckClaudeSettings(t *testing.T) {
+	base := config.ServerSettings{CloudLLMAPI: config.CloudAPIAnthropic, CloudLLMEffort: "low", ResearchEffort: "medium",
+		StrongLLMEffort: "low", CloudLLMThinking: "disabled", StrongLLMThinking: "between_tools"}
+	if err := checkClaudeSettings(base); err != nil {
+		t.Fatalf("取值都对应通过：%v", err)
+	}
+	for name, change := range map[string]func(*config.ServerSettings){
+		"HARO_CLOUD_LLM_EFFORT":    func(s *config.ServerSettings) { s.CloudLLMEffort = "max" },
+		"HARO_RESEARCH_EFFORT":     func(s *config.ServerSettings) { s.ResearchEffort = "xhigh" },
+		"HARO_STRONG_LLM_EFFORT":   func(s *config.ServerSettings) { s.StrongLLMEffort = "max" },
+		"HARO_CLOUD_LLM_THINKING":  func(s *config.ServerSettings) { s.CloudLLMThinking = "off" },
+		"HARO_STRONG_LLM_THINKING": func(s *config.ServerSettings) { s.StrongLLMThinking = "enabled" },
+	} {
+		settings := base
+		change(&settings)
+		if err := checkClaudeSettings(settings); err == nil || !strings.Contains(err.Error(), name) {
+			t.Errorf("%s 写错：应起不来并写明变量名：%v", name, err)
+		}
+	}
+	openai := base
+	openai.CloudLLMAPI, openai.CloudLLMThinking = config.CloudAPIOpenAI, "off"
+	if err := checkClaudeSettings(openai); err != nil {
+		t.Errorf("用 OpenAI 兼容接口时不查 Claude 的取值：%v", err)
 	}
 }

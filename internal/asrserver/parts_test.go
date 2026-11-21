@@ -1,9 +1,16 @@
 package asrserver
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
+	"io"
+	"log/slog"
+	"net/http/httptest"
 	"testing"
+	"time"
+
+	"github.com/coder/websocket"
 
 	"github.com/bukahou/haro/internal/realtimeproto"
 )
@@ -19,7 +26,8 @@ func pcmOf(n int, value int16) []byte {
 
 // 时间轴：累计采样点一直往前走；只保留最近 historySeconds 秒，取超出范围的部分时自动截掉。
 func TestAudioTimelineKeepsRecentHistory(t *testing.T) {
-	var timeline audioTimeline
+	timeline := audioTimeline{keep: samplesIn(DefaultTiming.History)}
+	historySeconds := int(DefaultTiming.History.Seconds())
 	second := realtimeproto.TranscriptionSampleRate
 	samples := timeline.append(pcmOf(second, 16384))
 	if timeline.now() != second || len(samples) != second || samples[0] != 0.5 {
@@ -42,7 +50,9 @@ func TestAudioTimelineKeepsRecentHistory(t *testing.T) {
 
 // 回声窗口：播完时回声到播放结束；语音段开头的回声剪掉，剩下太短就整段当回声；识别、算声纹都不取进回声。
 func TestEchoWindow(t *testing.T) {
-	var echo echoWindow
+	echo := newEchoWindow(DefaultTiming)
+	minAfterEchoMs, minWakeWindowMs := int(DefaultTiming.MinAfterEcho.Milliseconds()), int(DefaultTiming.MinWakeWindow.Milliseconds())
+	wakeKeywordWindowMs := int(DefaultTiming.WakeKeywordWindow.Milliseconds())
 	if !echo.start() || echo.start() {
 		t.Fatal("第一次开始播放算刚开始，之后再说开始不算")
 	}
@@ -129,19 +139,77 @@ func (d fixedTurnDetector) EndOfTurnProbability([]float32) (float64, error) {
 
 // 说完判断：概率到 endOfTurnCutoff 算说完；等接着说的上限 semantic_vad 按 eagerness，其他情况 2 秒。
 func TestTurnEnd(t *testing.T) {
-	if got := (turnEnd{}).waitLimit(); got != defaultWaitMs*samplesPerMs {
+	if got := (turnEnd{defaultWait: samplesIn(DefaultTiming.DefaultWait)}).waitLimit(); got != 2000*samplesPerMs {
 		t.Errorf("默认等 2 秒：%d", got)
 	}
 	if got := (turnEnd{semantic: true, maxWait: 123}).waitLimit(); got != 123 {
 		t.Errorf("semantic_vad 按 eagerness：%d", got)
 	}
-	for probability, want := range map[float64]bool{endOfTurnCutoff: true, endOfTurnCutoff - 0.01: false} {
-		complete, got, err := turnEnd{semantic: true, detector: fixedTurnDetector{probability: probability}}.complete(pcmOf(10, 0))
+	cutoff := DefaultTiming.EndOfTurnCutoff
+	for probability, want := range map[float64]bool{cutoff: true, cutoff - 0.01: false} {
+		complete, got, err := turnEnd{semantic: true, cutoff: cutoff, detector: fixedTurnDetector{probability: probability}}.complete(pcmOf(10, 0))
 		if err != nil || complete != want || got != probability {
 			t.Errorf("概率 %.2f：说完应为 %v，实际 %v（%v）", probability, want, complete, err)
 		}
 	}
 	if _, _, err := (turnEnd{semantic: true, detector: fixedTurnDetector{err: errors.New("模型出错")}}).complete(nil); err == nil {
 		t.Error("模型出错要交出错误（调用方按说完处理）")
+	}
+}
+
+// 时长与门槛：没注入时用 DefaultTiming；eagerness 对到三档（medium、auto、空都按 auto）。
+func TestTimingDefaultsAndEagerness(t *testing.T) {
+	if (Timing{}).orDefault() != DefaultTiming {
+		t.Error("零值应换成 DefaultTiming")
+	}
+	custom := DefaultTiming
+	custom.WakeOnlyWait = 500 * time.Millisecond
+	if custom.orDefault() != custom {
+		t.Error("注入的值照用")
+	}
+	for eagerness, want := range map[string]time.Duration{"low": 3 * time.Second, "high": time.Second, "medium": 2 * time.Second,
+		"auto": 2 * time.Second, "": 2 * time.Second} {
+		if got := DefaultTiming.maxWait(eagerness); got != want {
+			t.Errorf("eagerness %q：%v，应为 %v", eagerness, got, want)
+		}
+	}
+}
+
+// quietDetector 是从不报告在说话的 VAD（唤醒词响了、但 VAD 没把它当成一段话）。
+type quietDetector struct{}
+
+func (quietDetector) AcceptWaveform([]float32)     {}
+func (quietDetector) IsSpeech() bool               { return false }
+func (quietDetector) PopSegments() []SpeechSegment { return nil }
+func (quietDetector) Close()                       {}
+
+// 唤醒词说完就停了、一直没开口：等 Timing.WakeOnlyWait（注入的值）后按「只叫了唤醒词」交出这一句。
+func TestWakeOnlyWaitComesFromTiming(t *testing.T) {
+	timing := DefaultTiming
+	timing.WakeOnlyWait = 200 * time.Millisecond
+	server := httptest.NewServer(NewHandler(Dependencies{Transcriber: &fixedTranscriber{text: "哈罗哈罗。"}, Timing: timing,
+		NewVoiceDetector:  func(realtimeproto.TurnDetection) (VoiceDetector, error) { return quietDetector{}, nil },
+		NewKeywordSpotter: func() (KeywordSpotter, error) { return &fakeSpotter{}, nil },
+		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil))}))
+	t.Cleanup(server.Close)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	t.Cleanup(cancel)
+	conn, _, err := websocket.Dial(ctx, transcriptionURL(t, server.URL), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { conn.CloseNow() })
+	turn := realtimeproto.TurnDetection{Type: "server_vad", SilenceDurationMs: 300}
+	if err := writeClientEvent(ctx, conn, transcriptionUpdate(turn, true)); err != nil {
+		t.Fatal(err)
+	}
+	sendKeyword(t, ctx, conn)
+	sendPattern(t, ctx, conn, [2]int{300, 0}) // 比注入的 200 ms 长、比默认的 1 s 短
+	events := readEvents(t, ctx, conn, 4)
+	if _, ok := events[2].(realtimeproto.InputAudioBufferSpeechStopped); !ok {
+		t.Fatalf("等过注入的 WakeOnlyWait 应按说完处理：%v", events)
+	}
+	if completed, ok := events[3].(realtimeproto.InputAudioTranscriptionCompleted); !ok || !completed.Wake {
+		t.Fatalf("只叫了唤醒词也原样交出：%v", events)
 	}
 }

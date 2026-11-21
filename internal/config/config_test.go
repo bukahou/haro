@@ -1,6 +1,8 @@
 package config
 
 import (
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -10,7 +12,7 @@ func TestCloudLLMReadyForAnthropic(t *testing.T) {
 	for _, name := range []string{"ANTHROPIC_FEDERATION_RULE_ID", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_PROFILE"} {
 		t.Setenv(name, "") // 不受跑测试那台机器的环境影响
 	}
-	base := Settings{CloudLLMAPI: CloudAPIAnthropic, CloudLLMModel: "claude-haiku-5-5", AnthropicAPIKey: "k",
+	base := ServerSettings{CloudLLMAPI: CloudAPIAnthropic, CloudLLMModel: "claude-haiku-5-5", AnthropicAPIKey: "k",
 		CloudLLMEffort: "low", ResearchEffort: "medium"}
 	if err := base.cloudLLMReady(); err != nil {
 		t.Fatalf("配齐了应通过：%v", err)
@@ -18,13 +20,12 @@ func TestCloudLLMReadyForAnthropic(t *testing.T) {
 
 	cases := []struct {
 		name   string
-		change func(*Settings)
+		change func(*ServerSettings)
 		want   string
 	}{
-		{"没设模型", func(s *Settings) { s.CloudLLMModel = "" }, "HARO_CLOUD_LLM_MODEL"},
-		{"没有凭证", func(s *Settings) { s.AnthropicAPIKey = "" }, "HARO_ANTHROPIC_API_KEY"},
-		{"力度要开思考才行", func(s *Settings) { s.CloudLLMEffort = "max" }, "low、medium 或 high"},
-		{"不认识的接口格式", func(s *Settings) { s.CloudLLMAPI = "gemini" }, "HARO_CLOUD_LLM_API"},
+		{"没设模型", func(s *ServerSettings) { s.CloudLLMModel = "" }, "HARO_CLOUD_LLM_MODEL"},
+		{"没有凭证", func(s *ServerSettings) { s.AnthropicAPIKey = "" }, "HARO_ANTHROPIC_API_KEY"},
+		{"不认识的接口格式", func(s *ServerSettings) { s.CloudLLMAPI = "gemini" }, "HARO_CLOUD_LLM_API"},
 	}
 	for _, c := range cases {
 		settings := base
@@ -46,14 +47,14 @@ func TestCloudLLMReadyForAnthropic(t *testing.T) {
 // 天气的备用来源只认 jma / none；家的位置写错照样报错。
 func TestValidateWeather(t *testing.T) {
 	for _, backup := range []string{WeatherBackupJMA, WeatherBackupNone} {
-		if err := (Settings{WeatherBackup: backup}).validateWeather(); err != nil {
+		if err := (ServerSettings{WeatherBackup: backup}).validateWeather(); err != nil {
 			t.Errorf("%s 应通过：%v", backup, err)
 		}
 	}
-	if err := (Settings{WeatherBackup: "met"}).validateWeather(); err == nil || !strings.Contains(err.Error(), "HARO_WEATHER_BACKUP") {
+	if err := (ServerSettings{WeatherBackup: "met"}).validateWeather(); err == nil || !strings.Contains(err.Error(), "HARO_WEATHER_BACKUP") {
 		t.Errorf("不认识的备用来源应报错：%v", err)
 	}
-	if err := (Settings{WeatherBackup: WeatherBackupJMA, WeatherHome: "家"}).validateWeather(); err == nil ||
+	if err := (ServerSettings{WeatherBackup: WeatherBackupJMA, WeatherHome: "家"}).validateWeather(); err == nil ||
 		!strings.Contains(err.Error(), "HARO_WEATHER_HOME") {
 		t.Errorf("家的位置写错应报错：%v", err)
 	}
@@ -61,7 +62,7 @@ func TestValidateWeather(t *testing.T) {
 
 // OpenAI 兼容接口的检查不变：地址、模型、key 都要有。
 func TestCloudLLMReadyForOpenAI(t *testing.T) {
-	settings := Settings{CloudLLMAPI: CloudAPIOpenAI, CloudLLMURL: "https://example.com/v1", CloudLLMModel: "m", CloudLLMAPIKey: "k"}
+	settings := ServerSettings{CloudLLMAPI: CloudAPIOpenAI, CloudLLMURL: "https://example.com/v1", CloudLLMModel: "m", CloudLLMAPIKey: "k"}
 	if err := settings.cloudLLMReady(); err != nil {
 		t.Fatalf("配齐了应通过：%v", err)
 	}
@@ -76,7 +77,7 @@ func TestValidateStrongLLM(t *testing.T) {
 	for _, name := range []string{"ANTHROPIC_FEDERATION_RULE_ID", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_PROFILE"} {
 		t.Setenv(name, "")
 	}
-	base := Settings{CloudLLMAPI: CloudAPIAnthropic, CloudLLMModel: "claude-haiku-5-5", AnthropicAPIKey: "k",
+	base := ServerSettings{CloudLLMAPI: CloudAPIAnthropic, CloudLLMModel: "claude-haiku-5-5", AnthropicAPIKey: "k",
 		CloudLLMEffort: "low", ResearchEffort: "medium", CloudLLMThinking: "disabled", StrongLLMThinking: "between_tools",
 		StrongLLMVisionMode: VisionByExpert}
 	if err := base.validateStrongLLM(); err != nil {
@@ -101,15 +102,13 @@ func TestValidateStrongLLM(t *testing.T) {
 	}
 	cases := []struct {
 		name   string
-		change func(*Settings)
+		change func(*ServerSettings)
 		want   string
 	}{
-		{"没设汇率", func(s *Settings) { s.USDToYen = 0 }, "HARO_USD_JPY"},
-		{"不认识的用途", func(s *Settings) { s.StrongLLMUse = []string{"vision", "chat"} }, "HARO_STRONG_LLM_USE"},
-		{"力度不对", func(s *Settings) { s.StrongLLMEffort = "max" }, "HARO_STRONG_LLM_EFFORT"},
-		{"思考写法不对", func(s *Settings) { s.StrongLLMThinking = "off" }, "HARO_STRONG_LLM_THINKING"},
-		{"云端接口没配好", func(s *Settings) { s.AnthropicAPIKey = "" }, "HARO_STRONG_LLM_MODEL"},
-		{"看画面的方式不对", func(s *Settings) { s.StrongLLMVisionMode = "both" }, "HARO_STRONG_LLM_VISION_MODE"},
+		{"没设汇率", func(s *ServerSettings) { s.USDToYen = 0 }, "HARO_USD_JPY"},
+		{"不认识的用途", func(s *ServerSettings) { s.StrongLLMUse = []string{"vision", "chat"} }, "HARO_STRONG_LLM_USE"},
+		{"云端接口没配好", func(s *ServerSettings) { s.AnthropicAPIKey = "" }, "HARO_STRONG_LLM_MODEL"},
+		{"看画面的方式不对", func(s *ServerSettings) { s.StrongLLMVisionMode = "both" }, "HARO_STRONG_LLM_VISION_MODE"},
 	}
 	for _, c := range cases {
 		settings := strong
@@ -189,7 +188,7 @@ func TestFrameSizeParsing(t *testing.T) {
 
 // 拍照底层只认三个值；写错时启动失败。
 func TestCameraBackendIsValidated(t *testing.T) {
-	settings := Settings{TurnDetection: "server_vad", ServerURL: "http://127.0.0.1:59130"}
+	settings := TerminalSettings{TurnDetection: "server_vad", ServerURL: "http://127.0.0.1:59130"}
 	for _, backend := range []string{CameraBackendAuto, CameraBackendMediaDevices, CameraBackendFFmpeg} {
 		settings.CameraBackend = backend
 		if err := settings.validateTerminal(); err != nil {
@@ -199,5 +198,60 @@ func TestCameraBackendIsValidated(t *testing.T) {
 	settings.CameraBackend = "v4l2"
 	if err := settings.validateTerminal(); err == nil {
 		t.Error("不认识的拍照底层应报错")
+	}
+}
+
+// 提前压缩的门槛：默认 24000；0 = 不看；负数起不来。
+func TestCompactContextTokens(t *testing.T) {
+	minimal := map[string]string{"HARO_LLM_PROVIDER": "local", "HARO_TTS": "piper", "HARO_TTS_URL": "http://127.0.0.1:9",
+		"HARO_ASR_URL": "http://127.0.0.1:9", "HARO_TOOLS": "false", "HARO_WEATHER": "false", "HARO_SERVER_LISTEN": "127.0.0.1:0",
+		"HARO_STRONG_LLM_MODEL": "", "HARO_TAVILY_API_KEY": "", "HARO_CONTEXT_COMPACT_TOKENS": "",
+		"HARO_CONVERSATIONS_DB": filepath.Join(t.TempDir(), "conversations.db")}
+	for name, value := range minimal {
+		t.Setenv(name, value)
+	}
+	settings, err := LoadBrainSettings()
+	if err != nil || settings.CompactContextTokens != 24000 {
+		t.Fatalf("默认 24000：%d %v", settings.CompactContextTokens, err)
+	}
+	t.Setenv("HARO_CONTEXT_COMPACT_TOKENS", "0")
+	if settings, err := LoadBrainSettings(); err != nil || settings.CompactContextTokens != 0 {
+		t.Errorf("0 = 不看：%d %v", settings.CompactContextTokens, err)
+	}
+	t.Setenv("HARO_CONTEXT_COMPACT_TOKENS", "-1")
+	if _, err := LoadBrainSettings(); err == nil || !strings.Contains(err.Error(), "HARO_CONTEXT_COMPACT_TOKENS") {
+		t.Errorf("负数应起不来：%v", err)
+	}
+}
+
+// envNames 是 T 自己的字段（不含嵌入的 Common）对应的环境变量。
+func envNames[T any]() map[string]bool {
+	names := map[string]bool{}
+	fields := reflect.TypeFor[T]()
+	for i := range fields.NumField() {
+		field := fields.Field(i)
+		if field.Anonymous {
+			continue
+		}
+		if name, _, _ := strings.Cut(field.Tag.Get("env"), ","); name != "" {
+			names[name] = true
+		}
+	}
+	return names
+}
+
+// 终端和服务端的配置各管各的：同一个环境变量只在一边定义（两边都用的放 Common）。
+func TestServerAndTerminalSettingsDoNotOverlap(t *testing.T) {
+	server, terminal := envNames[ServerSettings](), envNames[TerminalSettings]()
+	if len(server) == 0 || len(terminal) == 0 {
+		t.Fatalf("两边都应读得出环境变量：%d / %d", len(server), len(terminal))
+	}
+	for name := range terminal {
+		if server[name] {
+			t.Errorf("%s 在服务端和终端的配置里都有：两边都用的放 Common", name)
+		}
+	}
+	if !server["HARO_ASR_URL"] || !terminal["HARO_SERVER_URL"] || server["HARO_TURN_DETECTION"] {
+		t.Error("服务端连识别服务、终端连服务端；说完判断是终端交给识别流的设置")
 	}
 }

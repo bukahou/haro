@@ -41,6 +41,8 @@ type turnRecord struct {
 	truncated bool
 	// capRaisedTo：这一轮主人确认后把月度上限提高到了多少（日元）；0 = 没提高
 	capRaisedTo float64
+	// contextTokens：这一轮请求模型时带的上下文——最大的那次请求的输入 token（模型报的；不知道时为 0）
+	contextTokens int
 	// extraNotes：这一轮情况说明里额外的附注（例如叫醒后的第一句）
 	extraNotes []string
 	// delivered：要「主人听完这一轮才算告诉了」的事——附上的情况的确认（任务板、额度提醒）和工具登记的（OnDelivered）；
@@ -177,7 +179,7 @@ func (s *Session) closeTurn(record *turnRecord, ending turnEnding) bool {
 		dropped := s.currentConversation().dropPendingActionsFrom(record.turn)
 		s.logger.Info("问确认时被打断：撤掉这一轮存下的待确认操作", "dropped", dropped)
 	}
-	s.rememberTurn(record.startedAt, record.messages(ending, answer))
+	s.rememberTurn(record.startedAt, record.messages(ending, answer), record.contextTokens)
 	if ending == turnCompleted && len(record.delivered) > 0 { // 被打断、出错时不算告诉了，下一轮再附上
 		s.mu.Lock()
 		if s.truncateAtMs < 0 { // 说完了，还要等主人听完（见 pendingDelivered）

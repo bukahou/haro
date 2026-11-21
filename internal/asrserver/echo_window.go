@@ -6,12 +6,6 @@ import (
 	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
-// minAfterEchoMs：剪掉回声后剩下不到这么长，就当整段都是回声。
-const minAfterEchoMs = 250
-
-// minWakeWindowMs：算唤醒词声纹至少要这么长的声音（避开回声后太短就不避了）。
-const minWakeWindowMs = 1000
-
 // echoWindow 是回声窗口（haro 扩展）：终端播放回答期间，麦克风里主要是 haro 自己的声音。
 //
 // until：这个采样点之前的声音是 haro 自己的回声。播完时 = 播放结束的位置；打断时 = 打断句的开头。
@@ -21,6 +15,15 @@ type echoWindow struct {
 	playing bool
 	until   int
 	level   levelMeter // 播放期间的麦克风音量（排查打断用：设备会不会在放声音时把麦克风压低）
+	// 采样点：剪掉回声后至少要剩多长（Timing.MinAfterEcho）、唤醒词那一段多长（WakeKeywordWindow）、
+	// 算唤醒词声纹至少要多长（MinWakeWindow）
+	minAfterEcho, keywordWindow, minWakeWindow int
+}
+
+// newEchoWindow 按 timing 建回声窗口。
+func newEchoWindow(timing Timing) echoWindow {
+	return echoWindow{minAfterEcho: samplesIn(timing.MinAfterEcho), keywordWindow: samplesIn(timing.WakeKeywordWindow),
+		minWakeWindow: samplesIn(timing.MinWakeWindow)}
 }
 
 // start 是终端开始播放；返回这次是不是刚开始（之前没在播）。
@@ -48,13 +51,13 @@ func (w *echoWindow) interrupt() { w.playing = false }
 // cutAt 把回声的终点定在 at（打断句的开头：之前混着 haro 自己的声音）。
 func (w *echoWindow) cutAt(at int) { w.until = at }
 
-// trim 剪掉语音段开头的回声。剩下不到 minAfterEchoMs 时整段都当回声（ignore）；cut 表示剪过。
+// trim 剪掉语音段开头的回声。剩下不到 minAfterEcho 时整段都当回声（ignore）；cut 表示剪过。
 func (w echoWindow) trim(segment SpeechSegment) (trimmed SpeechSegment, cut, ignore bool) {
 	if segment.StartSample >= w.until {
 		return segment, false, false
 	}
 	end := segment.StartSample + segment.SampleCount
-	if end-w.until < minAfterEchoMs*samplesPerMs {
+	if end-w.until < w.minAfterEcho {
 		return segment, false, true
 	}
 	return SpeechSegment{StartSample: w.until, SampleCount: end - w.until}, true, false
@@ -65,12 +68,12 @@ func (w echoWindow) paddedStart(startSample, prefixMs int) int {
 	return max(startSample-prefixMs*samplesPerMs, min(startSample, w.until))
 }
 
-// wakeWindowStart 是算唤醒词声纹的起点：唤醒词前 wakeKeywordWindowMs，刚播完时避开回声（剩下至少 minWakeWindowMs）。
+// wakeWindowStart 是算唤醒词声纹的起点：唤醒词那一段的开头，刚播完时避开回声（剩下至少 minWakeWindow）。
 // 播放中被叫（打断）时回声避不开，只能整段算。
 func (w echoWindow) wakeWindowStart(now int) int {
-	start := now - wakeKeywordWindowMs*samplesPerMs
+	start := now - w.keywordWindow
 	if !w.playing && w.until > start {
-		start = min(w.until, now-minWakeWindowMs*samplesPerMs)
+		start = min(w.until, now-w.minWakeWindow)
 	}
 	return start
 }

@@ -43,7 +43,7 @@ func (s shutdownSteps) run() {
 }
 
 // startTelemetry 开启遥测；关停的最后一步在期限内把还没发出的发出去（采集器连不上时不卡住退出）。
-func startTelemetry(ctx context.Context, settings config.Settings, shutdown *shutdownSteps) error {
+func startTelemetry(ctx context.Context, settings config.ServerSettings, shutdown *shutdownSteps) error {
 	shutdownTelemetry, err := telemetry.SetupTelemetry(ctx, settings.OTLPEndpoint)
 	if err != nil {
 		return err
@@ -69,7 +69,7 @@ type services struct {
 }
 
 // connectServices 准备外部服务（语音合成、识别、模型的客户端）和费用的刹车：先有刹车，再接搜索、后台调查。
-func connectServices(ctx context.Context, settings config.Settings, logger *slog.Logger, shutdown *shutdownSteps) (services, error) {
+func connectServices(ctx context.Context, settings config.ServerSettings, logger *slog.Logger, shutdown *shutdownSteps) (services, error) {
 	deps := services{httpClient: &http.Client{Timeout: settings.RequestTimeout},
 		// 模型的流式请求不用带总超时的客户端：客户端的总超时连读流也算在内，各用途要的长短不同 ⇒
 		// 每个模型按用途给请求设期限（cloudModelSpec.requestTimeout；调查受它自己的总时限管）
@@ -114,7 +114,7 @@ type tooling struct {
 }
 
 // buildTooling 准备工具：自研工具内置（记事本直接连数据库；天气；联网搜索与后台调查），MCP 只接第三方（现在还没有）。
-func buildTooling(ctx context.Context, settings config.Settings, deps services, logger *slog.Logger, shutdown *shutdownSteps) (tooling, error) {
+func buildTooling(ctx context.Context, settings config.ServerSettings, deps services, logger *slog.Logger, shutdown *shutdownSteps) (tooling, error) {
 	kit := tooling{briefers: []brain.Briefer{brain.ClockBriefer{}, deps.guard}, notices: brain.NewNoticeHub()}
 	if !settings.Tools {
 		return kit, nil
@@ -164,7 +164,7 @@ func buildTooling(ctx context.Context, settings config.Settings, deps services, 
 }
 
 // assembleBrain 装配大脑：代理（模型）、对话簿、主人资料、多终端仲裁、月度上限的口头提高。
-func assembleBrain(ctx context.Context, settings config.Settings, catalog agents.Catalog, deps services, kit tooling,
+func assembleBrain(ctx context.Context, settings config.ServerSettings, catalog agents.Catalog, deps services, kit tooling,
 	logger *slog.Logger, shutdown *shutdownSteps) (brain.Components, brain.Options, error) {
 	options, err := buildBrainOptions(settings)
 	if err != nil {
@@ -218,7 +218,7 @@ func assembleBrain(ctx context.Context, settings config.Settings, catalog agents
 
 // openConversationStore 打开对话库（没设 HARO_CONVERSATIONS_DB 时为 nil：对话只在内存里）；旧的对话文件导入一次，
 // 出错就不启动（不带着空历史开始）。
-func openConversationStore(ctx context.Context, settings config.Settings, logger *slog.Logger, shutdown *shutdownSteps) (brain.ConversationStore, error) {
+func openConversationStore(ctx context.Context, settings config.ServerSettings, logger *slog.Logger, shutdown *shutdownSteps) (brain.ConversationStore, error) {
 	if settings.ConversationsDB == "" {
 		return nil, nil
 	}
@@ -240,7 +240,7 @@ func openConversationStore(ctx context.Context, settings config.Settings, logger
 }
 
 // serve 对外提供服务，直到收到退出信号：停止接新连接 → 结束会话（每一轮收尾、落盘）→ 返回后由 shutdownSteps 依次收尾。
-func serve(ctx context.Context, settings config.Settings, components brain.Components, options brain.Options, deps services,
+func serve(ctx context.Context, settings config.ServerSettings, components brain.Components, options brain.Options, deps services,
 	logger *slog.Logger) error {
 	newSession := func(terminal brainserver.Terminal) brainserver.Session {
 		parts := components

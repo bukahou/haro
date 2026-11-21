@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"iter"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -91,6 +92,25 @@ const (
 	// ThinkingAdaptive 让模型自己决定想多少（思考关不掉的模型用这个）。
 	ThinkingAdaptive = "adaptive"
 )
+
+// claudeEfforts 是思考关掉时 Claude 接受的回答力度（xhigh / max 要开着思考）；空 = 模型默认。
+var claudeEfforts = []string{"", "low", "medium", "high"}
+
+// ValidateClaudeEffort 检查回答力度（启动时按配置检查，写错了起不来）。
+func ValidateClaudeEffort(effort string) error {
+	if !slices.Contains(claudeEfforts, effort) {
+		return fmt.Errorf("只能是 low、medium 或 high（思考是关掉的），现在是 %q", effort)
+	}
+	return nil
+}
+
+// ValidateClaudeThinking 检查思考的写法（ThinkingDisabled 等）。
+func ValidateClaudeThinking(thinking string) error {
+	if !slices.Contains([]string{ThinkingDisabled, ThinkingBetweenTools, ThinkingAdaptive}, thinking) {
+		return fmt.Errorf("只能是 %s、%s 或 %s，现在是 %q", ThinkingDisabled, ThinkingBetweenTools, ThinkingAdaptive, thinking)
+	}
+	return nil
+}
 
 // AnthropicOptions 是创建 AnthropicChatModel 的参数。
 type AnthropicOptions struct {

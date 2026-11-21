@@ -38,11 +38,11 @@ func (b *ConversationBook) maybeSummarize(c *Conversation) {
 		return
 	}
 	c.mu.Lock()
-	if c.summarizing || len(c.unsummarized) < summaryBatch {
+	if c.summarizing || len(c.unsummarized) == 0 || (len(c.unsummarized) < summaryBatch && !c.compacted) {
 		c.mu.Unlock()
 		return
 	}
-	c.summarizing = true
+	c.summarizing, c.compacted = true, false
 	previous, batch := c.summary, append([]ConversationTurn(nil), c.unsummarized...)
 	c.mu.Unlock()
 
