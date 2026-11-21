@@ -621,6 +621,73 @@ func TestVoiceprintGatesWakeAndLabelsSpeaker(t *testing.T) {
 	}
 }
 
+// 同时进行的转写会话到了上限：新的会话回 too_many_sessions（带码、断开；服务端照断开重开那样退避再试），
+// haro-asr 记一条带码的警告；有会话结束、交还名额之后，新的会话照常开始。
+func TestTranscriptionSessionLimit(t *testing.T) {
+	logs := &recordingHandler{}
+	server := httptest.NewServer(NewHandler(Dependencies{Transcriber: &lengthTranscriber{}, Limits: Limits{MaxSessions: 1},
+		Logger: slog.New(logs), NewVoiceDetector: func(VoiceDetectorConfig) (VoiceDetector, error) { return &energyDetector{}, nil }}))
+	t.Cleanup(server.Close)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	t.Cleanup(cancel)
+	dial := func() *websocket.Conn {
+		conn, _, err := websocket.Dial(ctx, transcriptionURL(t, server.URL), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { conn.CloseNow() })
+		return conn
+	}
+	turn := realtimeproto.TurnDetection{Type: "server_vad"}
+	first := dial()
+	startSession(t, ctx, first, turn, false)
+
+	second := dial()
+	_ = writeClientEvent(ctx, second, transcriptionUpdate(turn, false))
+	if refusal, ok := readEvents(t, ctx, second, 1)[0].(realtimeproto.Error); !ok || refusal.Code != realtimeproto.CodeTooManySessions {
+		t.Fatalf("满了应回 too_many_sessions：%+v", refusal)
+	}
+	if code, ok := logs.attr(slog.LevelWarn, "code"); !ok || code.String() != string(realtimeproto.CodeTooManySessions) {
+		t.Errorf("满了拒绝时应记一条带码的警告：%v %v", code, ok)
+	}
+
+	_ = first.Close(websocket.StatusNormalClosure, "")
+	deadline := time.Now().Add(3 * time.Second) // 服务端那头的会话结束、交还名额要一点时间
+	for {
+		next := dial()
+		_ = writeClientEvent(ctx, next, transcriptionUpdate(turn, false))
+		event := readEvents(t, ctx, next, 1)[0]
+		if _, ok := event.(realtimeproto.SessionUpdated); ok {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("有会话结束之后应能开新的会话：%+v", event)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// 连上之后一直不发 session.update：等到 Limits.SessionUpdateWait 就断开，不一直占着。
+func TestSessionUpdateWait(t *testing.T) {
+	conn, ctx := dialRealtimeWith(t, Dependencies{Transcriber: &lengthTranscriber{}, Limits: Limits{SessionUpdateWait: 50 * time.Millisecond},
+		NewVoiceDetector: func(VoiceDetectorConfig) (VoiceDetector, error) { return &energyDetector{}, nil }})
+	started := time.Now()
+	for {
+		_, data, err := conn.Read(ctx)
+		if err != nil {
+			break
+		}
+		if event, _ := realtimeproto.DecodeServerEvent(data); event != nil {
+			if _, accepted := event.(realtimeproto.SessionUpdated); accepted {
+				t.Fatal("没发 session.update 不应开始会话")
+			}
+		}
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Errorf("一直不发 session.update 时应在期限上断开：等了 %v", elapsed)
+	}
+}
+
 // failingEmbedder 什么都算不出声纹（像句子太短时那样）。
 type failingEmbedder struct{}
 

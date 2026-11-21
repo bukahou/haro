@@ -64,7 +64,8 @@ haro 是一个家用语音助手：家里每个房间放一台**终端**（麦�
   说到一半断开时，服务端替丢掉的那句补一个「说完」，这一轮按识别失败结束，终端照常收尾；
   断开超过 10 秒才提示终端一次（`haro.notice` 的 `transcription_lost`，终端播「断开」那一声），重开后再提示一次（`transcription_restored`）。
   haro-asr 接受识别流的设置后回 `session.updated`，服务端等到它才算打开；不接受的（请求类的错误码，例如要 semantic_vad 而它没配
-  说完判断模型）不再重开，把同一个错误码告诉终端一次、提示 `transcription_lost`。
+  说完判断模型）不再重开，把同一个错误码告诉终端一次、提示 `transcription_lost`。haro-asr 同时进行的转写会话有上限
+  （`asrserver.DefaultLimits`），满了回 `too_many_sessions`，服务端照断开重开那样退避再试。
   存活检查 `/livez` 只看进程；就绪检查 `/readyz` 看识别、合成、模型凭证、账本，结果由后台定期检查（`internal/readiness`）。
   其中识别那一项探的是 haro-asr 自己的 `/readyz`：它在 1 秒内真的识别完一小段静音才算就绪（识别器卡住时跟着失败）。
 - **对话跟着人走**：开了声纹时，服务端认出是谁在说话，用这个人自己的对话历史；换终端、断线重连、服务端重启都接得上。

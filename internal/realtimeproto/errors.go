@@ -20,13 +20,14 @@ const (
 	CodeResponseInProgress         ErrorCode = "response_in_progress"         // 已有进行中的回答
 	CodeUnsupportedFeature         ErrorCode = "unsupported_feature"          // 对端没有这项能力（例如没配唤醒词模型却要求唤醒门）
 	CodeUnsupportedProtocolVersion ErrorCode = "unsupported_protocol_version" // 握手时报的协议版本不受支持
+	CodeTooManySessions            ErrorCode = "too_many_sessions"            // 对端同时进行的会话到了上限：过一会儿再试
 	CodeServerError                ErrorCode = "server_error"                 // 服务端自己的问题
 )
 
 // errorType 是 Realtime 错误事件里的 error.type：请求有问题，还是服务端自己的问题。
 func (c ErrorCode) errorType() string {
 	switch c {
-	case CodeServerError, CodeTranscriptionFailed:
+	case CodeServerError, CodeTranscriptionFailed, CodeTooManySessions:
 		return "server_error"
 	default:
 		return "invalid_request_error"

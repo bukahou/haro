@@ -134,7 +134,7 @@ func TestSpeakerCheckFailedIsExclusive(t *testing.T) {
 // 对端自己的问题（server_error 类）过一会儿再试可能就好；请求类的码原样再发也一样被拒。没有码的按 server_error。
 func TestErrorCodeServerSide(t *testing.T) {
 	for code, want := range map[ErrorCode]bool{
-		CodeServerError: true, CodeTranscriptionFailed: true, "": true,
+		CodeServerError: true, CodeTranscriptionFailed: true, CodeTooManySessions: true, "": true,
 		CodeUnsupportedFeature: false, CodeInvalidEvent: false, CodeUnsupportedAudioFormat: false,
 	} {
 		if got := code.ServerSide(); got != want {

@@ -7,10 +7,14 @@
 package asrserver
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"time"
+
+	"golang.org/x/sync/semaphore"
 
 	"github.com/bukahou/haro/internal/readiness"
 	"github.com/bukahou/haro/internal/realtimeproto"
@@ -38,8 +42,29 @@ type Dependencies struct {
 	NewKeywordSpotter KeywordSpotterFactory // 为 nil 时不支持唤醒词（haro.wake_word）
 	Speakers          *SpeakerCheck         // 为 nil 或没有登记声纹时不比对
 	Timing            Timing                // 时长与门槛；零值 = DefaultTiming
+	Limits            Limits                // 转写会话的数量和等待上限；零值的字段 = DefaultLimits 的
 	Settings          CapabilitySettings    // 打开各项能力要设的配置项（拒绝时写进说明）；可以为空
 	Logger            *slog.Logger
+}
+
+// Limits 是转写会话入口的上限：先限量，再做事。
+type Limits struct {
+	// MaxSessions：同时进行的转写会话最多几个，满了的新会话回 too_many_sessions（haro-server 照断开重开那样退避再试）。
+	// 每个会话自己建一个 Silero VAD（重新载入模型）和唤醒词流，数量不设上限时连接失控（终端重连出错、局域网里谁都能连）
+	// 会撑爆原生内存。家里每台终端一个会话（断线重连时新旧两个会短暂重叠），远到不了这个数；定值，没有实测每个会话占多少内存
+	MaxSessions int
+	// SessionUpdateWait：连上之后最多等这么久收到第一条 session.update，过了就断开（haro-server 连上马上就发）。
+	// 不设的话，连上却不说话的连接会一直占着。定值
+	SessionUpdateWait time.Duration
+}
+
+// DefaultLimits 是现在在用的上限（来历见 Limits 的各字段）。
+var DefaultLimits = Limits{MaxSessions: 8, SessionUpdateWait: 10 * time.Second}
+
+func (l Limits) orDefault() Limits {
+	l.MaxSessions = cmp.Or(l.MaxSessions, DefaultLimits.MaxSessions)
+	l.SessionUpdateWait = cmp.Or(l.SessionUpdateWait, DefaultLimits.SessionUpdateWait)
+	return l
 }
 
 // CapabilitySettings 是打开每项能力要设的配置项：没有这项能力而被拒时写进说明，告诉对方该设什么。
@@ -61,8 +86,9 @@ func missing(capability, setting string) string {
 // NewHandler 返回挂好路由的 HTTP handler。
 func NewHandler(deps Dependencies) http.Handler {
 	mux := http.NewServeMux()
+	slots := semaphore.NewWeighted(int64(deps.Limits.orDefault().MaxSessions))
 	mux.HandleFunc("GET "+realtimeproto.TranscriptionPath, func(w http.ResponseWriter, r *http.Request) {
-		handleRealtimeTranscription(w, r, deps)
+		handleRealtimeTranscription(w, r, deps, slots)
 	})
 	mux.HandleFunc(realtimeproto.VoiceprintRoute, func(w http.ResponseWriter, r *http.Request) {
 		handleEnrollment(w, r, deps.Speakers) // 远程登记声纹

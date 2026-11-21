@@ -292,6 +292,7 @@ func TestOpenStreamRefusals(t *testing.T) {
 		{"做不到的设置", realtimeproto.CodeUnsupportedFeature, true},
 		{"取值不对", realtimeproto.CodeInvalidEvent, true},
 		{"转写服务自己出错", realtimeproto.CodeServerError, false},
+		{"转写服务的会话满了", realtimeproto.CodeTooManySessions, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			server := fakeTranscriptionServer(t, realtimeproto.Error{Code: c.code, Message: "不行"}, nil)
