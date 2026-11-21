@@ -12,14 +12,22 @@ import (
 	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
-// recordFormat 是录音格式：16 kHz 单声道 pcm16（和 PipeWire 版一致；设备原生格式由 miniaudio 转换、重采样）。
-var recordFormat = realtimeproto.AudioFormat{SampleRate: 16000, Channels: 1}
+// MicrophoneFormat 是麦克风送出的格式：转写会话要求的 16 kHz 单声道 pcm16（服务端把麦克风的音频原样交给识别，
+// 登记声纹的录音也按它）。设备原生的格式由 miniaudio 转换、重采样。
+var MicrophoneFormat = realtimeproto.TranscriptionFormat
 
-// micChunkBytes 是 20 ms 一块（Realtime / WebRTC 常用的粒度）。
-const micChunkBytes = 16000 / 50 * 2
+// micChunk 是一块的时长（Realtime / WebRTC 常用的粒度），也是设备回调的周期。
+const micChunk = 20 * time.Millisecond
+
+// micChunkBytes 是一块的字节数。
+var micChunkBytes = MicrophoneFormat.BytesPerSecond() * int(micChunk/time.Millisecond) / 1000
 
 // micQueueChunks：送给上层的块最多排这么多（1 秒）；上层跟不上时丢最新的，不阻塞音频线程。
-const micQueueChunks = 50
+const micQueueChunks = int(time.Second / micChunk)
+
+// firstChunkWait：开始录一段（登记声纹）时最多等第一块数据这么久。定值：设备正常在一个周期里就送出第一块；
+// 等不到也不卡住，Stop 时如实交出录到的。
+const firstChunkWait = 2 * time.Second
 
 // Microphone 常驻录音，实现 assistant.Microphone。
 type Microphone struct {
@@ -45,9 +53,9 @@ func (m *Microphone) OpenStream(ctx context.Context) (assistant.MicrophoneStream
 	config := malgo.DefaultDeviceConfig(malgo.Capture)
 	config.Capture.DeviceID = pointer
 	config.Capture.Format = malgo.FormatS16
-	config.Capture.Channels = uint32(recordFormat.Channels)
-	config.SampleRate = uint32(recordFormat.SampleRate)
-	config.PeriodSizeInMilliseconds = 20
+	config.Capture.Channels = uint32(MicrophoneFormat.Channels)
+	config.SampleRate = uint32(MicrophoneFormat.SampleRate)
+	config.PeriodSizeInMilliseconds = uint32(micChunk / time.Millisecond)
 	config.Resampling.Linear.LpfOrder = 8 // 设备多是 48 kHz：降到 16 kHz 前多滤一些，少混叠
 	stream.device, err = m.backend.openDevice(config, malgo.DeviceCallbacks{
 		Data: func(_, input []byte, _ uint32) { stream.receive(input) },
@@ -89,7 +97,7 @@ func (s *micStream) receive(input []byte) {
 	}
 	for _, chunk := range s.assembler.push(input) {
 		select {
-		case s.chunks <- realtimeproto.PCMAudio{Format: recordFormat, Data: chunk}:
+		case s.chunks <- realtimeproto.PCMAudio{Format: MicrophoneFormat, Data: chunk}:
 		default: // 上层跟不上：丢掉，绝不阻塞音频线程
 		}
 	}
@@ -155,7 +163,7 @@ func (r *Recorder) StartRecording(ctx context.Context) (assistant.Recording, err
 	go recording.collect()
 	select {
 	case <-recording.firstChunk:
-	case <-time.After(2 * time.Second): // 拿不到数据也不卡死，Stop 时如实返回录到的内容
+	case <-time.After(firstChunkWait):
 	case <-ctx.Done():
 	}
 	return recording, nil
@@ -183,5 +191,5 @@ func (r *recording) collect() {
 // Stop 结束录音，返回录到的 PCM。
 func (r *recording) Stop() (realtimeproto.PCMAudio, error) {
 	_ = r.stream.Close()
-	return realtimeproto.PCMAudio{Format: recordFormat, Data: <-r.collected}, nil
+	return realtimeproto.PCMAudio{Format: MicrophoneFormat, Data: <-r.collected}, nil
 }

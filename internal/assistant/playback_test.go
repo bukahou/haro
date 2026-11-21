@@ -164,6 +164,30 @@ func TestPlaysToTheEnd(t *testing.T) {
 	}
 }
 
+// unansweredBrain：事件由测试推送；收到取消也不确认（模拟服务端一直不回 response.done）。
+type unansweredBrain struct {
+	events chan realtimeproto.ServerEvent
+}
+
+func (unansweredBrain) Send(context.Context, realtimeproto.ClientEvent) error { return nil }
+func (b unansweredBrain) Events() <-chan realtimeproto.ServerEvent            { return b.events }
+
+// 被打断后服务端一直不确认取消：最多等 Timing.CancelConfirm 就不等了（不用默认的 3 秒）。
+func TestCancelConfirmWaitComesFromTiming(t *testing.T) {
+	brain, sink := unansweredBrain{events: make(chan realtimeproto.ServerEvent, 16)}, newSlowSink()
+	a := NewAssistant(Components{Brain: brain, Speaker: sink}, Options{BargeIn: true,
+		Timing: Timing{CancelConfirm: 30 * time.Millisecond}}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	brain.events <- chunk
+	brain.events <- realtimeproto.HaroWakeWordDetected{Keyword: "哈罗哈罗"}
+	started := time.Now()
+	if err := a.playResponse(context.Background(), noSpan(), "item_1", time.Now()); !errors.Is(err, errInterrupted) {
+		t.Fatalf("应被打断：%v", err)
+	}
+	if waited := time.Since(started); waited >= DefaultTiming.CancelConfirm {
+		t.Errorf("应只等 Timing.CancelConfirm（30ms），等了 %v", waited)
+	}
+}
+
 // 全局的追踪只能换一次：这个包的测试共用一个能读出来的。
 var (
 	spanRecorderOnce sync.Once

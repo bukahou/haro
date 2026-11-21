@@ -42,6 +42,8 @@ type Options struct {
 	NoticeTone realtimeproto.PCMAudio
 	// NoticeTones 是有专门提示音的提示种类（例如语音识别断开 / 恢复，和服务端断开 / 回来用同样的两声）
 	NoticeTones map[string]realtimeproto.PCMAudio
+	// Timing 是固定的几个时长；零值的字段用 DefaultTiming 的
+	Timing Timing
 }
 
 // WakeWordOptions 是唤醒词模式的参数。
@@ -74,6 +76,7 @@ func (a *Assistant) Busy() bool { return a.hearing.Load() || a.busy.Load() }
 
 // NewAssistant 组装一个 Assistant。
 func NewAssistant(parts Components, opts Options, logger *slog.Logger) *Assistant {
+	opts.Timing = opts.Timing.orDefault()
 	return &Assistant{parts: parts, opts: opts, logger: logger, replay: make(chan realtimeproto.ServerEvent, eventBacklog)}
 }
 

@@ -11,6 +11,7 @@
 package terminal
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -73,12 +74,19 @@ type Timing struct {
 	BackoffMax    time.Duration // 重试间隔的上限（重连服务端、待机等麦克风都不超过它）
 	// IncompatibleRetry 是协议版本不兼容时多久再试一次（要等人升级，频繁重试没用）；零值 = DefaultTiming 的
 	IncompatibleRetry time.Duration
+	// MicrophoneStopGrace：麦克风流自己停了以后先等这么久再判断是不是麦克风没了。定值：systemd 停服务时同时通知整组进程，
+	// 麦克风可能比关机信号先停，等一下让关机信号先到，不把关机当成麦克风没了去重新找设备。零值 = DefaultTiming 的
+	MicrophoneStopGrace time.Duration
+	// ToneSlack：播一段提示音最多等「提示音的时长 + 这么久」（打开设备、等播完），和对话里播提示音用同一个值
+	// （assistant.Timing.ToneSlack）。零值 = DefaultTiming 的
+	ToneSlack time.Duration
 }
 
 // DefaultTiming 是看守的默认时间。重试间隔上限 5 秒：服务端重启（make deploy、集群里换新版本）几秒就回来，
 // 上限再长，它回来以后终端还要白等十几秒才去连。
 var DefaultTiming = Timing{OfflineNotice: 10 * time.Second, Poll: 2 * time.Second,
-	BackoffMin: time.Second, BackoffMax: 5 * time.Second, IncompatibleRetry: 5 * time.Minute}
+	BackoffMin: time.Second, BackoffMax: 5 * time.Second, IncompatibleRetry: 5 * time.Minute,
+	MicrophoneStopGrace: 300 * time.Millisecond, ToneSlack: assistant.DefaultTiming.ToneSlack}
 
 // Supervisor 是终端的看守。
 type Supervisor struct {
@@ -89,9 +97,9 @@ type Supervisor struct {
 
 // NewSupervisor 创建看守。
 func NewSupervisor(parts Parts, timing Timing, logger *slog.Logger) *Supervisor {
-	if timing.IncompatibleRetry == 0 {
-		timing.IncompatibleRetry = DefaultTiming.IncompatibleRetry
-	}
+	timing.IncompatibleRetry = cmp.Or(timing.IncompatibleRetry, DefaultTiming.IncompatibleRetry)
+	timing.MicrophoneStopGrace = cmp.Or(timing.MicrophoneStopGrace, DefaultTiming.MicrophoneStopGrace)
+	timing.ToneSlack = cmp.Or(timing.ToneSlack, DefaultTiming.ToneSlack)
 	return &Supervisor{parts: parts, timing: timing, logger: logger}
 }
 
@@ -234,11 +242,10 @@ func (s *Supervisor) serve(ctx context.Context, conn Connection) error {
 	case errors.Is(cause, errSwitchDevice):
 		return errSwitchDevice
 	case errors.Is(err, microphoneStopped):
-		// 关机时麦克风可能比关机信号先停（systemd 同时通知整组进程）：稍等一下再判断（E-4）
-		select {
+		select { // 关机时麦克风可能比关机信号先停：稍等一下再判断（见 Timing.MicrophoneStopGrace）
 		case <-ctx.Done():
 			return errShutdown
-		case <-time.After(300 * time.Millisecond):
+		case <-time.After(s.timing.MicrophoneStopGrace):
 		}
 		s.logger.Warn("麦克风停了：重新找设备")
 		return microphoneStopped
@@ -344,7 +351,7 @@ func (s *Supervisor) playTone(ctx context.Context, tone realtimeproto.PCMAudio, 
 		s.logger.Warn("没有音箱：提示音只写日志", "why", why)
 		return
 	}
-	ctx, cancel := context.WithTimeout(ctx, tone.Duration()+5*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, tone.Duration()+s.timing.ToneSlack)
 	defer cancel()
 	stream, err := s.parts.ToneSink.OpenStream(ctx, tone.Format)
 	if err != nil {

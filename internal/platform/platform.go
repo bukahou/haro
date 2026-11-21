@@ -18,6 +18,7 @@ import (
 	"github.com/bukahou/haro/internal/platform/audio"
 	"github.com/bukahou/haro/internal/platform/camera"
 	"github.com/bukahou/haro/internal/platform/osdiff"
+	"github.com/bukahou/haro/internal/realtimeproto"
 	"github.com/bukahou/haro/internal/terminal"
 )
 
@@ -65,10 +66,13 @@ func (d *LocalDevices) Cameras(ctx context.Context) ([]terminal.Device, error) {
 	return d.os.Cameras(ctx)
 }
 
-// OpenMicrophone 打开常驻麦克风流；id 为空 = 系统默认。
+// OpenMicrophone 打开常驻麦克风流；id 为空 = 系统默认。送出的格式见 MicrophoneFormat。
 func (d *LocalDevices) OpenMicrophone(id string) assistant.Microphone {
 	return audio.NewMiniaudioMicrophone(d.audio, id)
 }
+
+// MicrophoneFormat 是麦克风（OpenMicrophone、OpenRecorder）送出的音频格式：连服务端时声明在 session.update 里。
+func (d *LocalDevices) MicrophoneFormat() realtimeproto.AudioFormat { return audio.MicrophoneFormat }
 
 // OpenRecorder 打开一段一段的录音（登记声纹用）。
 func (d *LocalDevices) OpenRecorder(id string) assistant.AudioRecorder {

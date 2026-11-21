@@ -32,9 +32,6 @@ import (
 	"github.com/bukahou/haro/internal/trigger"
 )
 
-// microphoneFormat 是麦克风上传给服务端的格式（平台层固定为 16 kHz 单声道；声明在 session.update 里）。
-var microphoneFormat = realtimeproto.AudioFormat{SampleRate: 16000, Channels: 1}
-
 func main() {
 	enrollName := flag.String("enroll", "", "登记声纹：在这台终端上录 3 句话，发给服务端登记，例如 -enroll 主人")
 	enrollAppend := flag.Bool("append", false, "和 -enroll 一起用：补录（换了麦克风、换了位置时），加进原来的声纹")
@@ -98,7 +95,7 @@ func run(logger *slog.Logger) error {
 	// 看守：连服务端 → 等麦克风 → 运行；出什么错都退回去重来，只有关机信号才退出
 	supervisor := terminal.NewSupervisor(terminal.Parts{
 		Dial: func(ctx context.Context) (terminal.Connection, error) {
-			return brainclient.Dial(ctx, brainclient.DialOptions{BaseURL: settings.ServerURL, InputFormat: microphoneFormat}, logger)
+			return brainclient.Dial(ctx, brainclient.DialOptions{BaseURL: settings.ServerURL, InputFormat: local.MicrophoneFormat()}, logger)
 		},
 		Catalog:            local,
 		MicrophoneOverride: settings.AudioSource,

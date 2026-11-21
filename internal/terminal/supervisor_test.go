@@ -338,6 +338,23 @@ func TestSupervisorWaitsForAndSwitchesMicrophone(t *testing.T) {
 	_ = stop()
 }
 
+// 麦克风流自己停了：先等 Timing.MicrophoneStopGrace（关机信号可能晚一步到）再去重新找设备。
+func TestSupervisorWaitsMicrophoneStopGrace(t *testing.T) {
+	r := newRig()
+	timing := testTiming
+	timing.MicrophoneStopGrace = 600 * time.Millisecond // 比默认的长：用的确实是传进来的值
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go NewSupervisor(r.parts(), timing, slog.New(slog.NewTextHandler(io.Discard, nil))).Run(ctx)
+	eventually(t, "运行", func() bool { return r.sessionCount() == 1 })
+	stopped := time.Now()
+	r.fail <- assistant.ErrMicrophoneStopped
+	eventually(t, "麦克风停了之后重来", func() bool { return r.sessionCount() == 2 })
+	if waited := time.Since(stopped); waited < timing.MicrophoneStopGrace {
+		t.Errorf("应先等 %v 再重来，只等了 %v", timing.MicrophoneStopGrace, waited)
+	}
+}
+
 // 音箱没了 / 回来了，都告诉服务端（没有音箱时服务端只发文字）。
 func TestSupervisorReportsSpeakerChanges(t *testing.T) {
 	r := newRig()

@@ -16,9 +16,6 @@ import (
 // errInterrupted 表示这次回答被用户用唤醒词打断了。
 var errInterrupted = errors.New("回答被打断")
 
-// cancelDrainTimeout：被打断后等服务端确认取消（response.done）最多这么久。
-const cancelDrainTimeout = 3 * time.Second
-
 // playResponse 消费服务端的事件，直到回答结束、声音播完：日志记文字，音频交给播放器。
 //
 // 音频在这里直接写进播放流（AudioStream.Write 只排进队列、不等播出），等播完放在后台：
@@ -141,10 +138,10 @@ func (a *Assistant) interrupt(ctx context.Context, turnSpan trace.Span, p *playe
 	return errInterrupted
 }
 
-// waitCancelled 等被取消的回答结束（response.done）；被取消的回答剩下的文字和声音丢掉，
+// waitCancelled 等被取消的回答结束（response.done，最多等 Timing.CancelConfirm）；被取消的回答剩下的文字和声音丢掉，
 // 其他事件（打断后用户接着说的话：speech_started / stopped 等）放进 replay，留给主循环处理。
 func (a *Assistant) waitCancelled(ctx context.Context) {
-	timeout := time.After(cancelDrainTimeout)
+	timeout := time.After(a.opts.Timing.CancelConfirm)
 	for {
 		select {
 		case <-ctx.Done():

@@ -189,7 +189,7 @@ else
 	mkdir -p "$config_dir"
 	cat >"$env_file" <<EOF
 # haro 终端的配置（安装脚本第一次安装时写的；之后可以手动改，重新安装不会覆盖这个文件）。
-# 每行 KEY="value"，启动时由 sh 读取。全部配置项：https://github.com/$repo/blob/main/internal/config/config.go
+# 每行 KEY="value"，启动时由 sh 读取。全部配置项和说明：https://github.com/$repo/blob/main/deploy/systemd/terminal.env.example
 HARO_SERVER_URL="$server_url"
 
 # 麦克风 / 音箱：空 = 跟系统默认（麦克风会跳过蓝牙的）。要指定就填设备 ID（麦克风的 ID 见启动日志 🎤 那一行的 id）；

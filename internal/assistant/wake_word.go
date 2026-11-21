@@ -175,12 +175,12 @@ func (a *Assistant) audible(tone realtimeproto.PCMAudio) bool {
 	return len(tone.Data) > 0 && a.parts.Speaker != nil
 }
 
-// playClip 在本机音箱上播一段提示音（播完才返回）。
+// playClip 在本机音箱上播一段提示音（播完才返回；最多等提示音的时长 + Timing.ToneSlack）。
 func (a *Assistant) playClip(ctx context.Context, tone realtimeproto.PCMAudio, what string) {
 	if !a.audible(tone) {
 		return
 	}
-	ctx, cancel := context.WithTimeout(ctx, tone.Duration()+5*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, tone.Duration()+a.opts.Timing.ToneSlack)
 	defer cancel()
 	stream, err := a.parts.Speaker.OpenStream(ctx, tone.Format)
 	if err != nil {
