@@ -1,16 +1,101 @@
 package profile
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
 
 var quietLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
+
+// warnings 数警告级的日志（按级别数，不比对文字）。
+type warnings struct {
+	mu    sync.Mutex
+	count int
+}
+
+func (w *warnings) Enabled(context.Context, slog.Level) bool { return true }
+func (w *warnings) WithAttrs([]slog.Attr) slog.Handler       { return w }
+func (w *warnings) WithGroup(string) slog.Handler            { return w }
+func (w *warnings) Handle(_ context.Context, record slog.Record) error {
+	if record.Level == slog.LevelWarn {
+		w.mu.Lock()
+		w.count++
+		w.mu.Unlock()
+	}
+	return nil
+}
+
+func (w *warnings) seen() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.count
+}
+
+// front matter 按 YAML 读：person 写成列表、行尾带注释都认；以前用逗号分开写几个名字的也认；
+// 写了不认识的项（拼错了）这份资料不用（记警告），不会悄悄当成别人的。
+func TestProfileFrontMatterIsYAML(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "owner.md", "---\nperson: [主人, 太太]   # 两个人共用一份\n---\n- 喜欢的：咖啡\n")
+	write(t, dir, "guest.md", "---\nperson: 客人 # 注释不算名字\n---\n- 喜欢的：茶\n")
+	write(t, dir, "legacy.md", "---\nperson: 老人, 小孩\n---\n- 喜欢的：散步\n")
+	write(t, dir, "typo.md", "---\nperson: 邻居\npreson_note: 拼错的项\n---\n- 喜欢的：猫\n")
+	log := &warnings{}
+	store := OpenDir(dir, slog.New(log))
+	for person, want := range map[string]string{"主人": "咖啡", "太太": "咖啡", "客人": "茶", "老人": "散步", "小孩": "散步"} {
+		if got := store.Profile(person); !strings.Contains(got, want) {
+			t.Errorf("%s 的资料应有 %q：%q", person, want, got)
+		}
+	}
+	if _, people := store.Summary(); len(people) != 5 {
+		t.Errorf("名字应是 5 个（不含写错的那份）：%v", people)
+	}
+	if got := store.Profile("邻居"); strings.Contains(got, "猫") || log.seen() == 0 {
+		t.Errorf("写了不认识的项：这份不用，并记警告：%q（警告 %d 条）", got, log.seen())
+	}
+}
+
+// 资料目录读出错（不是不存在，例如挂载出错时那个路径不是目录）：不当成没有资料，先用上次读到的，同一段出错只记一次警告；
+// 目录真的不存在了才当成没有资料。
+func TestProfileKeepsLastReadOnReadError(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "profile")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	write(t, dir, "owner.md", "---\nperson: 主人\n---\n- 怎么称呼：小王\n")
+	log := &warnings{}
+	store := OpenDir(dir, slog.New(log))
+	if got := store.Profile("主人"); !strings.Contains(got, "小王") {
+		t.Fatalf("先读到资料：%q", got)
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dir, []byte("不是目录"), 0o600); err != nil { // 读这个「目录」会出错，但它不是「不存在」
+		t.Fatal(err)
+	}
+	for range 2 {
+		if got := store.Profile("主人"); !strings.Contains(got, "小王") {
+			t.Errorf("读目录出错：应先用上次读到的：%q", got)
+		}
+	}
+	if log.seen() != 1 {
+		t.Errorf("同一段出错只记一次警告：%d 条", log.seen())
+	}
+	if err := os.Remove(dir); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.Profile("主人"); got != "" {
+		t.Errorf("目录不存在了：当成没有资料：%q", got)
+	}
+}
 
 func write(t *testing.T, dir, name, content string) {
 	t.Helper()
@@ -132,7 +217,7 @@ func TestExampleTemplatesAreEmpty(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if names, _ := parse(string(data)); len(names) != 1 || names[0] != "主人" {
+	if names, _, err := parse(data); err != nil || len(names) != 1 || names[0] != "主人" {
 		t.Errorf("模板的 person：%v", names)
 	}
 }

@@ -21,7 +21,7 @@ import (
 	"text/template"
 	"time"
 
-	"go.yaml.in/yaml/v3"
+	"github.com/bukahou/haro/internal/frontmatter"
 )
 
 // Mode 是代理被调用的方式。
@@ -193,14 +193,12 @@ func knownNames() []string {
 
 // parse 解析一个代理文件：--- 之间的 YAML 是配置（不认识的字段报错），之后是正文。
 func parse(name, source string, data []byte) (Definition, error) {
-	header, body, err := splitFrontMatter(data)
+	header, body, err := frontmatter.Split(data)
 	if err != nil {
 		return Definition{}, fmt.Errorf("%s：%w", source, err)
 	}
-	decoder := yaml.NewDecoder(bytes.NewReader(header))
-	decoder.KnownFields(true)
 	var definition Definition
-	if err := decoder.Decode(&definition); err != nil {
+	if err := frontmatter.Decode(header, &definition); err != nil {
 		return Definition{}, fmt.Errorf("%s 的配置: %w", source, err)
 	}
 	definition.Name, definition.Source, definition.Prompt = name, source, strings.TrimSpace(string(body))
@@ -215,25 +213,6 @@ func parse(name, source string, data []byte) (Definition, error) {
 		return Definition{}, fmt.Errorf("%s 的正文: %w", source, err)
 	}
 	return definition, nil
-}
-
-// splitFrontMatter 把文件分成开头的配置（第一行 --- 到下一行 ---）和之后的正文。
-func splitFrontMatter(data []byte) (header, body []byte, err error) {
-	data = bytes.ReplaceAll(data, []byte("\r\n"), []byte("\n"))
-	const fence = "---\n"
-	if !bytes.HasPrefix(data, []byte(fence)) {
-		return nil, nil, errors.New("开头要是一行 ---，接着是配置")
-	}
-	rest := data[len(fence):]
-	end := bytes.Index(rest, []byte("\n"+fence))
-	switch {
-	case end >= 0:
-		return rest[:end+1], rest[end+1+len(fence):], nil
-	case bytes.HasSuffix(rest, []byte("\n---")):
-		return rest[:len(rest)-len("---")], nil, nil
-	default:
-		return nil, nil, errors.New("配置没有用一行 --- 结束")
-	}
 }
 
 // validate 检查各字段的取值（不按格式猜默认值：写错了就起不来）。
