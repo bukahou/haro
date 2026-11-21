@@ -30,7 +30,7 @@ func loadAgentDefinitions(settings config.ServerSettings, logger *slog.Logger) (
 	}
 	slices.Sort(names)
 	for _, name := range names {
-		if definition := catalog[name]; !definition.Builtin() {
+		if definition := catalog[name]; !definition.Builtin {
 			logger.Warn("代理定义：用覆盖目录里的这份（程序里带的那份以后更新了也不会跟着变）", "agent", name, "file", definition.Source)
 		}
 	}

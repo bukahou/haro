@@ -83,12 +83,11 @@ type Definition struct {
 	MaxSearches int           `yaml:"max_searches"`
 
 	Prompt string `yaml:"-"` // 正文：系统提示词的模板
-	Source string `yaml:"-"` // 从哪读的（日志用）
-	prompt *template.Template
+	Source string `yaml:"-"` // 从哪读的（只给日志看）
+	// Builtin：这份是程序里带的（没被覆盖目录替换）。读的时候按来源记下，不从 Source 的写法推（覆盖目录也可能叫 builtin）
+	Builtin bool `yaml:"-"`
+	prompt  *template.Template
 }
-
-// Builtin 判断这份定义是不是程序里带的（没被覆盖目录替换）。
-func (d Definition) Builtin() bool { return strings.HasPrefix(d.Source, builtinDir+"/") }
 
 // RenderPrompt 填好正文里引用的值，得到系统提示词。正文引用了 values 里没有的名字时报错（不静默留空）。
 func (d Definition) RenderPrompt(values map[string]any) (string, error) {
@@ -130,7 +129,7 @@ func Load(dir string) (Catalog, error) {
 		if err != nil {
 			return nil, fmt.Errorf("读取 %s: %w", source, err)
 		}
-		if err := catalog.add(entry.Name(), source, data); err != nil {
+		if err := catalog.add(entry.Name(), source, data, true); err != nil {
 			return nil, err
 		}
 	}
@@ -161,15 +160,15 @@ func (c Catalog) override(dir string) error {
 		if err != nil {
 			return fmt.Errorf("读取代理定义: %w", err)
 		}
-		if err := c.add(filepath.Base(path), path, data); err != nil {
+		if err := c.add(filepath.Base(path), path, data, false); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// add 解析一个文件并记下（同名的替换）。
-func (c Catalog) add(fileName, source string, data []byte) error {
+// add 解析一个文件并记下（同名的替换）；builtin 表示是不是程序里带的那份。
+func (c Catalog) add(fileName, source string, data []byte, builtin bool) error {
 	name := strings.TrimSuffix(fileName, ".md")
 	if _, ok := known[name]; !ok {
 		return fmt.Errorf("%s：程序不认识叫 %s 的代理（认识的：%s）", source, name, strings.Join(knownNames(), "、"))
@@ -178,6 +177,7 @@ func (c Catalog) add(fileName, source string, data []byte) error {
 	if err != nil {
 		return err
 	}
+	definition.Builtin = builtin
 	c[name] = definition
 	return nil
 }
