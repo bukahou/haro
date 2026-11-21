@@ -102,16 +102,21 @@ haro 是一个家用语音助手：家里每个房间放一台**终端**（麦�
 
 自研工具注册在服务端进程内的 MCP 服务上（参数、结果由结构体定义，调用前校验；每个工具标明只读 / 会改数据 / 会破坏）；第三方服务只接远程 Streamable HTTP。
 会破坏的工具（和提高月度上限）执行时要带着主人的确认（确认闸放进去的 `brain.Confirmation`），工具箱和额度那一层自己核对，见不到就不执行。
+模型能触发的动作就是下表这些（会话自己提供的工具和工具箱里的）；「过确认闸」= 执行前要登记过的声音 + 有时效的确认。
+这张表由测试和代码核对（`internal/docstest`：工具箱和会话工具的名字、要不要过确认闸），加工具、改标注时跟着改。
 
-| 工具 | 说明 |
-|---|---|
-| `save_note` / `search_notes` / `delete_note` / `list_deleted_notes` / `restore_note` | 记事本（SQLite，时间存 UTC 的 Unix 秒）；按编号删，删掉的可以恢复 |
-| `confirm_action` / `cancel_action` | 会破坏的操作（删记事、提高月度上限）先存成待确认的操作（有时效），主人算不算同意由模型判断后调用；有会破坏的工具时一直提供（工具定义不变，提示词缓存不失效），系统提示词的工具介绍里不列 |
-| `get_weather` | 天气（Open-Meteo，不用密钥）；家的位置可以配坐标，或按公网 IP 推定。Open-Meteo 查不到时改用日本气象厅（见下） |
-| `look_at_camera` | 看终端摄像头的画面：调用时才经 MCP 让终端拍一帧（终端的工具清单里有「拍一帧」时才提供） |
-| `switch_persona` | 换性格（有两个以上性格时才提供） |
-| `web_search` | 联网搜一次（Tavily 远程 MCP）；设了密钥才提供 |
-| `start_research` / `research_status` / `cancel_research` | 后台调查（见下）；设了搜索密钥才提供 |
+| 工具 | 过确认闸 | 说明 |
+|---|---|---|
+| `save_note` / `search_notes` / `list_deleted_notes` / `restore_note` | | 记事本（SQLite，时间存 UTC 的 Unix 秒）；删掉的可以恢复 |
+| `delete_note` | ✓ | 按编号删记事 |
+| `raise_monthly_cap` | ✓ | 主人口头临时提高这个月的费用上限（每次加 `HARO_MONTHLY_RAISE_YEN`）；设了月度上限才提供 |
+| `confirm_action` / `cancel_action` | | 会破坏的操作（删记事、提高月度上限）先存成待确认的操作（有时效），主人算不算同意由模型判断后调用这两个（它们自己核对声纹、时效、参数，必须是下一轮）；有会破坏的工具时一直提供（工具定义不变，提示词缓存不失效），系统提示词的工具介绍里不列 |
+| `get_weather` | | 天气（Open-Meteo，不用密钥）；家的位置可以配坐标，或按公网 IP 推定。Open-Meteo 查不到时改用日本气象厅（见下） |
+| `look_at_camera` | | 看终端摄像头的画面：调用时才经 MCP 让终端拍一帧（终端的工具清单里有「拍一帧」时才提供） |
+| `switch_persona` | | 换性格（有两个以上性格时才提供） |
+| `ask_stronger_model` | | 主人纠正、或明说要想清楚时，前台模型交给更强的模型重答（`HARO_STRONG_LLM_USE` 有 correction 时才提供） |
+| `web_search` | | 联网搜一次（Tavily 远程 MCP）；设了密钥才提供 |
+| `start_research` / `research_status` / `cancel_research` | | 后台调查（见下）；设了搜索密钥才提供 |
 
 ### 天气的备用来源（`internal/weather`）
 
