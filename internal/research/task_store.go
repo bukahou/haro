@@ -11,12 +11,8 @@ import (
 	"embed"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
-
-	_ "modernc.org/sqlite" // 纯 Go 的 SQLite 驱动
 
 	"github.com/bukahou/haro/internal/sqliteschema"
 )
@@ -101,23 +97,9 @@ var ErrTaskNotFound = errors.New("没有这个调查任务")
 
 // OpenTaskStore 打开任务账本：path 是 SQLite 文件路径；空 = 只在内存里（服务端重启就没了）。
 func OpenTaskStore(ctx context.Context, path string) (TaskStore, error) {
-	location := "file::memory:"
-	if path != "" {
-		if dir := filepath.Dir(path); dir != "." {
-			if err := os.MkdirAll(dir, 0o755); err != nil {
-				return nil, fmt.Errorf("创建调查任务目录: %w", err)
-			}
-		}
-		location = path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)"
-	}
-	db, err := sql.Open("sqlite", location)
+	db, err := sqliteschema.Open(ctx, path, migrationFiles, sqliteschema.Options{})
 	if err != nil {
-		return nil, err
-	}
-	db.SetMaxOpenConns(1)
-	if err := sqliteschema.Migrate(ctx, db, migrationFiles); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("升级调查任务账本的表结构: %w", err)
+		return nil, fmt.Errorf("打开调查任务账本: %w", err)
 	}
 	return &sqliteTaskStore{db: db}, nil
 }

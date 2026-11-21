@@ -12,11 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"time"
-
-	_ "modernc.org/sqlite" // database/sql 的 sqlite 驱动
 
 	"github.com/bukahou/haro/internal/brain"
 	"github.com/bukahou/haro/internal/sqliteschema"
@@ -33,27 +29,11 @@ type SQLiteStore struct{ db *sql.DB }
 
 var _ brain.ConversationStore = (*SQLiteStore)(nil)
 
-// OpenSQLite 打开（没有就建）对话库，并把表结构升到最新。
+// OpenSQLite 打开（没有就建）对话库，并把表结构升到最新。库里是家里人说过的话：目录 0700、文件 0600。
 func OpenSQLite(ctx context.Context, path string) (*SQLiteStore, error) {
-	if dir := filepath.Dir(path); dir != "." {
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			return nil, fmt.Errorf("创建对话库目录: %w", err)
-		}
-	}
-	// 先以 0600 建文件：SQLite 自己建的是 0644；WAL 等附属文件沿用库文件的权限
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	db, err := sqliteschema.Open(ctx, path, migrationFiles, sqliteschema.Options{Private: true, ForeignKeys: true})
 	if err != nil {
 		return nil, fmt.Errorf("打开对话库: %w", err)
-	}
-	file.Close()
-	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)")
-	if err != nil {
-		return nil, err
-	}
-	db.SetMaxOpenConns(1) // 单写者
-	if err := sqliteschema.Migrate(ctx, db, migrationFiles); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("升级对话库的表结构: %w", err)
 	}
 	return &SQLiteStore{db: db}, nil
 }

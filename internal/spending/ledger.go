@@ -11,11 +11,10 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
-	"path/filepath"
+	"strings"
 	"time"
 
-	_ "modernc.org/sqlite" // 纯 Go 的 SQLite 驱动
+	"github.com/bukahou/haro/internal/sqliteschema"
 )
 
 // Purpose 是花钱的用途：额度按用途分开算。
@@ -86,23 +85,9 @@ type CapRaise struct {
 
 // OpenLedger 打开用量账本：path 是 SQLite 文件路径；空 = 只在内存里（服务端重启就清零，额度也跟着重置）。
 func OpenLedger(ctx context.Context, path string) (Ledger, error) {
-	location := "file::memory:"
-	if path != "" {
-		if dir := filepath.Dir(path); dir != "." {
-			if err := os.MkdirAll(dir, 0o755); err != nil {
-				return nil, fmt.Errorf("创建用量账本目录: %w", err)
-			}
-		}
-		location = path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)"
-	}
-	db, err := sql.Open("sqlite", location)
+	db, err := sqliteschema.Open(ctx, path, migrationFiles, sqliteschema.Options{Migrate: ledgerMigrations})
 	if err != nil {
-		return nil, err
-	}
-	db.SetMaxOpenConns(1) // 单写者；内存库也只能有一个连接（否则每个连接一份）
-	if err := migrateLedger(ctx, db); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("升级用量账本的表结构: %w", err)
+		return nil, fmt.Errorf("打开用量账本: %w", err)
 	}
 	return &sqliteLedger{db: db}, nil
 }
@@ -133,7 +118,7 @@ func (l *sqliteLedger) Total(ctx context.Context, since time.Time, purposes ...P
 	query := `SELECT COALESCE(SUM(yen), 0), COALESCE(SUM(credits), 0) FROM charges WHERE at >= ?`
 	args := []any{since.Unix()}
 	if len(purposes) > 0 {
-		query += ` AND purpose IN (?` + repeat(",?", len(purposes)-1) + `)`
+		query += ` AND purpose IN (?` + strings.Repeat(",?", len(purposes)-1) + `)`
 		for _, purpose := range purposes {
 			args = append(args, string(purpose))
 		}
@@ -173,11 +158,3 @@ func (l *sqliteLedger) CapRaised(ctx context.Context, since time.Time) (float64,
 }
 
 func (l *sqliteLedger) Close() error { return l.db.Close() }
-
-func repeat(s string, n int) string {
-	out := ""
-	for range n {
-		out += s
-	}
-	return out
-}
