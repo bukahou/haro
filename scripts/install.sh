@@ -20,6 +20,20 @@ die() {
 	printf '❌ %s\n' "$*" >&2
 	exit 1
 }
+
+# 拒装的原因各有一个退出码（scripts/test-install.sh 按退出码判断，不比对提示文字）；避开 shell 自己用的 1、2 和 126 以上
+exit_need_server_url=10 # 第一次安装没给服务端地址
+exit_checksum=11        # 下载的安装包和 SHA256SUMS 对不上
+exit_no_platform=12     # 这个版本没有这台机器的平台
+
+# refuse 退出码 说明：因为某个原因拒装
+refuse() {
+	code=$1
+	shift
+	printf '❌ %s\n' "$*" >&2
+	exit "$code"
+}
+
 usage() {
 	cat <<EOF
 haro 终端的安装脚本（装在自己的用户目录里，不需要 root）。再跑一次 = 升级到最新。
@@ -139,7 +153,7 @@ esac
 base_url=${HARO_RELEASE_BASE_URL:-$default_base}
 
 if [ ! -e "$env_file" ]; then
-	[ -n "$server_url" ] || die "第一次安装要告诉终端服务端在哪：--server-url http://服务端地址:59130"
+	[ -n "$server_url" ] || refuse "$exit_need_server_url" "第一次安装要告诉终端服务端在哪：--server-url http://服务端地址:59130"
 fi
 if [ -n "$server_url" ]; then
 	case $server_url in
@@ -164,11 +178,11 @@ curl -fsSL --retry 3 --retry-delay 2 -o "$work/SHA256SUMS" "$base_url/SHA256SUMS
 	die "下载不了 $base_url/SHA256SUMS（版本写对了吗？）"
 # 发布的平台以这个版本的 SHA256SUMS 为准：不在里面就是这个版本没有这个平台的安装包
 expected=$(awk -v name="$asset" '$2 == name || $2 == "*" name { print $1; exit }' "$work/SHA256SUMS")
-[ -n "$expected" ] || die "这个版本没有 ${platform} 的安装包（发布了哪些平台见 $base_url/SHA256SUMS）"
+[ -n "$expected" ] || refuse "$exit_no_platform" "这个版本没有 ${platform} 的安装包（发布了哪些平台见 $base_url/SHA256SUMS）"
 curl -fsSL --retry 3 --retry-delay 2 -o "$work/$asset" "$base_url/$asset" ||
 	die "下载不了 $base_url/$asset"
 actual=$(sha256_of "$work/$asset")
-[ "$actual" = "$expected" ] || die "校验不过：$asset 的 sha256 是 ${actual}，SHA256SUMS 写的是 ${expected}（下载出错或文件被改过），没有安装"
+[ "$actual" = "$expected" ] || refuse "$exit_checksum" "校验不过：$asset 的 sha256 是 ${actual}，SHA256SUMS 写的是 ${expected}（下载出错或文件被改过），没有安装"
 
 mkdir -p "$work/unpacked" "$bin_dir"
 tar -xzf "$work/$asset" -C "$work/unpacked"

@@ -15,7 +15,7 @@ import (
 func TestBusyWhileOwnerSpeaks(t *testing.T) {
 	ctx := context.Background()
 	brain := &scriptedBrain{events: make(chan realtimeproto.ServerEvent, 16)}
-	a := NewAssistant(Components{Brain: brain}, Options{WakeWord: WakeWordOptions{Phrase: "哈罗哈罗"}},
+	a := NewAssistant(Dependencies{Brain: brain}, Options{WakeWord: WakeWordOptions{Phrase: "哈罗哈罗"}},
 		slog.New(slog.NewTextHandler(io.Discard, nil)))
 	window := &conversationWindow{idle: time.Minute}
 	defer window.stop()

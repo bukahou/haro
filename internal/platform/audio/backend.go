@@ -55,7 +55,7 @@ func (b *Backend) Close() {
 	b.context.Free()
 }
 
-// Microphones 列出麦克风（不含「Monitor of …」这类录扬声器输出的虚拟源）。
+// Microphones 列出麦克风（照实列出，含回录源；回录源由平台层按系统报的属性去掉）。
 func (b *Backend) Microphones() ([]Device, error) { return b.devices(malgo.Capture) }
 
 // Speakers 列出音箱。

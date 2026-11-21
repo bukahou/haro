@@ -17,7 +17,7 @@ import (
 func (a *Assistant) runWakeWord(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	mic, err := a.parts.Microphone.OpenStream(ctx)
+	mic, err := a.deps.Microphone.OpenStream(ctx)
 	if err != nil {
 		return err
 	}
@@ -27,7 +27,7 @@ func (a *Assistant) runWakeWord(ctx context.Context) error {
 	keys := make(chan error, 1)
 	go func() {
 		for {
-			err := a.parts.Manual.WaitForToggle(ctx)
+			err := a.deps.Manual.WaitForToggle(ctx)
 			keys <- err
 			if err != nil {
 				return
@@ -57,7 +57,7 @@ func (a *Assistant) runWakeWord(ctx context.Context) error {
 			}
 			if window.awake {
 				a.sleep(ctx, window, "手动休眠")
-			} else if err := a.parts.Brain.Send(ctx, realtimeproto.HaroWakeWordWake{}); err != nil {
+			} else if err := a.deps.Brain.Send(ctx, realtimeproto.HaroWakeWordWake{}); err != nil {
 				a.logger.Error("手动唤醒失败", "err", err)
 			} else {
 				window.wake()
@@ -67,7 +67,7 @@ func (a *Assistant) runWakeWord(ctx context.Context) error {
 			a.sleep(ctx, window, "对话窗口结束")
 		case event := <-a.replay: // 打断后等取消确认期间收到的事件
 			a.handleWakeEvent(ctx, window, event)
-		case event := <-a.parts.Brain.Events():
+		case event := <-a.deps.Brain.Events():
 			a.handleWakeEvent(ctx, window, event)
 		}
 	}
@@ -111,7 +111,7 @@ func (a *Assistant) handleWakeEvent(ctx context.Context, window *conversationWin
 }
 
 func (a *Assistant) sleep(ctx context.Context, window *conversationWindow, reason string) {
-	if err := a.parts.Brain.Send(ctx, realtimeproto.HaroWakeWordSleep{}); err != nil {
+	if err := a.deps.Brain.Send(ctx, realtimeproto.HaroWakeWordSleep{}); err != nil {
 		if !errors.Is(err, context.Canceled) {
 			a.logger.Error("通知休眠失败：过一个对话窗口再试", "err", err)
 		}
@@ -172,7 +172,7 @@ func (a *Assistant) playSleepTone(ctx context.Context) {
 
 // audible 判断这段提示音放不放得出来（有声音、有音箱）。
 func (a *Assistant) audible(tone realtimeproto.PCMAudio) bool {
-	return len(tone.Data) > 0 && a.parts.Speaker != nil
+	return len(tone.Data) > 0 && a.deps.Speaker != nil
 }
 
 // playClip 在本机音箱上播一段提示音（播完才返回；最多等提示音的时长 + Timing.ToneSlack）。
@@ -182,7 +182,7 @@ func (a *Assistant) playClip(ctx context.Context, tone realtimeproto.PCMAudio, w
 	}
 	ctx, cancel := context.WithTimeout(ctx, tone.Duration()+a.opts.Timing.ToneSlack)
 	defer cancel()
-	stream, err := a.parts.Speaker.OpenStream(ctx, tone.Format)
+	stream, err := a.deps.Speaker.OpenStream(ctx, tone.Format)
 	if err != nil {
 		a.logger.Warn("播"+what+"失败", "err", err)
 		return

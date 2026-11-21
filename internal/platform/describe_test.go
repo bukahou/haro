@@ -19,7 +19,7 @@ type fakeOS struct {
 	err    error
 }
 
-func (f fakeOS) AudioTraits(_ context.Context, id, _ string) (osdiff.AudioTraits, error) {
+func (f fakeOS) AudioTraits(_ context.Context, id string) (osdiff.AudioTraits, error) {
 	return f.traits[id], f.err
 }
 func (fakeOS) Cameras(context.Context) ([]terminal.Device, error) { return nil, nil }

@@ -131,7 +131,7 @@ func TestWakeWordConversation(t *testing.T) {
 	manual := blockingManual{done: make(chan struct{})}
 	speaker := &recordingSpeaker{}
 	turn := realtimeproto.TurnDetection{Type: "server_vad"}
-	haro := assistant.NewAssistant(assistant.Components{
+	haro := assistant.NewAssistant(assistant.Dependencies{
 		Manual: manual, Microphone: loudMicrophone{}, Speaker: speaker, Brain: server,
 	}, assistant.Options{TurnDetection: turn, EchoGuard: 10 * time.Millisecond,
 		NoticeTone:  pcm("[叮咚]"),

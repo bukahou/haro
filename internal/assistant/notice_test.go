@@ -153,7 +153,7 @@ func startNoticeAssistant(t *testing.T, bargeIn bool) (*noticeServer, *heldSpeak
 	log := &timeline{}
 	server := &noticeServer{log: log, events: make(chan realtimeproto.ServerEvent, 16)}
 	speaker := &heldSpeaker{log: log, release: make(chan struct{}, 4)}
-	haro := assistant.NewAssistant(assistant.Components{
+	haro := assistant.NewAssistant(assistant.Dependencies{
 		Manual: waitingManual{}, Microphone: loudMicrophone{}, Speaker: speaker, Brain: server,
 	}, assistant.Options{TurnDetection: realtimeproto.TurnDetection{Type: "server_vad"}, EchoGuard: echoGuard, BargeIn: bargeIn,
 		NoticeTone: pcm("[叮咚]"), WakeWord: assistant.WakeWordOptions{Phrase: "哈罗哈罗", IdleTimeout: time.Minute}},
@@ -233,7 +233,7 @@ func TestNoticeWaitsUntilTheOwnerIsAnswered(t *testing.T) {
 	log := &timeline{}
 	server := &noticeServer{log: log, events: make(chan realtimeproto.ServerEvent, 16)}
 	speaker := &recordingSpeaker{}
-	haro := assistant.NewAssistant(assistant.Components{
+	haro := assistant.NewAssistant(assistant.Dependencies{
 		Manual: waitingManual{}, Microphone: loudMicrophone{}, Speaker: speaker, Brain: server,
 	}, assistant.Options{TurnDetection: realtimeproto.TurnDetection{Type: "server_vad"}, EchoGuard: echoGuard,
 		NoticeTone: pcm("[叮咚]"), WakeWord: assistant.WakeWordOptions{Phrase: "哈罗哈罗", IdleTimeout: time.Minute}},

@@ -1,5 +1,5 @@
 # haro 构建入口。bin/ 不进 git。
-#   make build        生成 bin/haro-server（服务端，纯 Go；记事本、网络诊断等自研工具都内置在里面，v5）；bin/haro（终端，cgo：
+#   make build        生成 bin/haro-server（服务端，纯 Go；记事本、天气等自研工具都内置在里面，v5）；bin/haro（终端，cgo：
 #                     音频库 miniaudio 随源码编译，不用装系统库，v4 D10）
 #                     与 bin/haro-asr（cgo，依赖 sherpa-onnx 原生库；单独运行，服务端按 HARO_ASR_URL 连它）
 #                     登记声纹用终端的 bin/haro -enroll <名字>（经服务端登记）
@@ -8,6 +8,7 @@
 #   make run-terminal 只运行终端（服务端要已经在跑）
 #   make test         全部测试
 #   make check-darwin 在 Linux 上检查 Mac 版能否满足平台层契约（GOOS=darwin 类型检查纯 Go 部分；含 cgo 的音频只能在 Mac 上编）
+#   make check-windows 同上，检查 Windows 版（还没适配的系统用降级的那份实现，也要编译得过）
 #   make version      打印这次构建的版本号
 #
 # 发版：合并到 main 后由 GitHub Actions 自动完成（.github/workflows/release.yml）——终端各平台程序进 GitHub Release，
@@ -19,7 +20,7 @@
 #   make uninstall-services        停掉并卸下装了的全部
 #   make deploy                    构建后重启这台机器上装了的服务（换上新版本）
 #   开关：systemctl --user start|stop haro.service；日志：journalctl --user -u haro -f
-.PHONY: build run run-server run-terminal test check-darwin install-terminal-service install-server-services uninstall-services deploy check-not-running check-no-manual-run image version
+.PHONY: build run run-server run-terminal test check-darwin check-windows install-terminal-service install-server-services uninstall-services deploy check-not-running check-no-manual-run image version
 
 TERMINAL_SERVICES := haro.service
 SERVER_SERVICES   := haro-asr.service haro-server.service
@@ -64,12 +65,16 @@ run-terminal: check-not-running build
 test:
 	go test ./...
 
-# 反过来：装服务 / 换版本前，手动跑的（make run）要先停，否则服务抢不到端口和摄像头
-# 平台层：Mac / Windows 版的「各系统不同的部分」和服务层在 Linux 上也能做类型检查
-check-darwin:
-	GOOS=darwin CGO_ENABLED=0 go vet ./internal/platform/osdiff/ ./internal/platform/camera/ ./internal/terminal/
-	GOOS=windows CGO_ENABLED=0 go vet ./internal/platform/osdiff/ ./internal/platform/camera/ ./internal/terminal/
+# 平台层：Mac / Windows 版的「各系统不同的部分」和服务层在 Linux 上也能做类型检查（纯 Go 的部分）
+CROSS_CHECK_PACKAGES := ./internal/platform/osdiff/ ./internal/platform/camera/ ./internal/terminal/
 
+check-darwin:
+	GOOS=darwin CGO_ENABLED=0 go vet $(CROSS_CHECK_PACKAGES)
+
+check-windows:
+	GOOS=windows CGO_ENABLED=0 go vet $(CROSS_CHECK_PACKAGES)
+
+# 反过来：装服务 / 换版本前，手动跑的（make run）要先停，否则服务抢不到端口和摄像头
 check-no-manual-run:
 	@for program in haro-asr haro-server; do \
 		if pgrep -u "$$USER" -x $$program >/dev/null && ! systemctl --user is-active --quiet $$program.service; then \

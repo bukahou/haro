@@ -85,7 +85,7 @@ var chunk = realtimeproto.ResponseOutputAudioDelta{Audio: realtimeproto.PCMAudio
 	Format: realtimeproto.AudioFormat{SampleRate: 32000, Channels: 1}, Data: make([]byte, 6400)}}
 
 func newBargeInAssistant(brain *scriptedBrain, sink *slowSink) *Assistant {
-	return NewAssistant(Components{Brain: brain, Speaker: sink}, Options{BargeIn: true,
+	return NewAssistant(Dependencies{Brain: brain, Speaker: sink}, Options{BargeIn: true,
 		WakeWord: WakeWordOptions{Phrase: "哈罗哈罗"}}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
 
@@ -175,7 +175,7 @@ func (b unansweredBrain) Events() <-chan realtimeproto.ServerEvent            { 
 // 被打断后服务端一直不确认取消：最多等 Timing.CancelConfirm 就不等了（不用默认的 3 秒）。
 func TestCancelConfirmWaitComesFromTiming(t *testing.T) {
 	brain, sink := unansweredBrain{events: make(chan realtimeproto.ServerEvent, 16)}, newSlowSink()
-	a := NewAssistant(Components{Brain: brain, Speaker: sink}, Options{BargeIn: true,
+	a := NewAssistant(Dependencies{Brain: brain, Speaker: sink}, Options{BargeIn: true,
 		Timing: Timing{CancelConfirm: 30 * time.Millisecond}}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	brain.events <- chunk
 	brain.events <- realtimeproto.HaroWakeWordDetected{Keyword: "哈罗哈罗"}

@@ -50,7 +50,7 @@ func (a *Assistant) respondHandsFree(ctx context.Context, item string, speechEnd
 // 返回的 resume 在出声结束后调用：settle 为 true 时先等 EchoGuard（音箱里的余音散掉）再恢复收听。
 func (a *Assistant) suppressEcho(ctx context.Context) (resume func(settle bool)) {
 	if a.opts.BargeIn {
-		if err := a.parts.Brain.Send(ctx, realtimeproto.HaroPlaybackStarted{}); err != nil {
+		if err := a.deps.Brain.Send(ctx, realtimeproto.HaroPlaybackStarted{}); err != nil {
 			a.logger.Error("通知开始播放失败", "err", err)
 		}
 	} else {
@@ -64,7 +64,7 @@ func (a *Assistant) suppressEcho(ctx context.Context) (resume func(settle bool))
 			}
 		}
 		if a.opts.BargeIn {
-			if err := a.parts.Brain.Send(context.WithoutCancel(ctx), realtimeproto.HaroPlaybackStopped{}); err != nil {
+			if err := a.deps.Brain.Send(context.WithoutCancel(ctx), realtimeproto.HaroPlaybackStopped{}); err != nil {
 				a.logger.Error("通知播放结束失败", "err", err)
 			}
 		} else {
@@ -79,7 +79,7 @@ func (a *Assistant) uploadMicrophone(ctx context.Context, mic MicrophoneStream) 
 		if a.uplink.muted() {
 			chunk.Data = make([]byte, len(chunk.Data))
 		}
-		if err := a.parts.Brain.Send(ctx, realtimeproto.InputAudioBufferAppend{Audio: chunk}); err != nil {
+		if err := a.deps.Brain.Send(ctx, realtimeproto.InputAudioBufferAppend{Audio: chunk}); err != nil {
 			return err
 		}
 		a.uplink.advance(chunk)

@@ -7,7 +7,8 @@
 //	sleep.wav  ：轻轻的由高到低两声（对话结束、去休眠了；比断开那声更轻、更低）
 //	notice.wav ：明亮的「叮咚」（服务端有事告诉你，例如后台调查查完了）
 //
-// 想用自己的声音录的提示音：放进一个目录（offline.wav / online.wav，16 bit PCM），设 HARO_TONES_DIR 指向它。
+// 想用自己的声音录的提示音：放进一个目录（offline.wav、online.wav、sleep.wav、notice.wav，16 bit PCM；
+// 缺哪个就用内置的那个），设 HARO_TONES_DIR 指向它。
 //
 //	go run gen_tones.go   # 在 assets/tones 目录里运行
 package main

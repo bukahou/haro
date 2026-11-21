@@ -18,7 +18,7 @@ import (
 type Adapter interface {
 	// AudioTraits 认出音频设备 id 的接口类型、是不是回录源（选设备的规则只看它们）。认不出时返回零值和原因
 	// （例如 Linux 上没装 pactl）：这个设备照常可用，接口类型当未知。
-	AudioTraits(ctx context.Context, id, name string) (AudioTraits, error)
+	AudioTraits(ctx context.Context, id string) (AudioTraits, error)
 	// Cameras 列出摄像头（拍照用的，不含元数据节点、屏幕录制）。
 	Cameras(ctx context.Context) ([]terminal.Device, error)
 	// CameraInput 决定怎样向摄像头要画面：captureSize 是想要的分辨率（例如 1280x720），

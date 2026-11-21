@@ -36,14 +36,14 @@ func (a *Assistant) playResponse(ctx context.Context, turnSpan trace.Span, item 
 		select {
 		case <-ctx.Done():
 			if done == nil {
-				_ = a.parts.Brain.Send(context.WithoutCancel(ctx), realtimeproto.ResponseCancel{})
+				_ = a.deps.Brain.Send(context.WithoutCancel(ctx), realtimeproto.ResponseCancel{})
 			}
 			return ctx.Err()
 		case err := <-finished:
 			player.end()
 			player = nil
 			return a.finishResponse(turnSpan, *done, err, answer.String(), committedAt)
-		case event := <-a.parts.Brain.Events():
+		case event := <-a.deps.Brain.Events():
 			switch e := event.(type) {
 			case realtimeproto.HaroNotice: // 正在说话：提示留到这一轮播完再响
 				select {
@@ -68,7 +68,7 @@ func (a *Assistant) playResponse(ctx context.Context, turnSpan trace.Span, item 
 			case realtimeproto.ResponseOutputAudioDelta:
 				if player == nil {
 					_, span := tracer.Start(ctx, "terminal.playback")
-					stream, err := a.parts.Speaker.OpenStream(ctx, e.Audio.Format)
+					stream, err := a.deps.Speaker.OpenStream(ctx, e.Audio.Format)
 					if err != nil {
 						span.End()
 						return fail(turnSpan, "打开播放流", err)
@@ -125,7 +125,7 @@ func (a *Assistant) interrupt(ctx context.Context, turnSpan trace.Span, p *playe
 	a.logger.Info("✋ 被打断", "item", item, "played", played.Round(time.Millisecond), "answer_so_far", answer)
 	turnSpan.SetAttributes(attribute.String("haro.response.status", "interrupted"),
 		attribute.Float64("haro.turn.played_seconds", played.Seconds()))
-	brain := a.parts.Brain
+	brain := a.deps.Brain
 	if err := brain.Send(ctx, realtimeproto.ConversationItemTruncate{AudioEndMs: played.Milliseconds()}); err != nil {
 		a.logger.Warn("通知服务端截断历史失败", "err", err)
 	}
@@ -149,7 +149,7 @@ func (a *Assistant) waitCancelled(ctx context.Context) {
 		case <-timeout:
 			a.logger.Warn("等服务端确认取消超时")
 			return
-		case event := <-a.parts.Brain.Events():
+		case event := <-a.deps.Brain.Events():
 			switch event.(type) {
 			case realtimeproto.ResponseDone:
 				return

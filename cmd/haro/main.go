@@ -10,7 +10,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -51,7 +50,7 @@ func main() {
 		}
 		return
 	}
-	if err := run(logger); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, io.EOF) {
+	if err := run(logger); err != nil && !errors.Is(err, context.Canceled) {
 		logger.Error("haro 退出", "err", err)
 		os.Exit(1)
 	}
@@ -93,7 +92,7 @@ func run(logger *slog.Logger) error {
 	}
 
 	// 看守：连服务端 → 等麦克风 → 运行；出什么错都退回去重来，只有关机信号才退出
-	supervisor := terminal.NewSupervisor(terminal.Parts{
+	supervisor := terminal.NewSupervisor(terminal.SupervisorDependencies{
 		Dial: func(ctx context.Context) (terminal.Connection, error) {
 			return brainclient.Dial(ctx, brainclient.DialOptions{BaseURL: settings.ServerURL, InputFormat: local.MicrophoneFormat()}, logger)
 		},
@@ -102,14 +101,14 @@ func run(logger *slog.Logger) error {
 		SpeakerOverride:    settings.AudioSink,
 		CameraName:         cameraName(camera),
 		Tools:              terminaltools.NewServer(camera, buildinfo.Version, logger),
-		NewSession: func(conn terminal.Connection, devices terminal.Devices) terminal.Session {
+		NewSession: func(conn terminal.Connection, devices terminal.SelectedDevices) terminal.Session {
 			logger.Info("🎤 麦克风", "device", devices.Microphone.Name, "id", devices.Microphone.ID, "why", devices.Microphone.Reason)
 			if devices.HasSpeaker {
 				logger.Info("🔊 音箱", "device", devices.Speaker.Name, "why", devices.Speaker.Reason)
 			} else {
 				logger.Warn("没有音箱：照常听，回答只写日志", "why", devices.WhyNoSpeaker)
 			}
-			return assistant.NewAssistant(assistant.Components{
+			return assistant.NewAssistant(assistant.Dependencies{
 				Manual:     keyboard,
 				Microphone: local.OpenMicrophone(devices.Microphone.ID),
 				Speaker:    local.OpenSpeaker(devices.Speaker.ID),

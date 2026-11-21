@@ -205,7 +205,7 @@ func TestWakeWordThroughServerSession(t *testing.T) {
 	defer session.Close()
 
 	speaker := &recordingSpeaker{}
-	haro := assistant.NewAssistant(assistant.Components{
+	haro := assistant.NewAssistant(assistant.Dependencies{
 		Manual: noKeyboard{}, Microphone: loudMicrophone{}, Speaker: speaker, Brain: session,
 	}, assistant.Options{TurnDetection: realtimeproto.TurnDetection{Type: "server_vad"}, EchoGuard: 10 * time.Millisecond,
 		NoticeTone:  pcm("[叮咚]"),

@@ -1,8 +1,9 @@
-// Package brainclient 是终端一侧的服务端：经 WebSocket 连 haro-server，实现 assistant.BrainSession。
+// Package brainclient 是终端连服务端的客户端：经 WebSocket 连 haro-server，实现 assistant.BrainSession。
 //
 // 与进程内的 brain.Session 保持同样的约定：Events() 在会话期间不关闭。
-// 连接断了时：补发一个 Error；如果正有回答在进行，再补发一个 status=failed 的 ResponseDone（终端就不会一直等）；
-// 之后 Send 都返回 ErrDisconnected，Done() 关闭。终端的看守（internal/terminal）据此关掉这条连接、重新 Dial。
+// 连接断了时：补发一个 Error；如果正有回答在进行，再补发一个 status=failed 的 ResponseDone（终端就不会一直等；
+// 终端一直不收时最多等 EventBacklog，之后丢掉）；之后 Send 都返回 ErrDisconnected，Done() 关闭。
+// 终端的看守（internal/terminal）据此关掉这条连接、重新 Dial。
 package brainclient
 
 import (
@@ -66,8 +67,7 @@ type DialOptions struct {
 	EventBacklog time.Duration
 }
 
-// defaultEventBacklog：事件队列满了以后默认等多久。定值，没有单独实测：终端正常时几十毫秒内就腾出地方，
-// 5 秒没腾出来就是卡住了。
+// defaultEventBacklog：事件队列满了以后默认等多久。定值：终端正常时边收边处理，队列满着 5 秒都腾不出地方就是卡住了。
 const defaultEventBacklog = 5 * time.Second
 
 // eventQueueSize：事件队列的长度（服务端一段回答的音频一下子涌过来时先放在这里）。

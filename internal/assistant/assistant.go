@@ -23,8 +23,8 @@ var (
 		"haro.turn.time_to_first_audio", "用户说完到第一段回答音频写入播放器的时间")
 )
 
-// Components 是终端需要的全部能力，由 cmd/haro 组装注入。
-type Components struct {
+// Dependencies 是一次对话运行用到的全部能力，由 cmd/haro 组装注入。
+type Dependencies struct {
 	Manual     ManualToggle // 回车手动唤醒 / 休眠
 	Microphone Microphone
 	Speaker    AudioSink
@@ -53,9 +53,9 @@ type WakeWordOptions struct {
 	SleepTone   realtimeproto.PCMAudio // 休眠时播一声（「我去睡觉了」），让人知道要重新叫唤醒词；空 = 不播
 }
 
-// Assistant 是 haro 的对外入口：反复执行「听 → 看 → 交给服务端 → 说」。
+// Assistant 是一次对话运行：反复执行「听 → 交给服务端 → 说」（画面由服务端要的时候经 MCP 来拍）。
 type Assistant struct {
-	parts  Components
+	deps   Dependencies
 	opts   Options
 	logger *slog.Logger
 	uplink micUplink                      // 上传音频的时间轴与静音开关
@@ -75,16 +75,16 @@ const eventBacklog = 16
 func (a *Assistant) Busy() bool { return a.hearing.Load() || a.busy.Load() }
 
 // NewAssistant 组装一个 Assistant。
-func NewAssistant(parts Components, opts Options, logger *slog.Logger) *Assistant {
+func NewAssistant(deps Dependencies, opts Options, logger *slog.Logger) *Assistant {
 	opts.Timing = opts.Timing.orDefault()
-	return &Assistant{parts: parts, opts: opts, logger: logger, replay: make(chan realtimeproto.ServerEvent, eventBacklog)}
+	return &Assistant{deps: deps, opts: opts, logger: logger, replay: make(chan realtimeproto.ServerEvent, eventBacklog)}
 }
 
 // Run 打开服务端会话（服务端判断说完、启用唤醒门），然后按唤醒词轮流说话，直到 ctx 取消或出错。
 func (a *Assistant) Run(ctx context.Context) error {
 	turn := a.opts.TurnDetection
 	update := realtimeproto.SessionUpdate{TurnDetection: &turn, WakeWord: true}
-	if err := a.parts.Brain.Send(ctx, update); err != nil {
+	if err := a.deps.Brain.Send(ctx, update); err != nil {
 		return fmt.Errorf("初始化服务端会话: %w", err)
 	}
 	return a.runWakeWord(ctx)

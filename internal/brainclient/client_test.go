@@ -111,6 +111,18 @@ func askOverWebSocket(t *testing.T, client *brainclient.Client) {
 	}
 }
 
+// nextEvent 等终端收到下一个事件（等不到就失败）。
+func nextEvent(t *testing.T, client *brainclient.Client) realtimeproto.ServerEvent {
+	t.Helper()
+	select {
+	case event := <-client.Events():
+		return event
+	case <-time.After(5 * time.Second):
+		t.Fatal("等服务端的事件超时")
+		return nil
+	}
+}
+
 func collectUntilDone(t *testing.T, client *brainclient.Client) []realtimeproto.ServerEvent {
 	t.Helper()
 	var events []realtimeproto.ServerEvent
@@ -235,8 +247,10 @@ func TestDisconnectDuringResponse(t *testing.T) {
 	}
 	defer client.Close()
 	askOverWebSocket(t, client)
-	time.Sleep(100 * time.Millisecond)
-	listener.killAll()
+	if _, ok := nextEvent(t, client).(realtimeproto.ResponseOutputAudioTranscriptDelta); !ok {
+		t.Fatal("应先收到回答的第一段")
+	}
+	listener.killAll() // 回答说到一半
 
 	events := collectUntilDone(t, client)
 	sawError := false
@@ -287,11 +301,13 @@ func TestDisconnectDuringServerStartedResponse(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, ok := (<-client.Events()).(realtimeproto.ResponseCreated); !ok {
+	if _, ok := nextEvent(t, client).(realtimeproto.ResponseCreated); !ok {
 		t.Fatal("应先收到 response.created")
 	}
-	time.Sleep(100 * time.Millisecond)
-	listener.killAll()
+	if _, ok := nextEvent(t, client).(realtimeproto.ResponseOutputAudioTranscriptDelta); !ok {
+		t.Fatal("应接着收到回答的第一段")
+	}
+	listener.killAll() // 回答说到一半
 
 	events := collectUntilDone(t, client)
 	done := events[len(events)-1].(realtimeproto.ResponseDone)

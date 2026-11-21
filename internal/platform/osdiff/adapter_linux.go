@@ -36,7 +36,7 @@ const (
 )
 
 // AudioTraits 认出设备的接口类型和是不是回录源：没见过的设备才去问 pactl（一次列出全部设备）。
-func (a *linuxAdapter) AudioTraits(ctx context.Context, id, _ string) (AudioTraits, error) {
+func (a *linuxAdapter) AudioTraits(ctx context.Context, id string) (AudioTraits, error) {
 	a.mu.Lock()
 	traits, known := a.audio[id]
 	waiting, lastErr := time.Now().Before(a.retryAfter), a.pactlErr

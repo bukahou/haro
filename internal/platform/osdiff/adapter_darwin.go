@@ -19,12 +19,12 @@ var _ Adapter = darwinAdapter{} // 少实现一个方法，Mac 版就编译不�
 func Current() Adapter { return darwinAdapter{} }
 
 // AudioTraits：接口类型按 CoreAudio 的设备 UID 认；CoreAudio 没有回录源。
-func (darwinAdapter) AudioTraits(_ context.Context, id, _ string) (AudioTraits, error) {
+func (darwinAdapter) AudioTraits(_ context.Context, id string) (AudioTraits, error) {
 	return AudioTraits{Bus: darwinAudioBus(id)}, nil
 }
 
-// Cameras 用 ffmpeg 列 AVFoundation 设备（要起一个进程，所以只在启动时列一次，P-1）。
-// ffmpeg 列完设备会以「找不到输入」退出（非 0），设备清单在 stderr 里，照常解析。
+// Cameras 用 ffmpeg 列 AVFoundation 设备。要起一个进程，所以不定期列：启动时列一次，之后只在要重新找摄像头时
+// （第一次拍、上次取帧失败以后）才列。ffmpeg 列完设备会以「找不到输入」退出（非 0），设备清单在 stderr 里，照常解析。
 func (darwinAdapter) Cameras(ctx context.Context) ([]terminal.Device, error) {
 	output, err := exec.CommandContext(ctx, "ffmpeg", "-hide_banner", "-f", "avfoundation",
 		"-list_devices", "true", "-i", "").CombinedOutput()

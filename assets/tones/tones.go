@@ -38,12 +38,6 @@ type Tones struct {
 	Notice  realtimeproto.PCMAudio // 服务端的提示（例如后台调查查完了）：叫醒问就行
 }
 
-// Offline 返回「断开了」的提示音。
-func Offline() (realtimeproto.PCMAudio, error) { return pcmwav.Decode(offlineWAV) }
-
-// Online 返回「回来了」的提示音。
-func Online() (realtimeproto.PCMAudio, error) { return pcmwav.Decode(onlineWAV) }
-
 // Load 读提示音：dir 为空用编进程序里的；否则读 dir 里的 offline.wav、online.wav、sleep.wav、notice.wav（缺哪个就用内置的那个）。
 func Load(dir string) (Tones, error) {
 	var tones Tones
