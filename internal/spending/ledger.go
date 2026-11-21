@@ -4,13 +4,15 @@
 // Guard 据此决定还能不能花：后台调查按天封顶、大模型按月封顶、搜索积分按天封顶。
 // 云厂商的预算告警一般只发提醒、不会停服务，真正能拦住的只有服务端自己。
 //
-// 对外：OpenLedger（Facade）+ Ledger（接口）；Guard；MeteredChatModel / BudgetedChatModel（装饰 brain.ChatModel）。
+// 对外：OpenLedger（Facade）+ Ledger（接口）+ WithBookkeeping（记账日志与补写）；Guard；
+// MeteredChatModel / BudgetedChatModel（装饰 brain.ChatModel）。
 package spending
 
 import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -68,7 +70,10 @@ type Ledger interface {
 	Record(ctx context.Context, charge Charge) error
 	// Total 合计 since 之后的花费；purposes 为空 = 所有用途。
 	Total(ctx context.Context, since time.Time, purposes ...Purpose) (Totals, error)
-	// CheckWritable 确认账本现在写得进去（就绪检查用）：不改任何数据。
+	// FlushPending 把之前写不进、留在内存里的花费补写进去（见 WithBookkeeping）；补写不成时报错：
+	// 这时合计不完整，不能拿来判断额度。不留待补写的实现（SQLite 账本写不进就直接报错）什么都不做。
+	FlushPending(ctx context.Context) error
+	// CheckWritable 确认账本现在写得进去（就绪检查用）：有待补写的先补写，此外不改任何数据。
 	CheckWritable(ctx context.Context) error
 	// RaiseCap 记下一次主人确认的临时提高上限；CapRaised 合计 since 之后提高了多少日元。
 	RaiseCap(ctx context.Context, raise CapRaise) error
@@ -92,9 +97,19 @@ func OpenLedger(ctx context.Context, path string) (Ledger, error) {
 	return &sqliteLedger{db: db}, nil
 }
 
+// WithBookkeeping 给账本套上记账的两层：每记上一笔打一行日志（花的钱在日志里就看得见，见 loggingLedger）；
+// 写不进的那笔留在内存里、之后补写，补写成功之前 Guard 不放行有上限的付费调用和搜索（见 pendingChargesLedger）。
+// 补写也经过日志那层：补写上的每一笔照样打一行。
+func WithBookkeeping(ledger Ledger, logger *slog.Logger) Ledger {
+	return &pendingChargesLedger{Ledger: &loggingLedger{Ledger: ledger, logger: logger}, logger: logger, now: time.Now}
+}
+
 type sqliteLedger struct {
 	db *sql.DB
 }
+
+// FlushPending：SQLite 账本写不进时直接报错给调用方，自己不留待补写的。
+func (l *sqliteLedger) FlushPending(context.Context) error { return nil }
 
 func (l *sqliteLedger) Record(ctx context.Context, charge Charge) error {
 	if charge.At.IsZero() {

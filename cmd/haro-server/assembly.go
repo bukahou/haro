@@ -100,7 +100,7 @@ func connectServices(ctx context.Context, settings config.ServerSettings, logger
 	if err != nil {
 		return deps, err
 	}
-	deps.ledger = spending.WithChargeLog(ledger, logger)
+	deps.ledger = spending.WithBookkeeping(ledger, logger)
 	shutdown.add(func() { deps.ledger.Close() })
 	if settings.UsageDB == "" {
 		logger.Warn("没设 HARO_USAGE_DB：用量只记在内存里，服务端重启后额度重新计算")

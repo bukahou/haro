@@ -28,6 +28,7 @@ func (l *chargeLog) Record(_ context.Context, charge Charge) error {
 func (l *chargeLog) Total(context.Context, time.Time, ...Purpose) (Totals, error) {
 	return Totals{}, nil
 }
+func (l *chargeLog) FlushPending(context.Context) error       { return nil }
 func (l *chargeLog) CheckWritable(context.Context) error      { return nil }
 func (l *chargeLog) RaiseCap(context.Context, CapRaise) error { return nil }
 func (l *chargeLog) CapRaised(context.Context, time.Time) (float64, error) {

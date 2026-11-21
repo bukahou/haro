@@ -240,8 +240,9 @@ func QuickSearch(ctx context.Context, searcher WebSearcher, meter SearchMeter, q
 	if err != nil {
 		return "", err
 	}
+	// 写不进时由计量那边留着补写，补写成功之前不放行有上限的搜索（spending.WithBookkeeping）
 	if err := meter.RecordSearch(context.WithoutCancel(ctx), credits); err != nil {
-		logger.Warn("搜索用量没记上", "err", err)
+		logger.Warn("搜索用量没写进账本", "err", err, "credits", credits)
 	}
 	return truncateRunes(text, quickSearchMaxRunes), nil
 }

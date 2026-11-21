@@ -435,8 +435,9 @@ func (r *Runner) metered(ctx context.Context, credits int, run func() (string, e
 	if err != nil {
 		return "", err
 	}
+	// 写不进时由计量那边留着补写，补写成功之前不放行有上限的调查和搜索（spending.WithBookkeeping）
 	if err := r.meter.RecordSearch(context.WithoutCancel(ctx), credits); err != nil {
-		r.logger.Warn("调查的搜索用量没记上", "err", err)
+		r.logger.Warn("调查的搜索用量没写进账本", "err", err, "credits", credits)
 	}
 	return text, nil
 }

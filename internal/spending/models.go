@@ -72,9 +72,10 @@ func (m *MeteredChatModel) record(usage *brain.ReplyUsage) {
 	charge := Charge{Purpose: m.purpose, Item: "llm:" + m.model, InputTokens: usage.PromptTokens, OutputTokens: usage.OutputTokens,
 		CacheReadTokens: usage.CacheReadTokens, CacheWriteTokens: usage.CacheWriteTokens, Yen: m.pricing.LLMYen(m.model, *usage),
 		Incomplete: usage.Incomplete, TokensUnknown: usage.TokensUnknown}
-	// 用独立的 context：回答被打断（ctx 取消）时，已经产生的费用照样要记（记上的每一笔由账本那层打日志，见 WithChargeLog）
+	// 用独立的 context：回答被打断（ctx 取消）时，已经产生的费用照样要记（记上的每一笔由账本那层打日志；
+	// 写不进的由账本留着补写，补写成功之前不放行有上限的付费调用，见 WithBookkeeping）
 	if err := m.ledger.Record(context.Background(), charge); err != nil {
-		m.logger.Warn("用量没记上", "err", err, "item", charge.Item, "yen", charge.Yen, "incomplete", charge.Incomplete)
+		m.logger.Warn("💴 这次的用量没写进账本", "err", err, "item", charge.Item, "yen", charge.Yen, "incomplete", charge.Incomplete)
 	}
 }
 
@@ -103,8 +104,8 @@ func (b *BudgetedChatModel) StreamReply(ctx context.Context, request brain.ChatR
 	case errors.Is(err, ErrOverBudget):
 		b.logger.Warn("💴 月度额度已用完：不回答", "why", err)
 		return func(yield func(brain.ReplyDelta, error) bool) { yield(brain.ReplyDelta{}, err) }
-	default: // 账本读不出来（ErrLedgerUnavailable）：拿不到依据就不放行，告诉主人原因（否则账本一坏，花费就没有上限）
-		b.logger.Error("💴 读不出用量账本：这一轮不调用要花钱的模型", "err", err)
+	default: // 账本用不了（ErrLedgerUnavailable：读不出、写不进的补写不进去）：拿不到依据就不放行，告诉主人原因（否则账本一坏，花费就没有上限）
+		b.logger.Error("💴 用量账本用不了：这一轮不调用要花钱的模型", "err", err)
 		return func(yield func(brain.ReplyDelta, error) bool) { yield(brain.ReplyDelta{}, err) }
 	}
 }

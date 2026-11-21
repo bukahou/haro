@@ -116,13 +116,14 @@ func overBudget(phrase, spentName string, spent, limit string, format string, ar
 		values: map[string]string{spentName: spent, "limit": limit}}
 }
 
-// ErrLedgerUnavailable 表示读不出用量账本（errors.Is 判断）：不知道花了多少，就不放行要花钱的调用。
-var ErrLedgerUnavailable = errors.New("读不出用量账本")
+// ErrLedgerUnavailable 表示用量账本用不了（errors.Is 判断）：读不出，或者之前写不进的补写不进去。
+// 不知道一共花了多少，就不放行要花钱的调用。
+var ErrLedgerUnavailable = errors.New("用量账本用不了")
 
-// ledgerUnavailable 是读不出账本的具体错误：Is(ErrLedgerUnavailable)；Phrase 念给主人听，让他知道为什么不回答。
+// ledgerUnavailable 是账本用不了的具体错误：Is(ErrLedgerUnavailable)；Phrase 念给主人听，让他知道为什么不回答。
 type ledgerUnavailable struct{ err error }
 
-func (e *ledgerUnavailable) Error() string        { return "读不出用量账本: " + e.err.Error() }
+func (e *ledgerUnavailable) Error() string        { return "用量账本用不了: " + e.err.Error() }
 func (e *ledgerUnavailable) Unwrap() error        { return e.err }
 func (e *ledgerUnavailable) Is(target error) bool { return target == ErrLedgerUnavailable }
 func (e *ledgerUnavailable) Phrase() (string, map[string]string) {
@@ -156,6 +157,19 @@ func (g *Guard) startOfMonth() time.Time {
 	return time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
 }
 
+// spentSince 合计 since 之后的花费（purposes 为空 = 所有用途），拿来判断额度：先把之前写不进账本的补写进去。
+// 补写不成、读不出时返回 ErrLedgerUnavailable：合计不完整（写不进时它不再增长），不能拿来放行。
+func (g *Guard) spentSince(ctx context.Context, since time.Time, purposes ...Purpose) (Totals, error) {
+	if err := g.ledger.FlushPending(ctx); err != nil {
+		return Totals{}, &ledgerUnavailable{err: err}
+	}
+	spent, err := g.ledger.Total(ctx, since, purposes...)
+	if err != nil {
+		return Totals{}, &ledgerUnavailable{err: err}
+	}
+	return spent, nil
+}
+
 // AllowResearch 判断今天还能不能派后台调查（以及调查进行中每一轮之前再判一次）。
 func (g *Guard) AllowResearch(ctx context.Context) error {
 	if err := g.allowMonthly(ctx); err != nil {
@@ -164,7 +178,7 @@ func (g *Guard) AllowResearch(ctx context.Context) error {
 	if g.limits.ResearchDailyYen <= 0 {
 		return nil
 	}
-	spent, err := g.ledger.Total(ctx, g.startOfDay(), PurposeResearch)
+	spent, err := g.spentSince(ctx, g.startOfDay(), PurposeResearch)
 	if err != nil {
 		return err
 	}
@@ -180,7 +194,7 @@ func (g *Guard) AllowSearch(ctx context.Context, credits int) error {
 	if g.limits.SearchDailyCredits <= 0 {
 		return nil
 	}
-	used, err := g.ledger.Total(ctx, g.startOfDay(), PurposeSearch, PurposeResearch)
+	used, err := g.spentSince(ctx, g.startOfDay(), PurposeSearch, PurposeResearch)
 	if err != nil {
 		return err
 	}
@@ -192,7 +206,7 @@ func (g *Guard) AllowSearch(ctx context.Context, credits int) error {
 }
 
 // AllowPaidLLM 调用要花钱的大模型之前，看这个月的总费用（大模型 + 搜索）到没到上限；顺便在用到 WarnRatio 时准备一条提醒（每月一次）。
-// 账本读不出时返回 ErrLedgerUnavailable：拿不到依据就不放行（否则账本一坏，花费就没有上限）。
+// 账本读不出、之前写不进的补写不进去时返回 ErrLedgerUnavailable：拿不到依据就不放行（否则账本一坏，花费就没有上限）。
 func (g *Guard) AllowPaidLLM(ctx context.Context) error {
 	return g.allowMonthly(ctx)
 }
@@ -201,9 +215,9 @@ func (g *Guard) allowMonthly(ctx context.Context) error {
 	if g.limits.MonthlyYen <= 0 {
 		return nil
 	}
-	spent, err := g.ledger.Total(ctx, g.startOfMonth())
+	spent, err := g.spentSince(ctx, g.startOfMonth())
 	if err != nil {
-		return &ledgerUnavailable{err: err}
+		return err
 	}
 	limit, err := g.monthlyLimit(ctx)
 	if err != nil {
