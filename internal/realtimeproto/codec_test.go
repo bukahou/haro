@@ -114,6 +114,35 @@ func TestErrorWireShape(t *testing.T) {
 	}
 }
 
+// 取事件名只读到顶层的 type 为止（整条消息只由各事件自己的解码完整解析一次）：type 后面就算不完整也读得出名字；
+// type 不在最前面时跳过前面的值；没有 type 为空；不是对象、type 不是字符串的报 invalid_event。
+func TestEventTypeReadsOnlyUpToType(t *testing.T) {
+	for data, want := range map[string]string{
+		`{"type":"response.create",`: "response.create", // 后面没读
+		`{"audio":"AAAA","nested":{"type":"x"},"type":"input_audio_buffer.append"}`: "input_audio_buffer.append",
+		`{"audio":"AAAA"}`:        "",
+		`{"type":"a","type":"b"}`: "a", // 和 json.Unmarshal 一样放过重名
+	} {
+		if got, err := EventType([]byte(data)); err != nil || got != want {
+			t.Errorf("EventType(%s) = %q, %v；应为 %q", data, got, err, want)
+		}
+	}
+	for _, data := range []string{`[]`, `"type"`, `{"type":5}`, `{"type":`, ``} {
+		if _, err := EventType([]byte(data)); !hasCode(err, CodeInvalidEvent) {
+			t.Errorf("EventType(%s) 应报 invalid_event：%v", data, err)
+		}
+	}
+	// 整条消息由事件自己的解码完整解析：没有内容的事件也一样，不完整的照样拒绝
+	if _, err := DecodeClientEvent([]byte(`{"type":"response.create",`), input16k); !hasCode(err, CodeInvalidEvent) {
+		t.Errorf("不完整的消息应拒绝：%v", err)
+	}
+}
+
+func hasCode(err error, code ErrorCode) bool {
+	protocolErr, ok := errors.AsType[*ProtocolError](err)
+	return ok && protocolErr.Code == code
+}
+
 // 声纹的三种结果只能是一种：算不出来（speaker_check_failed）时还说比对过、认出了谁，编码和解码都拒绝。
 func TestSpeakerCheckFailedIsExclusive(t *testing.T) {
 	for _, event := range []InputAudioTranscriptionCompleted{

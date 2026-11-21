@@ -1,9 +1,11 @@
 package realtimeproto
 
 import (
+	"bytes"
 	"cmp"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/json/jsontext"
 	"errors"
 	"fmt"
 )
@@ -108,14 +110,38 @@ func DecodeServerEvent(data []byte) (ServerEvent, error) {
 	return event, nil
 }
 
-// EventType 是一条消息的事件名（type 字段）；不是 JSON 对象时返回带 invalid_event 码的错误，没有 type 时为空。
-// 解码和日志（解不开的事件按名字计数）共用。
+// EventType 是一条消息的事件名（type 字段）；不是 JSON 对象、type 不是字符串时返回带 invalid_event 码的错误，
+// 没有 type 时为空。解码和日志（解不开的事件按名字计数）共用。
+//
+// 只读到顶层的 type 为止（编码出来的事件 type 都在最前面，后面的音频不用扫）：整条消息只由各事件自己的解码
+// 完整解析一次，不先为了取事件名整条解一遍。type 不在最前面时，前面的值跳过（只扫不解）。
 func EventType(data []byte) (string, error) {
-	var head wireTypeOnly
-	if err := json.Unmarshal(data, &head); err != nil {
+	decoder := jsontext.NewDecoder(bytes.NewReader(data), // 和 json.Unmarshal 一样宽松：重名的键、不合法的 UTF-8 都放过
+		jsontext.AllowDuplicateNames(true), jsontext.AllowInvalidUTF8(true))
+	if start, err := decoder.ReadToken(); err != nil || start.Kind() != '{' {
+		return "", ProtocolErrorf(CodeInvalidEvent, "事件要是 JSON 对象")
+	}
+	for decoder.PeekKind() == '"' {
+		name, err := decoder.ReadToken()
+		if err != nil {
+			return "", ProtocolErrorf(CodeInvalidEvent, "解析事件: %v", err)
+		}
+		if name.String() != "type" {
+			if err := decoder.SkipValue(); err != nil {
+				return "", ProtocolErrorf(CodeInvalidEvent, "解析事件: %v", err)
+			}
+			continue
+		}
+		value, err := decoder.ReadToken()
+		if err != nil || value.Kind() != '"' {
+			return "", ProtocolErrorf(CodeInvalidEvent, "事件的 type 要是字符串")
+		}
+		return value.String(), nil
+	}
+	if _, err := decoder.ReadToken(); err != nil { // 没有 type：读到的应是这个对象的结尾
 		return "", ProtocolErrorf(CodeInvalidEvent, "解析事件: %v", err)
 	}
-	return head.Type, nil
+	return "", nil
 }
 
 // withCode 给解码时的错误补上错误码；已经带码的保持原样。
@@ -239,8 +265,12 @@ func (e HaroWakeWordWake) toWire() (any, error)    { return wireTypeOnly{Type: e
 func (e HaroPlaybackStarted) toWire() (any, error) { return wireTypeOnly{Type: e.Type()}, nil }
 func (e HaroPlaybackStopped) toWire() (any, error) { return wireTypeOnly{Type: e.Type()}, nil }
 
+// typeOnlyClient：没有内容的事件同样完整解析一次（EventType 只读到 type 为止），整条不是合法 JSON 的照样拒绝。
 func typeOnlyClient(event ClientEvent) clientCodec {
-	return clientCodec{wireTypeOnly{}, func([]byte, AudioFormat) (ClientEvent, error) { return event, nil }}
+	return clientCodec{wireTypeOnly{}, func(data []byte, _ AudioFormat) (ClientEvent, error) {
+		var wire wireTypeOnly
+		return event, json.Unmarshal(data, &wire)
+	}}
 }
 
 // ——— 服务端事件 ———

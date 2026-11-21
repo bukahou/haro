@@ -579,9 +579,13 @@ func TestEchoTailAfterPlaybackIsClipped(t *testing.T) {
 }
 
 // switchableEmbedder 返回测试指定的「当前说话人」的向量。
-type switchableEmbedder struct{ current atomic.Value }
+type switchableEmbedder struct {
+	current atomic.Value
+	calls   atomic.Int32 // 算了几次声纹
+}
 
 func (e *switchableEmbedder) Embed([]float32) ([]float32, error) {
+	e.calls.Add(1)
 	return e.current.Load().([]float32), nil
 }
 
@@ -730,6 +734,9 @@ func TestWakeUtteranceKeepsWakeSpeaker(t *testing.T) {
 	completed, ok := events[2].(realtimeproto.InputAudioTranscriptionCompleted)
 	if !ok || completed.Speaker != "主人" || !completed.SpeakerChecked {
 		t.Errorf("唤醒句应沿用唤醒时的声纹：%v", events)
+	}
+	if calls := embedder.calls.Load(); calls != 1 {
+		t.Errorf("唤醒时认出来了就不再对整句另算一次声纹：算了 %d 次", calls)
 	}
 }
 

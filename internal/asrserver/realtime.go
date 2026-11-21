@@ -490,14 +490,14 @@ func (s *transcriptionSession) finishUtterance(ctx context.Context) error {
 	s.deps.Logger.Info("识别完成", "item", current.itemID, "audio", audio.Duration().Round(time.Millisecond),
 		"elapsed", time.Since(started).Round(time.Millisecond), "text", transcript.Text, "language", transcript.Language,
 		"wake", current.wake, "barge_in", current.bargeIn)
-	speaker, checked, failed := s.identifySpeaker(current.itemID, audio.Data)
-	tentative := ""
-	switch {
-	case current.wakeSpeaker != "": // 唤醒时已经认出来了：这句沿用，不让很短的唤醒句重新比对推翻它
-		speaker, checked, failed = current.wakeSpeaker, true, false
-	case current.wakeGuess != "" && speaker == "":
-		// 唤醒时只过了唤醒门槛：不算认出来，告诉服务端像是谁，由它按这句话的长短决定怎么回（短句受限回答）
-		tentative = current.wakeGuess
+	// 唤醒时已经认出来了：这句沿用，不再对整句另算一次声纹（也不让很短的唤醒句重新比对推翻它）
+	speaker, checked, failed, tentative := current.wakeSpeaker, true, false, ""
+	if current.wakeSpeaker == "" {
+		speaker, checked, failed = s.identifySpeaker(current.itemID, audio.Data)
+		if current.wakeGuess != "" && speaker == "" {
+			// 唤醒时只过了唤醒门槛：不算认出来，告诉服务端像是谁，由它按这句话的长短决定怎么回（短句受限回答）
+			tentative = current.wakeGuess
+		}
 	}
 	return writeEvent(ctx, s.conn, realtimeproto.InputAudioTranscriptionCompleted{ItemID: current.itemID,
 		Transcript: transcript.Text, Speaker: speaker, SpeakerChecked: checked, SpeakerCheckFailed: failed,
