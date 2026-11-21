@@ -26,7 +26,9 @@ type scriptedModel struct {
 	specs    [][]brain.ToolSpec
 }
 
-func (m *scriptedModel) StreamReply(_ context.Context, messages []brain.ChatMessage, tools []brain.ToolSpec) iter.Seq2[brain.ReplyDelta, error] {
+func (m *scriptedModel) StreamReply(_ context.Context, request brain.ChatRequest) iter.Seq2[brain.ReplyDelta, error] {
+	messages := request.Messages
+	tools := request.Tools
 	m.mu.Lock()
 	m.requests = append(m.requests, append([]brain.ChatMessage(nil), messages...))
 	m.specs = append(m.specs, tools)
@@ -244,7 +246,7 @@ func TestReportToolSchema(t *testing.T) {
 // stubbornModel 不管给没给工具都要求再搜（防专家陷入循环）。
 type stubbornModel struct{ requests int }
 
-func (m *stubbornModel) StreamReply(context.Context, []brain.ChatMessage, []brain.ToolSpec) iter.Seq2[brain.ReplyDelta, error] {
+func (m *stubbornModel) StreamReply(context.Context, brain.ChatRequest) iter.Seq2[brain.ReplyDelta, error] {
 	m.requests++
 	requests := m.requests
 	return func(yield func(brain.ReplyDelta, error) bool) {

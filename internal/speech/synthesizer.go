@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/bukahou/haro/internal/brain"
+	"github.com/bukahou/haro/internal/pcmwav"
 	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
@@ -65,5 +66,5 @@ func (p *PiperHTTPSynthesizer) synthesizeWhole(ctx context.Context, sentence str
 	if resp.StatusCode != http.StatusOK {
 		return realtimeproto.PCMAudio{}, fmt.Errorf("piper 返回 %d: %.200s", resp.StatusCode, body)
 	}
-	return DecodeWAV(body)
+	return pcmwav.Decode(body)
 }

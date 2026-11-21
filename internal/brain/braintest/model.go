@@ -29,6 +29,7 @@ type Reply struct {
 	Err       error             // 吐完以上内容后返回的错误
 	Delay     time.Duration     // 每个文字片段之前等多久（测打断、取消用）
 	Hang      bool              // 吐完之后不结束，直到被取消（模拟还在生成）
+	Truncated bool              // 输出到了上限被截断：最后一段标 StopMaxTokens
 }
 
 // Say 是只吐一段文字的回答。
@@ -41,8 +42,9 @@ func Call(name string, arguments map[string]any) Reply {
 
 // Request 是模型收到的一次请求（消息和工具清单的副本）。
 type Request struct {
-	Messages []brain.ChatMessage
-	Tools    []brain.ToolSpec
+	Messages        []brain.ChatMessage
+	Tools           []brain.ToolSpec
+	ForbidToolCalls bool // 工具照给、这一轮不许调用
 }
 
 // ToolNames 是这次请求提供的工具名。
@@ -130,13 +132,12 @@ func (m *Model) Remaining() int {
 	return len(m.replies)
 }
 
-// Warmup 什么也不做。
-func (m *Model) Warmup(context.Context) error { return nil }
-
 // StreamReply 记下请求，按脚本回下一条。
-func (m *Model) StreamReply(ctx context.Context, messages []brain.ChatMessage, tools []brain.ToolSpec) iter.Seq2[brain.ReplyDelta, error] {
+func (m *Model) StreamReply(ctx context.Context, request brain.ChatRequest) iter.Seq2[brain.ReplyDelta, error] {
+	messages := request.Messages
 	m.mu.Lock()
-	m.requests = append(m.requests, Request{Messages: slices.Clone(messages), Tools: slices.Clone(tools)})
+	m.requests = append(m.requests, Request{Messages: slices.Clone(messages), Tools: slices.Clone(request.Tools),
+		ForbidToolCalls: request.ForbidToolCalls})
 	n := len(m.requests)
 	var reply Reply
 	exhausted := len(m.replies) == 0
@@ -169,9 +170,16 @@ func (m *Model) StreamReply(ctx context.Context, messages []brain.ChatMessage, t
 		if len(reply.ToolCalls) > 0 && !yield(brain.ReplyDelta{ToolCalls: slices.Clone(reply.ToolCalls)}, nil) {
 			return
 		}
-		if reply.Usage != nil {
-			usage := *reply.Usage
-			if !yield(brain.ReplyDelta{Usage: &usage}, nil) {
+		if reply.Usage != nil || reply.Truncated {
+			last := brain.ReplyDelta{}
+			if reply.Usage != nil {
+				usage := *reply.Usage
+				last.Usage = &usage
+			}
+			if reply.Truncated {
+				last.Stop = brain.StopMaxTokens
+			}
+			if !yield(last, nil) {
 				return
 			}
 		}

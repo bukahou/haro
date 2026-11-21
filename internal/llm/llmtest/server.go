@@ -73,6 +73,15 @@ type Script struct {
 	Status   int      // 不是 200 时只回这个状态码和一段错误 JSON
 	Events   []string // 依次推送的事件（JSON）
 	CutAfter int      // 大于 0 时，推送这么多个事件后直接断开连接（模拟流中途断开）
+	Hang     bool     // 推完 Events 后不结束，一直等到客户端断开（模拟还在生成）
+}
+
+// hang 把已经写出的部分推给客户端，然后等到客户端断开。
+func hang(w http.ResponseWriter, r *http.Request) {
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+	<-r.Context().Done()
 }
 
 // NewClaudeServer 是假的 Claude Messages API（POST /v1/messages）：按 Script 推送 SSE，「event:」行取自每个事件的 type。
@@ -109,6 +118,9 @@ func NewClaudeServer(t testing.TB, scripts ...Script) *Server {
 			}
 			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", head.Type, event)
 		}
+		if script.Hang {
+			hang(w, r)
+		}
 	}))
 	t.Cleanup(server.Close)
 	return server
@@ -131,6 +143,10 @@ func NewOpenAIServer(t testing.TB, scripts ...Script) *Server {
 				cut(w)
 			}
 			fmt.Fprintf(w, "data: %s\n\n", event)
+		}
+		if script.Hang {
+			hang(w, r)
+			return
 		}
 		fmt.Fprint(w, "data: [DONE]\n\n")
 	}))

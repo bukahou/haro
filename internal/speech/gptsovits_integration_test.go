@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/bukahou/haro/internal/brain"
+	"github.com/bukahou/haro/internal/pcmwav"
 	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
@@ -35,13 +36,13 @@ func TestGPTSoVITSLive(t *testing.T) {
 		name string
 		u    brain.Utterance
 	}{
-		{"平常", brain.Utterance{Text: "现在是下午三点二十分，你四点有个会。", Language: brain.LanguageChinese}},
-		{"调侃", brain.Utterance{Text: "你问我冰箱里有什么？我又不是冰箱。", Emotion: brain.EmotionTease, Language: brain.LanguageChinese}},
-		{"笑", brain.Utterance{Text: "哈哈，你又把袜子穿反了，今天第二次了。", Emotion: brain.EmotionLaugh, Language: brain.LanguageChinese}},
-		{"激动", brain.Utterance{Text: "真的假的？明天放假？太好了！", Emotion: brain.EmotionExcited, Language: brain.LanguageChinese}},
-		{"温柔", brain.Utterance{Text: "别着急，慢慢来，你已经做得很好了。", Emotion: brain.EmotionGentle, Language: brain.LanguageChinese}},
-		{"轻声", brain.Utterance{Text: "嘘，已经很晚了，早点睡吧。", Emotion: brain.EmotionWhisper, Language: brain.LanguageChinese}},
-		{"日语", brain.Utterance{Text: "えっ、また寝坊したの？しょうがないなあ、もう。", Emotion: brain.EmotionTease, Language: brain.LanguageJapanese}},
+		{"平常", brain.Utterance{Text: "现在是下午三点二十分，你四点有个会。"}},
+		{"调侃", brain.Utterance{Text: "你问我冰箱里有什么？我又不是冰箱。", Emotion: brain.EmotionTease}},
+		{"笑", brain.Utterance{Text: "哈哈，你又把袜子穿反了，今天第二次了。", Emotion: brain.EmotionLaugh}},
+		{"激动", brain.Utterance{Text: "真的假的？明天放假？太好了！", Emotion: brain.EmotionExcited}},
+		{"温柔", brain.Utterance{Text: "别着急，慢慢来，你已经做得很好了。", Emotion: brain.EmotionGentle}},
+		{"轻声", brain.Utterance{Text: "嘘，已经很晚了，早点睡吧。", Emotion: brain.EmotionWhisper}},
+		{"日语", brain.Utterance{Text: "えっ、また寝坊したの？しょうがないなあ、もう。", Emotion: brain.EmotionTease}},
 	}
 	for _, c := range cases {
 		started := time.Now()
@@ -66,7 +67,7 @@ func TestGPTSoVITSLive(t *testing.T) {
 			t.Errorf("%s: 音频太短（%s）", c.name, audio.Duration())
 		}
 		if out != "" {
-			if err := os.WriteFile(filepath.Join(out, c.name+".wav"), EncodeWAV(audio), 0o644); err != nil {
+			if err := pcmwav.WriteFile(filepath.Join(out, c.name+".wav"), audio); err != nil {
 				t.Fatal(err)
 			}
 		}

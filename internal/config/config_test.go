@@ -84,7 +84,7 @@ func TestValidateStrongLLM(t *testing.T) {
 	}
 	strong := base
 	strong.StrongLLMModel, strong.StrongLLMUse, strong.StrongLLMEffort = "claude-sonnet-5-5", []string{"vision", "correction", "research"}, "low"
-	strong.USDToYen, strong.StrongLLMPriceIn, strong.StrongLLMPriceOut = 160, 2, 10
+	strong.USDToYen = 160
 	if err := strong.validateStrongLLM(); err != nil {
 		t.Fatalf("配齐了应通过：%v", err)
 	}
@@ -104,7 +104,7 @@ func TestValidateStrongLLM(t *testing.T) {
 		change func(*Settings)
 		want   string
 	}{
-		{"没设单价", func(s *Settings) { s.StrongLLMPriceIn = 0 }, "HARO_STRONG_LLM_PRICE_INPUT"},
+		{"没设汇率", func(s *Settings) { s.USDToYen = 0 }, "HARO_USD_JPY"},
 		{"不认识的用途", func(s *Settings) { s.StrongLLMUse = []string{"vision", "chat"} }, "HARO_STRONG_LLM_USE"},
 		{"力度不对", func(s *Settings) { s.StrongLLMEffort = "max" }, "HARO_STRONG_LLM_EFFORT"},
 		{"思考写法不对", func(s *Settings) { s.StrongLLMThinking = "off" }, "HARO_STRONG_LLM_THINKING"},
@@ -141,6 +141,23 @@ func TestRemovedSettings(t *testing.T) {
 		"HARO_ASR_PORT": "59126", "HARO_PIPER_PYTHON": "python3", "HARO_PIPER_MODEL": "zh.onnx", "HARO_PIPER_PORT": "59125"}))
 	if err != nil || len(notes) != 6 {
 		t.Errorf("拉起子进程用的配置项只提醒：notes=%v err=%v", notes, err)
+	}
+	notes, err = checkRemovedSettings(lookup(map[string]string{"HARO_NETDIAG_DNS_NAME": "www.cloudflare.com", "HARO_NETDIAG_INTERNET_TARGET": "1.1.1.1:443"}))
+	if err != nil || len(notes) != 2 {
+		t.Errorf("网络诊断的配置项只提醒：notes=%v err=%v", notes, err)
+	}
+	notes, err = checkRemovedSettings(lookup(map[string]string{"HARO_CONTEXT_SIZE": "4096", "HARO_MODEL_KEEP_ALIVE": "30m"}))
+	if err != nil || len(notes) != 2 {
+		t.Errorf("Ollama 那边配的两项只提醒：notes=%v err=%v", notes, err)
+	}
+	prices := map[string]string{}
+	for _, side := range []string{"CLOUD", "STRONG"} {
+		for _, kind := range []string{"INPUT", "OUTPUT", "CACHE_READ", "CACHE_WRITE"} {
+			prices["HARO_"+side+"_LLM_PRICE_"+kind] = "1"
+		}
+	}
+	if notes, err = checkRemovedSettings(lookup(prices)); err != nil || len(notes) != 8 {
+		t.Errorf("手写的八个单价只提醒：notes=%v err=%v", notes, err)
 	}
 	if notes, err := checkRemovedSettings(lookup(nil)); err != nil || len(notes) != 0 {
 		t.Errorf("没写时什么都不说：notes=%v err=%v", notes, err)

@@ -16,7 +16,7 @@ type namedModel struct {
 	calls int
 }
 
-func (m *namedModel) StreamReply(context.Context, []brain.ChatMessage, []brain.ToolSpec) iter.Seq2[brain.ReplyDelta, error] {
+func (m *namedModel) StreamReply(context.Context, brain.ChatRequest) iter.Seq2[brain.ReplyDelta, error] {
 	m.calls++
 	return func(yield func(brain.ReplyDelta, error) bool) { yield(brain.ReplyDelta{Text: m.name}, nil) }
 }
@@ -48,7 +48,7 @@ func TestRouterChoosesModelByRule(t *testing.T) {
 			{Role: brain.RoleAssistant, Text: "抱歉"}, {Role: brain.RoleUser, Text: "好了谢谢"}}, "haiku"},
 	}
 	for _, c := range cases {
-		text, _, _, err := collect(t, router.StreamReply(context.Background(), c.messages, nil))
+		text, _, _, err := collect(t, router.StreamReply(context.Background(), brain.ChatRequest{Messages: c.messages}))
 		if err != nil || text != c.want {
 			t.Errorf("%s：交给了 %q（%v），应为 %q", c.name, text, err, c.want)
 		}
@@ -56,7 +56,7 @@ func TestRouterChoosesModelByRule(t *testing.T) {
 
 	onlyVision := NewRouterChatModel(RouterOptions{Default: haiku, Vision: sonnet, VisionName: "sonnet", Logger: logger})
 	corrected := []brain.ChatMessage{system, {Role: brain.RoleUser, Text: "不对", Escalate: true}}
-	if text, _, _, _ := collect(t, onlyVision.StreamReply(context.Background(), corrected, nil)); text != "haiku" {
+	if text, _, _, _ := collect(t, onlyVision.StreamReply(context.Background(), brain.ChatRequest{Messages: corrected})); text != "haiku" {
 		t.Errorf("没配纠正用的模型时，纠正也用默认模型：交给了 %q", text)
 	}
 }

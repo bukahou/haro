@@ -34,12 +34,12 @@ func NewRouterChatModel(options RouterOptions) *RouterChatModel {
 }
 
 // StreamReply 见类型说明。
-func (r *RouterChatModel) StreamReply(ctx context.Context, messages []brain.ChatMessage, tools []brain.ToolSpec) iter.Seq2[brain.ReplyDelta, error] {
-	model, route, name := r.choose(messages)
+func (r *RouterChatModel) StreamReply(ctx context.Context, request brain.ChatRequest) iter.Seq2[brain.ReplyDelta, error] {
+	model, route, name := r.choose(request.Messages)
 	if route != "" {
 		r.options.Logger.Info("选模型", "route", route, "model", name)
 	}
-	return model.StreamReply(ctx, messages, tools)
+	return model.StreamReply(ctx, request)
 }
 
 func (r *RouterChatModel) choose(messages []brain.ChatMessage) (brain.ChatModel, string, string) {
@@ -73,12 +73,12 @@ func escalated(messages []brain.ChatMessage) bool {
 	return false
 }
 
-// Warmup 预热各路模型（云端的预热是空操作）。
+// Warmup 预热各路模型里需要预热的。
 func (r *RouterChatModel) Warmup(ctx context.Context) error {
-	errs := []error{r.options.Default.Warmup(ctx)}
+	errs := []error{brain.WarmUp(ctx, r.options.Default)}
 	for _, model := range []brain.ChatModel{r.options.Vision, r.options.Correction} {
 		if model != nil && model != r.options.Default {
-			errs = append(errs, model.Warmup(ctx))
+			errs = append(errs, brain.WarmUp(ctx, model))
 		}
 	}
 	return errors.Join(errs...)

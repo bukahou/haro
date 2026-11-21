@@ -13,7 +13,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bukahou/haro/internal/speech"
+	"github.com/bukahou/haro/internal/pcmwav"
 )
 
 func TestKeywordSpotterLive(t *testing.T) {
@@ -36,7 +36,7 @@ func TestKeywordSpotterLive(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		audio, err := speech.DecodeWAV(data)
+		audio, err := pcmwav.Decode(data)
 		if err != nil {
 			t.Fatal(err)
 		}

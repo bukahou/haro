@@ -4,12 +4,15 @@ go 1.27
 
 require (
 	github.com/anthropics/anthropic-sdk-go/v2 v2.11.0
+	github.com/blackjack/webcam v0.6.2
 	github.com/caarlos0/env/v11 v11.4.2
 	github.com/coder/websocket v1.8.15
 	github.com/failsafe-go/failsafe-go v0.9.8
 	github.com/gen2brain/malgo v0.11.28
+	github.com/go-audio/audio v1.0.0
+	github.com/go-audio/wav v1.1.0
 	github.com/google/jsonschema-go v0.4.3
-	github.com/k2-fsa/sherpa-onnx-go v1.13.8
+	github.com/k2-fsa/sherpa-onnx-go/v2 v2.0.2
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/openai/openai-go/v3 v3.103.0
 	github.com/pion/mediadevices v0.10.1
@@ -32,19 +35,19 @@ require (
 require (
 	github.com/bahlo/generic-list-go v0.2.0 // indirect
 	github.com/bits-and-blooms/bitset v1.24.4 // indirect
-	github.com/blackjack/webcam v0.6.2 // indirect
 	github.com/buger/jsonparser v1.1.2 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/dustin/go-humanize v1.1.0 // indirect
+	github.com/go-audio/riff v1.0.0 // indirect
 	github.com/go-logr/logr v1.4.4 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.30.0 // indirect
 	github.com/invopop/jsonschema v0.14.0 // indirect
-	github.com/k2-fsa/sherpa-onnx-go-linux v1.13.8 // indirect
-	github.com/k2-fsa/sherpa-onnx-go-macos v1.13.8 // indirect
-	github.com/k2-fsa/sherpa-onnx-go-windows v1.13.8 // indirect
+	github.com/k2-fsa/sherpa-onnx-go-linux/v2 v2.0.2 // indirect
+	github.com/k2-fsa/sherpa-onnx-go-macos/v2 v2.0.2 // indirect
+	github.com/k2-fsa/sherpa-onnx-go-windows/v2 v2.0.2 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
 	github.com/mfridman/interpolate v0.0.2 // indirect
 	github.com/ncruces/go-strftime v1.1.0 // indirect

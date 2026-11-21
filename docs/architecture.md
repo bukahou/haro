@@ -45,7 +45,7 @@ haro 是一个家用语音助手：家里每个房间放一台**终端**（麦�
 | 接口 | 实现 |
 |---|---|
 | `StreamingRecognizer` | `internal/speech`：按 `HARO_ASR_URL` 连 haro-asr（或其他照 OpenAI Realtime 转写会话的服务） |
-| `ChatModel` | `internal/llm`：ollama（本地）、Claude API 或 OpenAI 兼容接口（云端）；主备切换（`FallbackChatModel`） |
+| `ChatModel` | `internal/llm`：Claude API（官方 SDK）、OpenAI 兼容接口（官方 openai-go；本地 Ollama 走它的兼容端点）；主备切换（`FallbackChatModel`）。请求可以「工具照给、这轮不许调用」（提示词缓存不失效）；输出到上限时明确报「被截断」；需要预热的模型另实现 `ModelWarmer`。三个适配跑同一组契约测试（`internal/llm/contract_test.go`） |
 | `SpeechSynthesizer` | `internal/speech`：GPT-SoVITS（边合成边播放）、Piper |
 | `Toolbox` | `internal/tools`：内置工具 + 第三方 MCP 服务 |
 | `ConversationStore` | `internal/conversationstore`：SQLite（goose 迁移）；每一轮带说话的时间，发给模型时每轮前标日期和时刻 |
@@ -70,13 +70,13 @@ haro 是一个家用语音助手：家里每个房间放一台**终端**（麦�
 
 ### 工具
 
-自研工具内置在服务端里；**MCP 只用来接第三方服务**（本地子进程或远程 Streamable HTTP）。
+自研工具注册在服务端进程内的 MCP 服务上（参数、结果由结构体定义，调用前校验；每个工具标明只读 / 会改数据 / 会破坏）；第三方服务只接远程 Streamable HTTP。
 
 | 工具 | 说明 |
 |---|---|
 | `get_current_time` | 现在的时间 |
-| `save_note` / `search_notes` / `list_recent_notes` / `delete_note` | 记事本（SQLite）；删除前要口头确认 |
-| `check_network` / `network_interfaces` | 网络诊断（查的是服务端所在机器的网络） |
+| `save_note` / `search_notes` / `delete_note` / `list_deleted_notes` / `restore_note` | 记事本（SQLite）；按编号删，删掉的可以恢复 |
+| `confirm_action` / `cancel_action` | 会破坏的操作（删记事）先存成待确认的操作（有时效），主人算不算同意由模型判断后调用；只在有待确认的操作时提供 |
 | `get_weather` | 天气（Open-Meteo，不用密钥）；家的位置可以配坐标，或按公网 IP 推定。Open-Meteo 查不到时改用日本气象厅（见下） |
 | `look_at_camera` | 看终端摄像头的画面：调用时才经 MCP 让终端拍一帧（终端的工具清单里有「拍一帧」时才提供） |
 | `switch_persona` | 换性格（有两个以上性格时才提供） |
@@ -109,8 +109,13 @@ Open-Meteo 连不上或报错时，日本境内的地点改查日本气象厅网
 
 ### 费用（`internal/spending`）
 
-大模型和搜索按量计费时：每次调用都记账（token、搜索积分，按配置的单价与汇率折成本地货币），
+大模型和搜索按量计费时：每次调用都记账（token、搜索积分，按单价与汇率折成本地货币），
 按天、按月封顶。超过月度上限后改用本地模型；没有本地模型时直接告诉主人额度用完了。
+
+云端模型的单价来自公共的模型价格目录（`internal/pricecatalog`，默认 [models.dev](https://models.dev)，`HARO_MODEL_PRICES_*`）：
+服务端启动时拉取（含缓存读写的单价、按上下文大小分的档），拉到的那一家存一份到 `HARO_MODEL_PRICES_CACHE`，
+下次拉不到时用它；都没有、或目录里没有用到的模型时服务端起不来（费用上限要靠单价折算，不按 0 记）。
+汇率（`HARO_USD_JPY`）和搜索积分的价格目录里没有，照旧在配置里写。
 
 ## 终端（`internal/terminal` 与 `internal/platform`）
 
@@ -120,8 +125,10 @@ Open-Meteo 连不上或报错时，日本境内的地点改查日本气象厅网
   选设备的规则（只看设备的接口类型：有别的麦克风时不用蓝牙麦克风，因为蓝牙耳机当麦克风会切到通话模式、音质下降）。
 - **平台层** `internal/platform`：门面 `OpenLocalDevices`；`audio`（miniaudio）、`camera`（要看时才打开摄像头拍一帧：Linux 用 pion/mediadevices，预热到曝光稳定再取；ffmpeg 是备用，macOS 现在用它）、
   `osdiff`（各操作系统的差异：设备的接口类型怎么认、摄像头怎么找、向摄像头要什么格式和分辨率；按编译标签自动选，`make check-darwin` 在 Linux 上检查 macOS 版能否编译）。
+  Linux 上都看系统报的结构化信息、不按名字猜：音频设备的接口类型和回录源取 PipeWire / PulseAudio 的设备属性（`pactl -f json`，
+  所以终端要装 pulseaudio-utils；没有时照系统默认选麦克风、认不出蓝牙）；摄像头是按 V4L2 查询能列出视频采集格式的节点（元数据节点不算）。
 - 摄像头画面和具体摄像头无关：`HARO_CAMERA_SIZE` 是想要的分辨率，Linux 上先列出摄像头支持的格式（同一摄像头各格式能出的分辨率不同，
-  驱动遇到要不到的会悄悄换），能出就明确要它，出不了就要宽度够的里面最小的；`HARO_FRAME_WIDTH`（默认 1280）是送给模型的**最大**宽度，
+  驱动遇到要不到的会悄悄换），能出就明确要它，出不了就要宽度够的里面最小的，同一个分辨率帧率高的优先；`HARO_FRAME_WIDTH`（默认 1280）是送给模型的**最大**宽度，
   画面更窄就原样送、不放大。启动时日志记下向摄像头要了什么（「📷 向摄像头要画面」）和实际送给模型多大（「📷 送给模型的画面」）。
 - 提示音（`assets/tones`：内置的不含人声；可以用 `HARO_TONES_DIR` 换成自己录的）：服务端断开 / 恢复、
   对话窗口结束去休眠（窗口默认 40 秒）、服务端的提示（例如后台调查查完了）。
@@ -135,7 +142,7 @@ systemd 用户服务从 `~/.config/haro/haro.env` 读取（`deploy/systemd/`）�
 
 - `anthropic`（默认）：Claude API（官方 Go SDK `anthropic-sdk-go`）。`HARO_CLOUD_LLM_MODEL` 例如 `claude-haiku-5-5`；
   思考关掉求快，回答力度用 `HARO_CLOUD_LLM_EFFORT`（聊天、摘要）/ `HARO_RESEARCH_EFFORT`（后台调查）；
-  开着提示词缓存，缓存读写的单价用 `HARO_CLOUD_LLM_PRICE_CACHE_READ` / `_WRITE` 记账（不设就按普通输入价，记多不记少）。
+  开着提示词缓存，缓存读写按模型价格目录里的单价分开记账。
   凭证：`HARO_ANTHROPIC_API_KEY`；不填时交给 SDK 自己找——在 Kubernetes 里可以用 Workload Identity Federation
   （服务账号令牌换短期令牌，不放长期密钥），配法见 Anthropic 文档「Use WIF with Kubernetes」。
   不要用 `ANTHROPIC_API_KEY` 放 haro 的 key：开发机上 Claude Code 也读这个变量。
@@ -157,7 +164,7 @@ systemd 用户服务从 `~/.config/haro/haro.env` 读取（`deploy/systemd/`）�
   （实测：只写「纠正时调用」时，Haiku 觉得自己没错就会争辩、不交）
 - `research`：后台调查由云端模型搜索、读网页，搜完把资料交给它写结论（不给工具）
 
-直接换它回答时，它出错或等太久（`HARO_STRONG_LLM_TIMEOUT`）由云端模型接手。单价 `HARO_STRONG_LLM_PRICE_*` 必填（月度上限要靠它折算）。
+直接换它回答时，它出错或等太久（`HARO_STRONG_LLM_TIMEOUT`）由云端模型接手。单价同样来自模型价格目录（目录里没有它就起不来）。
 Claude 各模型「关掉思考」的写法不同：`HARO_CLOUD_LLM_THINKING` / `HARO_STRONG_LLM_THINKING`，Haiku 5.5 用 `disabled`，
 Sonnet 5.5 只认 `between_tools`（两次工具调用之间会返回几句进度说明，haro 不回传；实测后续请求照样被接受）。
 

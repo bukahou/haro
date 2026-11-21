@@ -17,9 +17,6 @@ func TestEmbeddedTonesParse(t *testing.T) {
 			t.Errorf("%s：%v %v %v", name, format, duration, err)
 		}
 	}
-	if _, err := ParseWAV([]byte("not a wav file")); err == nil {
-		t.Error("不是 WAV 应报错")
-	}
 }
 
 func TestLoadTonesFromDirectory(t *testing.T) {

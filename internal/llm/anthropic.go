@@ -78,6 +78,7 @@ type AnthropicChatModel struct {
 	thinking          string
 	maxRetries        int
 	firstTokenTimeout time.Duration
+	requestTimeout    time.Duration
 }
 
 // Thinking 的取值。
@@ -104,13 +105,16 @@ type AnthropicOptions struct {
 	// FirstTokenTimeout 是等 Claude 开始回答（第一个流式事件）最多多久，超时就取消这次请求、交给退路；0 = 不限。
 	// 不用单独的 HTTP 客户端做「响应头超时」：多一个 HTTP 客户端就多一份令牌缓存（见 ClaudeAPI）。
 	FirstTokenTimeout time.Duration
+	// RequestTimeout 是一次请求从发出到流结束最多多久；0 = 只受调用方的 context 管（例如后台调查有自己的总时限）。
+	// 不放在共用的 HTTP 客户端上：客户端的总超时连读流也算在内，各用途要的长短不同。
+	RequestTimeout time.Duration
 }
 
 // NewAnthropicChatModel 创建模型（不发请求）。
 func NewAnthropicChatModel(options AnthropicOptions) *AnthropicChatModel {
 	return &AnthropicChatModel{api: options.API, model: options.Model, maxTokens: options.MaxTokens,
 		effort: anthropic.OutputConfigEffort(options.Effort), thinking: options.Thinking, maxRetries: options.MaxRetries,
-		firstTokenTimeout: options.FirstTokenTimeout}
+		firstTokenTimeout: options.FirstTokenTimeout, requestTimeout: options.RequestTimeout}
 }
 
 // thinkingConfig 按 Thinking 组装请求里的 thinking。
@@ -125,50 +129,35 @@ func (m *AnthropicChatModel) thinkingConfig() anthropic.ThinkingConfigParamUnion
 	}
 }
 
-// errNoFirstToken 表示在 FirstTokenTimeout 内没等到 Claude 开始回答。它不包着 context.Canceled：
-// 退路（FallbackChatModel）把 context.Canceled 当成「主人打断了」而不切换。
-var errNoFirstToken = errors.New("没等到 Claude 开始回答")
-
-// Warmup 云端不需要预热。
-func (m *AnthropicChatModel) Warmup(context.Context) error { return nil }
-
-// RefusalError 是 Claude 的安全审核拒绝回答（HTTP 200，stop_reason = refusal）。
-// 当作云端失败处理：开着退路时这一轮改用本地模型（v7：用户按推荐）；没有退路时念 SpokenMessage。
+// RefusalError 是模型的安全审核拒绝回答（Claude：HTTP 200、stop_reason = refusal；OpenAI 兼容：finish_reason = content_filter）。
+// 当作云端失败处理：开着退路时这一轮改用退路；没有退路时念固定的话。
 type RefusalError struct {
 	Category    string
 	Explanation string
 }
 
 func (e *RefusalError) Error() string {
-	return fmt.Sprintf("Claude 拒绝回答（%s）：%s", e.Category, e.Explanation)
+	return fmt.Sprintf("模型拒绝回答（%s）：%s", e.Category, e.Explanation)
 }
 
 // Phrase 见 brain.SpokenError。
 func (e *RefusalError) Phrase() (string, map[string]string) { return brain.PhraseRefused, nil }
 
-// StreamReply 流式产出文字；工具调用和用量在流结束时一次性产出（与 OpenAIChatModel 相同）。
-func (m *AnthropicChatModel) StreamReply(ctx context.Context, messages []brain.ChatMessage, tools []brain.ToolSpec) iter.Seq2[brain.ReplyDelta, error] {
+// StreamReply 流式产出文字；工具调用、用量和停下的原因在流结束时一次性产出（与 OpenAIChatModel 相同）。
+func (m *AnthropicChatModel) StreamReply(ctx context.Context, request brain.ChatRequest) iter.Seq2[brain.ReplyDelta, error] {
 	return func(yield func(brain.ReplyDelta, error) bool) {
-		params, err := m.request(messages, tools)
+		params, err := m.request(request)
 		if err != nil {
 			yield(brain.ReplyDelta{}, err)
 			return
 		}
-		requestCtx, cancel := context.WithCancelCause(ctx)
-		defer cancel(nil)
-		var watchdog *time.Timer
-		if m.firstTokenTimeout > 0 {
-			watchdog = time.AfterFunc(m.firstTokenTimeout, func() { cancel(errNoFirstToken) })
-			defer watchdog.Stop()
-		}
-		stream := m.api.client.Messages.NewStreaming(requestCtx, params, option.WithMaxRetries(m.maxRetries))
+		deadline := newStreamDeadline(ctx, m.requestTimeout, m.firstTokenTimeout)
+		defer deadline.close()
+		stream := m.api.client.Messages.NewStreaming(deadline.ctx, params, option.WithMaxRetries(m.maxRetries))
 		defer stream.Close() // 调用方提前 break 时关掉连接，即中止生成
 		var message anthropic.Message
 		for stream.Next() {
-			if watchdog != nil {
-				watchdog.Stop() // 开始回答了：后面不限时（整次请求的上限由 HTTP 客户端管）
-				watchdog = nil
-			}
+			deadline.started()
 			event := stream.Current()
 			if err := message.Accumulate(event); err != nil {
 				yield(brain.ReplyDelta{Usage: partialUsage(message)}, fmt.Errorf("解析 Claude 的流式响应: %w", err))
@@ -185,7 +174,7 @@ func (m *AnthropicChatModel) StreamReply(ctx context.Context, messages []brain.C
 			}
 		}
 		if err := stream.Err(); err != nil { // 出错、被取消：照样交出知道的那部分用量（记账不漏）
-			if errors.Is(context.Cause(requestCtx), errNoFirstToken) {
+			if deadline.noFirstToken() {
 				yield(brain.ReplyDelta{Usage: partialUsage(message)}, fmt.Errorf("请求 Claude: %w（等了 %v）", errNoFirstToken, m.firstTokenTimeout))
 				return
 			}
@@ -193,10 +182,14 @@ func (m *AnthropicChatModel) StreamReply(ctx context.Context, messages []brain.C
 			return
 		}
 		usage := usageOf(message.Usage)
-		if message.StopReason == anthropic.StopReasonRefusal {
+		switch message.StopReason {
+		case anthropic.StopReasonRefusal:
 			// 带上用量：被拒的请求照样计费，记账的装饰器先记下这一笔，退路再接手
 			yield(brain.ReplyDelta{Usage: usage}, &RefusalError{Category: string(message.StopDetails.Category),
 				Explanation: message.StopDetails.Explanation})
+			return
+		case anthropic.StopReasonMaxTokens: // 截断：不交出工具调用（写到一半的参数不完整）
+			yield(brain.ReplyDelta{Usage: usage, Stop: brain.StopMaxTokens}, nil)
 			return
 		}
 		calls, err := toolCallsOf(message.Content)
@@ -209,7 +202,8 @@ func (m *AnthropicChatModel) StreamReply(ctx context.Context, messages []brain.C
 }
 
 // request 组装一次请求。
-func (m *AnthropicChatModel) request(messages []brain.ChatMessage, tools []brain.ToolSpec) (anthropic.MessageNewParams, error) {
+func (m *AnthropicChatModel) request(request brain.ChatRequest) (anthropic.MessageNewParams, error) {
+	messages, tools := request.Messages, request.Tools
 	params := anthropic.MessageNewParams{
 		Model:     anthropic.Model(m.model),
 		MaxTokens: int64(m.maxTokens),
@@ -226,12 +220,13 @@ func (m *AnthropicChatModel) request(messages []brain.ChatMessage, tools []brain
 	markPreviousTurnForCache(converted) // 断点 ②
 	params.Messages = converted
 	if len(tools) == 0 {
-		// 这一轮不许调用工具（例如最后一轮逼模型直接回答），但历史里可能有工具往来：
-		// Claude 要求有工具往来的请求带上工具定义，所以按历史里的工具名补上，并声明这一轮不许调用
+		// 没有工具的请求，历史里却可能有工具往来（例如后台调查最后写结论）：
+		// Claude 要求有工具往来的请求带上工具定义，所以按历史里的工具名补上，并声明不许调用
 		tools = toolsSeenIn(messages)
-		if len(tools) > 0 {
-			params.ToolChoice = anthropic.ToolChoiceUnionParam{OfNone: &anthropic.ToolChoiceNoneParam{}}
-		}
+	}
+	if len(tools) > 0 && (request.ForbidToolCalls || len(request.Tools) == 0) {
+		// 工具定义照给（和前几轮一样，断点 ① 之前的缓存照样命中），这一轮不许调用
+		params.ToolChoice = anthropic.ToolChoiceUnionParam{OfNone: &anthropic.ToolChoiceNoneParam{}}
 	}
 	if len(tools) > 0 {
 		converted, err := toAnthropicTools(tools)

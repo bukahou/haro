@@ -177,9 +177,9 @@ type usageTotal struct {
 	usage brain.ReplyUsage
 }
 
-func (u *usageTotal) StreamReply(ctx context.Context, messages []brain.ChatMessage, tools []brain.ToolSpec) iter.Seq2[brain.ReplyDelta, error] {
+func (u *usageTotal) StreamReply(ctx context.Context, request brain.ChatRequest) iter.Seq2[brain.ReplyDelta, error] {
 	return func(yield func(brain.ReplyDelta, error) bool) {
-		for delta, err := range u.ChatModel.StreamReply(ctx, messages, tools) {
+		for delta, err := range u.ChatModel.StreamReply(ctx, request) {
 			if delta.Usage != nil {
 				u.mu.Lock()
 				u.usage.PromptTokens += delta.Usage.PromptTokens
@@ -242,7 +242,7 @@ func judgeAnswer(t *testing.T, judge *AnthropicChatModel, expected, answer strin
 		{Role: brain.RoleUser, Text: "正确答案：" + expected + "\n回答：" + answer}}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	for delta, err := range judge.StreamReply(ctx, messages, []brain.ToolSpec{tool}) {
+	for delta, err := range judge.StreamReply(ctx, brain.ChatRequest{Messages: messages, Tools: []brain.ToolSpec{tool}}) {
 		if err != nil {
 			t.Logf("评审出错：%v", err)
 			return judgement{}

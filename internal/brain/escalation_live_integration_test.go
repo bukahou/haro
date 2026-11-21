@@ -22,7 +22,8 @@ type escalationProbe struct {
 	escalated bool
 }
 
-func (p *escalationProbe) StreamReply(ctx context.Context, messages []brain.ChatMessage, tools []brain.ToolSpec) iter.Seq2[brain.ReplyDelta, error] {
+func (p *escalationProbe) StreamReply(ctx context.Context, request brain.ChatRequest) iter.Seq2[brain.ReplyDelta, error] {
+	messages := request.Messages
 	for i := len(messages) - 1; i >= 0; i-- {
 		if messages[i].Role == brain.RoleUser && len(messages[i].Image) == 0 {
 			p.mu.Lock()
@@ -31,9 +32,8 @@ func (p *escalationProbe) StreamReply(ctx context.Context, messages []brain.Chat
 			break
 		}
 	}
-	return p.inner.StreamReply(ctx, messages, tools)
+	return p.inner.StreamReply(ctx, request)
 }
-func (p *escalationProbe) Warmup(ctx context.Context) error { return p.inner.Warmup(ctx) }
 
 func (p *escalationProbe) takeEscalated() bool {
 	p.mu.Lock()

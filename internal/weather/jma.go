@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 )
 
 // JMA 是日本气象厅网站数据（bosai）的天气来源：只覆盖日本，按地区预报，不用密钥。
@@ -21,9 +23,10 @@ type JMA struct {
 	fetch, geocode       fetcher
 	now                  func() time.Time
 
-	mu     sync.Mutex
-	tables *jmaTables
-	areas  map[string]JMAArea
+	loading singleflight.Group // 地区表：同时要的只下载一次，不在锁里下载（下载要好几秒，查已经缓存的地区不该等它）
+	mu      sync.Mutex
+	tables  *jmaTables
+	areas   map[string]JMAArea
 }
 
 // jst 是气象厅数据用的时区（日本没有夏令时）。

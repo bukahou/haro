@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 )
 
 // HomeLocator 给出「家」在哪（查天气不说地点时用）。
@@ -33,9 +35,10 @@ type IPHome struct {
 	name string // 配置里给的名字；空 = 用定位出来的城市名
 	http *http.Client
 
-	mu      sync.Mutex
-	cached  Place
-	fetched time.Time
+	locating singleflight.Group // 同时要定位的只发一次请求，请求不在锁里发：Known 每轮都调用，不能被它卡住
+	mu       sync.Mutex
+	cached   Place
+	fetched  time.Time
 }
 
 const ipHomeTTL = 24 * time.Hour
@@ -54,18 +57,26 @@ func (h *IPHome) Known() (Place, bool, bool) {
 
 func (h *IPHome) Home(ctx context.Context) (Place, error) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
-	if !h.fetched.IsZero() && time.Since(h.fetched) < ipHomeTTL {
-		return h.cached, nil
+	cached, fetched := h.cached, h.fetched
+	h.mu.Unlock()
+	if !fetched.IsZero() && time.Since(fetched) < ipHomeTTL {
+		return cached, nil
 	}
-	place, err := h.locate(ctx)
+	place, err := sharedRequest(ctx, &h.locating, "home", func(ctx context.Context) (Place, error) {
+		place, err := h.locate(ctx)
+		if err == nil {
+			h.mu.Lock()
+			h.cached, h.fetched = place, time.Now()
+			h.mu.Unlock()
+		}
+		return place, err
+	})
 	if err != nil {
-		if !h.fetched.IsZero() {
-			return h.cached, nil // 定位服务暂时连不上：沿用上次的
+		if !fetched.IsZero() {
+			return cached, nil // 定位服务暂时连不上：沿用上次的
 		}
 		return Place{}, fmt.Errorf("按 IP 定位家的位置失败: %w", err)
 	}
-	h.cached, h.fetched = place, time.Now()
 	return place, nil
 }
 

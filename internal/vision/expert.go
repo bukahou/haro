@@ -242,22 +242,10 @@ func (e *Expert) runTool(ctx context.Context, call brain.ToolCall, searches *int
 	return result
 }
 
-// complete 请求模型一次，收齐文字、工具调用与用量。
+// complete 请求模型一次，收齐文字、工具调用与用量；被截断按失败（brain.ErrTruncated，退回把画面交给前台）。
 func complete(ctx context.Context, model brain.ChatModel, messages []brain.ChatMessage, specs []brain.ToolSpec) (string, []brain.ToolCall, brain.ReplyUsage, error) {
-	var text strings.Builder
-	var calls []brain.ToolCall
-	var usage brain.ReplyUsage
-	for delta, err := range model.StreamReply(ctx, messages, specs) {
-		if err != nil {
-			return text.String(), calls, usage, err
-		}
-		text.WriteString(delta.Text)
-		calls = append(calls, delta.ToolCalls...)
-		if delta.Usage != nil {
-			usage = *delta.Usage
-		}
-	}
-	return text.String(), calls, usage, nil
+	reply, err := brain.CollectReply(ctx, model, brain.ChatRequest{Messages: messages, Tools: specs})
+	return reply.Text, reply.ToolCalls, reply.Usage, err
 }
 
 func since(started time.Time) time.Duration { return time.Since(started).Round(time.Millisecond) }

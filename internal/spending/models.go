@@ -36,7 +36,7 @@ func NewMeteredChatModel(inner brain.ChatModel, model string, purpose Purpose, p
 // 一点用量都拿不到时也记一行（token 不知道），不漏记。
 //
 // 调用方中途不要了（回答被打断）而 ctx 已经取消时，接着把内层收完：内层很快因为取消结束，并交出知道的用量。
-func (m *MeteredChatModel) StreamReply(ctx context.Context, messages []brain.ChatMessage, tools []brain.ToolSpec) iter.Seq2[brain.ReplyDelta, error] {
+func (m *MeteredChatModel) StreamReply(ctx context.Context, request brain.ChatRequest) iter.Seq2[brain.ReplyDelta, error] {
 	return func(yield func(brain.ReplyDelta, error) bool) {
 		recorded, callerGone := false, false
 		defer func() {
@@ -44,7 +44,7 @@ func (m *MeteredChatModel) StreamReply(ctx context.Context, messages []brain.Cha
 				m.record(&brain.ReplyUsage{Incomplete: true, TokensUnknown: true})
 			}
 		}()
-		for delta, err := range m.inner.StreamReply(ctx, messages, tools) {
+		for delta, err := range m.inner.StreamReply(ctx, request) {
 			if delta.Usage != nil && !recorded {
 				m.record(delta.Usage)
 				recorded = true
@@ -76,8 +76,8 @@ func (m *MeteredChatModel) record(usage *brain.ReplyUsage) {
 	}
 }
 
-// Warmup 原样转发。
-func (m *MeteredChatModel) Warmup(ctx context.Context) error { return m.inner.Warmup(ctx) }
+// Warmup 转发给里面的模型（它需要预热的话）。
+func (m *MeteredChatModel) Warmup(ctx context.Context) error { return brain.WarmUp(ctx, m.inner) }
 
 // BudgetedChatModel 按月度额度选模型（R5 c）：额度内用 paid（可能花钱的那套组合）；
 // 超过上限改用 free（本地模型）；没有 free 时回答「额度用完了」。
@@ -93,14 +93,14 @@ func NewBudgetedChatModel(paid, free brain.ChatModel, guard *Guard, logger *slog
 }
 
 // StreamReply 每次请求前查一次额度。
-func (b *BudgetedChatModel) StreamReply(ctx context.Context, messages []brain.ChatMessage, tools []brain.ToolSpec) iter.Seq2[brain.ReplyDelta, error] {
+func (b *BudgetedChatModel) StreamReply(ctx context.Context, request brain.ChatRequest) iter.Seq2[brain.ReplyDelta, error] {
 	err := b.guard.AllowPaidLLM(ctx)
 	switch {
 	case err == nil:
-		return b.paid.StreamReply(ctx, messages, tools)
+		return b.paid.StreamReply(ctx, request)
 	case errors.Is(err, ErrOverBudget) && b.free != nil:
 		b.logger.Warn("💴 月度额度已用完：这一轮用本地模型", "why", err)
-		return b.free.StreamReply(ctx, messages, tools)
+		return b.free.StreamReply(ctx, request)
 	case errors.Is(err, ErrOverBudget):
 		b.logger.Warn("💴 月度额度已用完，又没有本地模型可退：不回答", "why", err)
 		return func(yield func(brain.ReplyDelta, error) bool) { yield(brain.ReplyDelta{}, err) }
@@ -110,5 +110,5 @@ func (b *BudgetedChatModel) StreamReply(ctx context.Context, messages []brain.Ch
 	}
 }
 
-// Warmup 预热主用的那套。
-func (b *BudgetedChatModel) Warmup(ctx context.Context) error { return b.paid.Warmup(ctx) }
+// Warmup 预热主用的那套（需要预热的话）。
+func (b *BudgetedChatModel) Warmup(ctx context.Context) error { return brain.WarmUp(ctx, b.paid) }

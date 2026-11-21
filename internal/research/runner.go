@@ -448,22 +448,10 @@ func orError(text string, err error) string {
 	return text
 }
 
-// complete 请求模型一次，收齐文字、工具调用与 token 数。
+// complete 请求模型一次，收齐文字、工具调用与 token 数（出错时也算上知道的用量）；被截断按失败（brain.ErrTruncated）。
 func complete(ctx context.Context, model brain.ChatModel, messages []brain.ChatMessage, specs []brain.ToolSpec) (string, []brain.ToolCall, int, error) {
-	var text strings.Builder
-	var calls []brain.ToolCall
-	tokens := 0
-	for delta, err := range model.StreamReply(ctx, messages, specs) {
-		if err != nil {
-			return text.String(), calls, tokens, err
-		}
-		text.WriteString(delta.Text)
-		calls = append(calls, delta.ToolCalls...)
-		if delta.Usage != nil {
-			tokens += delta.Usage.PromptTokens + delta.Usage.OutputTokens
-		}
-	}
-	return text.String(), calls, tokens, nil
+	reply, err := brain.CollectReply(ctx, model, brain.ChatRequest{Messages: messages, Tools: specs})
+	return reply.Text, reply.ToolCalls, reply.Usage.PromptTokens + reply.Usage.OutputTokens, err
 }
 
 type searchInput struct {

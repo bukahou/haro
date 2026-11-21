@@ -16,7 +16,9 @@ var _ Adapter = otherAdapter{}
 // Current 返回本次编译的系统的实现。
 func Current() Adapter { return otherAdapter{} }
 
-func (otherAdapter) AudioBus(string, string) terminal.Bus               { return terminal.BusUnknown }
+func (otherAdapter) AudioTraits(context.Context, string, string) (AudioTraits, error) {
+	return AudioTraits{}, nil
+}
 func (otherAdapter) Cameras(context.Context) ([]terminal.Device, error) { return nil, nil }
 func (otherAdapter) CameraInput(context.Context, string, string) CameraCapture {
 	return CameraCapture{}

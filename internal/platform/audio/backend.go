@@ -70,11 +70,8 @@ func (b *Backend) devices(kind malgo.DeviceType) ([]Device, error) {
 	}
 	devices := make([]Device, 0, len(infos))
 	for _, info := range infos {
-		key := deviceKey(info.ID)
-		if kind == malgo.Capture && strings.HasSuffix(key, ".monitor") {
-			continue
-		}
-		devices = append(devices, Device{Key: key, Name: info.Name(), Default: info.IsDefault != 0, id: info.ID})
+		// 回录源（录的是放出来的声音）由平台层按系统报的属性去掉（osdiff.AudioTraits），这里照实列出
+		devices = append(devices, Device{Key: deviceKey(info.ID), Name: info.Name(), Default: info.IsDefault != 0, id: info.ID})
 	}
 	return devices, nil
 }

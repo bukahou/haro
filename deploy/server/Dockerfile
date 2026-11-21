@@ -28,7 +28,7 @@ ARG VERSION=dev
 RUN CGO_ENABLED=0 go build -trimpath -ldflags "-X github.com/bukahou/haro/internal/buildinfo.Version=${VERSION}" -o /out/bin/haro-server ./cmd/haro-server \
  && go build -trimpath -ldflags "-X github.com/bukahou/haro/internal/buildinfo.Version=${VERSION}" -o /out/bin/haro-asr ./cmd/haro-asr \
  && mkdir -p /out/lib \
- && cp "$(go list -m -f '{{.Dir}}' github.com/k2-fsa/sherpa-onnx-go-linux)"/lib/x86_64-unknown-linux-gnu/*.so /out/lib/
+ && cp "$(go list -m -f '{{.Dir}}' github.com/k2-fsa/sherpa-onnx-go-linux/v2)"/lib/x86_64-unknown-linux-gnu/*.so /out/lib/
 
 FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y \
@@ -68,7 +68,8 @@ ENV LD_LIBRARY_PATH=/opt/haro/lib \
     HARO_RESEARCH_DB=/data/research.db \
     HARO_CONVERSATIONS_DB=/data/conversations.db \
     HARO_CONVERSATIONS_DIR=/data/conversations \
-    HARO_PERSONA_STATE=/data/persona
+    HARO_PERSONA_STATE=/data/persona \
+    HARO_MODEL_PRICES_CACHE=/data/model-prices.json
 
 # 版本标签放在最后：ARG 之后的 RUN 都会因版本号变化而重建（apt 那一层就不能复用缓存了）
 ARG VERSION=dev

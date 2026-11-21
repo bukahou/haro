@@ -46,11 +46,11 @@ func (f *FallbackChatModel) markPrimaryFailed() {
 }
 
 // StreamReply 见类型说明。
-func (f *FallbackChatModel) StreamReply(ctx context.Context, messages []brain.ChatMessage, tools []brain.ToolSpec) iter.Seq2[brain.ReplyDelta, error] {
+func (f *FallbackChatModel) StreamReply(ctx context.Context, request brain.ChatRequest) iter.Seq2[brain.ReplyDelta, error] {
 	return func(yield func(brain.ReplyDelta, error) bool) {
 		if f.degraded() { // 熔断中：不等主模型
 			f.Logger.Info("主模型熔断中，直接用备用模型", "secondary", f.SecondaryName)
-			for delta, err := range f.Secondary.StreamReply(ctx, messages, tools) {
+			for delta, err := range f.Secondary.StreamReply(ctx, request) {
 				if !yield(delta, err) || err != nil {
 					return
 				}
@@ -58,7 +58,7 @@ func (f *FallbackChatModel) StreamReply(ctx context.Context, messages []brain.Ch
 			return
 		}
 		produced := false
-		for delta, err := range f.Primary.StreamReply(ctx, messages, tools) {
+		for delta, err := range f.Primary.StreamReply(ctx, request) {
 			if err != nil {
 				if produced || errors.Is(err, context.Canceled) || ctx.Err() != nil {
 					yield(brain.ReplyDelta{}, err)
@@ -67,7 +67,7 @@ func (f *FallbackChatModel) StreamReply(ctx context.Context, messages []brain.Ch
 				f.markPrimaryFailed()
 				f.Logger.Warn("主模型失败，改用备用模型", "primary", f.PrimaryName, "secondary", f.SecondaryName,
 					"cooldown", f.Cooldown, "err", err)
-				for delta, err := range f.Secondary.StreamReply(ctx, messages, tools) {
+				for delta, err := range f.Secondary.StreamReply(ctx, request) {
 					if !yield(delta, err) || err != nil {
 						return
 					}
@@ -84,7 +84,7 @@ func (f *FallbackChatModel) StreamReply(ctx context.Context, messages []brain.Ch
 	}
 }
 
-// Warmup 预热主备两个模型（本地要把模型装进显存；云端的预热是空操作）。主模型预热失败不影响备用。
+// Warmup 预热主备两个模型里需要预热的（本地要把模型装进显存）。主模型预热失败不影响备用。
 func (f *FallbackChatModel) Warmup(ctx context.Context) error {
-	return errors.Join(f.Primary.Warmup(ctx), f.Secondary.Warmup(ctx))
+	return errors.Join(brain.WarmUp(ctx, f.Primary), brain.WarmUp(ctx, f.Secondary))
 }

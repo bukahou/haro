@@ -135,8 +135,11 @@ func (s *Session) finishAnswer(ctx context.Context, record *turnRecord, answer s
 		s.closeTurn(record, turnFailed)
 		return s.failed(realtimeproto.ReasonGenerationFailed, "生成回答", err)
 	}
-	s.closeTurn(record, turnCompleted)
-	done := realtimeproto.ResponseDone{Status: realtimeproto.StatusCompleted}
+	ending, done := turnCompleted, realtimeproto.ResponseDone{Status: realtimeproto.StatusCompleted}
+	if record.truncated { // 到了输出上限：照「没说完」告诉终端（OpenAI Realtime 同样的状态和原因）
+		ending, done = turnTruncated, realtimeproto.ResponseDone{Status: realtimeproto.StatusIncomplete, Reason: realtimeproto.ReasonMaxOutputTokens}
+	}
+	s.closeTurn(record, ending)
 	if usage != nil {
 		done.Usage = &realtimeproto.Usage{InputTokens: usage.PromptTokens, OutputTokens: usage.OutputTokens}
 	}
@@ -291,14 +294,13 @@ func (s *Session) generateSentences(ctx context.Context, history []ChatMessage, 
 	}
 	for round := 0; ; round++ {
 		segment = baseRound + round
-		var tools []ToolSpec
-		if round < maxToolRounds { // 最后一轮不再给工具，逼模型直接回答
-			tools = specs
-		}
+		// 最后一轮工具定义照给（提示词缓存不失效）、但不许调用，逼模型直接回答
+		request := ChatRequest{Messages: messages, Tools: specs, ForbidToolCalls: round >= maxToolRounds}
 		var calls []ToolCall
 		var roundText strings.Builder
 		var roundUsage *ReplyUsage
-		for delta, err := range s.parts.Model.StreamReply(ctx, messages, tools) {
+		truncated := false
+		for delta, err := range s.parts.Model.StreamReply(ctx, request) {
 			if err != nil {
 				recordSpanError(span, err)
 				return usage.add(roundUsage), err
@@ -319,8 +321,19 @@ func (s *Session) generateSentences(ctx context.Context, history []ChatMessage, 
 			if delta.Usage != nil {
 				roundUsage = delta.Usage
 			}
+			truncated = truncated || delta.Stop == StopMaxTokens
 		}
 		usage = usage.add(roundUsage)
+		if len(calls) > 0 && request.ForbidToolCalls { // 不许调用时还要调用：不执行，说了的话就是回答
+			s.logger.Warn("模型在不许调用工具的一轮要求调用工具：不执行", "tools", toolNames(calls))
+			calls = nil
+		}
+		if truncated { // 到了输出上限：说出去的就是这些（适配不交出被截断的工具调用）
+			s.logger.Warn("回答到了模型的输出上限，没说完", "round", round, "output_tokens", outputTokens(roundUsage))
+			record.final.WriteString(roundText.String())
+			record.truncated = true
+			break
+		}
 		if len(calls) == 0 {
 			record.final.WriteString(roundText.String())
 			break
@@ -403,8 +416,7 @@ func (s *Session) generateSentences(ctx context.Context, history []ChatMessage, 
 			attribute.Int("haro.llm.cache_read_tokens", usage.CacheReadTokens),
 			attribute.Int("haro.llm.cache_write_tokens", usage.CacheWriteTokens),
 			attribute.Int("haro.llm.requests", usage.Requests),
-			attribute.Int("haro.llm.thinking_chars", usage.ThinkingChars),
-			attribute.Int64("haro.llm.load_ms", usage.LoadMillis))
+			attribute.Int("haro.llm.thinking_chars", usage.ThinkingChars))
 		s.logger.Info("模型用量", "requests", usage.Requests, "prompt_tokens", usage.PromptTokens, "output_tokens", usage.OutputTokens,
 			"cache_read_tokens", usage.CacheReadTokens, "cache_write_tokens", usage.CacheWriteTokens,
 			"visible_chars", utf8.RuneCountInString(answer.String()), "thinking_chars", usage.ThinkingChars)
@@ -477,3 +489,20 @@ func recordSpanError(span trace.Span, err error) {
 }
 
 func since(started time.Time) time.Duration { return time.Since(started).Round(time.Millisecond) }
+
+// toolNames 是一组调用的工具名（日志用）。
+func toolNames(calls []ToolCall) []string {
+	names := make([]string, 0, len(calls))
+	for _, call := range calls {
+		names = append(names, call.Name)
+	}
+	return names
+}
+
+// outputTokens 是这次请求输出了多少 token（日志用；不知道时为 0）。
+func outputTokens(usage *ReplyUsage) int {
+	if usage == nil {
+		return 0
+	}
+	return usage.OutputTokens
+}

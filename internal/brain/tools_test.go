@@ -11,6 +11,7 @@ import (
 
 	"github.com/bukahou/haro/internal/brain"
 	"github.com/bukahou/haro/internal/brain/braintest"
+	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
 // fakeToolbox 记录调用（和参数）；delete_note 会破坏、要过确认闸。
@@ -94,18 +95,53 @@ func TestToolLoopUsageAddsUpAllRequests(t *testing.T) {
 	}
 }
 
-// 模型每一轮都要求调用工具：第 4 轮不再提供工具，逼它直接回答。
+// 模型每一轮都要求调用工具：第 4 轮工具定义照给（提示词缓存不失效），但声明不许调用，逼它直接回答。
 func TestToolLoopStopsAfterMaxRounds(t *testing.T) {
 	search := braintest.Call("search_notes", nil)
 	model := braintest.NewModel(t, search, search, search, braintest.Say("没查到。"))
 	k := newToolTalker(t, model, &fakeToolbox{})
 	k.say("查一下")
-	var offered []int
-	for _, request := range model.Requests() {
-		offered = append(offered, len(request.Tools))
+	requests := model.Requests()
+	if len(requests) != 4 {
+		t.Fatalf("应请求 4 次：%d", len(requests))
 	}
-	if len(offered) != 4 || offered[0] == 0 || offered[3] != 0 {
-		t.Errorf("每轮提供的工具数 %v，应为 3 轮有工具 + 最后 1 轮没有", offered)
+	for i, request := range requests {
+		forbid := i == 3
+		if !slices.Equal(request.ToolNames(), requests[0].ToolNames()) || len(request.Tools) == 0 || request.ForbidToolCalls != forbid {
+			t.Errorf("第 %d 次：工具 %v、不许调用=%v；应为每次同样的工具，只有最后一次不许调用", i+1, request.ToolNames(), request.ForbidToolCalls)
+		}
+	}
+}
+
+// 不许调用工具的一轮模型还是要求调用：不执行，说了的话就是这一轮的回答。
+func TestToolCallsInForbiddenRoundAreNotExecuted(t *testing.T) {
+	search := braintest.Call("search_notes", nil)
+	stubborn := braintest.Reply{Chunks: []string{"没查到。"}, ToolCalls: search.ToolCalls}
+	model := braintest.NewModel(t, search, search, search, stubborn)
+	toolbox := &fakeToolbox{}
+	k := newToolTalker(t, model, toolbox)
+	if answer := k.say("查一下"); answer != "没查到。" {
+		t.Errorf("说了的话就是回答：%q", answer)
+	}
+	if calls := toolbox.called(); len(calls) != 3 {
+		t.Errorf("不许调用的那一轮不该执行工具：执行了 %v", calls)
+	}
+}
+
+// 回答到了输出上限：说出去的照常念完，终端收到「没说完」（incomplete，原因 max_output_tokens）；
+// 历史里记下说了的部分和「被截断」的说明，模型下一轮知道自己没说完。
+func TestTruncatedAnswerIsReportedAsIncomplete(t *testing.T) {
+	model := braintest.NewModel(t, braintest.Reply{Chunks: []string{"从前有座山，山里有座庙。"}, Truncated: true}, braintest.Say("好的。"))
+	k := newToolTalker(t, model, &fakeToolbox{})
+	done := braintest.Done(t, k.ask("讲个长故事"))
+	if done.Status != realtimeproto.StatusIncomplete || done.Reason != realtimeproto.ReasonMaxOutputTokens {
+		t.Errorf("应报没说完：%+v", done)
+	}
+	k.say("然后呢")
+	history := withoutSynthetic(model.LastRequest().Messages)
+	answer := history[len(history)-2]
+	if answer.Role != brain.RoleAssistant || !strings.Contains(answer.Text, "从前有座山，山里有座庙。") || !strings.Contains(answer.Text, "输出上限") {
+		t.Errorf("历史里应记下说了的部分和被截断的说明：%+v", answer)
 	}
 }
 

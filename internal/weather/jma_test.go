@@ -65,8 +65,11 @@ var (
 type fakeJMAServer struct {
 	*httptest.Server
 	geocodes       atomic.Int32
-	latestTime     atomic.Value // string
-	nearestMissing atomic.Bool  // 最近的观测站缺测（气温为 null）
+	areaTables     atomic.Int32                  // 地区表（area.json）被下载了几次
+	tableGate      atomic.Pointer[chan struct{}] // 设了就等它关上才回地区表
+	geocodeGate    atomic.Pointer[chan struct{}] // 设了就等它关上才回地址反查
+	latestTime     atomic.Value                  // string
+	nearestMissing atomic.Bool                   // 最近的观测站缺测（气温为 null）
 }
 
 // 第二近的观测站（東京）的实况。
@@ -92,6 +95,9 @@ func newFakeJMAServer(t *testing.T) *fakeJMAServer {
 		switch {
 		case r.URL.Path == "/geocoder":
 			server.geocodes.Add(1)
+			if gate := server.geocodeGate.Load(); gate != nil {
+				<-*gate
+			}
 			if code, ok := municipalities[r.URL.Query().Get("lat")]; ok {
 				_ = json.NewEncoder(w).Encode(map[string]any{"results": map[string]string{"muniCd": code, "lv01Nm": "－"}})
 				return
@@ -106,6 +112,12 @@ func newFakeJMAServer(t *testing.T) *fakeJMAServer {
 			}
 			_, _ = w.Write([]byte(fakeObservations))
 		case files[r.URL.Path] != "":
+			if r.URL.Path == "/bosai/common/const/area.json" {
+				server.areaTables.Add(1)
+				if gate := server.tableGate.Load(); gate != nil {
+					<-*gate
+				}
+			}
 			_, _ = w.Write([]byte(files[r.URL.Path]))
 		default:
 			http.NotFound(w, r)
@@ -234,4 +246,41 @@ func show(value *float64) string {
 	}
 	raw, _ := json.Marshal(*value)
 	return string(raw)
+}
+
+// 地区表要下载好几秒：同时查两处只下载一次；查已经缓存的地区不等别处的下载、地址反查。
+func TestJMALocateDoesNotHoldTheLockWhileFetching(t *testing.T) {
+	server := newFakeJMAServer(t)
+	jma := server.client()
+	ctx := context.Background()
+
+	gate := make(chan struct{})
+	server.tableGate.Store(&gate)
+	results := make(chan error, 2)
+	for _, place := range []Place{shinjuku, sendai} {
+		go func() { _, err := jma.Locate(ctx, place); results <- err }()
+	}
+	time.Sleep(100 * time.Millisecond) // 两个都在等地区表
+	close(gate)
+	for range 2 {
+		if err := <-results; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := server.areaTables.Load(); n != 1 {
+		t.Errorf("同时查两处，地区表应只下载一次：%d 次", n)
+	}
+
+	geocodeGate := make(chan struct{})
+	server.geocodeGate.Store(&geocodeGate)
+	go func() { _, err := jma.Locate(ctx, sapporo); results <- err }() // 卡在地址反查
+	time.Sleep(50 * time.Millisecond)
+	started := time.Now()
+	if area, err := jma.Locate(ctx, shinjuku); err != nil || area.Office != "130000" || time.Since(started) > 50*time.Millisecond {
+		t.Errorf("已经缓存的地区应马上返回：%+v %v 用了 %v", area, err, time.Since(started))
+	}
+	close(geocodeGate)
+	if err := <-results; err != nil {
+		t.Fatal(err)
+	}
 }

@@ -13,6 +13,7 @@ package terminal
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -99,6 +100,7 @@ var (
 	errBrainLost      = errors.New("和服务端的连接断了")
 	errSwitchDevice   = errors.New("该换麦克风了")
 	errShutdown       = errors.New("关机")
+	errRunFailed      = errors.New("对话运行出错") // 例如设备在列表里、却打不开（被别的程序独占、权限）
 	microphoneStopped = assistant.ErrMicrophoneStopped
 )
 
@@ -109,19 +111,21 @@ type offlineState struct {
 }
 
 // Run 一直运行，直到 ctx 取消（关机信号）；正常关机返回 nil。
+//
+// 对话运行出错（例如设备在列表里、却打不开）时按翻倍的间隔重来（从 BackoffMin 到 BackoffMax），
+// 不每隔固定时间就重连服务端、刷一条日志；中途因为别的原因（断线、换麦克风）结束过一次，间隔就从头算。
 func (s *Supervisor) Run(ctx context.Context) error {
+	runFailures := retrypolicy.NewBuilder[any]().
+		HandleErrors(errRunFailed).
+		WithBackoff(s.timing.BackoffMin, max(s.timing.BackoffMin, s.timing.BackoffMax)).
+		WithMaxRetries(-1).
+		OnRetryScheduled(func(event failsafe.ExecutionScheduledEvent[any]) {
+			s.logger.Error("对话运行出错：重来", "err", event.LastError(), "retry_in", event.Delay)
+		}).
+		Build()
 	offline := offlineState{since: time.Now()}
 	for {
-		conn, err := s.connect(ctx, &offline)
-		if err != nil {
-			return nil // 只有关机才会连不上而返回
-		}
-		if offline.announced {
-			s.playTone(ctx, s.parts.Online, "服务端恢复了")
-		}
-		offline = offlineState{}
-		reason := s.serve(ctx, conn)
-		_ = conn.Close()
+		reason := failsafe.With(runFailures).WithContext(ctx).Run(func() error { return s.runOnce(ctx, &offline) })
 		switch {
 		case ctx.Err() != nil || errors.Is(reason, errShutdown):
 			return nil
@@ -132,60 +136,71 @@ func (s *Supervisor) Run(ctx context.Context) error {
 	}
 }
 
-// connect 连服务端，连不上就按翻倍的间隔重试；断开超过 OfflineNotice 时提示一次。
+// runOnce 连上服务端，用这条连接运行到该结束为止；返回结束的原因。
+func (s *Supervisor) runOnce(ctx context.Context, offline *offlineState) error {
+	conn, err := s.connect(ctx, offline)
+	if err != nil {
+		return errShutdown // 只有关机才会连不上而返回
+	}
+	if offline.announced {
+		s.playTone(ctx, s.parts.Online, "服务端恢复了")
+	}
+	*offline = offlineState{}
+	defer conn.Close()
+	return s.serve(ctx, conn)
+}
+
+// connect 连服务端，连不上就重试（间隔见 reconnectDelay），直到连上或关机；断开超过 OfflineNotice、
+// 或协议版本不兼容时提示一次。
 func (s *Supervisor) connect(ctx context.Context, offline *offlineState) (Connection, error) {
-	backoff := s.timing.BackoffMin
-	for {
+	reconnect := retrypolicy.NewBuilder[Connection]().
+		WithMaxRetries(-1).
+		WithDelayFunc(func(exec failsafe.ExecutionAttempt[Connection]) time.Duration {
+			return s.reconnectDelay(exec.LastError(), exec.Retries(), offline)
+		}).
+		OnRetryScheduled(func(event failsafe.ExecutionScheduledEvent[Connection]) {
+			if errors.Is(event.LastError(), realtimeproto.ErrIncompatibleProtocol) {
+				s.logger.Error("和服务端的协议版本不兼容：把终端和服务端升到同一版本", "err", event.LastError(), "retry_in", event.Delay)
+				return
+			}
+			s.logger.Warn("连不上服务端", "err", event.LastError(), "retry_in", event.Delay)
+		}).
+		Build()
+	return failsafe.With(reconnect).WithContext(ctx).Get(func() (Connection, error) {
 		conn, err := s.parts.Dial(ctx)
-		if err == nil {
-			return conn, nil
-		}
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
+		if err == nil || ctx.Err() != nil {
+			return conn, err
 		}
 		if offline.since.IsZero() { // 不是因为断线才来重连的（例如刚换完麦克风）：从现在开始算
 			offline.since = time.Now()
 		}
-		if errors.Is(err, realtimeproto.ErrIncompatibleProtocol) {
-			s.logger.Error("和服务端的协议版本不兼容：把终端和服务端升到同一版本", "err", err,
-				"retry_in", s.timing.IncompatibleRetry)
-			if !offline.announced {
-				offline.announced = true
-				s.playTone(ctx, s.parts.Offline, "协议版本不兼容")
-			}
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(s.timing.IncompatibleRetry):
-			}
-			continue
+		switch {
+		case offline.announced:
+		case errors.Is(err, realtimeproto.ErrIncompatibleProtocol):
+			offline.announced = true
+			s.playTone(ctx, s.parts.Offline, "协议版本不兼容")
+		case time.Since(offline.since) >= s.timing.OfflineNotice:
+			offline.announced = true
+			s.playTone(ctx, s.parts.Offline, "服务端断开超过提示时间")
 		}
-		s.logger.Warn("连不上服务端", "err", err, "retry_in", backoff)
-		retryAt := time.Now().Add(backoff)
-		for time.Now().Before(retryAt) {
-			wait := time.Until(retryAt)
-			if !offline.announced {
-				if untilNotice := time.Until(offline.since.Add(s.timing.OfflineNotice)); untilNotice <= 0 {
-					// 到提示时间先立刻再连一次：服务端可能正好在两次重试之间起来了（make deploy 时服务端启动要好几秒，
-					// 而重试间隔在翻倍，下一次可能要等到 15 秒以后）；还连不上才提示（躲开这类重启）
-					if conn, err := s.parts.Dial(ctx); err == nil {
-						return conn, nil
-					}
-					offline.announced = true
-					s.playTone(ctx, s.parts.Offline, "服务端断开超过提示时间")
-					continue
-				} else {
-					wait = min(wait, untilNotice)
-				}
-			}
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(wait):
-			}
-		}
-		backoff = min(backoff*2, s.timing.BackoffMax)
+		return nil, err
+	})
+}
+
+// reconnectDelay 是下一次重连服务端前等多久（retries = 已经重试过几次）：
+//   - 协议版本不兼容：隔 IncompatibleRetry（要等人把两端升到同一版本，频繁重试没用）；
+//   - 其余从 BackoffMin 翻倍，最长 BackoffMax；
+//   - 还没提示断开时不越过提示时间：到提示时间先再连一次 —— 服务端可能正好在两次重试之间起来了
+//     （make deploy 时服务端启动要好几秒，而间隔在翻倍），还连不上才提示，躲开这类重启。
+func (s *Supervisor) reconnectDelay(lastErr error, retries int, offline *offlineState) time.Duration {
+	if errors.Is(lastErr, realtimeproto.ErrIncompatibleProtocol) {
+		return s.timing.IncompatibleRetry
 	}
+	delay := min(s.timing.BackoffMin<<min(retries, 20), s.timing.BackoffMax)
+	if !offline.announced {
+		delay = min(delay, max(0, time.Until(offline.since.Add(s.timing.OfflineNotice))))
+	}
+	return delay
 }
 
 // serve 用一条连接运行，直到它该结束；返回结束的原因。
@@ -228,13 +243,7 @@ func (s *Supervisor) serve(ctx context.Context, conn Connection) error {
 		s.logger.Warn("麦克风停了：重新找设备")
 		return microphoneStopped
 	case err != nil:
-		s.logger.Error("对话运行出错：重来", "err", err)
-		select { // 避免同一个错误转圈刷日志
-		case <-ctx.Done():
-			return errShutdown
-		case <-time.After(s.timing.BackoffMin):
-		}
-		return err
+		return fmt.Errorf("%w: %w", errRunFailed, err) // Run 按翻倍的间隔重来
 	}
 	return errShutdown // Run 正常返回 = 键盘输入结束等，按关机处理
 }

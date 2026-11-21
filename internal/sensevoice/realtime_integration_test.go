@@ -20,8 +20,8 @@ import (
 	"github.com/coder/websocket/wsjson"
 
 	"github.com/bukahou/haro/internal/asrserver"
+	"github.com/bukahou/haro/internal/pcmwav"
 	"github.com/bukahou/haro/internal/realtimeproto"
-	"github.com/bukahou/haro/internal/speech"
 )
 
 func TestRealtimeLive(t *testing.T) {
@@ -30,7 +30,7 @@ func TestRealtimeLive(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer recognizer.Close()
-	factory, err := NewSileroDetectorFactory(os.Getenv("HARO_VAD_MODEL"), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	factory, err := NewSileroDetectorFactory(os.Getenv("HARO_VAD_MODEL"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +47,7 @@ func TestRealtimeLive(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		audio, err := speech.DecodeWAV(data)
+		audio, err := pcmwav.Decode(data)
 		if err != nil || audio.Format.SampleRate != 16000 || audio.Format.Channels != 1 {
 			t.Fatalf("%s 必须是 16kHz 单声道：%+v %v", path, audio.Format, err)
 		}
@@ -102,7 +102,7 @@ func TestWakeRealtimeLive(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer recognizer.Close()
-	vad, err := NewSileroDetectorFactory(os.Getenv("HARO_VAD_MODEL"), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	vad, err := NewSileroDetectorFactory(os.Getenv("HARO_VAD_MODEL"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +119,7 @@ func TestWakeRealtimeLive(t *testing.T) {
 	var stream []byte
 	for _, path := range strings.Split(os.Getenv("HARO_TEST_WAVS"), ",") {
 		data, _ := os.ReadFile(path)
-		audio, err := speech.DecodeWAV(data)
+		audio, err := pcmwav.Decode(data)
 		if err != nil {
 			t.Fatal(err)
 		}

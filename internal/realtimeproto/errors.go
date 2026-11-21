@@ -95,6 +95,7 @@ const (
 	ReasonEmptyTranscript     ResponseReason = "empty_transcript"     // 没识别出字
 	ReasonTranscriptionFailed ResponseReason = "transcription_failed" // 识别出错
 	ReasonGenerationFailed    ResponseReason = "generation_failed"    // 模型生成回答出错
+	ReasonMaxOutputTokens     ResponseReason = "max_output_tokens"    // 回答到了模型的输出上限，没说完（status = incomplete）
 	ReasonSynthesisFailed     ResponseReason = "synthesis_failed"     // 语音合成出错
 	ReasonServerDisconnected  ResponseReason = "server_disconnected"  // 终端侧补的：回答进行中和服务端断了（不在线上传输）
 )

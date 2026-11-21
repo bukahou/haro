@@ -49,7 +49,9 @@ func offers(specs []brain.ToolSpec, name string) bool {
 	return slices.ContainsFunc(specs, func(spec brain.ToolSpec) bool { return spec.Name == name })
 }
 
-func (m *scriptedModel) StreamReply(ctx context.Context, messages []brain.ChatMessage, specs []brain.ToolSpec) iter.Seq2[brain.ReplyDelta, error] {
+func (m *scriptedModel) StreamReply(ctx context.Context, request brain.ChatRequest) iter.Seq2[brain.ReplyDelta, error] {
+	messages := request.Messages
+	specs := request.Tools
 	m.mu.Lock()
 	m.toolsSeen = append(m.toolsSeen, offers(specs, "search_web"))
 	m.lastMsgs = messages
@@ -400,7 +402,9 @@ type writerModel struct {
 	offered  []string // 最后一次给的工具
 }
 
-func (m *writerModel) StreamReply(_ context.Context, messages []brain.ChatMessage, specs []brain.ToolSpec) iter.Seq2[brain.ReplyDelta, error] {
+func (m *writerModel) StreamReply(_ context.Context, request brain.ChatRequest) iter.Seq2[brain.ReplyDelta, error] {
+	messages := request.Messages
+	specs := request.Tools
 	m.mu.Lock()
 	m.calls++
 	m.lastMsgs, m.offered = messages, nil

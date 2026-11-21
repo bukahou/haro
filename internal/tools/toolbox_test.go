@@ -16,7 +16,6 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/bukahou/haro/internal/brain"
-	"github.com/bukahou/haro/internal/netdiag"
 	"github.com/bukahou/haro/internal/notes"
 )
 
@@ -241,23 +240,5 @@ func TestNoteTools(t *testing.T) {
 	}
 	if now, err := box.Call(ctx, brain.ToolCall{Name: "get_current_time"}); err != nil || !strings.Contains(now, "星期") {
 		t.Errorf("get_current_time：%s %v", now, err)
-	}
-}
-
-func TestNetworkDiagnosticsBuiltins(t *testing.T) {
-	box, err := NewToolbox(context.Background(), nil, quietLogger, NetworkDiagnostics(netdiag.NewChecker("localhost", "127.0.0.1:1")))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer box.Close()
-	needs := confirmations(box)
-	for _, name := range []string{"get_current_time", "check_network", "network_interfaces"} {
-		if confirm, ok := needs[name]; !ok || confirm {
-			t.Errorf("%s：应在、而且是只读（不要确认）：%v", name, needs)
-		}
-	}
-	result, err := box.Call(context.Background(), brain.ToolCall{Name: "network_interfaces"})
-	if err != nil || !strings.Contains(result, "interfaces") {
-		t.Errorf("network_interfaces 应在本机直接执行：%q %v", result, err)
 	}
 }

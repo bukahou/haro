@@ -196,7 +196,7 @@ func (spokenErr) Phrase() (string, map[string]string) {
 	return brain.PhraseOverMonthlyBudget, map[string]string{"spent": "3100", "limit": "3000"}
 }
 
-func (overBudgetModel) StreamReply(context.Context, []brain.ChatMessage, []brain.ToolSpec) iter.Seq2[brain.ReplyDelta, error] {
+func (overBudgetModel) StreamReply(context.Context, brain.ChatRequest) iter.Seq2[brain.ReplyDelta, error] {
 	return func(yield func(brain.ReplyDelta, error) bool) { yield(brain.ReplyDelta{}, spokenErr{}) }
 }
 func (overBudgetModel) Warmup(context.Context) error { return nil }

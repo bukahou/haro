@@ -5,46 +5,33 @@ import (
 	"testing"
 )
 
-// c960Formats 是 EMEET C960 的实际输出（ffmpeg 8.0）：未压缩的只到 640×480，1280×720 只有 MJPEG。
-const c960Formats = `[video4linux2,v4l2 @ 0x58c33e708e40] Compressed:       mjpeg :          Motion-JPEG : 1920x1080 1280x960 1280x720 1024x576 800x600 640x480 640x360
-[video4linux2,v4l2 @ 0x58c33e708e40] Raw       :     yuyv422 :           YUYV 4:2:2 : 640x480 640x360
-Error opening input file /dev/video0.`
+// mode 是一个分辨率和帧率。
+func mode(width, height int, fps float64) frameMode {
+	return frameMode{size: frameSize{width, height}, fps: fps}
+}
 
-func TestParseV4L2Formats(t *testing.T) {
-	got := parseV4L2Formats(c960Formats)
-	if len(got) != 2 || got[0].name != "mjpeg" || !got[0].compressed || len(got[0].sizes) != 7 ||
-		got[1].name != "yuyv422" || got[1].compressed || !reflect.DeepEqual(got[1].sizes, []frameSize{{640, 480}, {640, 360}}) {
-		t.Fatalf("C960 的格式解析不对：%+v", got)
-	}
-
-	// 有的驱动报步进范围；ffmpeg 不认识的格式写 Unsupported；模拟出来的格式多一段「Emulated :」
-	other := `[video4linux2,v4l2 @ 0x1] Raw       :     yuv420p :     Planar YUV 4:2:0 : {32-2592, 2}x{32-1944, 2}
-[video4linux2,v4l2 @ 0x1] Raw       : Unsupported :                 XYZW : 640x480
-[video4linux2,v4l2 @ 0x1] Raw       :       bgr24 :            BGR24 : Emulated : 320x240`
-	got = parseV4L2Formats(other)
-	if len(got) != 2 || got[0].name != "yuv420p" || len(got[0].sizes) != 0 ||
-		got[0].ranges[0] != (frameSizeRange{32, 2592, 2, 32, 1944, 2}) ||
-		got[1].name != "bgr24" || !reflect.DeepEqual(got[1].sizes, []frameSize{{320, 240}}) {
-		t.Fatalf("范围 / Unsupported / Emulated 解析不对：%+v", got)
-	}
-
-	if got := parseV4L2Formats("ffmpeg: command not found"); len(got) != 0 {
-		t.Errorf("没有格式清单时应为空：%+v", got)
-	}
+// c960 照 EMEET C960 报的格式：未压缩的只到 640×480，1280×720 只有 MJPEG；都是 30 帧。
+var c960 = []v4l2Format{
+	{name: "mjpeg", compressed: true, modes: []frameMode{mode(1920, 1080, 30), mode(1280, 960, 30), mode(1280, 720, 30),
+		mode(1024, 576, 30), mode(800, 600, 30), mode(640, 480, 30), mode(640, 360, 30)}},
+	{name: "yuyv422", modes: []frameMode{mode(640, 480, 30), mode(640, 360, 30)}},
 }
 
 func TestChooseV4L2Capture(t *testing.T) {
-	c960 := parseV4L2Formats(c960Formats)
 	both := []v4l2Format{
-		{name: "mjpeg", compressed: true, sizes: []frameSize{{1280, 720}, {640, 480}}},
-		{name: "yuyv422", sizes: []frameSize{{1280, 720}, {640, 480}}},
+		{name: "mjpeg", compressed: true, modes: []frameMode{mode(1280, 720, 30), mode(640, 480, 30)}},
+		{name: "yuyv422", modes: []frameMode{mode(1280, 720, 30), mode(640, 480, 30)}},
 	}
-	big := []v4l2Format{{name: "mjpeg", compressed: true, sizes: []frameSize{{3280, 2464}, {1920, 1080}, {1640, 1232}}}}
+	slowRaw := []v4l2Format{ // 未压缩的在高分辨率下只有几帧
+		{name: "yuyv422", modes: []frameMode{mode(1280, 720, 10)}},
+		{name: "mjpeg", compressed: true, modes: []frameMode{mode(1280, 720, 30)}},
+	}
+	big := []v4l2Format{{name: "mjpeg", compressed: true, modes: []frameMode{mode(3280, 2464, 15), mode(1920, 1080, 30), mode(1640, 1232, 30)}}}
 	small := []v4l2Format{
-		{name: "mjpeg", compressed: true, sizes: []frameSize{{320, 240}}},
-		{name: "yuyv422", sizes: []frameSize{{640, 480}, {320, 240}}},
+		{name: "mjpeg", compressed: true, modes: []frameMode{mode(320, 240, 30)}},
+		{name: "yuyv422", modes: []frameMode{mode(640, 480, 30), mode(320, 240, 30)}},
 	}
-	stepwise := parseV4L2Formats(`[v @ 0x1] Raw       :     yuv420p :     Planar YUV 4:2:0 : {32-2592, 2}x{32-1944, 2}`)
+	stepwise := []v4l2Format{{name: "yuv420p", ranges: []frameSizeRange{{32, 2592, 2, 32, 1944, 2}}}}
 	cases := []struct {
 		name               string
 		formats            []v4l2Format
@@ -52,8 +39,9 @@ func TestChooseV4L2Capture(t *testing.T) {
 		wantFormat, wantSz string
 	}{
 		{"C960：1280x720 只有 MJPEG 能出", c960, "1280x720", "mjpeg", "1280x720"},
-		{"C960：640x480 两种都能出，要未压缩的", c960, "640x480", "yuyv422", "640x480"},
-		{"同一分辨率两种格式都能出，要未压缩的", both, "1280x720", "yuyv422", "1280x720"},
+		{"C960：640x480 两种都能出、帧率一样，要未压缩的", c960, "640x480", "yuyv422", "640x480"},
+		{"同一分辨率两种格式帧率一样：要未压缩的", both, "1280x720", "yuyv422", "1280x720"},
+		{"同一分辨率未压缩的帧率低：要帧率高的", slowRaw, "1280x720", "mjpeg", "1280x720"},
 		{"没有想要的：宽度够的里面要最小的", big, "1280x720", "mjpeg", "1640x1232"},
 		{"都不够宽：要最大的", small, "1280x720", "yuyv422", "640x480"},
 		{"步进范围里有想要的", stepwise, "1280x720", "yuv420p", "1280x720"},
@@ -69,7 +57,7 @@ func TestChooseV4L2Capture(t *testing.T) {
 }
 
 func TestV4L2Capture(t *testing.T) {
-	got := v4l2Capture("/dev/video0", parseV4L2Formats(c960Formats), "1280x720")
+	got := v4l2Capture("/dev/video0", c960, "1280x720")
 	want := CameraCapture{Input: []string{"-f", "v4l2", "-input_format", "mjpeg", "-video_size", "1280x720", "-i", "/dev/video0"},
 		Format: "mjpeg", Size: "1280x720"}
 	if !reflect.DeepEqual(got, want) {
@@ -78,5 +66,18 @@ func TestV4L2Capture(t *testing.T) {
 	if got := v4l2Capture("/dev/video0", nil, "1280x720"); !reflect.DeepEqual(got.Input,
 		[]string{"-f", "v4l2", "-video_size", "1280x720", "-i", "/dev/video0"}) || got.Format != "" {
 		t.Errorf("列不出格式时应不指定格式：%+v", got)
+	}
+}
+
+// 像素格式的四字符码按内核的写法算（videodev2.h：V4L2_PIX_FMT_MJPEG = 0x47504a4d、YUYV = 0x56595559）。
+func TestFFmpegPixelFormats(t *testing.T) {
+	if v4l2FourCC("MJPG") != 0x47504a4d || v4l2FourCC("YUYV") != 0x56595559 {
+		t.Fatalf("四字符码算错了：%#x %#x", v4l2FourCC("MJPG"), v4l2FourCC("YUYV"))
+	}
+	if f := ffmpegPixelFormats[0x47504a4d]; f.name != "mjpeg" || !f.compressed {
+		t.Errorf("MJPEG：%+v", f)
+	}
+	if f := ffmpegPixelFormats[0x56595559]; f.name != "yuyv422" || f.compressed {
+		t.Errorf("YUYV：%+v", f)
 	}
 }

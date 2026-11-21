@@ -1,6 +1,6 @@
 //go:build integration
 
-// 对本机真实 ollama 的集成测试（默认不跑）：
+// 对本机真实 ollama（走它的 OpenAI 兼容端点）的集成测试（默认不跑）：
 //
 //	HARO_TEST_IMAGE=/path/frame.jpg go test -tags integration -run Ollama -v ./internal/llm/
 //
@@ -28,9 +28,9 @@ func TestOllamaStreamReplyLive(t *testing.T) {
 	if modelName == "" {
 		modelName = "qwen3-vl:4b"
 	}
-	model := NewOllamaChatModel(baseURL, modelName, 4096, "30m", &http.Client{Timeout: 2 * time.Minute})
+	model := NewOllamaChatModel(baseURL, modelName, 800, OpenAIOptions{HTTPClient: &http.Client{}, RequestTimeout: 2 * time.Minute})
 	ctx := context.Background()
-	if err := model.Warmup(ctx); err != nil {
+	if err := brain.WarmUp(ctx, model); err != nil {
 		t.Fatal(err)
 	}
 	var image []byte
@@ -49,7 +49,7 @@ func TestOllamaStreamReplyLive(t *testing.T) {
 		var answer strings.Builder
 		var usage *brain.ReplyUsage
 		input := brain.ChatMessage{Role: brain.RoleUser, Text: "你能看到我吗？我旁边有什么？", Image: image}
-		for delta, err := range model.StreamReply(ctx, append(history, input), nil) {
+		for delta, err := range model.StreamReply(ctx, brain.ChatRequest{Messages: append(history, input)}) {
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -65,8 +65,8 @@ func TestOllamaStreamReplyLive(t *testing.T) {
 			time.Since(started).Round(time.Millisecond), image != nil)
 		t.Logf("  回答（%d 字）：%s", utf8.RuneCountInString(answer.String()), answer.String())
 		if usage != nil {
-			t.Logf("  prompt_tokens=%d output_tokens=%d thinking_chars=%d load_ms=%d",
-				usage.PromptTokens, usage.OutputTokens, usage.ThinkingChars, usage.LoadMillis)
+			t.Logf("  prompt_tokens=%d output_tokens=%d thinking_chars=%d",
+				usage.PromptTokens, usage.OutputTokens, usage.ThinkingChars)
 		}
 	}
 }

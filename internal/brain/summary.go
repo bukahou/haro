@@ -89,33 +89,15 @@ func summarizeTurns(ctx context.Context, model ChatModel, previous string, turns
 			"用第三人称、中文、不超过 300 字，只输出摘要本身。"},
 		{Role: RoleUser, Text: "旧摘要：\n" + previous + "\n\n新的对话：\n" + transcript.String()},
 	}
-	var summary strings.Builder
-	for delta, err := range model.StreamReply(ctx, messages, nil) {
-		if err != nil {
-			return "", err
-		}
-		summary.WriteString(delta.Text)
+	reply, err := CollectReply(ctx, model, ChatRequest{Messages: messages})
+	if err != nil { // 包括写到一半到了输出上限：半份摘要不用，留着旧摘要和没压进去的对话，下次再压
+		return "", err
 	}
-	text := strings.TrimSpace(stripThinking(summary.String()))
+	text := strings.TrimSpace(reply.Text)
 	if utf8.RuneCountInString(text) > summaryMaxRunes {
 		text = string([]rune(text)[:summaryMaxRunes])
 	}
 	return text, nil
-}
-
-// stripThinking 去掉思考型模型可能夹带的 <think>…</think>。
-func stripThinking(text string) string {
-	for {
-		start := strings.Index(text, "<think>")
-		if start < 0 {
-			return text
-		}
-		end := strings.Index(text[start:], "</think>")
-		if end < 0 {
-			return text[:start]
-		}
-		text = text[:start] + text[start+end+len("</think>"):]
-	}
 }
 
 // summaryNote 是放进系统提示词的摘要段落。

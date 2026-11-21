@@ -17,7 +17,7 @@ import (
 // 到运行时 Smart Turn 才初始化失败（2026-11-17 Dependabot 提议 v1.32.1（API 28）→ v1.38.0（API 31），而自带的是 1.28.2）。
 // 这里用 sherpa-onnx 模块里的那份动态库真的初始化一次：对不上就在 CI 里失败。
 func TestBundledOnnxRuntimeSupportsBinding(t *testing.T) {
-	moduleDir, err := exec.Command("go", "list", "-m", "-f", "{{.Dir}}", "github.com/k2-fsa/sherpa-onnx-go-linux").Output()
+	moduleDir, err := exec.Command("go", "list", "-m", "-f", "{{.Dir}}", "github.com/k2-fsa/sherpa-onnx-go-linux/v2").Output()
 	if err != nil {
 		t.Fatalf("找不到 sherpa-onnx-go-linux 模块：%v", err)
 	}

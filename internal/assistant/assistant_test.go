@@ -49,7 +49,7 @@ func (s *recordingSpeaker) Played() time.Duration { return 0 }
 
 type stubModel struct{}
 
-func (stubModel) StreamReply(context.Context, []brain.ChatMessage, []brain.ToolSpec) iter.Seq2[brain.ReplyDelta, error] {
+func (stubModel) StreamReply(context.Context, brain.ChatRequest) iter.Seq2[brain.ReplyDelta, error] {
 	return func(yield func(brain.ReplyDelta, error) bool) {
 		for _, token := range []string{"你旁边有", "一个杯子。", "还有键盘。"} {
 			if !yield(brain.ReplyDelta{Text: token}, nil) {

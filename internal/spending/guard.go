@@ -29,6 +29,26 @@ type TokenPrice struct {
 	// 提示词缓存：读缓存、写缓存的单价；0 = 按普通输入价算（宁可记多，不让额度失守）
 	CacheReadUSDPerMillion  float64
 	CacheWriteUSDPerMillion float64
+	// Tiers：一次请求的输入（含缓存读写）超过 AboveInputTokens 时，整次按那一档的单价算（例如上下文超过 10 万 token）。
+	// 按门槛从低到高
+	Tiers []PriceTier
+}
+
+// PriceTier 是按输入量分的一档单价。
+type PriceTier struct {
+	AboveInputTokens int
+	Price            TokenPrice // 用其中的四个单价
+}
+
+// forInput 是输入 promptTokens 个 token 的那次请求用的单价：超过了哪一档的门槛就用那一档（取最高的），都没超过用平常的。
+func (p TokenPrice) forInput(promptTokens int) TokenPrice {
+	chosen := p
+	for _, tier := range p.Tiers {
+		if promptTokens > tier.AboveInputTokens {
+			chosen = tier.Price
+		}
+	}
+	return chosen
 }
 
 // Knows 判断这个模型在不在价格表里（要花钱的写了单价，或者标了不花钱）。
@@ -43,6 +63,7 @@ func (p Pricing) LLMYen(model string, usage brain.ReplyUsage) float64 {
 	if !ok || price.Free { // 不在表里的建不出记账模型（NewMeteredChatModel），走不到这里
 		return 0
 	}
+	price = price.forInput(usage.PromptTokens)
 	cacheRead, cacheWrite := price.CacheReadUSDPerMillion, price.CacheWriteUSDPerMillion
 	if cacheRead <= 0 {
 		cacheRead = price.InputUSDPerMillion

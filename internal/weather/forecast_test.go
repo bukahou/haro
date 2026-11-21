@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -108,5 +109,56 @@ func TestDoesNotRetryWhenTLSHandshakeHangs(t *testing.T) {
 	err = fetch.getJSON(context.Background(), "https://"+listener.Addr().String()+"/forecast", &struct{}{})
 	if err == nil || accepted.Load() != 1 || time.Since(started) > time.Second {
 		t.Errorf("握手卡住应只连 1 次、约 200 ms 后放弃：%v，连了 %d 次，用了 %v", err, accepted.Load(), time.Since(started))
+	}
+}
+
+// hangingForecaster 一直等到被取消。
+type hangingForecaster struct{ budget time.Duration }
+
+func (h *hangingForecaster) ForecastFor(ctx context.Context, _ Place, _ int) (Forecast, error) {
+	if deadline, ok := ctx.Deadline(); ok {
+		h.budget = time.Until(deadline)
+	}
+	<-ctx.Done()
+	return Forecast{}, ctx.Err()
+}
+
+// deadlineForecaster 记下拿到的时间，马上给出结果。
+type deadlineForecaster struct{ budget time.Duration }
+
+func (d *deadlineForecaster) ForecastFor(ctx context.Context, place Place, _ int) (Forecast, error) {
+	if deadline, ok := ctx.Deadline(); ok {
+		d.budget = time.Until(deadline)
+	}
+	return Forecast{Place: place, Source: "日本气象厅"}, nil
+}
+
+// 主力卡住：最多用剩下时间的六成就放弃，备用还有四成的时间、照样查得到。
+func TestBackupStillHasTimeWhenPrimaryHangs(t *testing.T) {
+	primary, backup := &hangingForecaster{}, &deadlineForecaster{}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	forecast, err := WithBackup(primary, "Open-Meteo", backup, "日本气象厅", slog.New(slog.NewTextHandler(io.Discard, nil))).
+		ForecastFor(ctx, Place{Name: "家"}, 1)
+	if err != nil || forecast.Source != "日本气象厅" {
+		t.Fatalf("应改用备用：%+v %v", forecast, err)
+	}
+	if primary.budget > 650*time.Millisecond || backup.budget < 300*time.Millisecond {
+		t.Errorf("主力最多六成、备用至少还有三四成：主力 %v，备用 %v", primary.budget, backup.budget)
+	}
+}
+
+// 对方一直 5xx：再试一次就放弃，报错里写明试了几次。
+func TestServerErrorsAreRetriedOnce(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		http.Error(w, "busy", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	fetch := fetcher{http: server.Client(), attemptTimeout: time.Second, service: "测试服务"}
+	err := fetch.getJSON(context.Background(), server.URL, &struct{}{})
+	if err == nil || calls.Load() != 2 || !strings.Contains(err.Error(), "HTTP 503") || !strings.Contains(err.Error(), "试了 2 次") {
+		t.Errorf("5xx 应再试一次、写明试了几次：%v，请求了 %d 次", err, calls.Load())
 	}
 }
