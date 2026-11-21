@@ -116,7 +116,7 @@ func fitFrame(data []byte, width, height, limit int) ([]byte, int, int, error) {
 		scaled := image.NewRGBA(image.Rect(0, 0, w, h))
 		draw.ApproxBiLinear.Scale(scaled, scaled.Bounds(), img, bounds, draw.Src, nil)
 		var encoded bytes.Buffer
-		if err := jpeg.Encode(&encoded, scaled, &jpeg.Options{Quality: 85}); err != nil {
+		if err := jpeg.Encode(&encoded, scaled, &jpeg.Options{Quality: terminal.FrameJPEGQuality}); err != nil {
 			return nil, 0, 0, err
 		}
 		if encoded.Len() <= limit {

@@ -111,6 +111,8 @@ var (
 	errRunFailed      = errors.New("对话运行出错") // 例如设备在列表里、却打不开（被别的程序独占、权限）
 	errRunEnded       = errors.New("对话运行没出错就结束了")
 	microphoneStopped = assistant.ErrMicrophoneStopped
+	// errDeviceToolsEnded：设备能力（MCP）的会话自己结束了，连接还在
+	errDeviceToolsEnded = errors.New("设备能力（MCP）的会话结束了")
 )
 
 // offlineState 记服务端从什么时候连不上、有没有提示过。
@@ -226,9 +228,13 @@ func (s *Supervisor) serve(ctx context.Context, conn Connection) error {
 	defer cancel(nil)
 	if s.deps.Tools != nil {
 		s.deps.Tools.SetCameraAvailable(devices.Camera != "")
-		go func() { // 设备能力（MCP）跟这条连接同生共死
-			if err := s.deps.Tools.Serve(runCtx, conn.DeviceTools()); err != nil && runCtx.Err() == nil && !isDone(conn) {
-				s.logger.Warn("设备能力（MCP）的会话结束了", "err", err)
+		// 设备能力（MCP）跟这条连接同生共死：连接还在、会话却自己结束了时断开重连 —— MCP 会话由服务端那头发起，
+		// 只在这边重开对方不会重新初始化；留着这条连接，摄像头就一直用不了
+		go func() {
+			err := s.deps.Tools.Serve(runCtx, conn.DeviceTools())
+			if runCtx.Err() == nil && !isDone(conn) {
+				s.logger.Warn("设备能力（MCP）的会话结束了：断开重连，两边重新建会话", "err", err)
+				cancel(errDeviceToolsEnded)
 			}
 		}()
 	}
@@ -242,6 +248,8 @@ func (s *Supervisor) serve(ctx context.Context, conn Connection) error {
 		return errBrainLost
 	case errors.Is(cause, errSwitchDevice):
 		return errSwitchDevice
+	case errors.Is(cause, errDeviceToolsEnded):
+		return fmt.Errorf("%w: %w", errRunFailed, errDeviceToolsEnded) // 按翻倍的间隔重来：会话一连上就结束时不狂连
 	case errors.Is(err, microphoneStopped):
 		select { // 关机时麦克风可能比关机信号先停：稍等一下再判断（见 Timing.MicrophoneStopGrace）
 		case <-ctx.Done():

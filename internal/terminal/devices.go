@@ -76,7 +76,11 @@ var (
 	ErrCameraBusy = errors.New("摄像头被别的程序占用")
 )
 
-// Frame 是拍到的一帧。
+// FrameJPEGQuality 是送给模型的画面的 JPEG 质量：平台层编码拍到的画面、拍照的一方超过大小上限缩小重编码时都用它
+// （85 已经看不出压缩痕迹）。定义在这里而不在平台层：服务端也引用拍照的契约（terminaltools），不能连带引入平台层的 cgo。
+const FrameJPEGQuality = 85
+
+// Frame 是拍到的一帧（JPEG 按 FrameJPEGQuality 编码）。
 type Frame struct {
 	JPEG          []byte
 	TakenAt       time.Time

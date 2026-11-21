@@ -6,10 +6,9 @@ import (
 	"image/jpeg"
 
 	"golang.org/x/image/draw"
-)
 
-// jpegQuality：送给模型看的画面，85 已经看不出压缩痕迹。
-const jpegQuality = 85
+	"github.com/bukahou/haro/internal/terminal"
+)
 
 // encodeJPEG 把画面缩到不超过 maxWidth（更窄就原样：放大不会多出细节，只多花 token），编码成 JPEG。
 func encodeJPEG(img image.Image, maxWidth int) ([]byte, image.Point, error) {
@@ -21,7 +20,7 @@ func encodeJPEG(img image.Image, maxWidth int) ([]byte, image.Point, error) {
 		img = scaled
 	}
 	var encoded bytes.Buffer
-	if err := jpeg.Encode(&encoded, img, &jpeg.Options{Quality: jpegQuality}); err != nil {
+	if err := jpeg.Encode(&encoded, img, &jpeg.Options{Quality: terminal.FrameJPEGQuality}); err != nil {
 		return nil, image.Point{}, err
 	}
 	return encoded.Bytes(), img.Bounds().Size(), nil

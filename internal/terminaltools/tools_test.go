@@ -13,8 +13,11 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/bukahou/haro/internal/mcpbridge"
 	"github.com/bukahou/haro/internal/terminal"
@@ -121,6 +124,26 @@ func TestCaptureFailuresCarryCodes(t *testing.T) {
 			t.Errorf("%v：应得到错误码 %s，得到 %v", c.err, c.code, err)
 		}
 	}
+}
+
+// 取终端的工具清单偶尔失败（例如一次超时）：隔一会儿再取，摄像头照样用得上，不用等整条连接重连。
+func TestCameraClientRetriesToolList(t *testing.T) {
+	saved := defaultListRetry
+	defaultListRetry = listRetryTiming{delay: 5 * time.Millisecond, maxDelay: 10 * time.Millisecond, retries: 4}
+	t.Cleanup(func() { defaultListRetry = saved })
+	server := NewServer(&fakeCamera{}, "test", quiet)
+	server.SetCameraAvailable(true)
+	var lists atomic.Int32
+	server.mcp.AddReceivingMiddleware(func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, request mcp.Request) (mcp.Result, error) {
+			if method == "tools/list" && lists.Add(1) <= 2 {
+				return nil, errors.New("偶发的失败")
+			}
+			return next(ctx, method, request)
+		}
+	})
+	client := connect(t, server)
+	waitFor(t, "取清单失败两次后再取到、看得到「拍一帧」", client.Available)
 }
 
 // 没有摄像头的终端（camera 为 nil）永远不提供「拍一帧」。
