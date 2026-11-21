@@ -5,7 +5,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"strings"
+	"sync"
 	"testing"
 
 	"github.com/bukahou/haro/internal/platform/audio"
@@ -27,6 +27,35 @@ func (fakeOS) CameraInput(context.Context, string, string) osdiff.CameraCapture 
 	return osdiff.CameraCapture{}
 }
 
+// warnCounter 数警告级别的日志记录（带 err 属性的）。
+type warnCounter struct {
+	mu    sync.Mutex
+	warns int
+}
+
+func (c *warnCounter) Enabled(context.Context, slog.Level) bool { return true }
+func (c *warnCounter) Handle(_ context.Context, record slog.Record) error {
+	hasErr := false
+	record.Attrs(func(attr slog.Attr) bool {
+		hasErr = hasErr || attr.Key == "err"
+		return !hasErr
+	})
+	if record.Level == slog.LevelWarn && hasErr {
+		c.mu.Lock()
+		c.warns++
+		c.mu.Unlock()
+	}
+	return nil
+}
+func (c *warnCounter) WithAttrs([]slog.Attr) slog.Handler { return c }
+func (c *warnCounter) WithGroup(string) slog.Handler      { return c }
+
+func (c *warnCounter) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.warns
+}
+
 // 回录源按系统报的属性去掉，接口类型照报的填；认不出时设备照常列出、类型未知，提醒只写一次。
 func TestDescribeUsesSystemTraits(t *testing.T) {
 	listed := []audio.Device{{Key: "mic", Name: "USB 麦克风", Default: true}, {Key: "mic.monitor-like", Name: "回录"},
@@ -42,14 +71,14 @@ func TestDescribeUsesSystemTraits(t *testing.T) {
 		t.Errorf("回录源应去掉、接口类型照报的填：%+v", got)
 	}
 
-	var logs bytes.Buffer
-	blind := &LocalDevices{os: fakeOS{err: errors.New("pactl: not found")}, logger: slog.New(slog.NewTextHandler(&logs, nil))}
+	warnings := &warnCounter{}
+	blind := &LocalDevices{os: fakeOS{err: errors.New("pactl: not found")}, logger: slog.New(warnings)}
 	for range 3 {
 		if got := blind.describe(listed); len(got) != 3 || got[0].Bus != terminal.BusUnknown {
 			t.Fatalf("认不出时照常列出、类型未知：%+v", got)
 		}
 	}
-	if n := strings.Count(logs.String(), "认不出音频设备"); n != 1 {
-		t.Errorf("提醒只写一次：写了 %d 次", n)
+	if n := warnings.count(); n != 1 {
+		t.Errorf("提醒（带错误的警告）只写一次：写了 %d 次", n)
 	}
 }
