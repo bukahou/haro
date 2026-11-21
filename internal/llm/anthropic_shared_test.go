@@ -188,30 +188,35 @@ func TestAnthropicFirstTokenTimeoutHandsOverToFallback(t *testing.T) {
 	}
 }
 
-// 缓存断点 ② 打在「上一轮结束处」：这一轮主人的话（附着每轮都变的「现在的情况」）和这一轮的工具往来都在断点之后。
+// 缓存断点 ② 打在「上一轮结束处」：这一轮主人的话（附着每轮都变的「现在的情况」）在断点之后；
+// 断点 ③：一轮里连着调工具时打在最后一个工具结果上，这一轮的下一步从缓存读已有的工具往来。
 func TestAnthropicMarksPreviousTurnForCache(t *testing.T) {
 	model := NewAnthropicChatModel(AnthropicOptions{API: claudeAPIForTest("test-key", "", nil), Model: "claude-haiku-5-5", MaxTokens: 100})
 	system := brain.ChatMessage{Role: brain.RoleSystem, Text: "你是 haro。"}
 	cases := []struct {
 		name     string
 		messages []brain.ChatMessage
-		marked   string // 应带断点的那一块里出现的文字；空 = 不该有断点
+		marked   []string // 依次带断点的那几块里出现的文字；空 = 不该有断点
 	}{
-		{"第一轮：前面没有对话", []brain.ChatMessage{system, {Role: brain.RoleUser, Text: "现在 10 点。你好"}}, ""},
+		{"第一轮：前面没有对话", []brain.ChatMessage{system, {Role: brain.RoleUser, Text: "现在 10 点。你好"}}, nil},
 		{"上一轮的回答", []brain.ChatMessage{system,
 			{Role: brain.RoleUser, Text: "你好"}, {Role: brain.RoleAssistant, Text: "上一轮的回答"},
-			{Role: brain.RoleUser, Text: "现在 10 点。几点了"}}, "上一轮的回答"},
+			{Role: brain.RoleUser, Text: "现在 10 点。几点了"}}, []string{"上一轮的回答"}},
 		{"这一轮正在调工具", []brain.ChatMessage{system,
 			{Role: brain.RoleUser, Text: "你好"}, {Role: brain.RoleAssistant, Text: "上一轮的回答"},
 			{Role: brain.RoleUser, Text: "现在 10 点。天气"},
 			{Role: brain.RoleAssistant, ToolCalls: []brain.ToolCall{{ID: "w", Name: "get_weather"}}},
-			{Role: brain.RoleTool, ToolName: "get_weather", ToolCallID: "w", Text: "晴"}}, "上一轮的回答"},
+			{Role: brain.RoleTool, ToolName: "get_weather", ToolCallID: "w", Text: "晴"}}, []string{"上一轮的回答", "晴"}},
+		{"第一轮就在调工具（后台调查）", []brain.ChatMessage{system,
+			{Role: brain.RoleUser, Text: "查一下"},
+			{Role: brain.RoleAssistant, ToolCalls: []brain.ToolCall{{ID: "s", Name: "search_web"}}},
+			{Role: brain.RoleTool, ToolName: "search_web", ToolCallID: "s", Text: "搜到的结果"}}, []string{"搜到的结果"}},
 		{"上一轮有工具往来", []brain.ChatMessage{system,
 			{Role: brain.RoleUser, Text: "记一下"},
 			{Role: brain.RoleAssistant, ToolCalls: []brain.ToolCall{{ID: "n", Name: "save_note"}}},
 			{Role: brain.RoleTool, ToolName: "save_note", ToolCallID: "n", Text: "已记下"},
 			{Role: brain.RoleAssistant, Text: "记下了"},
-			{Role: brain.RoleUser, Text: "现在 10 点。还有呢"}}, "记下了"},
+			{Role: brain.RoleUser, Text: "现在 10 点。还有呢"}}, []string{"记下了"}},
 	}
 	for _, c := range cases {
 		params, err := model.request(brain.ChatRequest{Messages: c.messages})
@@ -234,11 +239,12 @@ func TestAnthropicMarksPreviousTurnForCache(t *testing.T) {
 			}
 			marked = append(marked, blocks...)
 		}
-		switch {
-		case c.marked == "" && len(marked) != 0:
-			t.Errorf("%s：不该有断点，实际 %v", c.name, marked)
-		case c.marked != "" && (len(marked) != 1 || !strings.Contains(marked[0], c.marked)):
-			t.Errorf("%s：断点应只打在「%s」那一块，实际 %v", c.name, c.marked, marked)
+		matches := len(marked) == len(c.marked)
+		for i := 0; matches && i < len(marked); i++ {
+			matches = strings.Contains(marked[i], c.marked[i])
+		}
+		if !matches {
+			t.Errorf("%s：断点应依次打在 %q 这几块，实际 %v", c.name, c.marked, marked)
 		}
 	}
 }

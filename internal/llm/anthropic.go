@@ -306,6 +306,7 @@ func (m *AnthropicChatModel) request(request brain.ChatRequest) (anthropic.Messa
 		params.System = []anthropic.TextBlockParam{{Text: system, CacheControl: anthropic.NewCacheControlEphemeralParam()}}
 	}
 	markPreviousTurnForCache(converted) // 断点 ②
+	markToolLoopForCache(converted)     // 断点 ③
 	params.Messages = converted
 	if len(tools) == 0 {
 		// 没有工具的请求，历史里却可能有工具往来（例如后台调查最后写结论）：
@@ -433,6 +434,22 @@ func markPreviousTurnForCache(messages []anthropic.MessageParam) {
 			}
 		}
 		return
+	}
+}
+
+// markToolLoopForCache 在一轮里连着调工具时（最后一条消息以工具结果开头）给最后一条消息的最后一块打缓存断点：
+// 这一轮的下一步原样带着到这里为止的全部内容，从缓存读，不再每一步都按没缓存的价格重付这一轮已有的工具往来
+// （后台调查一个任务就是一轮里十几步）。这一轮的第一步（最后一条是主人的话）不打：一问一答的轮次不多付写缓存的钱。
+func markToolLoopForCache(messages []anthropic.MessageParam) {
+	if len(messages) == 0 {
+		return
+	}
+	last := messages[len(messages)-1].OfUser
+	if last == nil || len(last.Content) == 0 || last.Content[0].OfToolResult == nil {
+		return
+	}
+	if cache := last.Content[len(last.Content)-1].GetCacheControl(); cache != nil {
+		*cache = anthropic.NewCacheControlEphemeralParam()
 	}
 }
 
