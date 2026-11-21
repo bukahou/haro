@@ -19,6 +19,7 @@ const (
 	turnInterrupted                   // 被打断（主人又说话、终端取消）
 	turnFailed                        // 模型或合成出错
 	turnRestarted                     // 服务端在这一轮中途重启（只用来预先存一份，重启后接进历史）
+	turnTruncated                     // 回答到了模型的输出上限，没说完
 )
 
 // turnRecord 是这一轮到目前为止的进展。只在回答的那个 goroutine 里写，收尾时读。
@@ -36,6 +37,8 @@ type turnRecord struct {
 	askedConfirmation bool
 	// restricted：声纹没确认的叫醒短句，受限回答：不给工具，这一轮不记进历史
 	restricted bool
+	// truncated：最后一段到了模型的输出上限，没说完
+	truncated bool
 	// extraNotes：这一轮情况说明里额外的附注（例如叫醒后的第一句）
 	extraNotes []string
 	// delivered：要「主人听完这一轮才算告诉了」的事——附上的情况的确认（任务板、额度提醒）和工具登记的（OnDelivered）；
@@ -97,6 +100,7 @@ const (
 	failedBeforeSpeaking  = "（这一轮出错了，没有说出回答）"
 	restartedUnfinished   = "（服务端在这一轮中途重启了，没有说完）"
 	nothingSaid           = "（这一轮没有说话）"
+	answerTruncated       = "（回答到了输出上限，后面的没有说出来）"
 )
 
 // messages 把这一轮整理成写进历史的一组消息：主人的话 → 每段工具往来（每个调用都有结果）→ 最后的回答。
@@ -142,6 +146,8 @@ func (s *Session) closeTurn(record *turnRecord, ending turnEnding) bool {
 		if answer == "" {
 			answer = nothingSaid
 		}
+	case turnTruncated:
+		answer = strings.TrimSpace(strings.TrimSpace(record.final.String()) + answerTruncated)
 	case turnInterrupted:
 		if s.truncateAtMs >= 0 { // 终端报了播到哪：一句没听到也记（模型要知道自己被打断了）
 			answer = heardText(s.spoken, s.truncateAtMs, record.finalRound())
@@ -197,6 +203,8 @@ func endingLabel(ending turnEnding) string {
 		return "被打断"
 	case turnFailed:
 		return "出错"
+	case turnTruncated:
+		return "到了输出上限"
 	default:
 		return "说完"
 	}

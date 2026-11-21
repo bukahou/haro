@@ -34,7 +34,7 @@ func drain(t *testing.T, model *Model, ctx context.Context, messages []brain.Cha
 	t.Helper()
 	var text strings.Builder
 	var calls []brain.ToolCall
-	for delta, err := range model.StreamReply(ctx, messages, nil) {
+	for delta, err := range model.StreamReply(ctx, brain.ChatRequest{Messages: messages}) {
 		if err != nil {
 			return text.String(), calls, err
 		}

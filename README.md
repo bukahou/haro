@@ -17,7 +17,7 @@
 
 - 终端：Go + miniaudio，Linux / macOS
 - 服务端：Go；本地识别（sherpa-onnx：SenseVoice、Silero VAD、Smart Turn、唤醒词、CAM++ 声纹）；
-  大模型用 ollama、Claude API（官方 Go SDK）或任意 OpenAI 兼容接口；语音合成用 GPT-SoVITS 或 Piper
+  大模型用 Claude API（官方 Go SDK）或任意 OpenAI 兼容接口（官方 openai-go；本地 Ollama 走它的 OpenAI 兼容端点）；语音合成用 GPT-SoVITS 或 Piper
 - 终端 ↔ 服务端：兼容 OpenAI Realtime API 的 WebSocket 事件协议
 
 架构、工具清单、配置与构建：见 [docs/architecture.md](docs/architecture.md)。

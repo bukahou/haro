@@ -35,6 +35,8 @@ var removedSettings = []removedSetting{
 	{name: "HARO_PIPER_PORT", removed: "服务端不再拉起 Piper，按 HARO_TTS_URL 连"},
 	{name: "HARO_NETDIAG_DNS_NAME", removed: "网络诊断工具已删除"},
 	{name: "HARO_NETDIAG_INTERNET_TARGET", removed: "网络诊断工具已删除"},
+	{name: "HARO_CONTEXT_SIZE", removed: "本地模型改走 Ollama 的 OpenAI 兼容端点，上下文长度在 Ollama 那边配（OLLAMA_CONTEXT_LENGTH）"},
+	{name: "HARO_MODEL_KEEP_ALIVE", removed: "本地模型改走 Ollama 的 OpenAI 兼容端点，模型常驻多久在 Ollama 那边配（OLLAMA_KEEP_ALIVE）"},
 }
 
 // checkRemovedSettings 检查环境里还写着的已删除配置项：返回给人看的提醒；值要求已删除的行为时返回错误。

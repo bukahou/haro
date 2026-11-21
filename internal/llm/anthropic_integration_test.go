@@ -102,7 +102,7 @@ func liveRound(t *testing.T, model *AnthropicChatModel, messages []brain.ChatMes
 	var text strings.Builder
 	var calls []brain.ToolCall
 	var usage brain.ReplyUsage
-	for delta, err := range model.StreamReply(ctx, messages, tools) {
+	for delta, err := range model.StreamReply(ctx, brain.ChatRequest{Messages: messages, Tools: tools}) {
 		if err != nil {
 			t.Fatalf("%s：%v", label, err)
 		}

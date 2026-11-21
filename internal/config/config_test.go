@@ -146,6 +146,10 @@ func TestRemovedSettings(t *testing.T) {
 	if err != nil || len(notes) != 2 {
 		t.Errorf("网络诊断的配置项只提醒：notes=%v err=%v", notes, err)
 	}
+	notes, err = checkRemovedSettings(lookup(map[string]string{"HARO_CONTEXT_SIZE": "4096", "HARO_MODEL_KEEP_ALIVE": "30m"}))
+	if err != nil || len(notes) != 2 {
+		t.Errorf("Ollama 那边配的两项只提醒：notes=%v err=%v", notes, err)
+	}
 	if notes, err := checkRemovedSettings(lookup(nil)); err != nil || len(notes) != 0 {
 		t.Errorf("没写时什么都不说：notes=%v err=%v", notes, err)
 	}

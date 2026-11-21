@@ -11,23 +11,28 @@ import (
 	"time"
 )
 
-// summaryModel 记下收到的请求，回一段固定摘要。
+// summaryModel 记下收到的请求，回一段固定摘要；truncated 时写到一半就到了输出上限。
 type summaryModel struct {
-	mu       sync.Mutex
-	requests []string
-	reply    string
+	mu        sync.Mutex
+	requests  []string
+	reply     string
+	truncated bool
 }
 
-func (m *summaryModel) StreamReply(_ context.Context, messages []ChatMessage, _ []ToolSpec) iter.Seq2[ReplyDelta, error] {
+func (m *summaryModel) StreamReply(_ context.Context, request ChatRequest) iter.Seq2[ReplyDelta, error] {
+	messages := request.Messages
 	m.mu.Lock()
 	m.requests = append(m.requests, messages[len(messages)-1].Text)
 	m.mu.Unlock()
 	return func(yield func(ReplyDelta, error) bool) {
-		yield(ReplyDelta{Text: "<think>想想</think>" + m.reply}, nil)
+		if !yield(ReplyDelta{Text: m.reply}, nil) {
+			return
+		}
+		if m.truncated {
+			yield(ReplyDelta{Stop: StopMaxTokens}, nil)
+		}
 	}
 }
-
-func (m *summaryModel) Warmup(context.Context) error { return nil }
 
 func (m *summaryModel) count() int {
 	m.mu.Lock()
@@ -59,7 +64,7 @@ func TestRollingSummary(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	if got := conversation.currentSummary(); got != "主人的车停在 B2。" {
-		t.Fatalf("摘要（去掉思考内容）：%q", got)
+		t.Fatalf("摘要：%q", got)
 	}
 	request := model.requests[0]
 	if !strings.Contains(request, "主人：车停在 B2") || strings.Contains(request, "工具结果") {
@@ -84,5 +89,31 @@ func TestNoSummaryKeepsOldBehaviour(t *testing.T) {
 	}
 	if len(conversation.messages()) != 2*3 || conversation.currentSummary() != "" {
 		t.Error("没开摘要：掉出窗口的直接丢")
+	}
+}
+
+// 摘要写到一半到了输出上限：半份摘要不用，旧摘要（这里是没有）和没压进去的对话照旧带着。
+func TestTruncatedSummaryIsNotUsed(t *testing.T) {
+	book := NewConversationBook(nil, Options{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	model := &summaryModel{reply: "主人的车停在", truncated: true}
+	book.SummarizeWith(model)
+	conversation := book.Conversation("主人")
+	for _, text := range []string{"车停在 B2", "第二句", "第三句", "第四句", "第五句"} {
+		conversation.appendTurn(ConversationTurn{Messages: []ChatMessage{{Role: RoleUser, Text: text},
+			{Role: RoleAssistant, Text: "好的。"}}}, 2)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for model.count() == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	time.Sleep(50 * time.Millisecond) // 让压缩那一步收尾
+	if model.count() == 0 {
+		t.Fatal("够一批了，应该请求压缩")
+	}
+	if got := conversation.currentSummary(); got != "" {
+		t.Errorf("被截断的半份摘要不该用：%q", got)
+	}
+	if messages := conversation.messages(); len(messages) != 5*3 { // 每轮：时间标记 + 两条，五轮都还在
+		t.Errorf("没压进去的对话照旧带着：%d 条", len(messages))
 	}
 }

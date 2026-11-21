@@ -125,7 +125,7 @@ func NewSession(parts Components, opts Options, logger *slog.Logger) *Session {
 
 // Warmup 预热模型。只在部署侧调用（不是 Realtime 事件）。
 func (s *Session) Warmup(ctx context.Context) error {
-	return s.parts.Model.Warmup(ctx)
+	return WarmUp(ctx, s.parts.Model)
 }
 
 // Events 返回服务端事件流（会话期间不关闭）。

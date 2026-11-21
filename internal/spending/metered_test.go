@@ -45,7 +45,7 @@ type streamScript struct {
 	cancelled      brain.ReplyDelta
 }
 
-func (s streamScript) StreamReply(ctx context.Context, _ []brain.ChatMessage, _ []brain.ToolSpec) iter.Seq2[brain.ReplyDelta, error] {
+func (s streamScript) StreamReply(ctx context.Context, _ brain.ChatRequest) iter.Seq2[brain.ReplyDelta, error] {
 	return func(yield func(brain.ReplyDelta, error) bool) {
 		for _, delta := range s.deltas {
 			if !yield(delta, nil) {
@@ -87,7 +87,7 @@ func TestMeteredRecordsEveryRequest(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			ledger := &chargeLog{}
-			for range metered(c.inner, ledger).StreamReply(context.Background(), nil, nil) {
+			for range metered(c.inner, ledger).StreamReply(context.Background(), brain.ChatRequest{}) {
 			}
 			got := ledger.recorded()
 			if len(got) != 1 || got[0].InputTokens != c.want.InputTokens || got[0].OutputTokens != c.want.OutputTokens ||
@@ -99,7 +99,7 @@ func TestMeteredRecordsEveryRequest(t *testing.T) {
 	// 出错时内层交出了知道的输入：照实记、标不完整
 	ledger := &chargeLog{}
 	inner := streamScript{deltas: []brain.ReplyDelta{{Text: "好"}, {Usage: partial}}, err: errors.New("断了")}
-	for range metered(inner, ledger).StreamReply(context.Background(), nil, nil) {
+	for range metered(inner, ledger).StreamReply(context.Background(), brain.ChatRequest{}) {
 	}
 	if got := ledger.recorded(); len(got) != 1 || got[0].InputTokens != 1000 || !got[0].Incomplete || got[0].TokensUnknown {
 		t.Errorf("出错时应记知道的输入：%+v", got)
@@ -113,7 +113,7 @@ func TestMeteredRecordsInterruptedRequest(t *testing.T) {
 		cancelled: brain.ReplyDelta{Usage: &brain.ReplyUsage{PromptTokens: 2000, Incomplete: true}}}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	for range metered(inner, ledger).StreamReply(ctx, nil, nil) {
+	for range metered(inner, ledger).StreamReply(ctx, brain.ChatRequest{}) {
 		cancel() // 主人打断：取消后不再要后面的
 		break
 	}
@@ -126,7 +126,7 @@ func TestMeteredRecordsInterruptedRequest(t *testing.T) {
 func TestMeteredRecordsAbandonedRequestAsUnknown(t *testing.T) {
 	ledger := &chargeLog{}
 	inner := streamScript{deltas: []brain.ReplyDelta{{Text: "从前"}, {Text: "有座山"}, {Usage: &brain.ReplyUsage{PromptTokens: 2000, OutputTokens: 5}}}}
-	for range metered(inner, ledger).StreamReply(context.Background(), nil, nil) {
+	for range metered(inner, ledger).StreamReply(context.Background(), brain.ChatRequest{}) {
 		break
 	}
 	if got := ledger.recorded(); len(got) != 1 || !got[0].TokensUnknown {

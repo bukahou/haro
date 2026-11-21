@@ -99,7 +99,8 @@ func TestSwitchPersonaToolOnlyWithChoices(t *testing.T) {
 
 type specRecorder struct{ names []string }
 
-func (m *specRecorder) StreamReply(_ context.Context, _ []brain.ChatMessage, tools []brain.ToolSpec) iter.Seq2[brain.ReplyDelta, error] {
+func (m *specRecorder) StreamReply(_ context.Context, request brain.ChatRequest) iter.Seq2[brain.ReplyDelta, error] {
+	tools := request.Tools
 	for _, tool := range tools {
 		m.names = append(m.names, tool.Name)
 	}
@@ -113,7 +114,9 @@ type promptRecorder struct {
 	system string
 }
 
-func (m *promptRecorder) StreamReply(_ context.Context, messages []brain.ChatMessage, tools []brain.ToolSpec) iter.Seq2[brain.ReplyDelta, error] {
+func (m *promptRecorder) StreamReply(_ context.Context, request brain.ChatRequest) iter.Seq2[brain.ReplyDelta, error] {
+	messages := request.Messages
+	tools := request.Tools
 	m.tools = nil
 	for _, tool := range tools {
 		m.tools = append(m.tools, tool.Name)

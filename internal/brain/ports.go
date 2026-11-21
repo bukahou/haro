@@ -15,11 +15,41 @@ import (
 // ChatModel 根据完整的消息列表（系统提示词 + 历史 + 本轮输入 + 工具往来）流式给出回答。
 type ChatModel interface {
 	// StreamReply 逐段产出可见文字与工具调用；调用方 range 拉取，提前 break 即中止生成。
-	// tools 为空表示这一轮不允许调用工具。最后一个 ReplyDelta 带 Usage。
-	StreamReply(ctx context.Context, messages []ChatMessage, tools []ToolSpec) iter.Seq2[ReplyDelta, error]
-	// Warmup 预先把模型加载进显存，避免第一轮对话等几十秒。
+	// 最后一段带 Usage 和 Stop（为什么停下）；出错时那一段带知道的那部分用量。
+	StreamReply(ctx context.Context, request ChatRequest) iter.Seq2[ReplyDelta, error]
+}
+
+// ChatRequest 是一次模型请求。
+type ChatRequest struct {
+	Messages []ChatMessage
+	Tools    []ToolSpec // 这次带的工具定义；空 = 没有工具
+	// ForbidToolCalls：工具定义照给（定义不变，提示词缓存的前缀就不变），但这一轮不许调用 ——
+	// 例如最后一轮逼模型直接回答。各适配用厂商的「不许调用工具」选项实现；服务端不认这个选项的，这一轮不带工具。
+	ForbidToolCalls bool
+}
+
+// ModelWarmer 是需要预热的模型（可选）：按需加载模型的服务（本地 Ollama）在第一轮对话前先把模型装进显存，
+// 免得第一轮等几十秒；云端不用实现。包装别的模型的那几层用 WarmUp 转发。
+type ModelWarmer interface {
 	Warmup(ctx context.Context) error
 }
+
+// WarmUp 预热 model（它需要预热的话）。
+func WarmUp(ctx context.Context, model ChatModel) error {
+	if warmer, ok := model.(ModelWarmer); ok {
+		return warmer.Warmup(ctx)
+	}
+	return nil
+}
+
+// StopReason 是模型这次为什么停下。
+type StopReason int
+
+const (
+	StopCompleted StopReason = iota // 说完了，或停下来等工具的结果
+	// StopMaxTokens：输出到了上限，被截断。截断时适配不交出工具调用（参数可能不完整）
+	StopMaxTokens
+)
 
 // TerminalCamera 是终端经 MCP 提供的摄像头（每条终端连接一个，由连接层注入）。
 type TerminalCamera interface {
@@ -177,6 +207,7 @@ type ReplyDelta struct {
 	Text      string      // 新增的可见文字（可能为空）
 	ToolCalls []ToolCall  // 模型要求调用的工具（可能为空）
 	Usage     *ReplyUsage // 只在最后一段上有
+	Stop      StopReason  // 只在最后一段上有意义
 }
 
 // ToolSpec 描述一个可以给模型用的工具。
@@ -210,9 +241,8 @@ type ReplyUsage struct {
 	// 记账时分开算；不报缓存的模型都是 0
 	CacheReadTokens  int
 	CacheWriteTokens int
-	ThinkingChars    int   // 思考内容的字数（只统计，不朗读）；用来查「看不见的输出」
-	LoadMillis       int64 // 本次请求里加载模型花的时间
-	Requests         int   // 这次回答请求了模型几次（调工具时不止一次；add 累加时计数）
+	ThinkingChars    int // 思考内容的字数（只统计，不朗读）；用来查「看不见的输出」
+	Requests         int // 这次回答请求了模型几次（调工具时不止一次；add 累加时计数）
 	// Incomplete：请求被打断或出错，用量只知道一部分：OutputTokens 不知道（为 0，不编）；
 	// 知道多少输入取决于厂商（Claude 在流的开头就报了输入）。TokensUnknown：连输入也不知道（还没开始就失败了）
 	Incomplete    bool
@@ -234,7 +264,6 @@ func (u *ReplyUsage) add(request *ReplyUsage) *ReplyUsage {
 	total.CacheReadTokens += request.CacheReadTokens
 	total.CacheWriteTokens += request.CacheWriteTokens
 	total.ThinkingChars += request.ThinkingChars
-	total.LoadMillis += request.LoadMillis
 	total.Requests++
 	total.Incomplete = total.Incomplete || request.Incomplete
 	return &total

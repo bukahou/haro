@@ -129,7 +129,7 @@ func useWorkloadIdentity(t *testing.T) {
 
 func replyText(t *testing.T, model brain.ChatModel) (string, error) {
 	t.Helper()
-	text, _, _, err := collect(t, model.StreamReply(context.Background(), []brain.ChatMessage{{Role: brain.RoleUser, Text: "?"}}, nil))
+	text, _, _, err := collect(t, model.StreamReply(context.Background(), brain.ChatRequest{Messages: []brain.ChatMessage{{Role: brain.RoleUser, Text: "?"}}}))
 	return text, err
 }
 
@@ -214,7 +214,7 @@ func TestAnthropicMarksPreviousTurnForCache(t *testing.T) {
 			{Role: brain.RoleUser, Text: "现在 10 点。还有呢"}}, "记下了"},
 	}
 	for _, c := range cases {
-		params, err := model.request(c.messages, nil)
+		params, err := model.request(brain.ChatRequest{Messages: c.messages})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -295,7 +295,7 @@ func TestClaudeReportsPartialUsageWhenCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	var usage *brain.ReplyUsage
-	for delta, err := range model.StreamReply(ctx, []brain.ChatMessage{{Role: brain.RoleUser, Text: "讲个故事"}}, nil) {
+	for delta, err := range model.StreamReply(ctx, brain.ChatRequest{Messages: []brain.ChatMessage{{Role: brain.RoleUser, Text: "讲个故事"}}}) {
 		if delta.Text != "" {
 			<-started
 			cancel() // 主人打断

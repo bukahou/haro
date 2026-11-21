@@ -38,11 +38,11 @@ func TestAnthropicStreamsTextToolCallsAndCacheUsage(t *testing.T) {
 	var pieces []string
 	var calls []brain.ToolCall
 	var usage *brain.ReplyUsage
-	for delta, err := range model.StreamReply(t.Context(), []brain.ChatMessage{
+	for delta, err := range model.StreamReply(t.Context(), brain.ChatRequest{Messages: []brain.ChatMessage{
 		{Role: brain.RoleSystem, Text: "你是 haro。"},
 		{Role: brain.RoleUser, Text: "东京天气怎么样"},
-	}, []brain.ToolSpec{{Name: "get_weather", Description: "查天气",
-		Parameters: json.RawMessage(`{"type":"object","properties":{"city":{"type":"string"}},"required":["city"],"additionalProperties":false}`)}}) {
+	}, Tools: []brain.ToolSpec{{Name: "get_weather", Description: "查天气",
+		Parameters: json.RawMessage(`{"type":"object","properties":{"city":{"type":"string"}},"required":["city"],"additionalProperties":false}`)}}}) {
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -162,11 +162,11 @@ func TestAnthropicNoToolsRoundKeepsHistoryValid(t *testing.T) {
 		`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":5}}`,
 		`{"type":"message_stop"}`}})
 	model := testClaudeModel(server, "")
-	for _, err := range model.StreamReply(t.Context(), []brain.ChatMessage{
+	for _, err := range model.StreamReply(t.Context(), brain.ChatRequest{Messages: []brain.ChatMessage{
 		{Role: brain.RoleUser, Text: "天气"},
 		{Role: brain.RoleAssistant, ToolCalls: []brain.ToolCall{{ID: "x", Name: "get_weather"}}},
 		{Role: brain.RoleTool, ToolName: "get_weather", ToolCallID: "x", Text: "晴"},
-	}, nil) {
+	}}) {
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -196,7 +196,7 @@ func TestAnthropicRefusalIsAnErrorWithUsage(t *testing.T) {
 	model := testClaudeModel(server, "low")
 	var refusal *RefusalError
 	var usage *brain.ReplyUsage
-	for delta, err := range model.StreamReply(t.Context(), []brain.ChatMessage{{Role: brain.RoleUser, Text: "?"}}, nil) {
+	for delta, err := range model.StreamReply(t.Context(), brain.ChatRequest{Messages: []brain.ChatMessage{{Role: brain.RoleUser, Text: "?"}}}) {
 		if delta.Usage != nil {
 			usage = delta.Usage
 		}
@@ -224,7 +224,7 @@ func TestAnthropicServerErrorFailsFastWithoutRetry(t *testing.T) {
 	model := testClaudeModel(server, "low")
 	produced := false
 	var failure error
-	for delta, err := range model.StreamReply(t.Context(), []brain.ChatMessage{{Role: brain.RoleUser, Text: "你好"}}, nil) {
+	for delta, err := range model.StreamReply(t.Context(), brain.ChatRequest{Messages: []brain.ChatMessage{{Role: brain.RoleUser, Text: "你好"}}}) {
 		if delta.Text != "" || len(delta.ToolCalls) > 0 {
 			produced = true
 		}

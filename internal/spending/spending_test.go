@@ -151,7 +151,7 @@ type replyModel struct {
 	calls int
 }
 
-func (m *replyModel) StreamReply(context.Context, []brain.ChatMessage, []brain.ToolSpec) iter.Seq2[brain.ReplyDelta, error] {
+func (m *replyModel) StreamReply(context.Context, brain.ChatRequest) iter.Seq2[brain.ReplyDelta, error] {
 	m.calls++
 	return func(yield func(brain.ReplyDelta, error) bool) {
 		if !yield(brain.ReplyDelta{Text: m.text}, nil) {
@@ -166,7 +166,7 @@ func (m *replyModel) Warmup(context.Context) error { return nil }
 func collectText(t *testing.T, model brain.ChatModel) (string, error) {
 	t.Helper()
 	var text strings.Builder
-	for delta, err := range model.StreamReply(context.Background(), nil, nil) {
+	for delta, err := range model.StreamReply(context.Background(), brain.ChatRequest{}) {
 		if err != nil {
 			return text.String(), err
 		}

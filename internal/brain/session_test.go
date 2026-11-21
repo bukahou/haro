@@ -30,7 +30,8 @@ type fakeModel struct {
 	history   []brain.ChatMessage
 }
 
-func (f *fakeModel) StreamReply(ctx context.Context, messages []brain.ChatMessage, _ []brain.ToolSpec) iter.Seq2[brain.ReplyDelta, error] {
+func (f *fakeModel) StreamReply(ctx context.Context, request brain.ChatRequest) iter.Seq2[brain.ReplyDelta, error] {
+	messages := request.Messages
 	f.lastInput, f.history = messages[len(messages)-1], messages[:len(messages)-1]
 	return func(yield func(brain.ReplyDelta, error) bool) {
 		for _, token := range f.tokens {

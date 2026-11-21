@@ -79,9 +79,15 @@ func run(logger *slog.Logger) error {
 	}()
 
 	httpClient := &http.Client{Timeout: settings.RequestTimeout}
+	// 模型的流式请求不用带总超时的客户端：客户端的总超时连读流也算在内，各用途要的长短不同 ⇒
+	// 每个模型按用途给请求设期限（cloudModelSpec.requestTimeout；调查受它自己的总时限管）
+	modelHTTP := &http.Client{}
 	// Claude 的客户端全进程只建一个，所有用途共用（见 llm.ClaudeAPI：多一个客户端 / HTTP 客户端就多一份令牌缓存，
 	// 集群令牌只能换一次 ⇒ 互相把令牌用掉）。不用 Claude 时为 nil
-	claude := newClaudeAPI(settings, httpClient)
+	claude := newClaudeAPI(settings, modelHTTP)
+	if _, err := llm.ParseToolCallIDStyle(settings.CloudLLMToolCallIDs); err != nil {
+		return fmt.Errorf("HARO_CLOUD_LLM_TOOL_CALL_IDS: %w", err)
+	}
 
 	synthesizer, err := buildSynthesizer(settings, httpClient, logger)
 	if err != nil {
@@ -133,7 +139,7 @@ func run(logger *slog.Logger) error {
 			expertSearch = func(ctx context.Context, query string) (string, error) {
 				return tools.QuickSearch(ctx, searcher, meter, query, logger)
 			}
-			runner, closeRunner, err := startResearch(ctx, settings, claude, httpClient, searcher, ledger, guard, logger)
+			runner, closeRunner, err := startResearch(ctx, settings, claude, modelHTTP, searcher, ledger, guard, logger)
 			if err != nil {
 				return err
 			}
@@ -157,9 +163,9 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	model := buildChatModel(settings, claude, httpClient, ledger, guard, spending.PurposeChat, logger)
+	model := buildChatModel(settings, claude, modelHTTP, ledger, guard, spending.PurposeChat, logger)
 	logger.Info("预热模型（本地第一次可能要几十秒；云端不用预热）", "model", activeModel(settings))
-	if err := model.Warmup(ctx); err != nil {
+	if err := brain.WarmUp(ctx, model); err != nil {
 		logger.Warn("模型预热失败，第一轮对话会比较慢", "err", err)
 	}
 	components := brain.Components{
@@ -170,7 +176,7 @@ func run(logger *slog.Logger) error {
 		},
 	}
 	if settings.VisionExpert() {
-		components.FrameExpert = newVisionExpert(settings, claude, httpClient, ledger, guard, expertSearch, logger)
+		components.FrameExpert = newVisionExpert(settings, claude, modelHTTP, ledger, guard, expertSearch, logger)
 	}
 	// 对话簿所有终端连接共用：换终端、重连、服务端重启都接得上
 	var conversationStore brain.ConversationStore
@@ -199,7 +205,7 @@ func run(logger *slog.Logger) error {
 		components.Profiles = profiles
 	}
 	if settings.ConversationSummary { // 滚动摘要：和主对话同一套模型，按 summary 用途记账
-		components.Conversations.SummarizeWith(buildChatModel(settings, claude, httpClient, ledger, guard, spending.PurposeSummary,
+		components.Conversations.SummarizeWith(buildChatModel(settings, claude, modelHTTP, ledger, guard, spending.PurposeSummary,
 			logger.With("model_use", "summary")))
 	}
 	if settings.WakeArbitration > 0 { // 多台终端同时听到唤醒词：只让最合适的那台回答
@@ -292,54 +298,53 @@ func readinessChecks(settings config.Settings, claude *llm.ClaudeAPI, ledger spe
 //   - local：本地 ollama 为主、云端退路（本地模型那台机器离线时自动改用云端）
 //
 // purpose 是记账用途：主对话（chat）与滚动摘要（summary，R4）各建一套，费用分开记。
-func buildChatModel(settings config.Settings, claude *llm.ClaudeAPI, httpClient *http.Client, ledger spending.Ledger, guard *spending.Guard,
+func buildChatModel(settings config.Settings, claude *llm.ClaudeAPI, client *http.Client, ledger spending.Ledger, guard *spending.Guard,
 	purpose spending.Purpose, logger *slog.Logger) brain.ChatModel {
-	// 当主模型时用快速失败的客户端：等响应头最多 CloudLLMTimeout，连不上 / 卡住时尽快换退路
-	quickClient := &http.Client{Timeout: settings.RequestTimeout,
-		Transport: &http.Transport{Proxy: http.ProxyFromEnvironment, ResponseHeaderTimeout: settings.CloudLLMTimeout,
-			DialContext: (&net.Dialer{Timeout: 2 * time.Second}).DialContext}}
 	pricing := pricingOf(settings)
 	maxTokens := settings.CloudMaxTokens
 	if purpose == spending.PurposeSummary && maxTokens < summaryMaxTokens {
 		maxTokens = summaryMaxTokens // 摘要最长 300 字，聊天的输出上限可能不够
 	}
+	// quick：当主模型时快速失败 —— 等不到开始回答（CloudLLMTimeout）就取消、交给退路
+	firstTokenTimeout := func(quick bool) time.Duration {
+		if quick {
+			return settings.CloudLLMTimeout
+		}
+		return 0
+	}
 	// 每个具体模型都记账（本地模型在价格表里标了不花钱，照样记 token）
-	newLocal := func(client *http.Client) brain.ChatModel {
-		return spending.NewMeteredChatModel(
-			llm.NewOllamaChatModel(settings.OllamaURL, settings.Model, settings.ContextSize, settings.ModelKeepAlive, client),
+	newLocal := func(quick bool) brain.ChatModel {
+		return spending.NewMeteredChatModel(llm.NewOllamaChatModel(settings.OllamaURL, settings.Model, maxTokens, llm.OpenAIOptions{
+			HTTPClient: client, FirstTokenTimeout: firstTokenTimeout(quick), RequestTimeout: settings.RequestTimeout}),
 			settings.Model, purpose, pricing, ledger, logger)
 	}
-	// quick：当主模型时快速失败（等不到开始回答就交给退路）。OpenAI 兼容接口靠 quickClient 的响应头超时；
-	// Claude 共用一个 HTTP 客户端，改用 FirstTokenTimeout（见 llm.ClaudeAPI）
-	newCloud := func(client *http.Client, quick bool) brain.ChatModel {
-		var firstTokenTimeout time.Duration
-		if quick {
-			firstTokenTimeout = settings.CloudLLMTimeout
-		}
+	newCloud := func(quick bool) brain.ChatModel {
 		// 不在 SDK 里重试：失败时由退路接手，不让主人多等
-		return spending.NewMeteredChatModel(newCloudChatModel(settings, claude, settings.CloudLLMModel, maxTokens, settings.CloudLLMEffort,
-			settings.CloudLLMThinking, 0, firstTokenTimeout, client), settings.CloudLLMModel, purpose, pricing, ledger, logger)
+		return spending.NewMeteredChatModel(newCloudChatModel(settings, claude, cloudModelSpec{model: settings.CloudLLMModel,
+			maxTokens: maxTokens, effort: settings.CloudLLMEffort, thinking: settings.CloudLLMThinking,
+			firstTokenTimeout: firstTokenTimeout(quick), requestTimeout: settings.RequestTimeout}, client),
+			settings.CloudLLMModel, purpose, pricing, ledger, logger)
 	}
 	var paid, free brain.ChatModel // paid：平时用的那套（可能花钱）；free：月度额度用完后退回的本地模型
 	switch {
 	case settings.LLMProvider != config.LLMCloud && !settings.LLMFallback:
 		logger.Info("服务端：本地模型", "model", settings.Model)
-		paid = newLocal(httpClient)
+		paid = newLocal(false)
 		free = paid
 	case settings.LLMProvider != config.LLMCloud:
 		logger.Info("服务端：本地模型，失败退回云端", "model", settings.Model, "fallback", settings.CloudLLMModel)
-		paid = llm.NewFallbackChatModel(newLocal(quickClient), "local", newCloud(httpClient, false), "cloud", settings.LLMCooldown, logger)
-		free = newLocal(httpClient)
+		paid = llm.NewFallbackChatModel(newLocal(true), "local", newCloud(false), "cloud", settings.LLMCooldown, logger)
+		free = newLocal(false)
 	case !settings.LLMFallback:
 		logger.Info("服务端：云端模型（月度额度用完后不回答：没有本地退路）", "model", settings.CloudLLMModel)
-		paid = newCloud(quickClient, true)
+		paid = newCloud(true)
 	default:
 		logger.Info("服务端：云端模型，失败退回本地", "model", settings.CloudLLMModel, "fallback", settings.Model)
-		paid = llm.NewFallbackChatModel(newCloud(quickClient, true), "cloud", newLocal(httpClient), "local", settings.LLMCooldown, logger)
-		free = newLocal(httpClient)
+		paid = llm.NewFallbackChatModel(newCloud(true), "cloud", newLocal(false), "local", settings.LLMCooldown, logger)
+		free = newLocal(false)
 	}
 	if purpose == spending.PurposeChat {
-		paid = routeToStrong(settings, claude, httpClient, paid, maxTokens, pricing, ledger, logger)
+		paid = routeToStrong(settings, claude, client, paid, maxTokens, pricing, ledger, logger)
 	}
 	return spending.NewBudgetedChatModel(paid, free, guard, logger)
 }
@@ -352,8 +357,10 @@ func routeToStrong(settings config.Settings, claude *llm.ClaudeAPI, client *http
 	if !vision && !correction {
 		return base
 	}
-	strong := spending.NewMeteredChatModel(newCloudChatModel(settings, claude, settings.StrongLLMModel, maxTokens, settings.StrongLLMEffort,
-		settings.StrongLLMThinking, 0, settings.StrongLLMTimeout, client), settings.StrongLLMModel, spending.PurposeChat, pricing, ledger, logger)
+	strong := spending.NewMeteredChatModel(newCloudChatModel(settings, claude, cloudModelSpec{model: settings.StrongLLMModel,
+		maxTokens: maxTokens, effort: settings.StrongLLMEffort, thinking: settings.StrongLLMThinking,
+		firstTokenTimeout: settings.StrongLLMTimeout, requestTimeout: settings.RequestTimeout}, client),
+		settings.StrongLLMModel, spending.PurposeChat, pricing, ledger, logger)
 	strongOrBase := llm.NewFallbackChatModel(strong, "strong", base, "cloud", settings.LLMCooldown, logger)
 	options := llm.RouterOptions{Default: base, Logger: logger}
 	if vision {
@@ -371,8 +378,9 @@ func routeToStrong(settings config.Settings, claude *llm.ClaudeAPI, client *http
 // 它出错或等太久时，brain 退回把画面直接交给前台模型（不经选模型的包装层，前台照常是云端模型）。
 func newVisionExpert(settings config.Settings, claude *llm.ClaudeAPI, client *http.Client, ledger spending.Ledger, guard *spending.Guard,
 	search vision.Search, logger *slog.Logger) brain.FrameExpert {
-	model := spending.NewMeteredChatModel(newCloudChatModel(settings, claude, settings.StrongLLMModel, settings.CloudMaxTokens,
-		settings.StrongLLMEffort, settings.StrongLLMThinking, 0, settings.StrongLLMTimeout, client),
+	model := spending.NewMeteredChatModel(newCloudChatModel(settings, claude, cloudModelSpec{model: settings.StrongLLMModel,
+		maxTokens: settings.CloudMaxTokens, effort: settings.StrongLLMEffort, thinking: settings.StrongLLMThinking,
+		firstTokenTimeout: settings.StrongLLMTimeout, requestTimeout: settings.RequestTimeout}, client),
 		settings.StrongLLMModel, spending.PurposeVision, pricingOf(settings), ledger, logger)
 	logger.Info("看画面：交给幕后专家，判断由前台转述", "model", settings.StrongLLMModel, "search", search != nil)
 	return vision.NewExpert(spending.NewBudgetedChatModel(model, nil, guard, logger), settings.StrongLLMModel, search, logger)
@@ -386,15 +394,27 @@ func newClaudeAPI(settings config.Settings, httpClient *http.Client) *llm.Claude
 	return llm.NewClaudeAPI(settings.AnthropicAPIKey, settings.CloudLLMURL, httpClient)
 }
 
+// cloudModelSpec 是一个云端模型的参数：同一个云端接口，不同用途（聊天、更强的模型、看画面、调查）各一套。
+type cloudModelSpec struct {
+	model             string
+	maxTokens         int
+	effort, thinking  string        // 只对 anthropic 有效
+	retries           int           // SDK 在 429 / 5xx / 断线时自己重试几次
+	firstTokenTimeout time.Duration // 等开始回答最多多久；0 = 不限
+	requestTimeout    time.Duration // 整次请求最多多久；0 = 只受调用方的 context 管
+}
+
 // newCloudChatModel 按 HARO_CLOUD_LLM_API 创建云端的 model：openai = OpenAI 兼容接口（用 client），
-// anthropic = Claude API（用共用的 claude；effort、thinking、retries、firstTokenTimeout 只对它有效）。
-func newCloudChatModel(settings config.Settings, claude *llm.ClaudeAPI, model string, maxTokens int, effort, thinking string, retries int,
-	firstTokenTimeout time.Duration, client *http.Client) brain.ChatModel {
+// anthropic = Claude API（用共用的 claude）。
+func newCloudChatModel(settings config.Settings, claude *llm.ClaudeAPI, spec cloudModelSpec, client *http.Client) brain.ChatModel {
 	if settings.CloudLLMAPI == config.CloudAPIAnthropic {
-		return llm.NewAnthropicChatModel(llm.AnthropicOptions{API: claude, Model: model, MaxTokens: maxTokens,
-			Effort: effort, Thinking: thinking, MaxRetries: retries, FirstTokenTimeout: firstTokenTimeout})
+		return llm.NewAnthropicChatModel(llm.AnthropicOptions{API: claude, Model: spec.model, MaxTokens: spec.maxTokens,
+			Effort: spec.effort, Thinking: spec.thinking, MaxRetries: spec.retries, FirstTokenTimeout: spec.firstTokenTimeout,
+			RequestTimeout: spec.requestTimeout})
 	}
-	return llm.NewOpenAIChatModel(settings.CloudLLMURL, model, settings.CloudLLMAPIKey, maxTokens, client)
+	return llm.NewOpenAIChatModel(llm.OpenAIOptions{BaseURL: settings.CloudLLMURL, Model: spec.model, APIKey: settings.CloudLLMAPIKey,
+		MaxTokens: spec.maxTokens, HTTPClient: client, ToolCallIDs: llm.ToolCallIDStyle(settings.CloudLLMToolCallIDs),
+		MaxRetries: spec.retries, FirstTokenTimeout: spec.firstTokenTimeout, RequestTimeout: spec.requestTimeout})
 }
 
 // pricingOf 是把用量折成日元的单价（都来自配置）：云端模型、设了的话更强的模型；本地模型标成不花钱。
@@ -474,7 +494,7 @@ func connectWebSearch(settings config.Settings, httpClient *http.Client, logger 
 }
 
 // startResearch 开启后台调查：任务账本、调查用的模型、上限，并在后台开始处理队列。
-func startResearch(ctx context.Context, settings config.Settings, claude *llm.ClaudeAPI, httpClient *http.Client, searcher tools.WebSearcher,
+func startResearch(ctx context.Context, settings config.Settings, claude *llm.ClaudeAPI, client *http.Client, searcher tools.WebSearcher,
 	ledger spending.Ledger, guard *spending.Guard, logger *slog.Logger) (*research.Runner, func(), error) {
 	store, err := research.OpenTaskStore(ctx, settings.ResearchDB)
 	if err != nil {
@@ -486,12 +506,13 @@ func startResearch(ctx context.Context, settings config.Settings, claude *llm.Cl
 	pricing := pricingOf(settings)
 	var model brain.ChatModel
 	if settings.ResearchLLM == config.LLMCloud {
-		// 调查在后台、不急：限流 / 服务端一时出错时让 SDK 重试两次
-		model = spending.NewMeteredChatModel(newCloudChatModel(settings, claude, settings.CloudLLMModel, researchMaxTokens, settings.ResearchEffort,
-			settings.CloudLLMThinking, 2, 0, httpClient), settings.CloudLLMModel, spending.PurposeResearch, pricing, ledger, logger)
+		// 调查在后台、不急：限流 / 服务端一时出错时让 SDK 重试两次；每次请求不另设期限，受调查自己的总时限管
+		model = spending.NewMeteredChatModel(newCloudChatModel(settings, claude, cloudModelSpec{model: settings.CloudLLMModel,
+			maxTokens: researchMaxTokens, effort: settings.ResearchEffort, thinking: settings.CloudLLMThinking, retries: 2}, client),
+			settings.CloudLLMModel, spending.PurposeResearch, pricing, ledger, logger)
 	} else {
-		model = spending.NewMeteredChatModel(llm.NewOllamaChatModel(settings.OllamaURL, settings.Model, settings.ContextSize,
-			settings.ModelKeepAlive, httpClient), settings.Model, spending.PurposeResearch, pricing, ledger, logger)
+		model = spending.NewMeteredChatModel(llm.NewOllamaChatModel(settings.OllamaURL, settings.Model, researchMaxTokens,
+			llm.OpenAIOptions{HTTPClient: client}), settings.Model, spending.PurposeResearch, pricing, ledger, logger)
 	}
 	limits := research.DefaultLimits
 	limits.Timeout, limits.MaxRounds = settings.ResearchTimeout, settings.ResearchMaxRounds
@@ -500,8 +521,9 @@ func startResearch(ctx context.Context, settings config.Settings, claude *llm.Cl
 	runner := research.NewRunner(store, model, searcher, meter, guard, limits, logger)
 	writer := "（调查模型自己写）"
 	if settings.StrongLLMFor(config.StrongForResearch) { // 搜索和读网页用便宜的模型，结论交给更强的模型写
-		runner.WriteConclusionsWith(spending.NewMeteredChatModel(newCloudChatModel(settings, claude, settings.StrongLLMModel, researchMaxTokens,
-			settings.ResearchEffort, settings.StrongLLMThinking, 2, 0, httpClient), settings.StrongLLMModel, spending.PurposeResearch, pricing, ledger, logger))
+		runner.WriteConclusionsWith(spending.NewMeteredChatModel(newCloudChatModel(settings, claude, cloudModelSpec{model: settings.StrongLLMModel,
+			maxTokens: researchMaxTokens, effort: settings.ResearchEffort, thinking: settings.StrongLLMThinking, retries: 2}, client),
+			settings.StrongLLMModel, spending.PurposeResearch, pricing, ledger, logger))
 		writer = settings.StrongLLMModel
 	}
 	running := make(chan struct{})

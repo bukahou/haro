@@ -45,7 +45,7 @@ haro 是一个家用语音助手：家里每个房间放一台**终端**（麦�
 | 接口 | 实现 |
 |---|---|
 | `StreamingRecognizer` | `internal/speech`：按 `HARO_ASR_URL` 连 haro-asr（或其他照 OpenAI Realtime 转写会话的服务） |
-| `ChatModel` | `internal/llm`：ollama（本地）、Claude API 或 OpenAI 兼容接口（云端）；主备切换（`FallbackChatModel`） |
+| `ChatModel` | `internal/llm`：Claude API（官方 SDK）、OpenAI 兼容接口（官方 openai-go；本地 Ollama 走它的兼容端点）；主备切换（`FallbackChatModel`）。请求可以「工具照给、这轮不许调用」（提示词缓存不失效）；输出到上限时明确报「被截断」；需要预热的模型另实现 `ModelWarmer`。三个适配跑同一组契约测试（`internal/llm/contract_test.go`） |
 | `SpeechSynthesizer` | `internal/speech`：GPT-SoVITS（边合成边播放）、Piper |
 | `Toolbox` | `internal/tools`：内置工具 + 第三方 MCP 服务 |
 | `ConversationStore` | `internal/conversationstore`：SQLite（goose 迁移）；每一轮带说话的时间，发给模型时每轮前标日期和时刻 |

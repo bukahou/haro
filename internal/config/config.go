@@ -63,10 +63,8 @@ type Settings struct {
 	RemovedSettingNotes []string
 
 	// 模型
-	OllamaURL      string `env:"HARO_OLLAMA_URL" envDefault:"http://127.0.0.1:11434"`
-	Model          string `env:"HARO_MODEL" envDefault:"qwen3-vl:8b-instruct"` // 本地（ollama）模型；4b 是思考变体，每轮多等 1.5–3 秒
-	ContextSize    int    `env:"HARO_CONTEXT_SIZE" envDefault:"4096"`
-	ModelKeepAlive string `env:"HARO_MODEL_KEEP_ALIVE" envDefault:"30m"`
+	OllamaURL string `env:"HARO_OLLAMA_URL" envDefault:"http://127.0.0.1:11434"`
+	Model     string `env:"HARO_MODEL" envDefault:"qwen3-vl:8b-instruct"` // 本地（ollama）模型；4b 是思考变体，每轮多等 1.5–3 秒
 	// 追加在内置基础提示词后面（内置的永远生效，外部只能追加；内置的见 brain.DefaultInstructions）
 	ExtraSystemPrompt string `env:"HARO_SYSTEM_PROMPT"`
 	// 主人资料：household.md（全家）+ 每人一份 *.md（开头 front matter 写 person: <声纹名字>）；空 = 不用
@@ -86,6 +84,8 @@ type Settings struct {
 	CloudLLMURL    string `env:"HARO_CLOUD_LLM_URL"`     // openai：接口的根地址（…/v1）；anthropic：留空 = 官方地址
 	CloudLLMModel  string `env:"HARO_CLOUD_LLM_MODEL"`   // 云端的模型 ID（例如 claude-haiku-5-5）
 	CloudLLMAPIKey string `env:"HARO_CLOUD_LLM_API_KEY"` // openai 的凭证：无默认值，只来自环境变量
+	// openai：服务端要求的工具调用编号格式（opaque / kimi / mistral；空 = 不挑格式）。按服务显式写，不按模型名猜
+	CloudLLMToolCallIDs string `env:"HARO_CLOUD_LLM_TOOL_CALL_IDS"`
 	// anthropic 的凭证：开发机放 key；集群里留空，由 SDK 走 Workload Identity Federation（ANTHROPIC_FEDERATION_* 等），
 	// 不放长期密钥。⚠️ 不用 ANTHROPIC_API_KEY 这个名字：Claude Code 也读它
 	AnthropicAPIKey string `env:"HARO_ANTHROPIC_API_KEY"`
