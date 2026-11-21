@@ -75,7 +75,7 @@ func TestBackupLive(t *testing.T) {
 	} {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		http := NewHTTPClient()
-		openMeteo := NewClient(primary.forecastURL, "https://geocoding-api.open-meteo.com/v1/search", http)
+		openMeteo := NewOpenMeteoClient(primary.forecastURL, "https://geocoding-api.open-meteo.com/v1/search", http)
 		forecaster := WithBackup(openMeteo, "Open-Meteo", NewJMA(liveJMAURL, liveGeocoderURL, http), "日本气象厅", logger)
 		started := time.Now()
 		forecast, err := forecaster.ForecastFor(ctx, livePlaces[0], 3)

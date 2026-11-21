@@ -52,7 +52,14 @@ type DayCast struct {
 	RainMillimeters   *float64 `json:"rain_mm,omitempty"`
 }
 
-// Forecaster 查一个地点现在的天气和未来 days 天（含今天，1–7）的预报。Open-Meteo、气象厅各实现一个。
+// 能查几天的预报（含今天）：Open-Meteo 和气象厅的周间预报都到第 7 天。超出范围的按最近的一端查（clampDays）。
+const (
+	MinForecastDays = 1
+	MaxForecastDays = 7
+)
+
+// Forecaster 查一个地点现在的天气和未来 days 天（含今天，MinForecastDays 到 MaxForecastDays）的预报。
+// Open-Meteo、气象厅各实现一个。
 type Forecaster interface {
 	ForecastFor(ctx context.Context, place Place, days int) (Forecast, error)
 }
@@ -72,8 +79,8 @@ func WithBackup(primary Forecaster, primaryName string, backup Forecaster, backu
 	return &BackupForecaster{primary: primary, backup: backup, primaryName: primaryName, backupName: backupName, logger: logger}
 }
 
-// primaryShare：有时限时主力最多用剩下时间的六成，留四成给备用 —— 主力卡住时备用还来得及
-// （默认 10 秒的工具时限下备用约 4 秒，够气象厅那条：地址反查、预报、实况）。主力很快就失败时，备用拿到的是全部剩下的时间。
+// primaryShare：调用方给了期限时，主力最多用剩下时间的六成，留四成给备用 —— 主力卡住时备用还来得及
+// （气象厅那条要地址反查、预报、实况几次请求）。主力很快就失败时，备用拿到的是全部剩下的时间。
 const primaryShare = 0.6
 
 // ForecastFor 实现 Forecaster。主人打断（context 取消）时不再去查备用。
@@ -105,9 +112,7 @@ func withShareOfDeadline(ctx context.Context, share float64) (context.Context, c
 	return context.WithTimeout(ctx, time.Duration(float64(time.Until(deadline))*share))
 }
 
-// clampDays 把天数限制在 1–7。
+// clampDays 把天数限制在 MinForecastDays 到 MaxForecastDays。
 func clampDays(days int) int {
-	return min(max(days, 1), 7)
+	return min(max(days, MinForecastDays), MaxForecastDays)
 }
-
-func ptr(value float64) *float64 { return &value }

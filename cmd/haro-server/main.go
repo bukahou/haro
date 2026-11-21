@@ -268,7 +268,7 @@ func weatherHome(ctx context.Context, settings config.ServerSettings, httpClient
 
 // weatherForecaster 是查天气用的来源：Open-Meteo 为主；HARO_WEATHER_BACKUP=jma 时查不到改用日本气象厅（只覆盖日本）。
 // 家所在的预报地区在后台先找好并写进日志：地区是按坐标自动找的，偏了能从日志看出来；第一次用备用时也不用再下载地区表。
-func weatherForecaster(ctx context.Context, settings config.ServerSettings, primary *weather.Client, home weather.HomeLocator,
+func weatherForecaster(ctx context.Context, settings config.ServerSettings, primary *weather.OpenMeteoClient, home weather.HomeLocator,
 	httpClient *http.Client, logger *slog.Logger) weather.Forecaster {
 	if settings.WeatherBackup != config.WeatherBackupJMA {
 		return primary

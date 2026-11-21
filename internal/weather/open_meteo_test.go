@@ -2,12 +2,72 @@ package weather
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+// openMeteoReplying 是只会回 body 的假 Open-Meteo。
+func openMeteoReplying(t *testing.T, body string) *OpenMeteoClient {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(body)) }))
+	t.Cleanup(server.Close)
+	return NewOpenMeteoClient(server.URL, server.URL, server.Client())
+}
+
+// 回复里是 null 的项不输出（不当成 0℃、降水 0% 报给模型）；某一天什么都没给就不列这一天。
+func TestOpenMeteoLeavesOutMissingValues(t *testing.T) {
+	client := openMeteoReplying(t, `{"current":{"time":"2026-11-21T10:00","temperature_2m":null,"apparent_temperature":null,
+		"relative_humidity_2m":60,"weather_code":61,"wind_speed_10m":null},
+		"daily":{"time":["2026-11-21","2026-11-22","2026-11-23"],"weather_code":[61,null,null],"temperature_2m_max":[15,null,null],
+		"temperature_2m_min":[8,6,null],"precipitation_probability_max":[80,0,null],"precipitation_sum":[5.2,null,null]}}`)
+	forecast, err := client.ForecastFor(context.Background(), sapporo, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := forecast.Current
+	if current.Temperature != nil || current.FeelsLike != nil || current.WindSpeed != nil || show(current.Humidity) != "60" ||
+		current.Weather != "小雨" {
+		t.Errorf("现在的天气：null 的不该有，有的照给：%+v", current)
+	}
+	if len(forecast.Days) != 2 {
+		t.Fatalf("什么都没给的那天不列：%+v", forecast.Days)
+	}
+	second := forecast.Days[1]
+	if second.Weather != "" || second.High != nil || second.RainMillimeters != nil || show(second.Low) != "6" || show(second.RainChancePercent) != "0" {
+		t.Errorf("第二天：null 的不该有，真的 0 照给：%+v", second)
+	}
+	raw, _ := json.Marshal(forecast)
+	for _, missing := range []string{`"temperature_c"`, `"feels_like_c"`, `"wind_kmh"`} {
+		if strings.Contains(string(raw), missing) {
+			t.Errorf("null 的项不应出现在给模型的结果里（%s）：%s", missing, raw)
+		}
+	}
+}
+
+// 现在的天气各项都是 null：当作没查到（报错），上层改用备用来源。
+func TestOpenMeteoWithoutCurrentWeatherFallsBack(t *testing.T) {
+	client := openMeteoReplying(t, `{"current":{"time":"2026-11-21T10:00","temperature_2m":null,"apparent_temperature":null,
+		"relative_humidity_2m":null,"weather_code":null,"wind_speed_10m":null},
+		"daily":{"time":["2026-11-21"],"weather_code":[0],"temperature_2m_max":[15],"temperature_2m_min":[8],
+		"precipitation_probability_max":[10],"precipitation_sum":[0]}}`)
+	if _, err := client.ForecastFor(context.Background(), sapporo, 1); !errors.Is(err, errNoCurrentWeather) {
+		t.Fatalf("现在的天气整段都缺应报错：%v", err)
+	}
+	backup := &stubForecaster{forecast: Forecast{Source: "日本气象厅"}}
+	forecast, err := WithBackup(client, "Open-Meteo", backup, "日本气象厅", slog.New(slog.NewTextHandler(io.Discard, nil))).
+		ForecastFor(context.Background(), sapporo, 1)
+	if err != nil || forecast.Source != "日本气象厅" || backup.calls != 1 {
+		t.Errorf("应改用备用：%+v %v（备用被问了 %d 次）", forecast, err, backup.calls)
+	}
+}
 
 // 第一次请求卡住（超时）、第二次正常：自动重试成功；服务报 4xx 不重试。
 func TestRetriesOnceOnTimeout(t *testing.T) {
@@ -28,7 +88,7 @@ func TestRetriesOnceOnTimeout(t *testing.T) {
 		_, _ = w.Write([]byte(`{"results":[{"name":"测试市","latitude":1,"longitude":2}]}`))
 	}))
 	defer server.Close()
-	client := NewClient(server.URL, server.URL, server.Client())
+	client := NewOpenMeteoClient(server.URL, server.URL, server.Client())
 	client.fetch.attemptTimeout = 100 * time.Millisecond
 
 	places, err := client.FindPlaces(context.Background(), "测试", "ja", 5)

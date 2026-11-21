@@ -137,7 +137,7 @@ func buildTooling(ctx context.Context, settings config.ServerSettings, deps serv
 	if settings.Weather { // 天气：Open-Meteo 为主，日本气象厅备用；都不用密钥
 		weatherHTTP := weather.NewHTTPClient() // 连接等得短：连不上就早点交给备用
 		home := weatherHome(ctx, settings, weatherHTTP, logger)
-		openMeteo := weather.NewClient(settings.WeatherForecastURL, settings.WeatherGeocodingURL, weatherHTTP)
+		openMeteo := weather.NewOpenMeteoClient(settings.WeatherForecastURL, settings.WeatherGeocodingURL, weatherHTTP)
 		forecaster := weatherForecaster(ctx, settings, openMeteo, home, weatherHTTP, logger)
 		builtins = append(builtins, tools.WeatherTools(openMeteo, forecaster, home, settings.WeatherGeocodingLanguage, logger))
 		if home != nil {

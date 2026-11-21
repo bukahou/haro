@@ -6,10 +6,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
-
-	"golang.org/x/sync/singleflight"
 )
 
 // HomeLocator 给出「家」在哪（查天气不说地点时用）。
@@ -29,52 +26,34 @@ func (h FixedHome) Known() (Place, bool, bool) { return h.Place, false, true }
 
 // IPHome 按家里的公网 IP 推定位置。精度大约是城市级：
 // 运营商有时把 IP 登记在别的城市的机房，可能偏到别的城市 ⇒ 启动时把推定结果写进日志，偏了就改用 HARO_WEATHER_HOME 填坐标。
-// 结果缓存一天（家里的 IP 很少变），定位服务连不上时沿用上次的结果。
+// 结果缓存一天（家里的 IP 很少变）；过期后先用上次的、后台重新定位；定位服务连不上时沿用上次的，
+// 一分钟之内不再去问它（见 cachedLookup）。
 type IPHome struct {
-	url  string
-	name string // 配置里给的名字；空 = 用定位出来的城市名
-	http *http.Client
-
-	locating singleflight.Group // 同时要定位的只发一次请求，请求不在锁里发：Known 每轮都调用，不能被它卡住
-	mu       sync.Mutex
-	cached   Place
-	fetched  time.Time
+	url      string
+	name     string // 配置里给的名字；空 = 用定位出来的城市名
+	http     *http.Client
+	location *cachedLookup[Place]
 }
 
 const ipHomeTTL = 24 * time.Hour
 
 // NewIPHome 创建按 IP 定位的「家」；url 是定位服务（默认 ipinfo.io，HTTPS、不用密钥）。
 func NewIPHome(url, name string, httpClient *http.Client) *IPHome {
-	return &IPHome{url: url, name: name, http: httpClient}
+	home := &IPHome{url: url, name: name, http: httpClient}
+	home.location = newCachedLookup(home.locate, ipHomeTTL)
+	return home
 }
 
-// Cached 返回已经定位好的位置（不发网络请求）；还没定位过时 ok=false。
+// Known 实现 HomeLocator：已经定位好的位置（不发网络请求，过期的也算）；还没定位成功过时 ok = false。
 func (h *IPHome) Known() (Place, bool, bool) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return h.cached, true, !h.fetched.IsZero()
+	place, ok := h.location.Known()
+	return place, true, ok
 }
 
+// Home 实现 HomeLocator。只有还没定位成功过、这次又定位不了时才报错。
 func (h *IPHome) Home(ctx context.Context) (Place, error) {
-	h.mu.Lock()
-	cached, fetched := h.cached, h.fetched
-	h.mu.Unlock()
-	if !fetched.IsZero() && time.Since(fetched) < ipHomeTTL {
-		return cached, nil
-	}
-	place, err := sharedRequest(ctx, &h.locating, "home", func(ctx context.Context) (Place, error) {
-		place, err := h.locate(ctx)
-		if err == nil {
-			h.mu.Lock()
-			h.cached, h.fetched = place, time.Now()
-			h.mu.Unlock()
-		}
-		return place, err
-	})
+	place, err := h.location.Get(ctx)
 	if err != nil {
-		if !fetched.IsZero() {
-			return cached, nil // 定位服务暂时连不上：沿用上次的
-		}
 		return Place{}, fmt.Errorf("按 IP 定位家的位置失败: %w", err)
 	}
 	return place, nil

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -65,7 +66,7 @@ func TestWeatherTool(t *testing.T) {
 	var queried string
 	server := fakeOpenMeteo(t, &queried)
 	defer server.Close()
-	client := weather.NewClient(server.URL+"/forecast", server.URL+"/search", server.Client())
+	client := weather.NewOpenMeteoClient(server.URL+"/forecast", server.URL+"/search", server.Client())
 	home := weather.FixedHome{Place: weather.Place{Latitude: 10.5, Longitude: 20.5}}
 	box, err := NewToolbox(ctx, nil, logger, WeatherTools(client, client, home, "ja", logger))
 	if err != nil {
@@ -74,8 +75,13 @@ func TestWeatherTool(t *testing.T) {
 	defer box.Close()
 
 	out, err := callWeather(t, box, nil)
-	if err != nil || !out.Home || out.Forecast == nil || out.Forecast.Current.Weather != "小雨" || queried != "10.5000,20.5000,3" {
-		t.Fatalf("不说地点查家里、默认 3 天：%+v %v %s", out, err, queried)
+	wantDefault := "10.5000,20.5000," + strconv.Itoa(defaultForecastDays)
+	if err != nil || !out.Home || out.Forecast == nil || out.Forecast.Current.Weather != "小雨" || queried != wantDefault {
+		t.Fatalf("不说地点查家里、默认 %d 天：%+v %v %s", defaultForecastDays, out, err, queried)
+	}
+	if _, err = callWeather(t, box, map[string]any{"days": weather.MaxForecastDays + 3}); err != nil ||
+		queried != "10.5000,20.5000,"+strconv.Itoa(weather.MaxForecastDays) {
+		t.Errorf("天数超出范围：按最多的天数查，不报错：%v %s", err, queried)
 	}
 	out, err = callWeather(t, box, map[string]any{"place": "大阪市", "days": 2})
 	if err != nil || out.Home || out.Forecast == nil || out.Forecast.Place.Name != "大阪市" || len(out.OtherPlaces) != 0 ||
@@ -97,6 +103,24 @@ func TestWeatherTool(t *testing.T) {
 		out, err = callWeather(t, box, map[string]any{"place": name})
 		if err != nil || out.Forecast != nil || out.Home || out.Note == "" || queried != "" {
 			t.Errorf("地名库里没有「%s」：照实交给模型（不查家、不补字再查、不报错）：%+v %v %s", name, out, err, queried)
+		}
+	}
+
+	// 参数说明里天数的范围、默认值由常量拼出
+	for _, spec := range box.Specs() {
+		var parameters struct {
+			Properties map[string]struct {
+				Description string `json:"description"`
+			} `json:"properties"`
+		}
+		if err := json.Unmarshal(spec.Parameters, &parameters); err != nil {
+			t.Fatal(err)
+		}
+		description := parameters.Properties["days"].Description
+		for _, number := range []int{weather.MinForecastDays, weather.MaxForecastDays, defaultForecastDays} {
+			if !strings.Contains(description, strconv.Itoa(number)) {
+				t.Errorf("days 的说明应写明范围和默认值（%d）：%q", number, description)
+			}
 		}
 	}
 
