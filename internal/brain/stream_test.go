@@ -3,6 +3,7 @@ package brain_test
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"slices"
 	"testing"
 	"time"
@@ -328,5 +329,47 @@ func TestTranscriptionWaitTimesOut(t *testing.T) {
 	done := braintest.Done(t, braintest.CollectUntilDone(t, session))
 	if done.Status != realtimeproto.StatusFailed || done.Reason != realtimeproto.ReasonTranscriptionFailed {
 		t.Errorf("等不到识别结果应结束这一轮：%+v", done)
+	}
+}
+
+// warnSignal 每收到一条告警级别的日志就发一次信号（只看级别，不比对文字）。
+type warnSignal chan struct{}
+
+func (w warnSignal) Enabled(context.Context, slog.Level) bool { return true }
+func (w warnSignal) WithAttrs([]slog.Attr) slog.Handler       { return w }
+func (w warnSignal) WithGroup(string) slog.Handler            { return w }
+func (w warnSignal) Handle(_ context.Context, record slog.Record) error {
+	if record.Level >= slog.LevelWarn {
+		select {
+		case w <- struct{}{}:
+		default:
+		}
+	}
+	return nil
+}
+
+// 识别流真断开时告警；会话正常结束时关掉的流不是断开，不告警（之前每次终端断开都会多一条「识别流断开了」）。
+func TestClosingSessionIsNotAStreamDisconnect(t *testing.T) {
+	voice := braintest.NewVoice()
+	warned := make(warnSignal, 8)
+	session := brain.NewSession(brain.Components{Model: &fakeModel{tokens: []string{"好。"}}, Synthesizer: fakeSynthesizer{},
+		Streaming: voice}, brain.Options{MaxHistoryTurn: 6, StreamReopen: brain.ReopenTiming{Delay: time.Millisecond,
+		MaxDelay: 5 * time.Millisecond, LostNoticeAfter: time.Hour}}, slog.New(warned))
+	turn := realtimeproto.TurnDetection{Type: "server_vad"}
+	first := braintest.Open(t, session, voice, realtimeproto.SessionUpdate{TurnDetection: &turn})
+
+	_ = first.Close() // 真断开（对端走了）
+	select {
+	case <-warned:
+	case <-time.After(braintest.EventTimeout):
+		t.Fatal("识别流真断开时应告警")
+	}
+	waitOpened(t, voice, 2)
+
+	_ = session.Close()
+	select {
+	case <-warned:
+		t.Error("会话正常结束时关掉的流不应当成断开来告警")
+	case <-time.After(100 * time.Millisecond): // 有问题时告警在关流后立刻就打
 	}
 }

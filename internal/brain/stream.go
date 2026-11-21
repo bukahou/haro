@@ -47,6 +47,11 @@ func (s *Session) runStream(stream RecognizerStream) {
 	}
 	for stream != nil {
 		s.pumpStreamEvents(stream)
+		select {
+		case <-s.closed: // 会话结束时关掉的（Close 先关 closed 再关流）：不是断开，不重开
+			return
+		default:
+		}
 		s.logger.Warn("识别流断开了：开始重开")
 		stream = s.reopenStream()
 	}
