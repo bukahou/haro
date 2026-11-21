@@ -41,28 +41,35 @@ COPY --from=build /out/lib/ /opt/haro/lib/
 COPY LICENSE /opt/haro/LICENSE
 COPY assets/wake-words.txt /opt/haro/assets/wake-words.txt
 COPY deploy/server/MODELS.md deploy/server/MODEL-LICENSES.txt /opt/haro/models/
-# 模型（只拷用到的文件，和 deploy/server/models.lock 一一对应：SenseVoice 用 int8 版；唤醒词用 chunk-16 的那一组）。
-# 识别、唤醒词的文件名要和 haro-asr 配置的默认值一致（HARO_ASR_MODEL_FILE、HARO_KWS_*_FILE，见 internal/config/asr.go），
-# 换文件时同时改配置。声纹模型保留原文件名：声纹记录里存的是模型文件名，换名字旧声纹就对不上了
-COPY --from=models asr/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/model.int8.onnx asr/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/tokens.txt /opt/haro/models/sensevoice/
-COPY --from=models asr/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20/encoder-epoch-13-avg-2-chunk-16-left-64.int8.onnx \
-     asr/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20/decoder-epoch-13-avg-2-chunk-16-left-64.onnx \
-     asr/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20/joiner-epoch-13-avg-2-chunk-16-left-64.int8.onnx \
-     asr/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20/tokens.txt /opt/haro/models/kws/
-COPY --from=models asr/silero_vad.onnx asr/smart-turn-v3.2-cpu.onnx /opt/haro/models/
-COPY --from=models speaker/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx /opt/haro/models/
+# 模型：只拷用到的文件（SenseVoice 用 int8 版；唤醒词用 chunk-16 的那一组，encoder、joiner 用 int8 版）。
+# 用哪个文件只在这里写一处：下面的 ENV 既是 haro-asr 的配置（不靠 internal/config/asr.go 里的默认值），也是 COPY 拷哪个文件。
+# 拷的来源和 deploy/server/models.lock 的「放到哪」一一对应；对不上时，镜像检查里在镜像中起 haro-asr 的冒烟检查会失败
+# （.github/actions/server-image）。声纹模型保留原文件名：声纹记录里存的是模型文件名，换名字旧声纹就对不上了
+ENV HARO_ASR_MODEL_DIR=/opt/haro/models/sensevoice \
+    HARO_ASR_MODEL_FILE=model.int8.onnx \
+    HARO_KWS_MODEL_DIR=/opt/haro/models/kws \
+    HARO_KWS_ENCODER_FILE=encoder-epoch-13-avg-2-chunk-16-left-64.int8.onnx \
+    HARO_KWS_DECODER_FILE=decoder-epoch-13-avg-2-chunk-16-left-64.onnx \
+    HARO_KWS_JOINER_FILE=joiner-epoch-13-avg-2-chunk-16-left-64.int8.onnx \
+    HARO_VAD_MODEL=/opt/haro/models/silero_vad.onnx \
+    HARO_TURN_MODEL=/opt/haro/models/smart-turn-v3.2-cpu.onnx \
+    HARO_SPEAKER_MODEL=/opt/haro/models/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx
+COPY --from=models asr/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/${HARO_ASR_MODEL_FILE} \
+     asr/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/tokens.txt ${HARO_ASR_MODEL_DIR}/
+COPY --from=models asr/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20/${HARO_KWS_ENCODER_FILE} \
+     asr/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20/${HARO_KWS_DECODER_FILE} \
+     asr/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20/${HARO_KWS_JOINER_FILE} \
+     asr/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20/tokens.txt ${HARO_KWS_MODEL_DIR}/
+COPY --from=models asr/silero_vad.onnx ${HARO_VAD_MODEL}
+COPY --from=models asr/smart-turn-v3.2-cpu.onnx ${HARO_TURN_MODEL}
+COPY --from=models speaker/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx ${HARO_SPEAKER_MODEL}
 
 # 镜像内部的路径（和镜像一起变）；环境相关的配置（TTS 地址、大模型、性格目录……）由 K8s ConfigMap 给
 ENV LD_LIBRARY_PATH=/opt/haro/lib \
     HARO_SERVER_LISTEN=0.0.0.0:59130 \
     HARO_ASR_LISTEN=127.0.0.1:59126 \
     HARO_ASR_URL=http://127.0.0.1:59126 \
-    HARO_ASR_MODEL_DIR=/opt/haro/models/sensevoice \
-    HARO_VAD_MODEL=/opt/haro/models/silero_vad.onnx \
-    HARO_TURN_MODEL=/opt/haro/models/smart-turn-v3.2-cpu.onnx \
-    HARO_KWS_MODEL_DIR=/opt/haro/models/kws \
     HARO_WAKE_WORDS_FILE=/opt/haro/assets/wake-words.txt \
-    HARO_SPEAKER_MODEL=/opt/haro/models/3dspeaker_speech_campplus_sv_zh_en_16k-common_advanced.onnx \
     HARO_VOICEPRINTS_DIR=/data/voiceprints \
     HARO_NOTES_DB=/data/notes.db \
     HARO_USAGE_DB=/data/usage.db \
