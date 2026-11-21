@@ -338,7 +338,7 @@ func startResearch(ctx context.Context, settings config.ServerSettings, deps ser
 	writer := "（调查模型自己写）"
 	if settings.StrongLLMFor(config.StrongForResearch) { // 搜索和读网页用便宜的模型，结论交给更强的模型写
 		runner.WriteConclusionsWith(deps.meteredCloudModel(settings, cloudModelSpec{model: settings.StrongLLMModel,
-			maxTokens: researchMaxTokens, effort: settings.ResearchEffort, thinking: settings.StrongLLMThinking, retries: 2},
+			maxTokens: researchConclusionMaxTokens, effort: settings.ResearchEffort, thinking: settings.StrongLLMThinking, retries: 2},
 			spending.PurposeResearch, logger))
 		writer = settings.StrongLLMModel
 	}
@@ -362,6 +362,11 @@ func startResearch(ctx context.Context, settings config.ServerSettings, deps ser
 
 // researchMaxTokens 是调查时每次请求的输出上限（结论比聊天长，聊天用 HARO_CLOUD_LLM_MAX_TOKENS）。
 const researchMaxTokens = 1000
+
+// researchConclusionMaxTokens 是更强的模型写结论时的输出上限：它开着思考（思考也算在输出上限里），结论连同来源
+// 经 submit_conclusion 一次交出，按 researchMaxTokens 会写到一半被截断（实测），这次调用白花。只按实际用的计费，
+// 每天的调查额度照样管着。
+const researchConclusionMaxTokens = 4000
 
 // researchLimits 是每个调查任务的上限：配置里设了的用配置的，没设（0）的用程序里的默认值（research.DefaultLimits，默认值只在那里写）。
 func researchLimits(settings config.ServerSettings) research.Limits {
