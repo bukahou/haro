@@ -143,11 +143,31 @@ type wireMCPMessage struct {
 }
 
 type wireItemTruncate struct {
-	Type         string `json:"type"`
-	ItemID       string `json:"item_id,omitempty" jsonschema:"haro 不填：截最近一次回答"`
-	ContentIndex int    `json:"content_index"`
-	AudioEndMs   int64  `json:"audio_end_ms" jsonschema:"用户听到了回答的前多少毫秒"`
+	Type         string      `json:"type"`
+	ItemID       string      `json:"item_id,omitempty" jsonschema:"不填：haro 只截最近一次回答（它不发回答的 item_id），填了就拒绝（invalid_event）"`
+	ContentIndex int         `json:"content_index"`
+	AudioEndMs   millisField `json:"audio_end_ms" jsonschema:"用户听到了回答的前多少毫秒（必填；缺了或为负拒绝：invalid_event）"`
 }
+
+// millisField 是必填、不能为负的毫秒数（线上就是一个整数）：解码时记下有没有这个字段，缺了（或是 null）不能当成 0 去执行。
+// 生成 Schema 时按 wireTypeSchemas 里写的算。
+type millisField struct {
+	ms  int64
+	set bool
+}
+
+func (m *millisField) UnmarshalJSON(data []byte) error {
+	if string(data) == "null" {
+		return nil // 和缺了一样
+	}
+	if err := json.Unmarshal(data, &m.ms); err != nil {
+		return err
+	}
+	m.set = true
+	return nil
+}
+
+func (m millisField) MarshalJSON() ([]byte, error) { return json.Marshal(m.ms) }
 
 // ——— 服务端事件 ———
 

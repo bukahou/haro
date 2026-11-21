@@ -13,9 +13,11 @@
 package brainserver
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -25,6 +27,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"golang.org/x/sync/semaphore"
 
 	"github.com/bukahou/haro/internal/buildinfo"
 	"github.com/bukahou/haro/internal/heartbeat"
@@ -51,8 +54,14 @@ type SessionFactory func(terminal Terminal) Session
 
 // Options 是连接层的设置。零值可用。
 type Options struct {
-	Heartbeat heartbeat.Timing // 零值 = heartbeat.Default
+	Heartbeat   heartbeat.Timing // 零值 = heartbeat.Default
+	MaxSessions int              // 同时最多几条对话会话；零值 = DefaultMaxSessions
 }
+
+// DefaultMaxSessions 是同时最多几条对话会话：每条会话在 haro-asr 占一个识别流（VAD、唤醒词各一份），连接一多，haro-asr 的
+// 内存跟着涨，最坏被杀掉、整个助手停摆。定值，没有实测每条会话占多少：家里一个房间一台终端，16 条绰绰有余，
+// 又挡得住重连出错、或局域网里有设备乱连时连接越开越多。
+const DefaultMaxSessions = 16
 
 // haroProtocolPrefix 是 haro 各版本子协议名的共同开头。
 const haroProtocolPrefix = "haro.realtime."
@@ -60,11 +69,28 @@ const haroProtocolPrefix = "haro.realtime."
 // NewHandler 返回挂好路由的 HTTP handler。
 func NewHandler(newSession SessionFactory, opts Options, logger *slog.Logger) http.Handler {
 	opts.Heartbeat = opts.Heartbeat.OrDefault()
+	opts.MaxSessions = cmp.Or(opts.MaxSessions, DefaultMaxSessions)
+	sessions := semaphore.NewWeighted(int64(opts.MaxSessions))
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET "+realtimeproto.ConversationPath, func(w http.ResponseWriter, r *http.Request) {
+		// 先限量再做事：满了就回 503，不握手、不建会话（不连 haro-asr）
+		if !sessions.TryAcquire(1) {
+			logger.Warn("拒绝连接：对话会话数到了上限", "remote", r.RemoteAddr, "limit", opts.MaxSessions)
+			writeHTTPError(w, http.StatusServiceUnavailable, realtimeproto.NewHTTPError(http.StatusServiceUnavailable,
+				realtimeproto.CodeTooManySessions, fmt.Sprintf("服务端同时最多 %d 条对话会话，现在满了：稍后再连", opts.MaxSessions)))
+			return
+		}
+		defer sessions.Release(1)
 		serveConversation(w, r, newSession, opts, logger)
 	})
 	return mux
+}
+
+// writeHTTPError 回一个出错的 HTTP 响应（握手之前）：状态码 + Realtime 形状的错误说明。
+func writeHTTPError(w http.ResponseWriter, status int, body realtimeproto.HTTPError) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(body)
 }
 
 // negotiate 按终端在握手里报的子协议决定接不接这条连接；拒绝时 reason 说明原因。
@@ -95,9 +121,7 @@ func reject(w http.ResponseWriter, reason string) {
 	body := realtimeproto.NewHTTPError(http.StatusBadRequest, realtimeproto.CodeUnsupportedProtocolVersion,
 		reason+"：把终端和服务端升到同一版本")
 	body.Error.SupportedProtocols = []string{realtimeproto.Protocol}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusBadRequest)
-	_ = json.NewEncoder(w).Encode(body)
+	writeHTTPError(w, http.StatusBadRequest, body)
 }
 
 func serveConversation(w http.ResponseWriter, r *http.Request, newSession SessionFactory, opts Options, logger *slog.Logger) {
@@ -199,11 +223,13 @@ func serveConversation(w http.ResponseWriter, r *http.Request, newSession Sessio
 			}
 			continue
 		}
-		if update, ok := event.(realtimeproto.SessionUpdate); ok && update.InputFormat.SampleRate > 0 {
-			inputFormat = update.InputFormat
-		}
 		if err := session.Send(ctx, event); err != nil {
 			_ = write(realtimeproto.ErrorEventFor(event.Type(), err))
+			continue
+		}
+		// 会话收下了 session.update 才按它声明的格式解之后的音频（被拒的 session.update 整条不生效）
+		if update, ok := event.(realtimeproto.SessionUpdate); ok && update.InputFormat.SampleRate > 0 {
+			inputFormat = update.InputFormat
 		}
 	}
 }

@@ -26,7 +26,8 @@ import (
 
 var quiet = slog.New(slog.NewTextHandler(io.Discard, nil))
 
-// fakeSession 记下收到的事件；回答请求一律答「已有进行中的回答」（测错误码原样传给客户端）。
+// fakeSession 记下收到的事件；回答请求一律答「已有进行中的回答」（测错误码原样传给客户端）；
+// 声明的输入格式不是 16 kHz 的 session.update 按 unsupported_audio_format 拒绝（和 brain.Session 一样）。
 type fakeSession struct {
 	received  chan realtimeproto.ClientEvent
 	events    chan realtimeproto.ServerEvent
@@ -41,8 +42,13 @@ func newFakeSession() *fakeSession {
 
 func (s *fakeSession) Send(_ context.Context, event realtimeproto.ClientEvent) error {
 	s.received <- event
-	if _, ok := event.(realtimeproto.ResponseCreate); ok {
+	switch e := event.(type) {
+	case realtimeproto.ResponseCreate:
 		return realtimeproto.ProtocolErrorf(realtimeproto.CodeResponseInProgress, "已有进行中的回答")
+	case realtimeproto.SessionUpdate:
+		if e.InputFormat.SampleRate > 0 && e.InputFormat != realtimeproto.TranscriptionFormat {
+			return realtimeproto.ProtocolErrorf(realtimeproto.CodeUnsupportedAudioFormat, "只收 16 kHz")
+		}
 	}
 	return nil
 }

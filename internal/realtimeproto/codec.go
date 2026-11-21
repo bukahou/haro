@@ -215,13 +215,28 @@ func decodeAudioAppend(data []byte, input AudioFormat) (ClientEvent, error) {
 }
 
 func (e ConversationItemTruncate) toWire() (any, error) {
-	return wireItemTruncate{Type: typeConversationItemTruncate, AudioEndMs: e.AudioEndMs}, nil
+	if e.AudioEndMs < 0 {
+		return nil, fmt.Errorf("conversation.item.truncate 的 audio_end_ms 不能是负数，收到 %d", e.AudioEndMs)
+	}
+	return wireItemTruncate{Type: typeConversationItemTruncate, AudioEndMs: millisField{ms: e.AudioEndMs, set: true}}, nil
 }
 
+// decodeItemTruncate：截断会改写持久化的历史，参数缺了不能当成零值去执行 —— audio_end_ms 必填、不能是负数；
+// haro 不发回答的 item_id，客户端填了 item_id 就是要截某一条别的回答，照办不了，拒绝。
 func decodeItemTruncate(data []byte, _ AudioFormat) (ClientEvent, error) {
 	var wire wireItemTruncate
-	err := json.Unmarshal(data, &wire)
-	return ConversationItemTruncate{AudioEndMs: wire.AudioEndMs}, err
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return nil, err
+	}
+	switch {
+	case !wire.AudioEndMs.set:
+		return nil, errors.New("缺 audio_end_ms（用户听到了回答的前多少毫秒）")
+	case wire.AudioEndMs.ms < 0:
+		return nil, fmt.Errorf("audio_end_ms 不能是负数，收到 %d", wire.AudioEndMs.ms)
+	case wire.ItemID != "":
+		return nil, fmt.Errorf("haro 只截最近一次回答、不带 item_id（服务端不发回答的 item_id），收到 %q", wire.ItemID)
+	}
+	return ConversationItemTruncate{AudioEndMs: wire.AudioEndMs.ms}, nil
 }
 
 func (e HaroTerminalDevices) toWire() (any, error) {

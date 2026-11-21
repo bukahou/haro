@@ -10,14 +10,15 @@
         },
         "item_id": {
           "type": "string",
-          "description": "haro 不填：截最近一次回答"
+          "description": "不填：haro 只截最近一次回答（它不发回答的 item_id），填了就拒绝（invalid_event）"
         },
         "content_index": {
           "type": "integer"
         },
         "audio_end_ms": {
           "type": "integer",
-          "description": "用户听到了回答的前多少毫秒"
+          "description": "用户听到了回答的前多少毫秒（必填；缺了或为负拒绝：invalid_event）",
+          "minimum": 0
         }
       },
       "required": [

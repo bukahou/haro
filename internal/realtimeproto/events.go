@@ -90,6 +90,7 @@ type HaroMCPMessage struct {
 
 // ConversationItemTruncate 表示用户只听到了回答的前 AudioEndMs 毫秒（被打断时由终端发出）：
 // 服务端只把听到的部分记进历史。与 Realtime 的 conversation.item.truncate 一致（haro 只截最近一次回答，不带 item_id）。
+// 线上 audio_end_ms 必填、不能是负数，带了 item_id 也拒绝（见 decodeItemTruncate）。
 type ConversationItemTruncate struct {
 	AudioEndMs int64
 }

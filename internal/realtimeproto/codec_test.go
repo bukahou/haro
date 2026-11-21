@@ -210,6 +210,12 @@ func TestDecodeClientEventErrorCodes(t *testing.T) {
 			`"turn_detection":null}}}}`, input16k, CodeUnsupportedAudioFormat},
 		{"不认识的会话种类", `{"type":"session.update","session":{"type":"translation","audio":{"input":{"turn_detection":null}}}}`,
 			input16k, CodeInvalidEvent},
+		// 截断会改写历史：缺字段不能当成 0 去执行；haro 不发回答的 item_id，填了就是要截别的回答
+		{"截断没给 audio_end_ms", `{"type":"conversation.item.truncate","content_index":0}`, input16k, CodeInvalidEvent},
+		{"截断的 audio_end_ms 是 null", `{"type":"conversation.item.truncate","content_index":0,"audio_end_ms":null}`, input16k, CodeInvalidEvent},
+		{"截断的 audio_end_ms 是负数", `{"type":"conversation.item.truncate","content_index":0,"audio_end_ms":-1}`, input16k, CodeInvalidEvent},
+		{"截断带 item_id", `{"type":"conversation.item.truncate","item_id":"item_7","content_index":0,"audio_end_ms":1200}`,
+			input16k, CodeInvalidEvent},
 	}
 	for _, c := range cases {
 		_, err := DecodeClientEvent([]byte(c.data), c.input)
@@ -217,6 +223,17 @@ func TestDecodeClientEventErrorCodes(t *testing.T) {
 		if !ok || protocolErr.Code != c.code {
 			t.Errorf("%s：应返回错误码 %s，得到 %v", c.name, c.code, err)
 		}
+	}
+}
+
+// 截断：audio_end_ms 是 0（还没说出口就被打断）照常收下；编码时负数直接报错，不发出去等对端拒绝。
+func TestItemTruncateAcceptsZeroAndRejectsNegativeOnEncode(t *testing.T) {
+	event, err := DecodeClientEvent([]byte(`{"type":"conversation.item.truncate","content_index":0,"audio_end_ms":0}`), input16k)
+	if err != nil || event != (ConversationItemTruncate{AudioEndMs: 0}) {
+		t.Errorf("audio_end_ms=0 应照常收下：%#v %v", event, err)
+	}
+	if _, err := EncodeClientEvent(ConversationItemTruncate{AudioEndMs: -5}); err == nil {
+		t.Error("负的 audio_end_ms 编码时就应报错")
 	}
 }
 

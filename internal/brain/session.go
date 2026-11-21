@@ -239,6 +239,11 @@ func (s *Session) Send(ctx context.Context, event realtimeproto.ClientEvent) err
 			if err := e.TurnDetection.Validate(); err != nil { // 写错的取值在这里就拒绝，不等识别服务拒
 				return realtimeproto.ProtocolErrorf(realtimeproto.CodeInvalidEvent, "%v", err)
 			}
+		}
+		if err := s.checkSessionUpdateLocked(e); err != nil { // 取值没错但照办不了：整条拒绝，什么都不改
+			return err
+		}
+		if e.TurnDetection != nil {
 			s.autoRespond = e.TurnDetection.CreateResponse == nil || *e.TurnDetection.CreateResponse
 		}
 		if e.TurnDetection != nil && s.streamConfig == nil {

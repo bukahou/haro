@@ -27,7 +27,7 @@ func Schema() (*jsonschema.Schema, error) {
 		Defs:        map[string]*jsonschema.Schema{},
 	}
 	add := func(side, name string, wire any) error {
-		schema, err := jsonschema.ForType(reflect.TypeOf(wire), nil)
+		schema, err := jsonschema.ForType(reflect.TypeOf(wire), &jsonschema.ForOptions{TypeSchemas: wireTypeSchemas})
 		if err != nil {
 			return fmt.Errorf("%s 事件 %s: %w", side, name, err)
 		}
@@ -54,6 +54,11 @@ func Schema() (*jsonschema.Schema, error) {
 		}
 	}
 	return root, nil
+}
+
+// wireTypeSchemas 是自己写了 JSON 编解码的线上类型的 Schema（生成器按 Go 结构推不出来）。
+var wireTypeSchemas = map[reflect.Type]*jsonschema.Schema{
+	reflect.TypeFor[millisField](): {Type: "integer", Minimum: new(0.0)},
 }
 
 // allowExtraFields 去掉生成器给对象加的「不许有别的字段」。
