@@ -112,7 +112,7 @@ func recordFor(ctx context.Context, recorder assistant.AudioRecorder, seconds ti
 
 func upload(ctx context.Context, opts Options, clips []string) (realtimeproto.VoiceprintEnrollmentResult, error) {
 	var none realtimeproto.VoiceprintEnrollmentResult
-	body, err := json.Marshal(realtimeproto.VoiceprintEnrollment{Append: opts.Append, Clips: clips})
+	body, err := json.Marshal(realtimeproto.VoiceprintEnrollment{Append: &opts.Append, Clips: clips}) // 补录还是覆盖都写明
 	if err != nil {
 		return none, err
 	}

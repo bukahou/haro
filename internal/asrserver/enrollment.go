@@ -37,6 +37,10 @@ func handleEnrollment(w http.ResponseWriter, r *http.Request, speakers *SpeakerC
 		writeError(w, http.StatusBadRequest, "无法解析请求: "+err.Error())
 		return
 	}
+	if request.Append == nil { // 不按覆盖处理：漏了这个字段不能把原来的声纹整份换掉
+		writeError(w, http.StatusBadRequest, "要写明 append：true = 补录，false = 重新登记（覆盖原来的）")
+		return
+	}
 	if len(request.Clips) < minEnrollmentClips {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("至少要 %d 句", minEnrollmentClips))
 		return
@@ -50,7 +54,7 @@ func handleEnrollment(w http.ResponseWriter, r *http.Request, speakers *SpeakerC
 		}
 		clips = append(clips, pcm16ToFloat(pcm))
 	}
-	result, err := speakers.enroll(r.PathValue("name"), clips, request.Append)
+	result, err := speakers.enroll(r.PathValue("name"), clips, *request.Append)
 	var badRequest badEnrollment
 	switch {
 	case errors.As(err, &badRequest):
