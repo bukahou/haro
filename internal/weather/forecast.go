@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 )
 
 // Place 是一个地点。
@@ -71,9 +72,15 @@ func WithBackup(primary Forecaster, primaryName string, backup Forecaster, backu
 	return &BackupForecaster{primary: primary, backup: backup, primaryName: primaryName, backupName: backupName, logger: logger}
 }
 
+// primaryShare：有时限时主力最多用剩下时间的六成，留四成给备用 —— 主力卡住时备用还来得及
+// （默认 10 秒的工具时限下备用约 4 秒，够气象厅那条：地址反查、预报、实况）。主力很快就失败时，备用拿到的是全部剩下的时间。
+const primaryShare = 0.6
+
 // ForecastFor 实现 Forecaster。主人打断（context 取消）时不再去查备用。
 func (b *BackupForecaster) ForecastFor(ctx context.Context, place Place, days int) (Forecast, error) {
-	forecast, err := b.primary.ForecastFor(ctx, place, days)
+	primaryCtx, cancel := withShareOfDeadline(ctx, primaryShare)
+	forecast, err := b.primary.ForecastFor(primaryCtx, place, days)
+	cancel()
 	if err == nil || ctx.Err() != nil {
 		return forecast, err
 	}
@@ -87,6 +94,15 @@ func (b *BackupForecaster) ForecastFor(ctx context.Context, place Place, days in
 	b.logger.Warn("天气：主力没查到，改用备用", "primary", b.primaryName, "backup", b.backupName, "place", place.Name, "err", err)
 	backup.Note = strings.TrimSpace(fmt.Sprintf("%s这次没查到，用的是备用的%s。%s", b.primaryName, b.backupName, backup.Note))
 	return backup, nil
+}
+
+// withShareOfDeadline 返回最多用 ctx 剩下时间的 share 的 context；ctx 没有时限时原样（只是可以取消）。
+func withShareOfDeadline(ctx context.Context, share float64) (context.Context, context.CancelFunc) {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, time.Duration(float64(time.Until(deadline))*share))
 }
 
 // clampDays 把天数限制在 1–7。

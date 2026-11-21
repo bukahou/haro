@@ -3,6 +3,7 @@ package weather
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -11,6 +12,9 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/failsafe-go/failsafe-go"
+	"github.com/failsafe-go/failsafe-go/retrypolicy"
 )
 
 // 每次请求最多等 3.5 秒；连上了却卡住等不到回复时再试一次（两次合计 7 秒，留在服务端 10 秒的工具时限内）。
@@ -51,43 +55,65 @@ func (f fetcher) getText(ctx context.Context, address string) (string, error) {
 	return text, err
 }
 
+// worthRetrying 标记一次请求的错误值得再试（连上后卡住、对方 5xx）；只用来分类，错误文字照原样。
+type worthRetrying struct{ err error }
+
+func (w worthRetrying) Error() string { return w.err.Error() }
+func (w worthRetrying) Unwrap() error { return w.err }
+
+// fetchRetries 是天气请求的重试：值得再试的错误再试一次（共 maxAttempts 次），两次之间不等；其余错误不重试。
+// 主人打断（context 取消）时不再试。
+var fetchRetries = retrypolicy.NewBuilder[any]().
+	HandleIf(func(_ any, err error) bool { return errors.As(err, new(worthRetrying)) }).
+	WithMaxAttempts(maxAttempts).
+	ReturnLastFailure().
+	Build()
+
 func (f fetcher) get(ctx context.Context, address string, decode func(io.Reader) error) error {
 	timeout := f.attemptTimeout
 	if timeout <= 0 {
 		timeout = defaultAttemptTimeout
 	}
-	var err error
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		var retry bool
-		retry, err = f.getOnce(ctx, address, timeout, decode)
-		if err == nil || !retry || ctx.Err() != nil {
-			return err
-		}
+	attempts := 0
+	err := failsafe.With(fetchRetries).WithContext(ctx).Run(func() error {
+		attempts++
+		return f.getOnce(ctx, address, timeout, decode)
+	})
+	if attempts > 1 && errors.As(err, new(worthRetrying)) {
+		return fmt.Errorf("%w（试了 %d 次）", err, attempts)
 	}
-	return fmt.Errorf("%w（试了 %d 次）", err, maxAttempts)
+	return err
 }
 
-func (f fetcher) getOnce(ctx context.Context, address string, timeout time.Duration, decode func(io.Reader) error) (retry bool, err error) {
+// getOnce 发一次请求；值得再试的错误包成 worthRetrying。
+func (f fetcher) getOnce(ctx context.Context, address string, timeout time.Duration, decode func(io.Reader) error) error {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	var connected atomic.Bool // 连接（含 TLS 握手）建立起来了
 	ctx = httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{GotConn: func(httptrace.GotConnInfo) { connected.Store(true) }})
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, address, nil)
 	if err != nil {
-		return false, err
+		return err
 	}
 	response, err := f.http.Do(request)
 	if err != nil {
-		return connected.Load(), fmt.Errorf("%s连不上: %w", f.name(), err)
+		return retryableIf(connected.Load(), fmt.Errorf("%s连不上: %w", f.name(), err))
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return response.StatusCode >= 500, fmt.Errorf("%s报错: HTTP %d", f.name(), response.StatusCode)
+		return retryableIf(response.StatusCode >= 500, fmt.Errorf("%s报错: HTTP %d", f.name(), response.StatusCode))
 	}
 	if err := decode(response.Body); err != nil {
-		return ctx.Err() != nil, fmt.Errorf("%s的回复看不懂: %w", f.name(), err)
+		return retryableIf(ctx.Err() != nil, fmt.Errorf("%s的回复看不懂: %w", f.name(), err))
 	}
-	return false, nil
+	return nil
+}
+
+func retryableIf(retry bool, err error) error {
+	if retry {
+		return worthRetrying{err: err}
+	}
+	return err
 }
 
 func (f fetcher) name() string {

@@ -91,8 +91,9 @@ func (j *JMA) Locate(ctx context.Context, place Place) (JMAArea, error) {
 	}
 	key := strconv.FormatFloat(place.Latitude, 'f', 3, 64) + "," + strconv.FormatFloat(place.Longitude, 'f', 3, 64)
 	j.mu.Lock()
-	defer j.mu.Unlock()
-	if area, ok := j.areas[key]; ok {
+	area, ok := j.areas[key]
+	j.mu.Unlock()
+	if ok {
 		return area, nil
 	}
 	tables, err := j.loadTables(ctx)
@@ -103,14 +104,16 @@ func (j *JMA) Locate(ctx context.Context, place Place) (JMAArea, error) {
 	if err != nil {
 		return JMAArea{}, err
 	}
-	area, err := tables.locate(municipality, place)
+	area, err = tables.locate(municipality, place)
 	if err != nil {
 		return JMAArea{}, err
 	}
+	j.mu.Lock()
 	if len(j.areas) >= maxCachedAreas {
 		clear(j.areas)
 	}
 	j.areas[key] = area
+	j.mu.Unlock()
 	return area, nil
 }
 
@@ -119,11 +122,27 @@ func inJapan(place Place) bool {
 	return place.Latitude >= 20 && place.Latitude <= 46 && place.Longitude >= 122 && place.Longitude <= 154
 }
 
-// loadTables 下载并缓存三张表；调用方持有 j.mu。
+// loadTables 返回地区表：下载过就用缓存的；同时要的只下载一次。
 func (j *JMA) loadTables(ctx context.Context) (*jmaTables, error) {
-	if j.tables != nil {
-		return j.tables, nil
+	j.mu.Lock()
+	tables := j.tables
+	j.mu.Unlock()
+	if tables != nil {
+		return tables, nil
 	}
+	return sharedRequest(ctx, &j.loading, "tables", func(ctx context.Context) (*jmaTables, error) {
+		tables, err := j.downloadTables(ctx)
+		if err == nil {
+			j.mu.Lock()
+			j.tables = tables
+			j.mu.Unlock()
+		}
+		return tables, err
+	})
+}
+
+// downloadTables 下载四张表（地区、预报区、周间预报区、观测站）并整理好。
+func (j *JMA) downloadTables(ctx context.Context) (*jmaTables, error) {
 	tables := &jmaTables{}
 	var stations map[string]jmaStationRaw
 	for _, table := range []struct {
@@ -155,7 +174,6 @@ func (j *JMA) loadTables(ctx context.Context) (*jmaTables, error) {
 		}
 	}
 	sort.Strings(tables.temperatureCodes)
-	j.tables = tables
 	return tables, nil
 }
 
