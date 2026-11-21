@@ -3,6 +3,8 @@ package persona
 import (
 	"os"
 	"path/filepath"
+	"slices"
+	"sync"
 	"testing"
 
 	"github.com/bukahou/haro/internal/brain"
@@ -53,5 +55,30 @@ func TestFileState(t *testing.T) {
 	}
 	if id, err := state.LoadPersona(); err != nil || id != "gentle" {
 		t.Errorf("读回 %q %v", id, err)
+	}
+}
+
+// 几台终端同时换性格：各写各的临时文件再改名，都不出错，读回的是其中一个完整的编号，不留临时文件。
+func TestFileStateConcurrentSaves(t *testing.T) {
+	dir := t.TempDir()
+	state := NewFileState(filepath.Join(dir, "persona"))
+	ids := []string{"buddy", "gentle"}
+	errs := make(chan error, 64)
+	var wg sync.WaitGroup
+	for i := range cap(errs) {
+		wg.Go(func() { errs <- state.SavePersona(ids[i%len(ids)]) })
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Errorf("同时保存不该出错：%v", err)
+		}
+	}
+	if id, err := state.LoadPersona(); err != nil || !slices.Contains(ids, id) {
+		t.Errorf("读回的应是其中一个完整的编号：%q %v", id, err)
+	}
+	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 1 {
+		t.Errorf("只剩状态文件本身，不留临时文件：%v %v", entries, err)
 	}
 }

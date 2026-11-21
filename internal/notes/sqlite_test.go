@@ -89,3 +89,31 @@ func TestOpenNeedsLocation(t *testing.T) {
 		t.Error("没给存储位置应报错")
 	}
 }
+
+// 删、恢复交回改完的那一条；没有这样的一条才是 ErrNotFound；库出错时交回出错的原因，不说成「没有这一条」
+// （以前改完读回时出错也报 ErrNotFound，主人会以为没删）。
+func TestMarkTellsNotFoundFromErrors(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	note, err := store.Save(ctx, "车停在C3的7号位。")
+	if err != nil {
+		t.Fatal(err)
+	}
+	deleted, err := store.Delete(ctx, note.ID)
+	if err != nil || deleted.ID != note.ID || deleted.Content != note.Content || deleted.DeletedAt.IsZero() {
+		t.Fatalf("删除交回删掉的那一条：%+v %v", deleted, err)
+	}
+	if _, err := store.Delete(ctx, note.ID); !errors.Is(err, ErrNotFound) {
+		t.Errorf("已经删过：ErrNotFound：%v", err)
+	}
+	if restored, err := store.Restore(ctx, note.ID); err != nil || !restored.DeletedAt.IsZero() {
+		t.Errorf("恢复交回恢复的那一条：%+v %v", restored, err)
+	}
+	if _, err := store.Restore(ctx, note.ID); !errors.Is(err, ErrNotFound) {
+		t.Errorf("没删过的恢复不了：ErrNotFound：%v", err)
+	}
+	store.Close()
+	if _, err := store.Delete(ctx, note.ID); err == nil || errors.Is(err, ErrNotFound) {
+		t.Errorf("库出错：交回出错的原因，不是「没有这一条」：%v", err)
+	}
+}
