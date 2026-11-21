@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -380,5 +382,19 @@ func TestLookAtCameraUsesPersonaStyle(t *testing.T) {
 	}
 	if len(seen) != 1 || seen[0].Text != "充电头，没跑了。" || seen[0].Emotion != testPersonas[0].DefaultEmotion {
 		t.Errorf("直接念的那句应用性格的语气：%+v", seen)
+	}
+}
+
+// 连不上模型服务（最低能力）：不再调用模型，念固定的话：连不上 + 现在的时间。
+func TestModelUnavailableSpeaksStatusAndTime(t *testing.T) {
+	down := fmt.Errorf("%w: 请求 Claude: connection refused", brain.ErrModelUnavailable)
+	model := braintest.NewModel(t, braintest.Reply{Err: down})
+	k := newToolTalker(t, model, &fakeToolbox{})
+	answer := k.say("今天天气怎么样")
+	if !strings.Contains(answer, "连不上") || !regexp.MustCompile(`\d{2}:\d{2}`).MatchString(answer) {
+		t.Errorf("应念「连不上」和现在的时间：%q", answer)
+	}
+	if n := len(model.Requests()); n != 1 {
+		t.Errorf("只请求了那一次：%d", n)
 	}
 }

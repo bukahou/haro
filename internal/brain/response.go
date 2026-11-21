@@ -122,6 +122,14 @@ func (s *Session) finishAnswer(ctx context.Context, record *turnRecord, answer s
 	case ctx.Err() != nil:
 		s.closeTurn(record, turnInterrupted)
 		return realtimeproto.ResponseDone{Status: realtimeproto.StatusCancelled}
+	case err != nil && errors.Is(err, ErrModelUnavailable) && answer == "" && record.executedTools() == 0:
+		// 最低能力（第 7 段）：连不上就不调用任何模型，念一句固定的话：连不上 + 现在的时间（报时是顺带给的，不用判断主人问的是什么）
+		s.logger.Warn("连不上模型服务：告诉主人，顺带报时", "err", err)
+		s.mu.Lock()
+		language := s.language
+		s.mu.Unlock()
+		return s.speakFixedReply(ctx, s.opts.Phrases.Say(language, PhraseModelUnavailable,
+			map[string]string{"time": time.Now().Format("15:04")}))
 	case err != nil:
 		var spoken SpokenError
 		if errors.As(err, &spoken) && answer == "" && record.executedTools() == 0 { // 例如额度用完了：直接告诉主人

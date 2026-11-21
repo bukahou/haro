@@ -168,7 +168,8 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	model := buildChatModel(settings, claude, modelHTTP, pricing, ledger, guard, spending.PurposeChat, logger)
+	model, breaker := buildChatModel(settings, claude, modelHTTP, pricing, ledger, guard, spending.PurposeChat, logger)
+	briefers = append(briefers, breaker) // 连不上之后刚恢复时，告诉模型断过多久
 	logger.Info("预热模型（本地第一次可能要几十秒；云端不用预热）", "model", activeModel(settings))
 	if err := brain.WarmUp(ctx, model); err != nil {
 		logger.Warn("模型预热失败，第一轮对话会比较慢", "err", err)
@@ -210,8 +211,9 @@ func run(logger *slog.Logger) error {
 		components.Profiles = profiles
 	}
 	if settings.ConversationSummary { // 滚动摘要：和主对话同一套模型，按 summary 用途记账
-		components.Conversations.SummarizeWith(buildChatModel(settings, claude, modelHTTP, pricing, ledger, guard, spending.PurposeSummary,
-			logger.With("model_use", "summary")))
+		summarizer, _ := buildChatModel(settings, claude, modelHTTP, pricing, ledger, guard, spending.PurposeSummary,
+			logger.With("model_use", "summary"))
+		components.Conversations.SummarizeWith(summarizer)
 	}
 	if settings.WakeArbitration > 0 { // 多台终端同时听到唤醒词：只让最合适的那台回答
 		components.WakeArbiter = brain.NewWakeArbiter(settings.WakeArbitration)
@@ -299,10 +301,11 @@ func readinessChecks(settings config.Settings, claude *llm.ClaudeAPI, ledger spe
 }
 
 // buildChatModel 按 HARO_LLM_PROVIDER 组装服务端用的模型（cloud = 云端，local = 本地 ollama；不互相顶替）。
+// 外面依次套：连不上时的熔断（交回的 breaker 也是每轮情况说明的来源）、按月度额度放行。
 //
 // purpose 是记账用途：主对话（chat）与滚动摘要（summary，R4）各建一套，费用分开记。
 func buildChatModel(settings config.Settings, claude *llm.ClaudeAPI, client *http.Client, pricing spending.Pricing, ledger spending.Ledger, guard *spending.Guard,
-	purpose spending.Purpose, logger *slog.Logger) brain.ChatModel {
+	purpose spending.Purpose, logger *slog.Logger) (brain.ChatModel, *llm.UnavailabilityBreaker) {
 	maxTokens := settings.CloudMaxTokens
 	if purpose == spending.PurposeSummary && maxTokens < summaryMaxTokens {
 		maxTokens = summaryMaxTokens // 摘要最长 300 字，聊天的输出上限可能不够
@@ -339,7 +342,8 @@ func buildChatModel(settings config.Settings, claude *llm.ClaudeAPI, client *htt
 	if purpose == spending.PurposeChat {
 		paid = routeToStrong(settings, claude, client, paid, maxTokens, pricing, ledger, logger)
 	}
-	return spending.NewBudgetedChatModel(paid, guard, logger)
+	breaker := llm.NewUnavailabilityBreaker(paid, unavailableRetry, logger)
+	return spending.NewBudgetedChatModel(breaker, guard, logger), breaker
 }
 
 // routeToStrong 按规则把看画面（takeover 时）、前台请它重答的请求交给更强的模型（HARO_STRONG_LLM_*），其余照旧；
@@ -616,3 +620,6 @@ func activeModel(settings config.Settings) string {
 
 // strongCooldown：更强的模型出错或等太久之后，这么久内直接用原来那套（沿用原来云端↔本地退路的冷却时间）。
 const strongCooldown = 30 * time.Second
+
+// unavailableRetry：连不上模型服务之后，这么久内不再去连（马上告诉主人连不上），之后放一个请求去试（沿用同一个冷却时间）。
+const unavailableRetry = 30 * time.Second

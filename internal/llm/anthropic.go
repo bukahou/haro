@@ -175,10 +175,11 @@ func (m *AnthropicChatModel) StreamReply(ctx context.Context, request brain.Chat
 		}
 		if err := stream.Err(); err != nil { // 出错、被取消：照样交出知道的那部分用量（记账不漏）
 			if deadline.noFirstToken() {
-				yield(brain.ReplyDelta{Usage: partialUsage(message)}, fmt.Errorf("请求 Claude: %w（等了 %v）", errNoFirstToken, m.firstTokenTimeout))
+				yield(brain.ReplyDelta{Usage: partialUsage(message)},
+					markUnavailable(ctx, fmt.Errorf("请求 Claude: %w（等了 %v）", errNoFirstToken, m.firstTokenTimeout)))
 				return
 			}
-			yield(brain.ReplyDelta{Usage: partialUsage(message)}, fmt.Errorf("请求 Claude: %w", err))
+			yield(brain.ReplyDelta{Usage: partialUsage(message)}, markUnavailable(ctx, fmt.Errorf("请求 Claude: %w", err)))
 			return
 		}
 		usage := usageOf(message.Usage)

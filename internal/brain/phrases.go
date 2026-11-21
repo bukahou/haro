@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-// 不经模型、直接念给主人的话：模型用不了时的说明（额度用完、账本读不出、模型拒答）。每种语言一份，
+// 不经模型、直接念给主人的话：模型用不了时的说明（连不上、额度用完、账本读不出、模型拒答）。每种语言一份，
 // 按主人最近一句话识别出的语种选；程序里带一份（phrases.json），部署时可以用文件换掉。
 
 // 话的键（SpokenError.Phrase 交的就是它们）。话里的 {名字} 换成交过来的值。
@@ -19,10 +19,11 @@ const (
 	PhraseOverSearchDaily   = "over_search_daily"   // {used} {limit}：今天的搜索到上限
 	PhraseLedgerUnavailable = "ledger_unavailable"  // 读不出费用账本
 	PhraseRefused           = "refused"             // 模型拒绝回答
+	PhraseModelUnavailable  = "model_unavailable"   // {time}：连不上云端的模型（最低能力：说明状态，顺带报时）
 )
 
 var phraseKeys = []string{PhraseOverMonthlyBudget, PhraseOverResearchDaily, PhraseOverSearchDaily,
-	PhraseLedgerUnavailable, PhraseRefused}
+	PhraseLedgerUnavailable, PhraseRefused, PhraseModelUnavailable}
 
 // Phrases 是每种语言的固定的话：语种（识别给的，例如 zh、ja、en）→ 键 → 话。Default 是没有这种语言时用的。
 type Phrases struct {

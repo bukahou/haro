@@ -7,6 +7,7 @@ package brain
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"iter"
 
 	"github.com/bukahou/haro/internal/realtimeproto"
@@ -27,6 +28,11 @@ type ChatRequest struct {
 	// 例如最后一轮逼模型直接回答。各适配用厂商的「不许调用工具」选项实现；服务端不认这个选项的，这一轮不带工具。
 	ForbidToolCalls bool
 }
+
+// ErrModelUnavailable 表示连不上模型服务（网络不通、等不到回答、认证失败、限流、服务端出错或过载）：
+// 不是请求本身有问题，过一会儿再试可能就好了。适配层把厂商的错误标成它（errors.Is 判断）；
+// 大脑据此进入最低能力：不调用模型，念「连不上」和现在的时间（第 7 段）。
+var ErrModelUnavailable = errors.New("连不上模型服务")
 
 // ModelWarmer 是需要预热的模型（可选）：按需加载模型的服务（本地 Ollama）在第一轮对话前先把模型装进显存，
 // 免得第一轮等几十秒；云端不用实现。包装别的模型的那几层用 WarmUp 转发。
