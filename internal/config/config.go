@@ -278,10 +278,8 @@ func (settings TerminalSettings) validateTerminal() error {
 		return fmt.Errorf("HARO_CAMERA_BACKEND 只能是 %s、%s 或 %s，现在是 %q", CameraBackendAuto, CameraBackendMediaDevices,
 			CameraBackendFFmpeg, settings.CameraBackend)
 	}
-	if settings.ServerURL == "" {
-		return fmt.Errorf("必须设 HARO_SERVER_URL（haro-server 的地址）")
-	}
-	return nil
+	// 对话（WebSocket）和登记声纹（HTTP）都按这个地址连：要是 http(s)
+	return requireHTTPURL("HARO_SERVER_URL", settings.ServerURL, "haro-server 的地址，例如 http://127.0.0.1:59130")
 }
 
 // validateBrain 校验服务端的配置。判断说完、唤醒词要用到的模型由服务端（haro-asr）加载，所以也在这里看。

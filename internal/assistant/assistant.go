@@ -61,14 +61,20 @@ type Assistant struct {
 	busy   atomic.Bool                    // 正在回答这一轮（请求回答 → 播完）
 	// hearing：主人正在说话（服务端报了开始说话，这一轮还没答完）
 	hearing atomic.Bool
+	// heldNotices：主人说着话时来的提示，留到这一轮答完再响（只在主循环里读写）
+	heldNotices []realtimeproto.HaroNotice
 }
+
+// eventBacklog：留给主循环之后再处理的事件最多这么多（打断后等取消确认期间收到的、留到这一轮答完再响的提示），
+// 再多就丢掉并写日志。
+const eventBacklog = 16
 
 // Busy 表示主人正在说话或正在回答（从开始说话到这一轮播完）；此时换麦克风、断开重连会丢掉这句话。
 func (a *Assistant) Busy() bool { return a.hearing.Load() || a.busy.Load() }
 
 // NewAssistant 组装一个 Assistant。
 func NewAssistant(parts Components, opts Options, logger *slog.Logger) *Assistant {
-	return &Assistant{parts: parts, opts: opts, logger: logger, replay: make(chan realtimeproto.ServerEvent, 16)}
+	return &Assistant{parts: parts, opts: opts, logger: logger, replay: make(chan realtimeproto.ServerEvent, eventBacklog)}
 }
 
 // Run 打开服务端会话（服务端判断说完、启用唤醒门），然后按唤醒词轮流说话，直到 ctx 取消或出错。

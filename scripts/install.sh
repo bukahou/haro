@@ -1,19 +1,6 @@
 #!/bin/sh
-# haro 终端的安装脚本（装在自己的用户目录里，不需要 root）。再跑一次 = 升级到最新。
-#
-#   curl -fsSL https://github.com/bukahou/haro/releases/latest/download/install.sh | sh -s -- --server-url http://服务端地址:59130
-#
-# 选项：
-#   --server-url URL   服务端地址（第一次安装时必填；配置文件已经有了就不改它）
-#   --version TAG      装指定版本，例如 v0.5.0-1a2b3c4（默认最新）
-#   --no-service       只装程序和配置，不装开机自启
-#   --uninstall        卸载程序和开机自启（配置文件留着）
-#
-# 做的事：下载这台机器对应的终端程序（Linux x86_64 / arm64、macOS Apple 芯片）→ 按 SHA256SUMS 校验 →
-#   装到 ~/.local/bin/haro → 第一次装时写配置 ~/.config/haro/haro.env →
-#   装成开机自启并（重新）启动：Linux 是 systemd 用户服务 haro.service（跟着桌面会话启停），macOS 是 LaunchAgent。
-# 不是这个脚本装的服务文件（例如开发时 make install-terminal-service 装的）不会被改动或删除。
-# 环境变量 HARO_RELEASE_BASE_URL：换掉下载地址（测试用，可以是 file://；指向放着压缩包和 SHA256SUMS 的目录）。
+# haro 终端的安装脚本。用法、选项、做的事只写在下面的 usage 里（--help 打印它）：
+# curl 管道装法（curl … | sh -s -- …）下 $0 不是这个文件，读不到这里的注释。
 set -eu
 
 repo=bukahou/haro
@@ -34,8 +21,24 @@ die() {
 	exit 1
 }
 usage() {
-	sed -n '2,17p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'
-	exit 2
+	cat <<EOF
+haro 终端的安装脚本（装在自己的用户目录里，不需要 root）。再跑一次 = 升级到最新。
+
+  curl -fsSL https://github.com/$repo/releases/latest/download/install.sh | sh -s -- --server-url http://服务端地址:59130
+
+选项：
+  --server-url URL   服务端地址（第一次安装时必填；配置文件已经有了就不改它）
+  --version TAG      装指定版本，例如 v0.5.0-1a2b3c4（默认最新）
+  --no-service       只装程序和配置，不装开机自启
+  --uninstall        卸载程序和开机自启（配置文件留着）
+  -h, --help         打印这段说明
+
+做的事：下载这台机器对应的终端程序（Linux x86_64 / arm64、macOS Apple 芯片）→ 按 SHA256SUMS 校验 →
+  装到 ~/.local/bin/haro → 第一次装时写配置 ~/.config/haro/haro.env →
+  装成开机自启并（重新）启动：Linux 是 systemd 用户服务 haro.service（跟着桌面会话启停），macOS 是 LaunchAgent。
+不是这个脚本装的服务文件（例如开发时 make install-terminal-service 装的）不会被改动或删除。
+环境变量 HARO_RELEASE_BASE_URL：换掉下载地址（测试用，可以是 file://；指向放着压缩包和 SHA256SUMS 的目录）。
+EOF
 }
 
 server_url=
@@ -58,7 +61,10 @@ while [ $# -gt 0 ]; do
 	--version=*) version=${1#*=} ;;
 	--no-service) with_service=false ;;
 	--uninstall) action=uninstall ;;
-	-h | --help) usage ;;
+	-h | --help)
+		usage
+		exit 0
+		;;
 	*) die "不认识的选项：$1（--help 看用法）" ;;
 	esac
 	shift

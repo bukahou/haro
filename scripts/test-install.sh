@@ -29,6 +29,10 @@ fail() {
 	exit 1
 }
 
+echo "== --help：curl 管道装法下（脚本从标准输入读，\$0 不是脚本文件）也打印用法"
+HOME=$home sh -s -- --help <"$root/scripts/install.sh" >"$work/out" 2>&1 || fail "--help 应正常退出：$(cat "$work/out")"
+grep -F -- '--server-url' "$work/out" >/dev/null || fail "--help 没打印用法：$(cat "$work/out")"
+
 echo "== 第一次安装不给服务端地址：必须拒绝"
 if installer >"$work/out" 2>&1; then fail "没给 --server-url 也装上了"; fi
 # 阳性对照：要确认是因为没给地址才拒绝，而不是脚本自己出错（macOS 上曾经是后者，这一条却照样通过）

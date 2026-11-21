@@ -32,10 +32,10 @@ type AudioSink interface {
 
 // AudioStream 是一条进行中的播放流。
 type AudioStream interface {
-	Write(pcm []byte) error
-	Drain() error          // 等缓冲里的声音全部播完
-	Abort() error          // 立即停止并丢掉缓冲（打断用）
-	Played() time.Duration // 已经播出多长（按「用户实际听到的部分」截断历史用）
+	Write(pcm []byte) error // 排进播放队列就返回，不等播出（回答的音频在事件循环里直接写，不能卡住它）
+	Drain() error           // 等缓冲里的声音全部播完
+	Abort() error           // 立即停止并丢掉缓冲（打断用）
+	Played() time.Duration  // 已经播出多长（按「用户实际听到的部分」截断历史用）
 }
 
 // BrainSession 是终端看到的服务端。

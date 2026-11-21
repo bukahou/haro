@@ -370,6 +370,102 @@ func TestSilentServerIsDetected(t *testing.T) {
 	}
 }
 
+// 服务端地址写成 ws://、scheme 大写、末尾带 /：都按结构换成对话会话的 WebSocket 地址，连得上。
+func TestDialNormalizesServerURL(t *testing.T) {
+	for _, rewrite := range []func(hostPort string) string{
+		func(hostPort string) string { return "ws://" + hostPort },
+		func(hostPort string) string { return "HTTP://" + hostPort + "/" },
+	} {
+		server := newServer(newScriptedSession(false))
+		base := rewrite(strings.TrimPrefix(server.URL, "http://"))
+		client, err := brainclient.Dial(context.Background(), brainclient.DialOptions{BaseURL: base, InputFormat: mic16k}, quiet)
+		if err != nil {
+			t.Errorf("%s 应连得上：%v", base, err)
+		} else {
+			client.Close()
+		}
+		server.Close()
+	}
+}
+
+// disconnectAnnouncement 是断线时补发的事件：error，正有回答时再加一个失败的 response.done。
+var disconnectAnnouncement = []string{realtimeproto.Error{}.Type(), realtimeproto.ResponseDone{}.Type()}
+
+// droppedAnnouncement 匹配「补发的事件放不下、丢掉了」的那条日志（警告，dropped 列出丢掉的事件）。
+func droppedAnnouncement(record logRecord) bool {
+	return record.level == slog.LevelWarn && record.hasFields(map[string]any{"dropped": disconnectAnnouncement})
+}
+
+// 回答涌过来、终端一直不收：队列满了就断开（等 EventBacklog）。断线补发的事件也放不下 ——
+// 最多再等 EventBacklog 就丢掉、写日志，不一直挂着。
+func TestDisconnectAnnouncementGivesUpWhenNobodyReads(t *testing.T) {
+	reply := make([]realtimeproto.ServerEvent, 100) // 比事件队列长
+	for i := range reply {
+		reply[i] = realtimeproto.ResponseOutputAudioTranscriptDelta{Delta: "字"}
+	}
+	server := newServer(newScriptedSession(true, reply...))
+	defer server.Close()
+	logs := &logRecords{}
+	client, err := brainclient.Dial(context.Background(), brainclient.DialOptions{BaseURL: server.URL, InputFormat: mic16k,
+		EventBacklog: 50 * time.Millisecond}, slog.New(logs))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	askOverWebSocket(t, client) // 之后不读 Events()
+	select {
+	case <-client.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("终端一直不收事件：应断开")
+	}
+	logs.waitFor(t, "补发的事件放不下时丢掉的警告", droppedAnnouncement)
+}
+
+// 断线时队列是满的（终端没在收），接着看守关掉了这条连接：补发的事件马上丢掉，不再等 EventBacklog。
+func TestDisconnectAnnouncementStopsWhenClosed(t *testing.T) {
+	const queueSize = 64 // brainclient 的事件队列长度
+	reply := make([]realtimeproto.ServerEvent, queueSize)
+	for i := range reply {
+		reply[i] = realtimeproto.ResponseOutputAudioTranscriptDelta{Delta: "字"}
+	}
+	server := newServer(newScriptedSession(true, reply...))
+	server.Close() // 只借用它的 handler，改用自己的监听
+	raw, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener := &trackingListener{Listener: raw}
+	httpServer := &http.Server{Handler: server.Config.Handler}
+	go httpServer.Serve(listener)
+	defer httpServer.Close()
+
+	logs := &logRecords{}
+	client, err := brainclient.Dial(context.Background(), brainclient.DialOptions{BaseURL: "http://" + raw.Addr().String(),
+		InputFormat: mic16k}, slog.New(logs)) // EventBacklog 用默认的 5 秒
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cap(client.Events()); got != queueSize {
+		t.Fatalf("测试前提：事件队列长 %d，实际 %d", queueSize, got)
+	}
+	askOverWebSocket(t, client) // 之后不读 Events()
+	deadline := time.Now().Add(2 * time.Second)
+	for len(client.Events()) < queueSize {
+		if time.Now().After(deadline) {
+			t.Fatalf("事件队列没满：%d", len(client.Events()))
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	listener.killAll()
+	<-client.Done()
+	closedAt := time.Now()
+	client.Close()
+	logs.waitFor(t, "补发的事件放不下时丢掉的警告", droppedAnnouncement)
+	if waited := time.Since(closedAt); waited > time.Second {
+		t.Errorf("连接关掉以后应马上丢掉，等了 %v", waited)
+	}
+}
+
 // 音频格式和声明的不一致：直接拒绝（避免服务端按错的采样率去识别）。
 func TestRejectsMismatchedAudioFormat(t *testing.T) {
 	server := newServer(newScriptedSession(false))

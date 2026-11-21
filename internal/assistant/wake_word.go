@@ -40,6 +40,7 @@ func (a *Assistant) runWakeWord(ctx context.Context) error {
 	a.logger.Info("💤 休眠中：叫「" + a.opts.WakeWord.Phrase + "」唤醒（或按回车）")
 
 	for {
+		a.playHeldNotices(ctx, window)
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -103,7 +104,7 @@ func (a *Assistant) handleWakeEvent(ctx context.Context, window *conversationWin
 				window.restart()
 			}
 		}
-		a.playNotice(ctx, e)
+		a.playNotice(ctx, window, e)
 	case realtimeproto.Error:
 		a.logger.Error("服务端出错", "message", e.Message)
 	}
@@ -125,13 +126,42 @@ func (a *Assistant) sleep(ctx context.Context, window *conversationWindow, reaso
 
 // playNotice 服务端有事告诉主人（例如后台调查查完了、语音识别断开了）：响一声。醒着、睡着都响。
 // 有专门提示音的种类（NoticeTones）播那一声，其余（包括不认识的）播通用的提示音。
-func (a *Assistant) playNotice(ctx context.Context, notice realtimeproto.HaroNotice) {
+//
+// 醒着时语音前端在听：提示音和回答一样防回声（suppressEcho）。主人正说着这一句时先不响，留到这一轮答完：
+// 这时响会混进这句话；防回声又会截断它（半双工上传静音会被当成说完；可以打断时语音前端开始只听唤醒词，
+// 这句就丢了、也不会再报说完）。睡着时语音前端只认唤醒词，直接播。
+func (a *Assistant) playNotice(ctx context.Context, window *conversationWindow, notice realtimeproto.HaroNotice) {
+	if a.hearing.Load() {
+		if len(a.heldNotices) < eventBacklog {
+			a.logger.Info("🔔 服务端提示：主人正在说话，这一轮答完再响", "kind", notice.Kind)
+			a.heldNotices = append(a.heldNotices, notice)
+		} else {
+			a.logger.Warn("事件太多，丢掉一个", "event", notice.Type(), "kind", notice.Kind)
+		}
+		return
+	}
 	a.logger.Info("🔔 服务端提示", "kind", notice.Kind)
 	tone, ok := a.opts.NoticeTones[notice.Kind]
 	if !ok {
 		tone = a.opts.NoticeTone
 	}
+	if window.awake && a.audible(tone) {
+		resume := a.suppressEcho(ctx)
+		defer resume(true)
+	}
 	a.playClip(ctx, tone, "提示音")
+}
+
+// playHeldNotices 主人说完、这一轮答完以后，响留着的提示（只在主循环里调用）。
+func (a *Assistant) playHeldNotices(ctx context.Context, window *conversationWindow) {
+	if a.hearing.Load() || len(a.heldNotices) == 0 {
+		return
+	}
+	held := a.heldNotices
+	a.heldNotices = nil
+	for _, notice := range held {
+		a.playNotice(ctx, window, notice)
+	}
 }
 
 // playSleepTone 休眠时说一声：不出声的话，人不知道它已经睡了，接着说话会没反应。
@@ -140,9 +170,14 @@ func (a *Assistant) playSleepTone(ctx context.Context) {
 	a.playClip(ctx, a.opts.WakeWord.SleepTone, "休眠提示音")
 }
 
+// audible 判断这段提示音放不放得出来（有声音、有音箱）。
+func (a *Assistant) audible(tone realtimeproto.PCMAudio) bool {
+	return len(tone.Data) > 0 && a.parts.Speaker != nil
+}
+
 // playClip 在本机音箱上播一段提示音（播完才返回）。
 func (a *Assistant) playClip(ctx context.Context, tone realtimeproto.PCMAudio, what string) {
-	if len(tone.Data) == 0 || a.parts.Speaker == nil {
+	if !a.audible(tone) {
 		return
 	}
 	ctx, cancel := context.WithTimeout(ctx, tone.Duration()+5*time.Second)
