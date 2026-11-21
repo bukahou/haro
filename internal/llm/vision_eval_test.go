@@ -31,6 +31,7 @@ import (
 
 	"github.com/google/jsonschema-go/jsonschema"
 
+	"github.com/bukahou/haro/internal/agents"
 	"github.com/bukahou/haro/internal/brain"
 	"github.com/bukahou/haro/internal/vision"
 )
@@ -98,11 +99,23 @@ func TestVisionEval(t *testing.T) {
 		judgeModel = "claude-sonnet-5-5"
 	}
 	judge := NewAnthropicChatModel(AnthropicOptions{API: api, Model: judgeModel, MaxTokens: 300, Effort: "low", Thinking: ThinkingDisabled})
+	catalog, err := agents.Load("") // 评测用程序里带的「看画面」定义（和线上同一份）
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition, _ := catalog.Get(agents.Vision)
+	rules, err := vision.RulesFrom(definition)
+	if err != nil {
+		t.Fatal(err)
+	}
 	var results []evalResult
 	for _, config := range evalConfigs {
 		model := &usageTotal{ChatModel: NewAnthropicChatModel(AnthropicOptions{API: api, Model: config.model,
 			MaxTokens: config.maxTokens, Effort: config.effort, Thinking: config.thinking})}
-		expert := vision.NewExpert(model, config.name, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		expert, err := vision.NewExpert(model, config.name, rules, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		if err != nil {
+			t.Fatal(err)
+		}
 		for _, sample := range samples {
 			frame, err := os.ReadFile(filepath.Join(dir, fmt.Sprintf("%s-%d.jpg", sample.id, config.width)))
 			if err != nil {

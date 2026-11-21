@@ -297,21 +297,24 @@ func (s *Session) generateSentences(ctx context.Context, history []ChatMessage, 
 	}
 
 	messages := append(history, input)
-	inputIndex := len(history) // 这一轮主人那句话在 messages 里的位置（请更强的模型重答时在它上面做标记）
 	specs := s.toolSpecs()
 	if record.restricted { // 声纹没确认的叫醒短句：不给工具
 		specs = nil
 	}
-	steps, forceFinal := newToolSteps(s.opts), false
+	// 这一轮先由前台回答；交给接手的代理后，剩下的请求都由它回答（带着同样的历史和系统提示词），步数从交接时重新算
+	agent, handedOver, firstRound := s.parts.Front, false, 0
+	ctx = startAgent(ctx, agent.Name)
+	offered := agent.offer(specs)
+	steps, forceFinal := newToolSteps(agent), false
 	for round := 0; ; round++ {
 		segment = baseRound + round
 		// 最后一步（或刚停下一个死循环）：工具定义照给（提示词缓存不失效）、但不许调用，逼模型直接回答
-		request := ChatRequest{Messages: messages, Tools: specs, ForbidToolCalls: round >= s.maxToolSteps()-1 || forceFinal}
+		request := ChatRequest{Messages: messages, Tools: offered, ForbidToolCalls: round-firstRound >= agent.maxSteps()-1 || forceFinal}
 		var calls []ToolCall
 		var roundText strings.Builder
 		var roundUsage *ReplyUsage
 		truncated := false
-		for delta, err := range s.parts.Model.StreamReply(ctx, request) {
+		for delta, err := range agent.Model.StreamReply(ctx, request) {
 			if err != nil {
 				recordSpanError(span, err)
 				return usage.add(roundUsage), err
@@ -358,7 +361,7 @@ func (s *Session) generateSentences(ctx context.Context, history []ChatMessage, 
 		exchange := []ChatMessage{{Role: RoleAssistant, Text: roundText.String(), ToolCalls: calls}}
 		var frameMessages []ChatMessage // 看画面：图片只能放在用户消息里，排在所有工具结果之后
 		var directAnswer string         // 专家那句直接当这一轮的回答（不再请求前台模型）
-		switched := false
+		switched, handOff := false, false
 		steps.begin()
 		for _, call := range calls {
 			if count, loop := steps.repeated(call); loop { // 死循环：不执行，告诉模型为什么停，下一步不许再调用
@@ -372,13 +375,22 @@ func (s *Session) generateSentences(ctx context.Context, history []ChatMessage, 
 			if ctx.Err() != nil { // 被打断：后面的调用不再执行（收尾时记成「没有执行」）
 				break
 			}
+			if !executable(agent, offered, record.restricted, call.Name) { // 这一步没给它的工具（照着历史里见过的名字调用）：不执行
+				s.logger.Warn("模型调用了这一步没提供的工具：不执行", "tool", call.Name, "agent", agent.Name)
+				result := notOfferedResult(call.Name)
+				record.recordResult(toolRoundIndex, call, result)
+				exchange = append(exchange, ChatMessage{Role: RoleTool, ToolName: call.Name, ToolCallID: call.ID, Text: result})
+				continue
+			}
 			var result string
 			switch call.Name {
 			case switchPersonaTool:
 				result = s.switchPersona(call.Arguments)
 				switched = true
 			case askStrongerTool:
-				result = s.escalate(&messages[inputIndex])
+				var escalated bool
+				result, escalated = s.escalate(handedOver)
+				handOff = handOff || escalated
 				record.rememberAs(toolRoundIndex, call, escalatedRecord)
 			case confirmActionTool:
 				result = s.confirmAction(ctx, record, call)
@@ -395,6 +407,9 @@ func (s *Session) generateSentences(ctx context.Context, history []ChatMessage, 
 				frames := look.frameMessages()
 				frameMessages = append(frameMessages, frames...)
 				record.rounds[toolRoundIndex].frameShown = len(frames) > 0
+				if len(frames) > 0 && s.parts.Handoff.frames() && !handedOver { // 画面交给接手的代理看
+					handOff = true
+				}
 			default:
 				if s.requiresConfirmation(call.Name) { // 会破坏的：先问主人（确认闸）
 					result = s.holdForConfirmation(record, call)
@@ -425,6 +440,16 @@ func (s *Session) generateSentences(ctx context.Context, history []ChatMessage, 
 			}
 			break
 		}
+		if handOff && s.parts.Handoff.Agent != nil {
+			next := *s.parts.Handoff.Agent
+			delegated, err := EnterAgent(ctx, s.logger, next.Name, Handover)
+			if err != nil {
+				s.logger.Warn("交不出去：这一轮还由原来的代理回答", "err", err)
+				continue
+			}
+			ctx, agent, handedOver, firstRound = delegated, next, true, round+1
+			offered, steps, forceFinal = agent.offer(specs), newToolSteps(agent), false
+		}
 	}
 	if err := flushText(); err != nil {
 		return usage, err
@@ -437,7 +462,7 @@ func (s *Session) generateSentences(ctx context.Context, history []ChatMessage, 
 			attribute.Int("haro.llm.cache_write_tokens", usage.CacheWriteTokens),
 			attribute.Int("haro.llm.requests", usage.Requests),
 			attribute.Int("haro.llm.thinking_chars", usage.ThinkingChars))
-		s.logger.Info("模型用量", "requests", usage.Requests, "prompt_tokens", usage.PromptTokens, "output_tokens", usage.OutputTokens,
+		s.logger.Info("模型用量", "agent", agent.Name, "requests", usage.Requests, "prompt_tokens", usage.PromptTokens, "output_tokens", usage.OutputTokens,
 			"cache_read_tokens", usage.CacheReadTokens, "cache_write_tokens", usage.CacheWriteTokens,
 			"visible_chars", utf8.RuneCountInString(answer.String()), "thinking_chars", usage.ThinkingChars)
 	}

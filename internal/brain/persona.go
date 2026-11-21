@@ -122,16 +122,16 @@ func (s *Session) switchPersona(arguments map[string]any) string {
 	return fmt.Sprintf("已切换为「%s」，从这句起按新的性格说话。", persona.Name)
 }
 
-// systemPrompt 拼出系统提示词：基础提示词 + 当前性格的风格。
+// systemPrompt 拼出系统提示词：前台的基础规则 + 工具介绍 + 主人资料 + 当前性格的风格（+ 之前聊过的摘要）。
 func (s *Session) systemPrompt() string {
 	s.mu.Lock()
-	instructions, conversation := s.opts.Instructions, s.conversation
+	conversation := s.conversation
 	s.mu.Unlock()
 	profile := ""
 	if s.parts.Profiles != nil {
 		profile = s.parts.Profiles.Profile(conversation.Person())
 	}
-	prompt := composeSystemPrompt(instructions, toolOverview(s.offeredTools()), profile, conversation.currentPersona())
+	prompt := composeSystemPrompt(s.parts.Front.Instructions, toolOverview(s.offeredTools()), profile, conversation.currentPersona())
 	if note := summaryNote(conversation.currentSummary()); note != "" {
 		prompt += "\n\n" + note
 	}

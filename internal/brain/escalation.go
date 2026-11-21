@@ -2,7 +2,7 @@ package brain
 
 // askStrongerTool 是内置的「请更强的模型重答」工具：主人在纠正、或明说要想清楚时由前台模型调用。
 // 认「主人在纠正」交给模型：任何语言、任何说法都认得出，不靠写死的词表。
-// 调用后这一轮剩下的请求标上 Escalate，由选模型的包装层交给更强的模型（Options.Escalation 为 true 时才提供）。
+// 调用后这一轮剩下的部分交给接手的代理（Components.Handoff；OnCorrection 时才提供这个工具）。
 const askStrongerTool = "ask_stronger_model"
 
 var askStrongerSpec = ToolSpec{Name: askStrongerTool,
@@ -11,7 +11,7 @@ var askStrongerSpec = ToolSpec{Name: askStrongerTool,
 	Parameters: ParametersFor[struct{}]()}
 
 const (
-	// 这条结果之后的请求已经交给更强的模型：话是对接手的模型说的
+	// 这条结果之后的请求已经交给接手的代理：话是对接手的模型说的
 	escalatedNote        = "这一句已改由更强的模型重新回答，现在回答的就是你：认真重新想（需要就查），直接回答主人；不要提交接的事，也不要再调用这个工具。"
 	alreadyEscalatedNote = "这一句已经由更强的模型在回答了，就是你：直接回答主人。"
 	// escalatedRecord 是历史里这次交接记成的样子：上面两句是给接手的模型这一轮看的要求，原样存下来，
@@ -19,12 +19,12 @@ const (
 	escalatedRecord = "（这一句交给了更强的模型回答）"
 )
 
-// escalate 把这一轮主人那句话标上 Escalate（input 指向 messages 里的那一条），返回交给模型的工具结果。
-func (s *Session) escalate(input *ChatMessage) string {
-	if input.Escalate {
-		return alreadyEscalatedNote
+// escalate 是调用 ask_stronger_model 的结果：还没交出去时，这一步之后交给接手的代理（handOff）；
+// 已经是接手的代理在回答时，提示它直接回答。
+func (s *Session) escalate(handedOver bool) (result string, handOff bool) {
+	if handedOver {
+		return alreadyEscalatedNote, false
 	}
-	input.Escalate = true
 	s.logger.Info("调用工具", "tool", askStrongerTool)
-	return escalatedNote
+	return escalatedNote, true
 }

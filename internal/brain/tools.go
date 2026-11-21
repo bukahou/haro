@@ -38,7 +38,8 @@ const (
 	frameRecalledNote = "（当时看了摄像头画面；画面不保留，现在要看需要重新调用 look_at_camera）"
 )
 
-// toolSpecs 返回可用的工具清单：内置的看画面 + 工具箱（内置时间 + MCP）。
+// toolSpecs 返回会话这一轮提供的工具：会话自己的（看画面、换性格、交给强模型、提高上限）+ 工具箱（内置 + MCP）
+// + 有待确认的操作时的确认、取消。交给哪个代理时再按它的允许名单筛（Agent.offer）。
 func (s *Session) toolSpecs() []ToolSpec {
 	var specs []ToolSpec
 	if s.parts.Camera != nil && s.parts.Camera.Available() {
@@ -47,7 +48,7 @@ func (s *Session) toolSpecs() []ToolSpec {
 	if spec, ok := switchPersonaSpec(s.opts.Personas); ok {
 		specs = append(specs, spec)
 	}
-	if s.opts.Escalation {
+	if s.parts.Handoff.corrections() {
 		specs = append(specs, askStrongerSpec)
 	}
 	if s.parts.MonthlyCap != nil { // 平时也能口头提高上限（照样过确认闸）
@@ -140,7 +141,7 @@ func (s *Session) lookAtCamera(ctx context.Context, view cameraView) cameraLook 
 		if persona := s.currentPersona(); persona != nil {
 			question.Style = persona.Prompt
 		}
-		report, err := s.parts.FrameExpert.ExamineFrame(ctx, question)
+		report, err := s.examineFrame(ctx, question)
 		if err == nil {
 			s.logger.Info("调用工具", "tool", lookAtCameraTool, "frame_bytes", len(frame), "by", "专家",
 				"spoken_chars", utf8.RuneCountInString(report.Spoken))
@@ -153,6 +154,15 @@ func (s *Session) lookAtCamera(ctx context.Context, view cameraView) cameraLook 
 	}
 	s.logger.Info("调用工具", "tool", lookAtCameraTool, "frame_bytes", len(frame))
 	return cameraLook{frame: frame, result: "已拿到摄像头当前画面，见下一条消息。"}
+}
+
+// examineFrame 把画面交给看画面的专家（子任务，经 EnterAgent 记进代理链）。
+func (s *Session) examineFrame(ctx context.Context, question FrameQuestion) (FrameReport, error) {
+	ctx, err := EnterAgent(ctx, s.logger, s.parts.FrameExpert.AgentName(), Subtask)
+	if err != nil {
+		return FrameReport{}, err
+	}
+	return s.parts.FrameExpert.ExamineFrame(ctx, question)
 }
 
 // frameMessages 是承载画面的用户消息：只有画面要交给前台模型看时才有（由专家看了、或没拍成时为空）。

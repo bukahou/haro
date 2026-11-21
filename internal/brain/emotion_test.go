@@ -2,6 +2,7 @@ package brain
 
 import (
 	"fmt"
+	"github.com/bukahou/haro/internal/agents"
 	"slices"
 	"strings"
 	"testing"
@@ -66,12 +67,21 @@ func mergeText(pieces []emotionPiece) []emotionPiece {
 	return merged
 }
 
-// 提示词里列出的标记来自同一份清单。
+// 提示词里列出的标记来自同一份清单：前台的定义引用 {{.EmotionTags}}，值由 PromptValues 给。
 func TestEmotionTagListComesFromTheTags(t *testing.T) {
+	catalog, err := agents.Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	front, _ := catalog.Get(agents.Front)
+	prompt, err := front.RenderPrompt(PromptValues())
+	if err != nil {
+		t.Fatal(err)
+	}
 	list := emotionTagList()
 	for _, tag := range emotionTags {
-		if !strings.Contains(list, "["+tag.Label+"]") || !strings.Contains(DefaultInstructions, "["+tag.Label+"]") {
-			t.Errorf("标记 %s 应出现在清单和提示词里：%s", tag.Label, list)
+		if !strings.Contains(list, "["+tag.Label+"]") || !strings.Contains(prompt, "["+tag.Label+"]") {
+			t.Errorf("标记 %s 应出现在清单和前台的提示词里：%s", tag.Label, list)
 		}
 	}
 }

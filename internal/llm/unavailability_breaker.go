@@ -21,8 +21,9 @@ import (
 //   - 恢复后，下一轮的情况说明里告诉模型刚才断过多久（Brief），由它自然地交代一句。
 //
 // 别的错误（请求有问题、拒答、被截断、主人打断）都算服务通着：半开时拿到的试探名额也要按结果归还。
+//
+// 同一个模型服务上的几个模型（前台的、接手的）用 Guard 套上同一个熔断器：哪个连不上都算这个服务连不上。
 type UnavailabilityBreaker struct {
-	inner   brain.ChatModel
 	breaker circuitbreaker.CircuitBreaker[any]
 	logger  *slog.Logger
 	now     func() time.Time
@@ -32,15 +33,11 @@ type UnavailabilityBreaker struct {
 	recovered time.Duration // 刚恢复、还没告诉模型的那次断了多久；0 = 没有
 }
 
-var (
-	_ brain.ChatModel   = (*UnavailabilityBreaker)(nil)
-	_ brain.Briefer     = (*UnavailabilityBreaker)(nil)
-	_ brain.ModelWarmer = (*UnavailabilityBreaker)(nil)
-)
+var _ brain.Briefer = (*UnavailabilityBreaker)(nil)
 
-// NewUnavailabilityBreaker 给 inner 加上连不上时的熔断；retryDelay 是打开之后多久再试一次。
-func NewUnavailabilityBreaker(inner brain.ChatModel, retryDelay time.Duration, logger *slog.Logger) *UnavailabilityBreaker {
-	b := &UnavailabilityBreaker{inner: inner, logger: logger, now: time.Now}
+// NewUnavailabilityBreaker 创建连不上时的熔断器；retryDelay 是打开之后多久再试一次。用 Guard 套到模型上。
+func NewUnavailabilityBreaker(retryDelay time.Duration, logger *slog.Logger) *UnavailabilityBreaker {
+	b := &UnavailabilityBreaker{logger: logger, now: time.Now}
 	b.breaker = circuitbreaker.NewBuilder[any]().
 		WithFailureThreshold(1).
 		WithSuccessThreshold(1).
@@ -64,8 +61,25 @@ func (b *UnavailabilityBreaker) stateChanged(event circuitbreaker.StateChangedEv
 	}
 }
 
-// StreamReply 见类型说明。
-func (b *UnavailabilityBreaker) StreamReply(ctx context.Context, request brain.ChatRequest) iter.Seq2[brain.ReplyDelta, error] {
+// Guard 给 inner 套上这个熔断器。
+func (b *UnavailabilityBreaker) Guard(inner brain.ChatModel) brain.ChatModel {
+	return &guardedModel{breaker: b, inner: inner}
+}
+
+// guardedModel 是套上熔断器的模型。
+type guardedModel struct {
+	breaker *UnavailabilityBreaker
+	inner   brain.ChatModel
+}
+
+var (
+	_ brain.ChatModel   = (*guardedModel)(nil)
+	_ brain.ModelWarmer = (*guardedModel)(nil)
+)
+
+// StreamReply 见 UnavailabilityBreaker 的说明。
+func (g *guardedModel) StreamReply(ctx context.Context, request brain.ChatRequest) iter.Seq2[brain.ReplyDelta, error] {
+	b := g.breaker
 	return func(yield func(brain.ReplyDelta, error) bool) {
 		if !b.breaker.TryAcquirePermit() {
 			yield(brain.ReplyDelta{}, fmt.Errorf("%w：刚才连不上，%v 后再试", brain.ErrModelUnavailable,
@@ -80,7 +94,7 @@ func (b *UnavailabilityBreaker) StreamReply(ctx context.Context, request brain.C
 				b.breaker.RecordSuccess()
 			}
 		}()
-		for delta, err := range b.inner.StreamReply(ctx, request) {
+		for delta, err := range g.inner.StreamReply(ctx, request) {
 			if err != nil {
 				failure = err
 			}
@@ -114,4 +128,4 @@ func (b *UnavailabilityBreaker) Brief(string) brain.Briefing {
 }
 
 // Warmup 转发给里面的模型（它需要预热的话）。
-func (b *UnavailabilityBreaker) Warmup(ctx context.Context) error { return brain.WarmUp(ctx, b.inner) }
+func (g *guardedModel) Warmup(ctx context.Context) error { return brain.WarmUp(ctx, g.inner) }

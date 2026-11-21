@@ -137,7 +137,7 @@ func TestWakeWordConversation(t *testing.T) {
 	streaming := &wakeStreaming{stream: &wakeStream{events: make(chan realtimeproto.ServerEvent, 8), failSleeps: 1}}
 	notices := brain.NewNoticeHub()
 	session := brain.NewSession(brain.Components{
-		Streaming: streaming, Model: stubModel{}, Synthesizer: echoSynthesizer{}, Notices: notices,
+		Streaming: streaming, Front: brain.Agent{Model: stubModel{}}, Synthesizer: echoSynthesizer{}, Notices: notices,
 		NewSegmenter: func() brain.TextSegmenter { return speech.NewSentenceSegmenter(4, 40) },
 	}, brain.Options{MaxHistoryTurn: 6}, logger)
 	defer session.Close()

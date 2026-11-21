@@ -11,8 +11,11 @@ import (
 
 // Components 是服务端需要的全部能力，由 cmd/haro-server 组装注入。
 type Components struct {
-	Streaming    StreamingRecognizer // 流式识别：服务端判断说完、唤醒词都靠它
-	Model        ChatModel
+	Streaming StreamingRecognizer // 流式识别：服务端判断说完、唤醒词都靠它
+	// Front 是前台：主对话的代理（模型、基础规则、能用的工具、步数）
+	Front Agent
+	// Handoff 是接手（可选）：哪些情况把这一轮剩下的部分交给更强的代理回答
+	Handoff      Handoff
 	Synthesizer  SpeechSynthesizer
 	Tools        Toolbox              // 可选：工具（内置 + MCP）
 	FrameExpert  FrameExpert          // 可选：看画面的幕后专家；nil = 画面直接交给前台模型
@@ -45,21 +48,11 @@ type Options struct {
 	Phrases Phrases
 	// MonthlyRaiseYen：口头提高月度上限时每次加多少（念给主人听的数，和额度那一层用同一个配置）
 	MonthlyRaiseYen float64
-	// 一句话里调用工具的步数与死循环（见 tool_steps.go）；零值 = Default*
-	MaxToolSteps     int
-	ToolRepeatLimit  int
-	ToolRepeatWindow int
-
-	// Instructions 是基础提示词（身份、能力、底线），只由服务端持有：客户端不能经 session.update 替换。
-	Instructions string
 
 	// 性格档案（可选）：两个以上时提供 switch_persona 工具
 	Personas       []Persona
 	DefaultPersona string       // 没记过当前性格时用哪个（ID）
 	PersonaState   PersonaState // 可选：记住当前性格，重启后保持
-
-	// Escalation：有更强的模型可以接手重答（选模型的包装层配了这条路）时为 true，提供 ask_stronger_model 工具
-	Escalation bool
 }
 
 // Session 是一次与终端的会话：接收 realtimeproto 客户端事件，经 Events() 发出服务端事件。
@@ -133,9 +126,9 @@ func NewSession(parts Components, opts Options, logger *slog.Logger) *Session {
 	return session
 }
 
-// Warmup 预热模型。只在部署侧调用（不是 Realtime 事件）。
+// Warmup 预热前台的模型。只在部署侧调用（不是 Realtime 事件）。
 func (s *Session) Warmup(ctx context.Context) error {
-	return WarmUp(ctx, s.parts.Model)
+	return WarmUp(ctx, s.parts.Front.Model)
 }
 
 // Events 返回服务端事件流（会话期间不关闭）。

@@ -27,7 +27,18 @@ const (
 	PurposeSearch   Purpose = "search"   // 主对话里的快查（R1）
 	PurposeSummary  Purpose = "summary"  // 滚动摘要（R4）
 	PurposeVision   Purpose = "vision"   // 看画面的幕后专家（与主对话分开记，看得出看画面花了多少）
+	PurposeStrong   Purpose = "strong"   // 更强的模型接手回答（主人纠正时、看画面接手时）
 )
+
+// ParsePurpose 把代理定义里写的用途换成 Purpose；不认识的报错（写错了就起不来，费用不会记到一个没人看的用途上）。
+func ParsePurpose(name string) (Purpose, error) {
+	for _, purpose := range []Purpose{PurposeChat, PurposeResearch, PurposeSearch, PurposeSummary, PurposeVision, PurposeStrong} {
+		if name == string(purpose) {
+			return purpose, nil
+		}
+	}
+	return "", fmt.Errorf("不认识的记账用途 %q（chat、research、search、summary、vision、strong）", name)
+}
 
 // Charge 是一笔花费。
 type Charge struct {

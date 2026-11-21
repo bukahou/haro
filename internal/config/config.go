@@ -65,8 +65,10 @@ type Settings struct {
 	// 模型
 	OllamaURL string `env:"HARO_OLLAMA_URL" envDefault:"http://127.0.0.1:11434"`
 	Model     string `env:"HARO_MODEL" envDefault:"qwen3-vl:8b-instruct"` // 本地（ollama）模型；4b 是思考变体，每轮多等 1.5–3 秒
-	// 追加在内置基础提示词后面（内置的永远生效，外部只能追加；内置的见 brain.DefaultInstructions）
+	// 追加在前台的基础规则后面（前台的定义见 internal/agents/builtin/front.md）
 	ExtraSystemPrompt string `env:"HARO_SYSTEM_PROMPT"`
+	// 代理定义的覆盖目录：里面同名的 *.md 替换程序里带的那份（internal/agents/builtin/）；空 = 用程序里带的
+	AgentsDir string `env:"HARO_AGENTS_DIR"`
 	// 主人资料：household.md（全家）+ 每人一份 *.md（开头 front matter 写 person: <声纹名字>）；空 = 不用
 	ProfileDir     string `env:"HARO_PROFILE_DIR"`
 	MaxHistoryTurn int    `env:"HARO_MAX_HISTORY_TURN" envDefault:"6"`

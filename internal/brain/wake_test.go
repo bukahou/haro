@@ -25,7 +25,7 @@ func situationOf(request braintest.Request) string {
 // 叫醒后的第一句、打断时说的：整句原样交给模型（唤醒词不删），情况说明里告诉它开头的唤醒词、回声不是主人要说的。
 func TestWakeUtteranceGoesToTheModelWithANote(t *testing.T) {
 	model := braintest.NewModel(t, braintest.Say("我在。"), braintest.Say("好，停下了。"), braintest.Say("嗯。"))
-	k := newTalker(t, brain.Components{Model: model, Synthesizer: fakeSynthesizer{}}, brain.Options{MaxHistoryTurn: 6})
+	k := newTalker(t, brain.Components{Front: brain.Agent{Model: model}, Synthesizer: fakeSynthesizer{}}, brain.Options{MaxHistoryTurn: 6})
 
 	if spoken := braintest.Spoken(k.owner2(braintest.Utterance{Wake: true, Text: "哈罗哈罗。"})); spoken != "我在。" {
 		t.Errorf("只叫了唤醒词：由模型应一声：%q", spoken)
@@ -49,7 +49,7 @@ func TestWakeUtteranceGoesToTheModelWithANote(t *testing.T) {
 // 长句、或者不是叫醒的，不回答。
 func TestUnverifiedWakeShortUtteranceGetsARestrictedReply(t *testing.T) {
 	model := braintest.NewModel(t, braintest.Say("你好呀。"), braintest.Say("我在。"), braintest.Say("在呢。"))
-	k := newTalker(t, brain.Components{Model: model, Synthesizer: fakeSynthesizer{}, Tools: &fakeToolbox{},
+	k := newTalker(t, brain.Components{Front: brain.Agent{Model: model}, Synthesizer: fakeSynthesizer{}, Tools: &fakeToolbox{},
 		Profiles: staticProfiles{"主人": "【主人资料】车停在 C3"}}, brain.Options{MaxHistoryTurn: 6})
 	k.owner2(braintest.Utterance{Text: "你好", Speaker: "主人", SpeakerChecked: true}) // 现在接的是主人的对话
 

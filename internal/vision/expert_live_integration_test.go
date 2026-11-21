@@ -47,7 +47,11 @@ func TestLiveExpert(t *testing.T) {
 	if request == "" {
 		request = "这是什么？"
 	}
-	report, err := NewExpert(model, "claude-sonnet-5-5", search, logger).ExamineFrame(ctx, brain.FrameQuestion{Frame: frame, Request: request, Style: os.Getenv("HARO_EVAL_STYLE")})
+	expert, err := NewExpert(model, "claude-sonnet-5-5", builtinRules(t), search, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := expert.ExamineFrame(ctx, brain.FrameQuestion{Frame: frame, Request: request, Style: os.Getenv("HARO_EVAL_STYLE")})
 	if err != nil {
 		t.Fatal(err)
 	}

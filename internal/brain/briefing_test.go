@@ -43,7 +43,7 @@ func TestBriefingDeliveredOnlyWhenHeard(t *testing.T) {
 	briefer := &reportBriefer{}
 	model := braintest.NewModel(t, braintest.Reply{Chunks: []string{"结论是"}, Hang: true}, braintest.Reply{Err: errors.New("503")},
 		braintest.Say("结论是 A。"), braintest.Say("好。"))
-	k := newTalker(t, brain.Components{Model: model, Synthesizer: fakeSynthesizer{}, Briefers: []brain.Briefer{briefer}},
+	k := newTalker(t, brain.Components{Front: brain.Agent{Model: model}, Synthesizer: fakeSynthesizer{}, Briefers: []brain.Briefer{briefer}},
 		brain.Options{MaxHistoryTurn: 6})
 
 	interruptWhen(t, k, func() bool { return len(model.Requests()) >= 1 }, 0)
@@ -66,7 +66,7 @@ func TestBriefingDeliveredOnlyWhenHeard(t *testing.T) {
 func TestBriefingNotDeliveredWhenPlaybackCut(t *testing.T) {
 	briefer := &reportBriefer{}
 	model := braintest.NewModel(t, braintest.Say("结论是 A。"), braintest.Say("我在。"))
-	k := newTalker(t, brain.Components{Model: model, Synthesizer: fakeSynthesizer{}, Briefers: []brain.Briefer{briefer}},
+	k := newTalker(t, brain.Components{Front: brain.Agent{Model: model}, Synthesizer: fakeSynthesizer{}, Briefers: []brain.Briefer{briefer}},
 		brain.Options{MaxHistoryTurn: 6})
 
 	k.say("有什么事吗")
@@ -81,7 +81,7 @@ func TestBriefingNotDeliveredWhenPlaybackCut(t *testing.T) {
 func TestBriefingNotDeliveredWhenSessionEnds(t *testing.T) {
 	briefer := &reportBriefer{}
 	model := braintest.NewModel(t, braintest.Say("结论是 A。"))
-	k := newTalker(t, brain.Components{Model: model, Synthesizer: fakeSynthesizer{}, Briefers: []brain.Briefer{briefer}},
+	k := newTalker(t, brain.Components{Front: brain.Agent{Model: model}, Synthesizer: fakeSynthesizer{}, Briefers: []brain.Briefer{briefer}},
 		brain.Options{MaxHistoryTurn: 6})
 
 	k.say("有什么事吗")
@@ -131,7 +131,7 @@ func TestToolDeliveredOnlyWhenHeard(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			toolbox := &deliveringToolbox{}
 			model := braintest.NewModel(t, braintest.Call("report", nil), braintest.Say("结论是 A。"), braintest.Say("好。"))
-			k := newTalker(t, brain.Components{Model: model, Synthesizer: fakeSynthesizer{}, Tools: toolbox},
+			k := newTalker(t, brain.Components{Front: brain.Agent{Model: model}, Synthesizer: fakeSynthesizer{}, Tools: toolbox},
 				brain.Options{MaxHistoryTurn: 6})
 			k.say("调查有结果了吗")
 			if got := toolbox.count(); got != 0 {
@@ -149,7 +149,7 @@ func TestToolDeliveredOnlyWhenHeard(t *testing.T) {
 	toolbox := &deliveringToolbox{}
 	model := braintest.NewModel(t, braintest.Call("report", nil), braintest.Reply{Chunks: []string{"结论是"}, Hang: true},
 		braintest.Say("好。"))
-	k := newTalker(t, brain.Components{Model: model, Synthesizer: fakeSynthesizer{}, Tools: toolbox}, brain.Options{MaxHistoryTurn: 6})
+	k := newTalker(t, brain.Components{Front: brain.Agent{Model: model}, Synthesizer: fakeSynthesizer{}, Tools: toolbox}, brain.Options{MaxHistoryTurn: 6})
 	interruptWhen(t, k, func() bool { return len(model.Requests()) >= 2 }, 0)
 	braintest.Done(t, k.ask("调查有结果了吗"))
 	k.say("嗯")
@@ -161,9 +161,9 @@ func TestToolDeliveredOnlyWhenHeard(t *testing.T) {
 // 每轮的即时情况附在主人这句话前面（不放系统提示词：系统提示词与历史每轮保持不变，提示词缓存才命中得了），历史里只存原话。
 func TestBriefingGoesBeforeTheUserTurn(t *testing.T) {
 	model := &fakeModel{tokens: []string{"好的。"}}
-	k := newTalker(t, brain.Components{Model: model, Synthesizer: fakeSynthesizer{},
+	k := newTalker(t, brain.Components{Front: brain.Agent{Model: model, Instructions: "你是测试助手"}, Synthesizer: fakeSynthesizer{},
 		Briefers: []brain.Briefer{staticBriefer{lines: []string{"额度提醒：这个月用到 80% 了"}}}},
-		brain.Options{MaxHistoryTurn: 6, Instructions: "你是测试助手"})
+		brain.Options{MaxHistoryTurn: 6})
 	k.ask("你好")
 	firstSystem := model.history[0].Text
 
@@ -227,9 +227,9 @@ func (p staticProfiles) Profile(person string) string { return p[person] }
 // 主人资料放在系统提示词里：内置规矩之后、性格之前；按说话人选。
 func TestProfileGoesIntoSystemPromptAfterInstructions(t *testing.T) {
 	model := &fakeModel{tokens: []string{"好的。"}}
-	k := newTalker(t, brain.Components{Model: model, Synthesizer: fakeSynthesizer{},
-		Profiles: staticProfiles{brain.SharedPerson: "【主人资料】不吃香菜"}},
-		brain.Options{MaxHistoryTurn: 6, Instructions: brain.ComposeInstructions("追加的一条规矩")})
+	k := newTalker(t, brain.Components{Front: brain.Agent{Model: model, Instructions: "你是 Haro。\n\n追加的一条规矩"},
+		Synthesizer: fakeSynthesizer{}, Profiles: staticProfiles{brain.SharedPerson: "【主人资料】不吃香菜"}},
+		brain.Options{MaxHistoryTurn: 6})
 	k.ask("你好")
 	system := model.history[0].Text
 	builtin := strings.Index(system, "你是 Haro")

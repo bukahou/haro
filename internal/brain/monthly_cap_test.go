@@ -36,7 +36,7 @@ func (f *fakeCap) count() int { f.mu.Lock(); defer f.mu.Unlock(); return len(f.r
 
 func newCapTalker(t *testing.T, model, judge brain.ChatModel, cap brain.MonthlyCap) *talker {
 	t.Helper()
-	return newTalker(t, brain.Components{Model: model, Synthesizer: fakeSynthesizer{}, MonthlyCap: cap, OverBudgetModel: judge},
+	return newTalker(t, brain.Components{Front: brain.Agent{Model: model}, Synthesizer: fakeSynthesizer{}, MonthlyCap: cap, OverBudgetModel: judge},
 		brain.Options{MaxHistoryTurn: 6, MonthlyRaiseYen: 500})
 }
 

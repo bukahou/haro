@@ -126,3 +126,6 @@ func unfinishedTagStart(text string) int {
 	}
 	return len(text)
 }
+
+// PromptValues 是代理正文里可以引用的、由 brain 定义的值（{{.EmotionTags}}：情绪标记的列表只在这里定义一处）。
+func PromptValues() map[string]any { return map[string]any{"EmotionTags": emotionTagList()} }

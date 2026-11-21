@@ -55,7 +55,7 @@ func (f *fakeToolbox) argumentsOf(i int) map[string]any {
 
 func newToolTalker(t *testing.T, model brain.ChatModel, toolbox brain.Toolbox) *talker {
 	t.Helper()
-	parts := brain.Components{Model: model, Synthesizer: fakeSynthesizer{}}
+	parts := brain.Components{Front: brain.Agent{Model: model}, Synthesizer: fakeSynthesizer{}}
 	if toolbox != nil {
 		parts.Tools = toolbox
 	}
@@ -101,8 +101,8 @@ func TestToolLoopUsageAddsUpAllRequests(t *testing.T) {
 // stepTalker 是步数上限设成 4 的会话（测步数，不碰死循环检测：每次调用的参数都不一样）。
 func stepTalker(t *testing.T, model brain.ChatModel, toolbox brain.Toolbox) *talker {
 	t.Helper()
-	return newTalker(t, brain.Components{Model: model, Synthesizer: fakeSynthesizer{}, Tools: toolbox},
-		brain.Options{MaxHistoryTurn: 6, MaxToolSteps: 4})
+	return newTalker(t, brain.Components{Front: brain.Agent{Model: model, MaxSteps: 4}, Synthesizer: fakeSynthesizer{}, Tools: toolbox},
+		brain.Options{MaxHistoryTurn: 6})
 }
 
 // searchFor 是一次参数不同的查找（不会被当成死循环）。
@@ -179,8 +179,8 @@ var lookAtCamera = braintest.Call("look_at_camera", nil)
 
 func newCameraTalker(t *testing.T, model brain.ChatModel, camera brain.TerminalCamera, expert brain.FrameExpert) *talker {
 	t.Helper()
-	return newTalker(t, brain.Components{Model: model, Synthesizer: fakeSynthesizer{}, Camera: camera, FrameExpert: expert},
-		brain.Options{MaxHistoryTurn: 6, Instructions: "基础规则。"})
+	return newTalker(t, brain.Components{Front: brain.Agent{Model: model, Instructions: "基础规则。"}, Synthesizer: fakeSynthesizer{},
+		Camera: camera, FrameExpert: expert}, brain.Options{MaxHistoryTurn: 6})
 }
 
 // 模型调用 look_at_camera 时才经 MCP 让终端拍：拍到的画面交给模型；闲聊时不拍，历史里不留图片。
@@ -212,18 +212,22 @@ func TestLookAtCameraCapturesOnDemand(t *testing.T) {
 	}
 }
 
-// fakeExpert 是看画面的专家：记下拿到的问题，交出设好的结论。
+// fakeExpert 是看画面的专家：记下拿到的问题（和当时的代理链），交出设好的结论。
 type fakeExpert struct {
 	mu        sync.Mutex
 	questions []brain.FrameQuestion
+	chains    [][]string
 	report    brain.FrameReport
 	err       error
 }
 
-func (e *fakeExpert) ExamineFrame(_ context.Context, question brain.FrameQuestion) (brain.FrameReport, error) {
+func (e *fakeExpert) AgentName() string { return "看画面" }
+
+func (e *fakeExpert) ExamineFrame(ctx context.Context, question brain.FrameQuestion) (brain.FrameReport, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.questions = append(e.questions, question)
+	e.chains = append(e.chains, brain.AgentChain(ctx))
 	if e.err != nil {
 		return brain.FrameReport{}, e.err
 	}
@@ -246,6 +250,9 @@ func TestLookAtCameraSpeaksExpertSentence(t *testing.T) {
 	}
 	if len(expert.questions) != 1 || string(expert.questions[0].Frame) != "充电头" || expert.questions[0].Request != "我手里拿着什么？" {
 		t.Fatalf("专家应拿到画面和主人的原话：%+v", expert.questions)
+	}
+	if !slices.Equal(expert.chains[0], []string{"前台", "看画面"}) {
+		t.Errorf("看画面是前台开的子任务，应记进代理链：%v", expert.chains[0])
 	}
 
 	k.ask("插脚是几根？")
@@ -385,8 +392,9 @@ func TestLookAtCameraUsesPersonaStyle(t *testing.T) {
 	expert := &fakeExpert{report: brain.FrameReport{Spoken: "充电头，没跑了。"}}
 	var seen []brain.Utterance
 	model := braintest.NewModel(t, lookAtCamera)
-	k := newTalker(t, brain.Components{Model: model, Synthesizer: fakeSynthesizer{seen: &seen}, Camera: braintest.NewCamera([]byte("充电头")),
-		FrameExpert: expert}, brain.Options{MaxHistoryTurn: 6, Instructions: "基础规则。", Personas: testPersonas, DefaultPersona: "buddy"})
+	k := newTalker(t, brain.Components{Front: brain.Agent{Model: model, Instructions: "基础规则。"}, Synthesizer: fakeSynthesizer{seen: &seen},
+		Camera: braintest.NewCamera([]byte("充电头")), FrameExpert: expert},
+		brain.Options{MaxHistoryTurn: 6, Personas: testPersonas, DefaultPersona: "buddy"})
 
 	k.ask("我手里拿着什么？")
 	if len(expert.questions) != 1 || expert.questions[0].Style != testPersonas[0].Prompt {
@@ -416,14 +424,15 @@ func TestSystemPromptListsOnlyOfferedTools(t *testing.T) {
 	everyTool := []string{"look_at_camera", "switch_persona", "ask_stronger_model", "raise_monthly_cap", "confirm_action",
 		"cancel_action", "web_search", "start_research", "research_status", "cancel_research", "save_note", "search_notes",
 		"delete_note", "list_deleted_notes", "restore_note", "get_weather"}
+	instructions := builtinFrontInstructions(t)
 	for _, name := range everyTool {
-		if strings.Contains(brain.DefaultInstructions, name) {
+		if strings.Contains(instructions, name) {
 			t.Errorf("基础提示词不该点名工具 %s", name)
 		}
 	}
 	model := braintest.NewModel(t, braintest.Say("好的。"))
-	k := newTalker(t, brain.Components{Model: model, Synthesizer: fakeSynthesizer{}, Tools: &fakeToolbox{}},
-		brain.Options{MaxHistoryTurn: 6, Instructions: brain.DefaultInstructions})
+	k := newTalker(t, brain.Components{Front: brain.Agent{Model: model, Instructions: instructions}, Synthesizer: fakeSynthesizer{},
+		Tools: &fakeToolbox{}}, brain.Options{MaxHistoryTurn: 6})
 	k.say("你好")
 	request := model.LastRequest()
 	for _, name := range everyTool {

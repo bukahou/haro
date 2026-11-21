@@ -53,7 +53,7 @@ type ConversationBook struct {
 	mu       sync.Mutex
 	byPerson map[string]*Conversation
 
-	summaryModel ChatModel // 滚动摘要用的模型（SummarizeWith）；nil = 不写摘要
+	summaryAgent *Agent // 写滚动摘要的代理（SummarizeWith）；nil = 不写摘要
 }
 
 // NewConversationBook 创建对话簿。opts 提供性格档案、默认性格与历史轮数。
@@ -88,7 +88,7 @@ func (b *ConversationBook) Conversation(person string) *Conversation {
 			if record.OpenTurn != nil { // 上次在这一轮中途重启：做过的工具照实接进历史（模型才知道自己做过）
 				b.logger.Warn("上次服务端在一轮中途重启：这一轮照实接进历史", "person", person, "at", record.OpenTurn.At)
 				conversation.history = append(conversation.history, *record.OpenTurn)
-				conversation.trimLocked(b.opts.MaxHistoryTurn, b.summaryModel != nil) // 持有 b.mu：直接读，不经 summarizer()
+				conversation.trimLocked(b.opts.MaxHistoryTurn, b.summaryAgent != nil) // 持有 b.mu：直接读，不经 summarizer()
 				recovered = true
 			}
 		}

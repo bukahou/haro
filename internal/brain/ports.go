@@ -65,10 +65,11 @@ type TerminalCamera interface {
 	Capture(ctx context.Context) ([]byte, error)
 }
 
-// FrameExpert 是看画面的幕后专家（可选）：设了它，look_at_camera 不把画面交给前台模型，
+// FrameExpert 是看画面的幕后专家（可选，代理「看画面」，以子任务方式调用）：设了它，look_at_camera 不把画面交给前台模型，
 // 而是把画面和主人这一轮的原话交给专家，前台拿到的是专家的判断（文字），再用自己的口吻转述。
 // 专家出错时退回把画面直接交给前台。
 type FrameExpert interface {
+	AgentName() string // 日志、代理链里的名字
 	ExamineFrame(ctx context.Context, question FrameQuestion) (FrameReport, error)
 }
 
@@ -201,8 +202,6 @@ type ChatMessage struct {
 	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`   // assistant：这一轮模型要求调用的工具
 	ToolName   string     `json:"tool_name,omitempty"`    // tool：这条是哪个工具的结果
 	ToolCallID string     `json:"tool_call_id,omitempty"` // tool：对应哪一次调用（ToolCall.ID）
-	// Escalate：这一句交给更强的模型重答（前台模型调用了 ask_stronger_model），选模型的包装层据此换模型。只标在本轮输入上，不存盘
-	Escalate bool `json:"-"`
 	// Synthetic：用户角色里系统合成的消息，不是主人说的话（每轮附带的「现在的情况」、历史里「当时看了画面」的替身）。
 	// 怎么交给模型由各适配层决定；找「本轮主人那句话」时跳过它
 	Synthetic bool `json:"synthetic,omitempty"`

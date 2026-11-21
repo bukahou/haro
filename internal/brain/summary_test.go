@@ -5,6 +5,7 @@ import (
 	"io"
 	"iter"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -15,14 +16,18 @@ import (
 type summaryModel struct {
 	mu        sync.Mutex
 	requests  []string
+	systems   []string   // 每次请求的系统提示词
+	chains    [][]string // 每次请求时的代理链
 	reply     string
 	truncated bool
 }
 
-func (m *summaryModel) StreamReply(_ context.Context, request ChatRequest) iter.Seq2[ReplyDelta, error] {
+func (m *summaryModel) StreamReply(ctx context.Context, request ChatRequest) iter.Seq2[ReplyDelta, error] {
 	messages := request.Messages
 	m.mu.Lock()
 	m.requests = append(m.requests, messages[len(messages)-1].Text)
+	m.systems = append(m.systems, messages[0].Text)
+	m.chains = append(m.chains, AgentChain(ctx))
 	m.mu.Unlock()
 	return func(yield func(ReplyDelta, error) bool) {
 		if !yield(ReplyDelta{Text: m.reply}, nil) {
@@ -43,7 +48,7 @@ func (m *summaryModel) count() int {
 func TestRollingSummary(t *testing.T) {
 	book := NewConversationBook(nil, Options{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	model := &summaryModel{reply: "主人的车停在 B2。"}
-	book.SummarizeWith(model)
+	book.SummarizeWith(Agent{Name: "摘要", Model: model, Instructions: "写摘要。"})
 	conversation := book.Conversation("主人")
 	turn := func(text string) ConversationTurn {
 		return ConversationTurn{Messages: []ChatMessage{{Role: RoleUser, Text: text}, {Role: RoleAssistant, Text: "好的，" + text + "。"},
@@ -69,6 +74,9 @@ func TestRollingSummary(t *testing.T) {
 	request := model.requests[0]
 	if !strings.Contains(request, "主人：车停在 B2") || strings.Contains(request, "工具结果") {
 		t.Errorf("压缩的输入：%s", request)
+	}
+	if model.systems[0] != "写摘要。" || !slices.Equal(model.chains[0], []string{"摘要"}) {
+		t.Errorf("应按代理「摘要」的系统提示词写、记进代理链：%q %v", model.systems[0], model.chains[0])
 	}
 	if messages := conversation.messages(); len(messages) != 2*4 {
 		t.Errorf("压进摘要后只带窗口内的 2 轮：%d 条", len(messages))
@@ -96,7 +104,7 @@ func TestNoSummaryKeepsOldBehaviour(t *testing.T) {
 func TestTruncatedSummaryIsNotUsed(t *testing.T) {
 	book := NewConversationBook(nil, Options{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	model := &summaryModel{reply: "主人的车停在", truncated: true}
-	book.SummarizeWith(model)
+	book.SummarizeWith(Agent{Name: "摘要", Model: model, Instructions: "写摘要。"})
 	conversation := book.Conversation("主人")
 	for _, text := range []string{"车停在 B2", "第二句", "第三句", "第四句", "第五句"} {
 		conversation.appendTurn(ConversationTurn{Messages: []ChatMessage{{Role: RoleUser, Text: text},

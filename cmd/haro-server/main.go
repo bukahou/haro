@@ -66,6 +66,10 @@ func run(logger *slog.Logger) error {
 	for _, note := range settings.RemovedSettingNotes {
 		logger.Warn(note)
 	}
+	catalog, err := loadAgentDefinitions(settings, logger) // 代理的定义写错了就起不来：先读，免得连好一堆东西才发现
+	if err != nil {
+		return err
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -169,21 +173,22 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	model, breaker := buildChatModel(settings, claude, modelHTTP, pricing, ledger, guard, spending.PurposeChat, logger)
-	briefers = append(briefers, breaker) // 连不上之后刚恢复时，告诉模型断过多久
+	built, err := agentAssembly{settings: settings, catalog: catalog, claude: claude, client: modelHTTP, pricing: pricing,
+		ledger: ledger, guard: guard, logger: logger}.build(toolbox, expertSearch)
+	if err != nil {
+		return err
+	}
+	briefers = append(briefers, built.breaker) // 连不上之后刚恢复时，告诉模型断过多久
 	logger.Info("预热模型（本地第一次可能要几十秒；云端不用预热）", "model", activeModel(settings))
-	if err := brain.WarmUp(ctx, model); err != nil {
+	if err := brain.WarmUp(ctx, built.front.Model); err != nil {
 		logger.Warn("模型预热失败，第一轮对话会比较慢", "err", err)
 	}
 	components := brain.Components{
-		Streaming: streaming, Model: model, Synthesizer: synthesizer, Tools: toolbox,
-		Briefers: briefers, Notices: notices,
+		Streaming: streaming, Front: built.front, Handoff: built.handoff, FrameExpert: built.expert,
+		Synthesizer: synthesizer, Tools: toolbox, Briefers: briefers, Notices: notices,
 		NewSegmenter: func() brain.TextSegmenter {
 			return speech.NewSentenceSegmenter(settings.FirstSegmentMinRunes, settings.MaxSegmentRunes)
 		},
-	}
-	if settings.VisionExpert() {
-		components.FrameExpert = newVisionExpert(settings, claude, modelHTTP, pricing, ledger, guard, expertSearch, logger)
 	}
 	if settings.MonthlyYen > 0 && settings.MonthlyRaiseYen > 0 && settings.LLMProvider == config.LLMCloud {
 		// 月度上限到了以后，主人可以口头临时提高：判断用的小调用不受额度管（否则上限到了就没法判断），按天限次数、照样记账
@@ -220,10 +225,8 @@ func run(logger *slog.Logger) error {
 		logger.Info("主人资料", "dir", settings.ProfileDir, "household_runes", household, "people", people)
 		components.Profiles = profiles
 	}
-	if settings.ConversationSummary { // 滚动摘要：和主对话同一套模型，按 summary 用途记账
-		summarizer, _ := buildChatModel(settings, claude, modelHTTP, pricing, ledger, guard, spending.PurposeSummary,
-			logger.With("model_use", "summary"))
-		components.Conversations.SummarizeWith(summarizer)
+	if built.summary != nil { // 滚动摘要：代理「摘要」，按它自己的用途记账
+		components.Conversations.SummarizeWith(*built.summary)
 	}
 	if settings.WakeArbitration > 0 { // 多台终端同时听到唤醒词：只让最合适的那台回答
 		components.WakeArbiter = brain.NewWakeArbiter(settings.WakeArbitration)
@@ -308,89 +311,6 @@ func readinessChecks(settings config.Settings, claude *llm.ClaudeAPI, ledger spe
 		}})
 	}
 	return checks, nil
-}
-
-// buildChatModel 按 HARO_LLM_PROVIDER 组装服务端用的模型（cloud = 云端，local = 本地 ollama；不互相顶替）。
-// 外面依次套：连不上时的熔断（交回的 breaker 也是每轮情况说明的来源）、按月度额度放行。
-//
-// purpose 是记账用途：主对话（chat）与滚动摘要（summary，R4）各建一套，费用分开记。
-func buildChatModel(settings config.Settings, claude *llm.ClaudeAPI, client *http.Client, pricing spending.Pricing, ledger spending.Ledger, guard *spending.Guard,
-	purpose spending.Purpose, logger *slog.Logger) (brain.ChatModel, *llm.UnavailabilityBreaker) {
-	maxTokens := settings.CloudMaxTokens
-	if purpose == spending.PurposeSummary && maxTokens < summaryMaxTokens {
-		maxTokens = summaryMaxTokens // 摘要最长 300 字，聊天的输出上限可能不够
-	}
-	// quick：当主模型时快速失败 —— 等不到开始回答（CloudLLMTimeout）就取消、交给退路
-	firstTokenTimeout := func(quick bool) time.Duration {
-		if quick {
-			return settings.CloudLLMTimeout
-		}
-		return 0
-	}
-	// 每个具体模型都记账（本地模型在价格表里标了不花钱，照样记 token）
-	newLocal := func(quick bool) brain.ChatModel {
-		return spending.NewMeteredChatModel(llm.NewOllamaChatModel(settings.OllamaURL, settings.Model, maxTokens, llm.OpenAIOptions{
-			HTTPClient: client, FirstTokenTimeout: firstTokenTimeout(quick), RequestTimeout: settings.RequestTimeout}),
-			settings.Model, purpose, pricing, ledger, logger)
-	}
-	newCloud := func(quick bool) brain.ChatModel {
-		// 不在 SDK 里重试：失败时由退路接手，不让主人多等
-		return spending.NewMeteredChatModel(newCloudChatModel(settings, claude, cloudModelSpec{model: settings.CloudLLMModel,
-			maxTokens: maxTokens, effort: settings.CloudLLMEffort, thinking: settings.CloudLLMThinking,
-			firstTokenTimeout: firstTokenTimeout(quick), requestTimeout: settings.RequestTimeout}, client),
-			settings.CloudLLMModel, purpose, pricing, ledger, logger)
-	}
-	// 本地、云端二选一，不自动互相顶替（第 7 段）：连不上时只保留最低能力，额度用完时不回答
-	var paid brain.ChatModel
-	if settings.LLMProvider == config.LLMLocal {
-		logger.Info("服务端：本地模型", "model", settings.Model)
-		paid = newLocal(true)
-	} else {
-		logger.Info("服务端：云端模型", "model", settings.CloudLLMModel)
-		paid = newCloud(true)
-	}
-	if purpose == spending.PurposeChat {
-		paid = routeToStrong(settings, claude, client, paid, maxTokens, pricing, ledger, logger)
-	}
-	breaker := llm.NewUnavailabilityBreaker(paid, unavailableRetry, logger)
-	return spending.NewBudgetedChatModel(breaker, guard, logger), breaker
-}
-
-// routeToStrong 按规则把看画面（takeover 时）、前台请它重答的请求交给更强的模型（HARO_STRONG_LLM_*），其余照旧；
-// 更强的模型出错或等太久（HARO_STRONG_LLM_TIMEOUT）时由原来那套接手。没设更强的模型、或这两类都不用它时原样返回。
-func routeToStrong(settings config.Settings, claude *llm.ClaudeAPI, client *http.Client, base brain.ChatModel, maxTokens int,
-	pricing spending.Pricing, ledger spending.Ledger, logger *slog.Logger) brain.ChatModel {
-	vision, correction := settings.VisionTakeover(), settings.StrongLLMFor(config.StrongForCorrection)
-	if !vision && !correction {
-		return base
-	}
-	strong := spending.NewMeteredChatModel(newCloudChatModel(settings, claude, cloudModelSpec{model: settings.StrongLLMModel,
-		maxTokens: maxTokens, effort: settings.StrongLLMEffort, thinking: settings.StrongLLMThinking,
-		firstTokenTimeout: settings.StrongLLMTimeout, requestTimeout: settings.RequestTimeout}, client),
-		settings.StrongLLMModel, spending.PurposeChat, pricing, ledger, logger)
-	strongOrBase := llm.NewFallbackChatModel(strong, "strong", base, "cloud", strongCooldown, logger)
-	options := llm.RouterOptions{Default: base, Logger: logger}
-	if vision {
-		options.Vision, options.VisionName = strongOrBase, settings.StrongLLMModel
-	}
-	if correction {
-		options.Correction, options.CorrectionName = strongOrBase, settings.StrongLLMModel
-	}
-	logger.Info("选模型：按规则交给更强的模型", "model", settings.StrongLLMModel, "use", settings.StrongLLMUse,
-		"vision_mode", settings.StrongLLMVisionMode, "effort", settings.StrongLLMEffort, "thinking", settings.StrongLLMThinking)
-	return llm.NewRouterChatModel(options)
-}
-
-// newVisionExpert 创建看画面的幕后专家（HARO_STRONG_LLM_VISION_MODE=expert）：用更强的模型，按 vision 用途记账、查月度额度。
-// 它出错或等太久时，brain 退回把画面直接交给前台模型（不经选模型的包装层，前台照常是云端模型）。
-func newVisionExpert(settings config.Settings, claude *llm.ClaudeAPI, client *http.Client, pricing spending.Pricing, ledger spending.Ledger, guard *spending.Guard,
-	search vision.Search, logger *slog.Logger) brain.FrameExpert {
-	model := spending.NewMeteredChatModel(newCloudChatModel(settings, claude, cloudModelSpec{model: settings.StrongLLMModel,
-		maxTokens: settings.CloudMaxTokens, effort: settings.StrongLLMEffort, thinking: settings.StrongLLMThinking,
-		firstTokenTimeout: settings.StrongLLMTimeout, requestTimeout: settings.RequestTimeout}, client),
-		settings.StrongLLMModel, spending.PurposeVision, pricing, ledger, logger)
-	logger.Info("看画面：交给幕后专家，判断由前台转述", "model", settings.StrongLLMModel, "search", search != nil)
-	return vision.NewExpert(spending.NewBudgetedChatModel(model, guard, logger), settings.StrongLLMModel, search, logger)
 }
 
 // newClaudeAPI 创建全进程共用的 Claude 客户端（HARO_CLOUD_LLM_API=anthropic 时）；其余情况为 nil。
@@ -577,9 +497,6 @@ func startResearch(ctx context.Context, settings config.Settings, claude *llm.Cl
 // overBudgetMaxTokens：月度上限到了以后，判断主人要不要提高上限的那次小调用的输出上限（只交工具调用，不说话）。
 const overBudgetMaxTokens = 200
 
-// summaryMaxTokens 是写滚动摘要时每次请求的输出上限。
-const summaryMaxTokens = 600
-
 // researchMaxTokens 是调查时每次请求的输出上限（结论比聊天长，聊天用 HARO_CLOUD_LLM_MAX_TOKENS）。
 const researchMaxTokens = 1000
 
@@ -605,10 +522,8 @@ func buildBrainOptions(settings config.Settings) (brain.Options, error) {
 	if err != nil {
 		return brain.Options{}, err
 	}
-	// 基础提示词：内置的永远生效，HARO_SYSTEM_PROMPT 只能追加
-	options := brain.Options{MaxHistoryTurn: settings.MaxHistoryTurn, Instructions: brain.ComposeInstructions(settings.ExtraSystemPrompt),
-		ConfirmationTimeout: settings.ConfirmationTimeout, Phrases: phrases, MonthlyRaiseYen: settings.MonthlyRaiseYen,
-		Escalation: settings.StrongLLMFor(config.StrongForCorrection)} // 和 routeToStrong 配「重答」那条路的条件一致
+	options := brain.Options{MaxHistoryTurn: settings.MaxHistoryTurn, ConfirmationTimeout: settings.ConfirmationTimeout,
+		Phrases: phrases, MonthlyRaiseYen: settings.MonthlyRaiseYen}
 	if settings.PersonasDir == "" {
 		return options, nil
 	}
@@ -631,7 +546,7 @@ func activeModel(settings config.Settings) string {
 	return settings.CloudLLMModel
 }
 
-// strongCooldown：更强的模型出错或等太久之后，这么久内直接用原来那套（沿用原来云端↔本地退路的冷却时间）。
+// strongCooldown：接手的强模型出错或等太久之后，这么久内直接由前台的模型接手（沿用原来云端↔本地退路的冷却时间）。
 const strongCooldown = 30 * time.Second
 
 // unavailableRetry：连不上模型服务之后，这么久内不再去连（马上告诉主人连不上），之后放一个请求去试（沿用同一个冷却时间）。

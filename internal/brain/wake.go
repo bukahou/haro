@@ -48,11 +48,8 @@ func (s *Session) speakRestricted(ctx context.Context, job *transcriptionJob) re
 	s.rememberLanguage(job.language)
 	record := newTurnRecord(job.text)
 	record.restricted = true
-	s.mu.Lock()
-	instructions := s.opts.Instructions
-	s.mu.Unlock()
 	notes := append([]string{restrictedNote}, s.wakeNotes(job)...)
-	history := []ChatMessage{{Role: RoleSystem, Text: composeSystemPrompt(instructions, "", "", s.currentPersona())},
+	history := []ChatMessage{{Role: RoleSystem, Text: composeSystemPrompt(s.parts.Front.Instructions, "", "", s.currentPersona())},
 		{Role: RoleUser, Text: situationHeading + joinLines(notes), Synthetic: true}}
 	answer, usage, err := s.speakAnswer(ctx, history, ChatMessage{Role: RoleUser, Text: job.text}, cameraView{}, record)
 	return s.finishAnswer(ctx, record, answer, usage, err)

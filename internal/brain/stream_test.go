@@ -16,7 +16,7 @@ import (
 
 func newStreamSession(t *testing.T, voice *braintest.Voice, model brain.ChatModel, arbiter *brain.WakeArbiter) *brain.Session {
 	t.Helper()
-	parts := brain.Components{Model: model, Synthesizer: fakeSynthesizer{}, WakeArbiter: arbiter,
+	parts := brain.Components{Front: brain.Agent{Model: model}, Synthesizer: fakeSynthesizer{}, WakeArbiter: arbiter,
 		NewSegmenter: func() brain.TextSegmenter { return speech.NewSentenceSegmenter(4, 40) }}
 	if voice != nil {
 		parts.Streaming = voice
@@ -76,7 +76,7 @@ func TestSessionHandsFreeTurn(t *testing.T) {
 
 func newReopenSession(t *testing.T, voice *braintest.Voice, timing brain.ReopenTiming) *brain.Session {
 	t.Helper()
-	parts := brain.Components{Model: &fakeModel{tokens: []string{"好的。"}}, Synthesizer: fakeSynthesizer{}, Streaming: voice,
+	parts := brain.Components{Front: brain.Agent{Model: &fakeModel{tokens: []string{"好的。"}}}, Synthesizer: fakeSynthesizer{}, Streaming: voice,
 		NewSegmenter: func() brain.TextSegmenter { return speech.NewSentenceSegmenter(4, 40) }}
 	session := brain.NewSession(parts, brain.Options{MaxHistoryTurn: 6, StreamReopen: timing}, quiet)
 	t.Cleanup(func() { _ = session.Close() })
@@ -346,7 +346,7 @@ func (w warnSignal) Handle(_ context.Context, record slog.Record) error {
 func TestClosingSessionIsNotAStreamDisconnect(t *testing.T) {
 	voice := braintest.NewVoice()
 	warned := make(warnSignal, 8)
-	session := brain.NewSession(brain.Components{Model: &fakeModel{tokens: []string{"好。"}}, Synthesizer: fakeSynthesizer{},
+	session := brain.NewSession(brain.Components{Front: brain.Agent{Model: &fakeModel{tokens: []string{"好。"}}}, Synthesizer: fakeSynthesizer{},
 		Streaming: voice}, brain.Options{MaxHistoryTurn: 6, StreamReopen: brain.ReopenTiming{Delay: time.Millisecond,
 		MaxDelay: 5 * time.Millisecond, LostNoticeAfter: time.Hour}}, slog.New(warned))
 	turn := realtimeproto.TurnDetection{Type: "server_vad"}

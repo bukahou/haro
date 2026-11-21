@@ -105,3 +105,15 @@ func TestDailyCallLimit(t *testing.T) {
 		t.Errorf("第二天重新算：%v（调用了 %d 次）", err, inner.calls)
 	}
 }
+
+// 代理定义里写的记账用途：认识的换成 Purpose，写错的报错。
+func TestParsePurpose(t *testing.T) {
+	for _, name := range []string{"chat", "strong", "vision", "summary", "research", "search"} {
+		if purpose, err := ParsePurpose(name); err != nil || string(purpose) != name {
+			t.Errorf("%s：%v", name, err)
+		}
+	}
+	if _, err := ParsePurpose("chatt"); err == nil {
+		t.Error("写错的用途应报错")
+	}
+}
