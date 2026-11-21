@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/google/jsonschema-go/jsonschema"
 )
 
 // 性格档案。
@@ -49,7 +51,7 @@ func initialPersona(opts Options) (*Persona, error) {
 	return &opts.Personas[0], nil
 }
 
-// findPersona 按 ID、名字或别名找性格（名字和别名允许包含关系：「温柔模式」能找到「温柔陪伴」的别名「温柔」）。
+// findPersona 按编号或名字找性格（完全一致才算；主人说的是哪一个由模型判断，按编号交过来）。
 func findPersona(personas []Persona, query string) *Persona {
 	query = strings.TrimSpace(query)
 	if query == "" {
@@ -60,35 +62,38 @@ func findPersona(personas []Persona, query string) *Persona {
 			return &personas[i]
 		}
 	}
-	for i := range personas {
-		for _, alias := range append([]string{personas[i].Name}, personas[i].Aliases...) {
-			if alias != "" && (strings.Contains(query, alias) || strings.Contains(alias, query)) {
-				return &personas[i]
-			}
-		}
-	}
 	return nil
 }
 
-// switchPersonaSpec 生成切换工具的说明（列出可选的性格）。只有一个性格时不提供这个工具。
+type switchPersonaInput struct {
+	Persona string `json:"persona" jsonschema:"要换成的性格的编号"`
+}
+
+// switchPersonaSpec 生成切换工具的说明：可选的性格按编号列出，名字和别名写在说明里给模型对照。只有一个性格时不提供这个工具。
 func switchPersonaSpec(personas []Persona) (ToolSpec, bool) {
 	if len(personas) < 2 {
 		return ToolSpec{}, false
 	}
-	names := make([]string, 0, len(personas))
-	for _, persona := range personas {
-		names = append(names, persona.Name)
+	schema, err := jsonschema.For[switchPersonaInput](nil)
+	if err != nil {
+		panic(fmt.Sprintf("switch_persona 的参数定义: %v", err))
 	}
-	parameters, _ := json.Marshal(map[string]any{
-		"type": "object",
-		"properties": map[string]any{
-			"name": map[string]any{"type": "string", "enum": names, "description": "要换成的性格"},
-		},
-		"required": []string{"name"},
-	})
+	options := make([]string, 0, len(personas))
+	for _, persona := range personas {
+		schema.Properties["persona"].Enum = append(schema.Properties["persona"].Enum, persona.ID)
+		option := persona.ID + "（" + persona.Name
+		if len(persona.Aliases) > 0 {
+			option += "，也叫" + strings.Join(persona.Aliases, "、")
+		}
+		options = append(options, option+"）")
+	}
+	parameters, err := json.Marshal(schema)
+	if err != nil {
+		panic(fmt.Sprintf("switch_persona 的参数定义: %v", err))
+	}
 	return ToolSpec{Name: switchPersonaTool, Parameters: parameters,
 		Description: "切换你的性格（说话方式和语气）。只有主人明确要求换性格、换模式、换说话风格时才调用，" +
-			"例如「换成温柔模式」「变回毒舌的」。可选：" + strings.Join(names, "、") + "。"}, true
+			"例如「换成温柔模式」「变回毒舌的」。可选（编号和名字）：" + strings.Join(options, "；") + "。"}, true
 }
 
 // currentPersona 返回当前性格（可能为 nil）。
@@ -98,11 +103,14 @@ func (s *Session) currentPersona() *Persona {
 
 // switchPersona 执行 switch_persona，返回交给模型的结果文字。
 func (s *Session) switchPersona(arguments map[string]any) string {
-	name, _ := arguments["name"].(string)
-	persona := findPersona(s.opts.Personas, name)
+	in, err := DecodeArguments[switchPersonaInput](arguments)
+	if err != nil {
+		return "没有切换：" + err.Error()
+	}
+	persona := findPersona(s.opts.Personas, in.Persona)
 	if persona == nil {
-		s.logger.Info("调用工具", "tool", switchPersonaTool, "name", name, "err", "没有这个性格")
-		return fmt.Sprintf("没有叫「%s」的性格，没有切换。", name)
+		s.logger.Info("调用工具", "tool", switchPersonaTool, "persona", in.Persona, "err", "没有这个性格")
+		return fmt.Sprintf("没有编号为「%s」的性格，没有切换。", in.Persona)
 	}
 	s.currentConversation().setPersona(persona) // 只换这个人的
 	if s.opts.PersonaState != nil {             // 也记成全家「上次选的」：新的人从它开始

@@ -550,7 +550,8 @@ func buildSynthesizer(settings config.Settings, httpClient *http.Client, logger 
 func buildBrainOptions(settings config.Settings) (brain.Options, error) {
 	// 基础提示词：内置的永远生效，HARO_SYSTEM_PROMPT 只能追加
 	options := brain.Options{MaxHistoryTurn: settings.MaxHistoryTurn, Instructions: brain.ComposeInstructions(settings.ExtraSystemPrompt),
-		Escalation: settings.StrongLLMFor(config.StrongForCorrection)} // 和 routeToStrong 配「重答」那条路的条件一致
+		ConfirmationTimeout: settings.ConfirmationTimeout,
+		Escalation:          settings.StrongLLMFor(config.StrongForCorrection)} // 和 routeToStrong 配「重答」那条路的条件一致
 	if settings.PersonasDir == "" {
 		return options, nil
 	}

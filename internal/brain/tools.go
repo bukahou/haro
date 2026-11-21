@@ -6,13 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
-	"strings"
 	"time"
 	"unicode/utf8"
 
 	"go.opentelemetry.io/otel/attribute"
-
-	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
 const (
@@ -34,7 +31,7 @@ var lookAtCameraSpec = ToolSpec{Name: lookAtCameraTool,
 		"外观细节主人问到才说；画面里没有的东西不要编。看不清就说看不清，请主人拿近一点或换个角度。" +
 		"画面里直接看到的比搜到的资料可靠，两者对不上时以画面为准，并说不确定。认东西要联网查时，搜索词用外观特征加上画面里读到的字。" +
 		"调用前说过的话（例如「我看看」），拿到结果后不要再说一遍。",
-	Parameters: json.RawMessage(`{"type":"object","properties":{}}`)}
+	Parameters: ParametersFor[struct{}]()}
 
 // cameraFrameNote 是承载画面的那条消息的文字；frameRecalledNote 是它写进历史时的替身（历史里不存图片）。
 const (
@@ -57,7 +54,7 @@ func (s *Session) toolSpecs() []ToolSpec {
 	if s.parts.Tools != nil {
 		specs = append(specs, s.parts.Tools.Specs()...)
 	}
-	return specs
+	return append(specs, s.confirmationSpecs()...) // 有待确认的操作时才有
 }
 
 // expertReport 是专家看完后交给前台的工具结果（转述的要求只放在这条结果里，不改系统提示词，免得提示词缓存失效）。
@@ -170,18 +167,6 @@ func (look cameraLook) historyResult(spokenDirectly bool) string {
 	}
 }
 
-// needsConfirmation 判断这批调用里有没有要用户口头确认的（MCP destructiveHint）。
-func (s *Session) needsConfirmation(calls []ToolCall) bool {
-	for _, spec := range s.toolSpecs() {
-		for _, call := range calls {
-			if call.Name == spec.Name && spec.RequiresConfirmation {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 // callTool 执行一次工具调用，返回交给模型的结果文字；出错时把错误也交给模型，让它如实告诉用户。
 // record 是这一轮的记录：工具用 OnDelivered 登记的事记在这里。
 func (s *Session) callTool(ctx context.Context, record *turnRecord, call ToolCall) string {
@@ -213,109 +198,5 @@ func (s *Session) assignToolCallIDs(calls []ToolCall) {
 		if calls[i].ID == "" {
 			calls[i].ID = conversation.nextToolCallID()
 		}
-	}
-}
-
-// confirmationQuestion 是执行需要确认的操作之前问用户的话；删除时把要删的内容描述说出来。
-func confirmationQuestion(calls []ToolCall) string {
-	for _, call := range calls {
-		if !strings.HasPrefix(call.Name, "delete") {
-			return "确定要这么做吗？说「确认」我就执行。"
-		}
-	}
-	var targets []string
-	for _, call := range calls {
-		targets = append(targets, deleteTargets(call.Arguments)...)
-	}
-	switch len(targets) {
-	case 0:
-		return "确定要删掉吗？说「确认」我就删。"
-	case 1:
-		return "确定要删掉和「" + targets[0] + "」有关的那条吗？说「确认」我就删。"
-	default:
-		return "确定要删掉和「" + strings.Join(targets, "」「") + "」有关的这几条吗？说「确认」我就删。"
-	}
-}
-
-// deleteTargets 取出删除工具参数里的描述：queries（一次删多条）或旧的 query。
-func deleteTargets(arguments map[string]any) []string {
-	var targets []string
-	add := func(value any) {
-		if text, ok := value.(string); ok && strings.TrimSpace(text) != "" {
-			targets = append(targets, strings.TrimSpace(text))
-		}
-	}
-	if list, ok := arguments["queries"].([]any); ok {
-		for _, item := range list {
-			add(item)
-		}
-	}
-	add(arguments["query"])
-	return targets
-}
-
-// confirmationAnswer 是用户对确认问题的回答类型。
-type confirmationAnswer int
-
-const (
-	confirmOther confirmationAnswer = iota // 说了别的：放弃待确认的操作，照常处理这句话
-	confirmYes
-	confirmNo
-)
-
-// classifyConfirmation 判断用户这句是不是在回答确认问题（只看短句，长句一律算「说了别的」）。
-func classifyConfirmation(text string) confirmationAnswer {
-	trimmed := strings.TrimFunc(text, func(r rune) bool { return strings.ContainsRune("，,。.!！?？、~～… ", r) })
-	if trimmed == "" || utf8.RuneCountInString(trimmed) > 8 {
-		return confirmOther
-	}
-	for _, word := range []string{"不", "别", "算了", "取消"} { // 先看否定：「不确定」里也有「确定」
-		if strings.Contains(trimmed, word) {
-			return confirmNo
-		}
-	}
-	for _, word := range []string{"确认", "确定", "删吧", "删掉", "删了", "是的", "对", "好", "可以", "执行", "嗯"} {
-		if strings.Contains(trimmed, word) {
-			return confirmYes
-		}
-	}
-	return confirmOther
-}
-
-// takePendingConfirmation 取走待确认的操作（只保留一轮：取走之后就没了）。
-func (s *Session) takePendingConfirmation() []ToolCall {
-	return s.currentConversation().takePendingConfirmation()
-}
-
-func (s *Session) setPendingConfirmation(calls []ToolCall) {
-	s.currentConversation().setPendingConfirmation(calls)
-}
-
-// handleConfirmation 处理上一轮留下的待确认操作；返回 handled=false 表示这句话要照常交给模型。
-func (s *Session) handleConfirmation(ctx context.Context, text string, pending []ToolCall) (realtimeproto.ResponseDone, bool) {
-	switch classifyConfirmation(text) {
-	case confirmYes:
-		// 真正执行的操作也记进这一轮（之后被打断、出错，历史里照样有它）
-		record := newTurnRecord(text)
-		situation, input := s.userTurn(text, record)
-		round := record.beginRound("", pending)
-		trail := []ChatMessage{{Role: RoleAssistant, ToolCalls: pending}}
-		for _, call := range pending {
-			result := s.callTool(ctx, record, call)
-			record.recordResult(round, call, result)
-			s.keepOpenTurn(record)
-			trail = append(trail, ChatMessage{Role: RoleTool, ToolName: call.Name, ToolCallID: call.ID, Text: result})
-		}
-		// 由模型根据执行结果回答：删了哪几条、哪些没找到、失败了为什么，固定的「删掉了」说不清这些。
-		history := append(append(s.historyWithInstructions(), situation...), input)
-		history = append(history, trail[:len(trail)-1]...)
-		answer, usage, err := s.speakAnswer(ctx, history, trail[len(trail)-1], cameraView{}, record)
-		return s.finishAnswer(ctx, record, answer, usage, err), true
-	case confirmNo:
-		s.rememberTurn(time.Now(), []ChatMessage{{Role: RoleUser, Text: text}, {Role: RoleAssistant, Text: "好的，不做了。"}})
-		return s.speakFixedReply(ctx, "好的，不做了。"), true
-	default:
-		s.logger.Info("用户没有确认，放弃待确认的操作")
-		return realtimeproto.ResponseDone{}, false
 	}
 }

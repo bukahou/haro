@@ -35,6 +35,8 @@ type Options struct {
 	MaxHistoryTurn int // 保留最近几轮（一问一答算一轮）的文字历史
 
 	StreamReopen ReopenTiming // 识别流断开后重开的节奏；零值 = DefaultReopenTiming
+	// ConfirmationTimeout：会破坏的操作问了主人之后，多久没确认就作废；零值 = DefaultConfirmationTimeout
+	ConfirmationTimeout time.Duration
 
 	// Instructions 是基础提示词（身份、能力、底线），只由服务端持有：客户端不能经 session.update 替换。
 	Instructions string

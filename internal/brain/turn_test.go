@@ -157,21 +157,22 @@ func (slowSynth) Synthesize(ctx context.Context, _ brain.Utterance) iter.Seq2[re
 	}
 }
 
-// 问「确定要删掉吗」时被打断：这个待确认的操作作废，主人接着说「确认」也不会删。
+// 问确认的话还没说完就被打断：主人没听完问话，这一轮存下的待确认操作作废，之后确认也不执行。
 func TestInterruptedConfirmationIsWithdrawn(t *testing.T) {
-	deleteSpot := braintest.Call("delete_note", map[string]any{"query": "车停车位"})
-	model := braintest.NewModel(t, deleteSpot, braintest.Say("好的。"))
+	model := braintest.NewModel(t, braintest.Call("delete_note", map[string]any{"ids": []any{3}}),
+		braintest.Reply{Chunks: []string{"要删掉第 3 条吗？"}, Hang: true},
+		braintest.Call("confirm_action", map[string]any{"action_id": "act_1"}), braintest.Say("好的。"))
 	toolbox := &fakeToolbox{}
 	k := newTalker(t, brain.Components{Model: model, Synthesizer: slowSynth{}, Tools: toolbox,
 		NewSegmenter: func() brain.TextSegmenter { return speech.NewSentenceSegmenter(0, 40) }}, brain.Options{MaxHistoryTurn: 6})
 
-	interruptWhen(t, k, func() bool { return len(model.Requests()) >= 1 }, 300) // 问题刚开始念就打断
-	if done := braintest.Done(t, k.ask("把那条删了")); done.Status != realtimeproto.StatusCancelled {
+	interruptWhen(t, k, func() bool { return len(model.Requests()) >= 2 }, 300) // 问题刚开始念就打断
+	if done := braintest.Done(t, k.owner("把那条删了")); done.Status != realtimeproto.StatusCancelled {
 		t.Fatalf("应是被打断：%+v", done)
 	}
-	k.say("确认")
+	k.owner("可以")
 	if got := toolbox.called(); len(got) != 0 {
-		t.Errorf("问确认时被打断，之后说「确认」也不应删除：%v", got)
+		t.Errorf("问确认时被打断，之后确认也不应执行：%v", got)
 	}
 }
 

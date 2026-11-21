@@ -23,13 +23,16 @@ const (
 
 // turnRecord 是这一轮到目前为止的进展。只在回答的那个 goroutine 里写，收尾时读。
 type turnRecord struct {
-	startedAt time.Time   // 主人这句话的时间（历史里每一轮标的时间）
-	question  string      // 主人的原话（不含每轮附带的情况说明）
-	rounds    []toolRound // 调用了工具的那几段（按顺序）
+	turn      int64     // 这一轮的编号（确认闸：确认必须在发起之后的一轮）
+	startedAt time.Time // 主人这句话的时间（历史里每一轮标的时间）
+	// voiceVerified：这句话的声纹认出了登记过的人（确认闸只让这样的人发起、确认会破坏的操作）
+	voiceVerified bool
+	question      string      // 主人的原话（不含每轮附带的情况说明）
+	rounds        []toolRound // 调用了工具的那几段（按顺序）
 	// final 是最后一段（不再调用工具时）说的话。段号：第 i 段工具往来是第 i 段，最后一段的段号 = 工具往来的段数
 	// （和说出口的句子上的段号对上：被打断时只算最后一段里听到的）
 	final strings.Builder
-	// askedConfirmation：这一轮问了主人「确定要删掉吗」（被打断时撤掉这个待确认的操作）
+	// askedConfirmation：这一轮存下了待确认的操作、要问主人（问话没说完就被打断时撤掉）
 	askedConfirmation bool
 	// delivered：要「主人听完这一轮才算告诉了」的事——附上的情况的确认（任务板、额度提醒）和工具登记的（OnDelivered）；
 	// 只在说完、播放没被打断时调用
@@ -46,7 +49,7 @@ type toolRound struct {
 }
 
 func newTurnRecord(question string) *turnRecord {
-	return &turnRecord{startedAt: time.Now(), question: question}
+	return &turnRecord{turn: turnCounter.Add(1), startedAt: time.Now(), question: question}
 }
 
 // finalRound 是最后一段的段号（之前每段工具往来各占一个段号）。
@@ -155,9 +158,9 @@ func (s *Session) closeTurn(record *turnRecord, ending turnEnding) bool {
 	case ending == turnFailed && answer == "":
 		answer = failedBeforeSpeaking
 	}
-	if ending == turnInterrupted && record.askedConfirmation { // 问「确定要删掉吗」时被打断：这件事作废
-		s.takePendingConfirmation()
-		s.logger.Info("问确认时被打断：撤掉待确认的操作")
+	if ending == turnInterrupted && record.askedConfirmation { // 问确认时被打断：主人没听完问话，这一轮存下的作废
+		dropped := s.currentConversation().dropPendingActionsFrom(record.turn)
+		s.logger.Info("问确认时被打断：撤掉这一轮存下的待确认操作", "dropped", dropped)
 	}
 	s.rememberTurn(record.startedAt, record.messages(ending, answer))
 	if ending == turnCompleted && len(record.delivered) > 0 { // 被打断、出错时不算告诉了，下一轮再附上

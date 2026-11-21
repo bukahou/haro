@@ -46,7 +46,7 @@ func newPersonaTalker(t *testing.T, model brain.ChatModel, state brain.PersonaSt
 func TestSwitchPersona(t *testing.T) {
 	model := braintest.NewModel(t,
 		braintest.Say("好的。"),
-		braintest.Call("switch_persona", map[string]any{"name": "温柔陪伴"}), braintest.Say("好的。"),
+		braintest.Call("switch_persona", map[string]any{"persona": "gentle"}), braintest.Say("好的。"),
 		braintest.Say("好的。"),
 		braintest.Say("好的。"))
 	state := &memoryState{}

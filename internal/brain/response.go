@@ -97,14 +97,9 @@ func (s *Session) respond(ctx context.Context, job *transcriptionJob) (done real
 		}
 		return realtimeproto.ResponseDone{Status: realtimeproto.StatusIncomplete, Reason: realtimeproto.ReasonEmptyTranscript}
 	}
-	if pending := s.takePendingConfirmation(); pending != nil { // 上一轮问了「确定要删掉吗」
-		if done, handled := s.handleConfirmation(ctx, job.text, pending); handled {
-			return done
-		}
-	}
-
 	// 画面不直接附在这句话上：模型需要看时调用 look_at_camera，闲聊时手里就没有画面
 	record := newTurnRecord(job.text)
+	record.voiceVerified = job.speakerChecked && job.speaker != ""
 	situation, input := s.userTurn(job.text, record) // 现在的情况单独成一条、不进历史；历史里只存原话
 	defer func() {
 		for _, round := range record.rounds {
@@ -304,17 +299,6 @@ func (s *Session) generateSentences(ctx context.Context, history []ChatMessage, 
 			break
 		}
 		s.assignToolCallIDs(calls)
-		if s.needsConfirmation(calls) {
-			s.setPendingConfirmation(calls)
-			record.askedConfirmation = true
-			question := confirmationQuestion(calls)
-			answer.WriteString(question)
-			record.final.WriteString(roundText.String() + question)
-			if err := send(segmenter.Push(question)); err != nil {
-				return usage, err
-			}
-			break
-		}
 		// 调用工具前说的话（「我查一下」）先说出去：工具执行时主人就能听到，也不和之后的回答拼成一句
 		if err := send(segmenter.Flush()); err != nil {
 			return usage, err
@@ -336,6 +320,10 @@ func (s *Session) generateSentences(ctx context.Context, history []ChatMessage, 
 			case askStrongerTool:
 				result = s.escalate(&messages[inputIndex])
 				record.rememberAs(toolRoundIndex, call, escalatedRecord)
+			case confirmActionTool:
+				result = s.confirmAction(ctx, record, call)
+			case cancelActionTool:
+				result = s.cancelAction(call)
 			case lookAtCameraTool:
 				look := s.lookAtCamera(ctx, view)
 				direct := look.speakDirectly(calls)
@@ -348,7 +336,11 @@ func (s *Session) generateSentences(ctx context.Context, history []ChatMessage, 
 				frameMessages = append(frameMessages, frames...)
 				record.rounds[toolRoundIndex].frameShown = len(frames) > 0
 			default:
-				result = s.callTool(ctx, record, call)
+				if s.requiresConfirmation(call.Name) { // 会破坏的：先问主人（确认闸）
+					result = s.holdForConfirmation(record, call)
+				} else {
+					result = s.callTool(ctx, record, call)
+				}
 			}
 			record.recordResult(toolRoundIndex, call, result)
 			s.keepOpenTurn(record) // 做完了一个工具：这一轮中途服务端重启的话，重启后照实接进历史

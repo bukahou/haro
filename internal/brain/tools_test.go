@@ -13,10 +13,11 @@ import (
 	"github.com/bukahou/haro/internal/brain/braintest"
 )
 
-// fakeToolbox 记录调用；delete_note 需要确认。
+// fakeToolbox 记录调用（和参数）；delete_note 会破坏、要过确认闸。
 type fakeToolbox struct {
-	mu    sync.Mutex
-	calls []string
+	mu        sync.Mutex
+	calls     []string
+	arguments []map[string]any
 }
 
 func (f *fakeToolbox) Specs() []brain.ToolSpec {
@@ -29,6 +30,7 @@ func (f *fakeToolbox) Call(_ context.Context, call brain.ToolCall) (string, erro
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, call.Name)
+	f.arguments = append(f.arguments, call.Arguments)
 	if call.Name == "search_notes" {
 		return "车停在C3的7号位", nil
 	}
@@ -38,6 +40,13 @@ func (f *fakeToolbox) called() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.calls...)
+}
+
+// argumentsOf 是第 i 次调用的参数。
+func (f *fakeToolbox) argumentsOf(i int) map[string]any {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.arguments[i]
 }
 
 func newToolTalker(t *testing.T, model brain.ChatModel, toolbox brain.Toolbox) *talker {
@@ -82,47 +91,6 @@ func TestToolLoopUsageAddsUpAllRequests(t *testing.T) {
 	done := braintest.Done(t, k.ask("我的车停在哪了？"))
 	if done.Usage == nil || done.Usage.InputTokens != 200 || done.Usage.OutputTokens != 10 {
 		t.Errorf("用量应为两次请求之和（输入 200、输出 10）：%+v", done.Usage)
-	}
-}
-
-func TestToolLoopAsksConfirmationBeforeDestructiveTool(t *testing.T) {
-	deleteSpot := braintest.Call("delete_note", map[string]any{"query": "车停车位"})
-	model := braintest.NewModel(t,
-		deleteSpot, braintest.Say("删好了。"), // 要删 → 主人确认 → 根据执行结果回答
-		deleteSpot,                       // 要删 → 主人说算了：固定回答，不请求模型
-		deleteSpot, braintest.Say("好的。")) // 要删 → 主人说了别的：放弃删除，照常回答
-	toolbox := &fakeToolbox{}
-	k := newToolTalker(t, model, toolbox)
-
-	if spoken := k.say("把那条删了"); !strings.Contains(spoken, "确定要删掉和「车停车位」有关的那条吗") {
-		t.Fatalf("应先问确认，播出 %q", spoken)
-	}
-	if len(toolbox.called()) != 0 {
-		t.Fatal("确认之前不应执行删除")
-	}
-	if spoken := k.say("确认"); spoken != "删好了。" {
-		t.Errorf("确认后应由模型根据删除结果回答，播出 %q", spoken)
-	}
-	if got := toolbox.called(); !slices.Equal(got, []string{"delete_note"}) {
-		t.Errorf("确认后应执行删除：%v", got)
-	}
-	if last := model.LastRequest().Last(); last.Role != brain.RoleTool || last.Text != `{"deleted":true}` {
-		t.Errorf("确认后交给模型的应是删除结果：%+v", last)
-	}
-
-	k.say("把那条删了")
-	if spoken := k.say("算了"); spoken != "好的，不做了。" {
-		t.Errorf("取消后播出 %q", spoken)
-	}
-	k.say("把那条删了")
-	if spoken := k.say("今天天气怎么样？"); spoken != "好的。" {
-		t.Errorf("说别的应照常回答，播出 %q", spoken)
-	}
-	if got := toolbox.called(); len(got) != 1 {
-		t.Errorf("取消和说别的都不应执行删除：%v", got)
-	}
-	if model.Remaining() != 0 {
-		t.Errorf("模型的请求次数不对：还剩 %d 条回答没用到", model.Remaining())
 	}
 }
 
@@ -362,15 +330,6 @@ func TestCaptureFailureIsToldToModel(t *testing.T) {
 }
 
 // 一次删多条：确认问句把每一条都列出来。
-func TestConfirmationListsEveryTarget(t *testing.T) {
-	model := braintest.NewModel(t,
-		braintest.Call("delete_note", map[string]any{"queries": []any{"明天下午去取快递", "周三取干洗"}}))
-	k := newToolTalker(t, model, &fakeToolbox{})
-	if spoken := k.say("把取快递和取干洗删了"); !strings.Contains(spoken, "「明天下午去取快递」「周三取干洗」有关的这几条吗") {
-		t.Errorf("应列出每一条，播出 %q", spoken)
-	}
-}
-
 // 专家写那句时拿到当前性格的说明；直接念出来的那句用性格的语气。
 func TestLookAtCameraUsesPersonaStyle(t *testing.T) {
 	expert := &fakeExpert{report: brain.FrameReport{Spoken: "充电头，没跑了。"}}
