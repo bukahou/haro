@@ -1,5 +1,5 @@
 #!/bin/sh
-# 安装脚本的冒烟测试（CI 的 build 一步在三个平台上各跑一次；本机也能跑）：
+# 安装脚本的冒烟测试（CI 的 build 一步在每个平台上各跑一次；本机也能跑）：
 #   scripts/test-install.sh 压缩包 期望的版本号
 #   例：scripts/test-install.sh dist/haro-linux-amd64.tar.gz v0.5.0-1a2b3c4
 # 在临时目录里假装一个 Release（压缩包 + SHA256SUMS）和一个空的家目录，用 install.sh 装一遍、再装一遍、卸一遍；

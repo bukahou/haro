@@ -2,9 +2,10 @@
 ## ci —— 推 dev、开往 main / dev 的 PR（含 Dependabot 的 PR）时运行；发版流程（release.yml）也先调用它：测试不过就不发版（v6）
 ## ============================================================
 ##   version  版本号 = v + VERSION 文件 + 提交号前 7 位（= Release 标签 = 镜像标签），例如 v0.5.0-1a2b3c4
-##   test     gofmt + go vet（含 integration、audiohw、eval 标签的测试：只编译检查，不跑）+ go test -short（跳过要网络的测试）
+##   test     gofmt + go vet（含 integration、audiohw、eval 标签的测试：只编译检查，不跑）+ go test
+##            （要真模型、真服务、外网、真设备的测试都用这几个编译标签挡在外面，不靠 -short）
 ##            + check-darwin / check-windows（Mac、Windows 版平台层的类型检查）
-##   scripts  shellcheck（安装脚本、模型下载脚本等）
+##   scripts  shellcheck（安装脚本、模型下载脚本等）+ 改部署标签的脚本的测试
 ##   build    终端的各个平台（列表只在 version 的 platforms 一处；现在是 Linux x86_64 / arm64），各在原生机器上编译、跑一次 -version，
 ##            再用安装脚本装一遍、升一遍、卸一遍（含「校验和不对必须拒装」的阳性对照）。
 ##            产物传成 artifact：release.yml 直接拿去发布 —— 发布的就是这里测过的那一份，不重新编译。
@@ -38,7 +39,7 @@ jobs:
       tag: ${{ steps.tag.outputs.tag }}
       platforms: ${{ steps.platforms.outputs.platforms }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - id: tag
@@ -57,10 +58,10 @@ jobs:
   test:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: go.mod
       - name: gofmt
@@ -69,13 +70,13 @@ jobs:
           [ -z "$unformatted" ] || { echo "::error::这些文件没有 gofmt：${unformatted}"; exit 1; }
       - run: go vet ./...
       - run: go vet -tags integration,audiohw,eval ./... # 要真模型、真服务、真设备的测试不在这里跑，但至少要编译得过
-      - run: go test -short ./...
+      - run: go test ./...
       - run: make check-darwin check-windows
 
   scripts:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: shellcheck
@@ -83,6 +84,8 @@ jobs:
           command -v shellcheck >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck; }
           shellcheck --version | head -2
           shellcheck --severity=warning scripts/*.sh deploy/systemd/run-with-env.sh
+      - name: 改部署标签的脚本（set-image-tag.sh）
+        run: sh scripts/test-set-image-tag.sh
       # macOS 的 sh 是 bash 3.2：紧跟在 $变量名 后面的中文会被当成变量名的一部分（报 unbound variable，2026-11-17 踩过）
       #   ⇒ 变量后面紧跟非 ASCII 字符时一律写成 ${变量名}
       - name: 变量名后面不能紧跟中文（macOS 兼容）
@@ -104,10 +107,10 @@ jobs:
       TAG: ${{ needs.version.outputs.tag }}
       ASSET: haro-${{ matrix.platform }}.tar.gz
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: go.mod
       # 终端要 cgo（音频库 miniaudio 随源码编译，不用装系统库）⇒ 每个平台在自己的机器上编，不交叉编译
@@ -121,7 +124,7 @@ jobs:
           tar -czf "dist/${ASSET}" -C dist/pkg haro LICENSE
       - name: 安装脚本：装、升、卸 + 阳性对照
         run: sh scripts/test-install.sh "dist/${ASSET}" "${TAG}"
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: haro-${{ matrix.platform }}
           path: dist/${{ env.ASSET }}
@@ -136,12 +139,12 @@ jobs:
       TAG: ${{ needs.version.outputs.tag }}
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       # 有 Docker Hub 账号就登录：拉基础镜像走登录后的额度。Dependabot 的 PR 拿不到这个 secret，就匿名拉
       - if: env.DOCKERHUB_USERNAME != ''
-        uses: docker/login-action@v4
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}

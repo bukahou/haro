@@ -232,14 +232,11 @@ make version          # 这次构建的版本号
 - **版本号** = `v` + 仓库根目录的 `VERSION` + 提交号前 7 位，例如 `v0.5.0-1a2b3c4`。GitHub Release 的标签、
   服务端镜像的标签、程序里的版本（`haro -version`、启动日志）是同一个字符串。`VERSION` 只在阶段性的大改时调。
 - **终端和服务端握手时互报版本**（HTTP 头 `X-Haro-Version`）：版本不同时两边的日志都会提醒升级终端。
-- **合并前的检查**（`.github/workflows/ci.yml`；日常开发在 `dev`，推 `dev` 和开 PR 时跑）：测试、终端三个平台的编译和安装脚本，
-  再试建一次服务端镜像（不推送；和发版用同一份构建步骤 `.github/actions/server-image`）—— Dockerfile、基础镜像的问题合并前就能发现。
-- **合并到 `main` 就发版**（`.github/workflows/release.yml`）：
-  1. 测试 + 终端各平台（列表只在 `ci.yml` 的 `platforms` 一处；现在是 Linux x86_64 / arm64，Mac 版暂停编译）的程序，各在原生机器上编译，用安装脚本装、卸一遍；
-  2. 程序发到 GitHub Release（附 `SHA256SUMS`、`install.sh`、来源证明），设为 latest；`v*` 的 Release 只留最近 20 个；
-  3. 服务端镜像：模型从本仓库的 Release 下载并按 `models.lock` 校验 → 构建 → Trivy 扫描（有可修的 CRITICAL
-     或疑似凭证就不推）→ 推 Docker Hub `bukahou/haro-server`（版本号 + latest）；
-  4. 改部署仓库里的镜像标签（生产环境要人工 SYNC 才会换版本）。
+- **合并前的检查**（`.github/workflows/ci.yml`；日常开发在 `dev`，推 `dev` 和开 PR 时跑）：每一步做什么写在 `ci.yml` 开头的说明里
+  （终端编哪几个平台只在它的 `platforms` 一处）。
+- **合并到 `main` 就发版，几分钟内上线**（部署仓库开着 Argo CD 自动同步，不用人工同步）。发版的每一步只写在
+  `.github/workflows/release.yml` 开头的说明里；只改文档（根目录的 `*.md`、`docs/`）的合并不发版，编进程序的文件（例如代理的提示词）改了照样发版。
+  workflow 里的第三方 action 按提交 SHA 引用，Trivy 的镜像按 digest 引用。
 - **模型的 Release**：原发布方随时可能删文件 ⇒ 模型第一次从原发布方下载、校验后，放进本仓库的 Release
   （`models-v1`，由 `.github/workflows/models.yml` 建：推 `models-v*` 标签，或在 Actions 页面手动运行）；之后构建只从这里下载。
 - **依赖更新**：Dependabot 每周检查 Go 依赖、基础镜像（Dockerfile 里钉了 digest）、GitHub Actions，有新版就开 PR 到 `dev`（`.github/dependabot.yml`）；
