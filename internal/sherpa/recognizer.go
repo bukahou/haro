@@ -1,8 +1,4 @@
-// Package sensevoice 用 sherpa-onnx 在 CPU 上运行 SenseVoice-Small 做语音识别。
-//
-// ⚠️ 这是 haro 里唯一用 cgo 的包（sherpa-onnx 附带预编译的原生库），只允许 cmd/haro-asr 引用；
-// haro 主程序经 HTTP 调用 haro-asr，保持纯 Go、可以直接交叉编译。
-package sensevoice
+package sherpa
 
 import (
 	"context"
@@ -14,16 +10,17 @@ import (
 	"strings"
 	"sync"
 
-	sherpa "github.com/k2-fsa/sherpa-onnx-go/v2/sherpa_onnx"
+	sherpaonnx "github.com/k2-fsa/sherpa-onnx-go/v2/sherpa_onnx"
 
 	"github.com/bukahou/haro/internal/asrserver"
 	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
-// Recognizer 封装 sherpa-onnx 的离线识别器。
+// Recognizer 封装 sherpa-onnx 的离线识别器（SenseVoice-Small）。
 type Recognizer struct {
-	mu         sync.Mutex // 识别器内部状态不保证并发安全；haro 一次只说一句，串行即可
-	recognizer *sherpa.OfflineRecognizer
+	// mu：识别器内部状态不保证并发安全，一次只识别一句；几台终端同时说完时在这里排队
+	mu         sync.Mutex
+	recognizer *sherpaonnx.OfflineRecognizer
 }
 
 // NewRecognizer 从模型目录（含 model.int8.onnx 与 tokens.txt）加载模型。language 为 "auto" 时自动判断语种。
@@ -35,15 +32,15 @@ func NewRecognizer(modelDir string, threads int, language string) (*Recognizer, 
 			return nil, fmt.Errorf("模型文件不可用: %w", err)
 		}
 	}
-	config := sherpa.OfflineRecognizerConfig{}
-	config.FeatConfig = sherpa.FeatureConfig{SampleRate: 16000, FeatureDim: 80}
-	config.ModelConfig.SenseVoice = sherpa.OfflineSenseVoiceModelConfig{
+	config := sherpaonnx.OfflineRecognizerConfig{}
+	config.FeatConfig = sherpaonnx.FeatureConfig{SampleRate: 16000, FeatureDim: 80}
+	config.ModelConfig.SenseVoice = sherpaonnx.OfflineSenseVoiceModelConfig{
 		Model: modelPath, Language: language, UseInverseTextNormalization: 1, // 数字写成阿拉伯数字、加标点
 	}
 	config.ModelConfig.Tokens = tokensPath
 	config.ModelConfig.NumThreads = threads
 	config.ModelConfig.Provider = "cpu"
-	recognizer := sherpa.NewOfflineRecognizer(&config)
+	recognizer := sherpaonnx.NewOfflineRecognizer(&config)
 	if recognizer == nil {
 		return nil, errors.New("sherpa-onnx 创建识别器失败（模型文件是否完整？）")
 	}
@@ -61,8 +58,8 @@ func (r *Recognizer) Transcribe(ctx context.Context, audio realtimeproto.PCMAudi
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	stream := sherpa.NewOfflineStream(r.recognizer)
-	defer sherpa.DeleteOfflineStream(stream)
+	stream := sherpaonnx.NewOfflineStream(r.recognizer)
+	defer sherpaonnx.DeleteOfflineStream(stream)
 	stream.AcceptWaveform(audio.Format.SampleRate, samples)
 	r.recognizer.Decode(stream)
 	result := stream.GetResult()
@@ -78,7 +75,7 @@ func (r *Recognizer) Transcribe(ctx context.Context, audio realtimeproto.PCMAudi
 func (r *Recognizer) Close() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	sherpa.DeleteOfflineRecognizer(r.recognizer)
+	sherpaonnx.DeleteOfflineRecognizer(r.recognizer)
 }
 
 // pcm16ToFloat 把 s16le 转成 [-1, 1) 的 float32，多声道只取第一声道。

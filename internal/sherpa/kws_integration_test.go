@@ -3,8 +3,8 @@
 // 用真实的唤醒词模型逐个检测录音（默认不跑），按 20ms 一块喂入，模拟流式：
 //
 //	HARO_KWS_MODEL_DIR=... HARO_KWS_KEYWORDS=... HARO_TEST_KWS_WAVS=a.wav,b.wav \
-//	  go test -tags integration -run KeywordSpotterLive -v ./internal/sensevoice/
-package sensevoice
+//	  go test -tags integration -run KeywordSpotterLive -v ./internal/sherpa/
+package sherpa
 
 import (
 	"os"

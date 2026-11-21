@@ -1,4 +1,4 @@
-package sensevoice
+package sherpa
 
 import (
 	"errors"
@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	sherpa "github.com/k2-fsa/sherpa-onnx-go/v2/sherpa_onnx"
+	sherpaonnx "github.com/k2-fsa/sherpa-onnx-go/v2/sherpa_onnx"
 
 	"github.com/bukahou/haro/internal/asrserver"
 	"github.com/bukahou/haro/internal/realtimeproto"
@@ -38,25 +38,25 @@ func NewKeywordSpotterFactory(config KeywordSpotterConfig) (asrserver.KeywordSpo
 	if _, err := os.Stat(config.KeywordsFile); err != nil {
 		return nil, nil, fmt.Errorf("关键词文件不可用: %w", err)
 	}
-	spotterConfig := sherpa.KeywordSpotterConfig{
-		FeatConfig:        sherpa.FeatureConfig{SampleRate: realtimeproto.TranscriptionSampleRate, FeatureDim: 80},
+	spotterConfig := sherpaonnx.KeywordSpotterConfig{
+		FeatConfig:        sherpaonnx.FeatureConfig{SampleRate: realtimeproto.TranscriptionSampleRate, FeatureDim: 80},
 		MaxActivePaths:    4,
 		KeywordsFile:      config.KeywordsFile,
 		KeywordsScore:     config.Score,
 		KeywordsThreshold: config.Threshold,
 	}
-	spotterConfig.ModelConfig.Transducer = sherpa.OnlineTransducerModelConfig{Encoder: encoder, Decoder: decoder, Joiner: joiner}
+	spotterConfig.ModelConfig.Transducer = sherpaonnx.OnlineTransducerModelConfig{Encoder: encoder, Decoder: decoder, Joiner: joiner}
 	spotterConfig.ModelConfig.Tokens = filepath.Join(config.ModelDir, "tokens.txt")
 	spotterConfig.ModelConfig.NumThreads = 1
 	spotterConfig.ModelConfig.Provider = "cpu"
-	spotter := sherpa.NewKeywordSpotter(&spotterConfig)
+	spotter := sherpaonnx.NewKeywordSpotter(&spotterConfig)
 	if spotter == nil {
 		return nil, nil, errors.New("sherpa-onnx 创建唤醒词识别器失败（模型或关键词文件有误？）")
 	}
 	factory := func() (asrserver.KeywordSpotter, error) {
-		return &keywordStream{spotter: spotter, stream: sherpa.NewKeywordStream(spotter)}, nil
+		return &keywordStream{spotter: spotter, stream: sherpaonnx.NewKeywordStream(spotter)}, nil
 	}
-	return factory, func() { sherpa.DeleteKeywordSpotter(spotter) }, nil
+	return factory, func() { sherpaonnx.DeleteKeywordSpotter(spotter) }, nil
 }
 
 // findModelFile 在模型目录里找 encoder / decoder / joiner：优先 chunk-16，其次优先 int8 量化版。
@@ -83,8 +83,8 @@ func findModelFile(dir, part string) (string, error) {
 
 // keywordStream 是一个转写会话专用的唤醒词识别流。
 type keywordStream struct {
-	spotter *sherpa.KeywordSpotter
-	stream  *sherpa.OnlineStream
+	spotter *sherpaonnx.KeywordSpotter
+	stream  *sherpaonnx.OnlineStream
 }
 
 // AcceptWaveform 喂入音频并返回识别到的唤醒词（没有则为空）。识别到后自动重置，避免同一次重复触发。
@@ -104,4 +104,4 @@ func (k *keywordStream) AcceptWaveform(samples []float32) string {
 func (k *keywordStream) Reset() { k.spotter.Reset(k.stream) }
 
 // Close 释放流。
-func (k *keywordStream) Close() { sherpa.DeleteOnlineStream(k.stream) }
+func (k *keywordStream) Close() { sherpaonnx.DeleteOnlineStream(k.stream) }

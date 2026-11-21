@@ -26,7 +26,7 @@ import (
 	"github.com/bukahou/haro/internal/buildinfo"
 	"github.com/bukahou/haro/internal/config"
 	"github.com/bukahou/haro/internal/graceful"
-	"github.com/bukahou/haro/internal/sensevoice"
+	"github.com/bukahou/haro/internal/sherpa"
 	"github.com/bukahou/haro/internal/smartturn"
 	"github.com/bukahou/haro/internal/voiceprint"
 )
@@ -98,14 +98,14 @@ func run(settings config.ASRSettings, logger *slog.Logger) error {
 	}()
 
 	loadStarted := time.Now()
-	recognizer, err := sensevoice.NewRecognizer(settings.ModelDir, settings.Threads, settings.Language)
+	recognizer, err := sherpa.NewRecognizer(settings.ModelDir, settings.Threads, settings.Language)
 	if err != nil {
 		return err
 	}
 	models.add(func() { recognizer.Close() })
 	logger.Info("模型已加载", "elapsed", time.Since(loadStarted).Round(time.Millisecond), "threads", settings.Threads)
 
-	newDetector, err := sensevoice.NewSileroDetectorFactory(settings.VADModel)
+	newDetector, err := sherpa.NewSileroDetectorFactory(settings.VADModel)
 	if err != nil {
 		return err
 	}
@@ -120,9 +120,9 @@ func run(settings config.ASRSettings, logger *slog.Logger) error {
 		logger.Info("说完判断（semantic_vad）已启用", "turn_model", settings.TurnModel)
 	}
 
-	kws := sensevoice.KeywordSpotterConfig{ModelDir: settings.KWSModelDir, KeywordsFile: settings.WakeWordsFile,
+	kws := sherpa.KeywordSpotterConfig{ModelDir: settings.KWSModelDir, KeywordsFile: settings.WakeWordsFile,
 		Threshold: float32(settings.KWSThreshold), Score: float32(settings.KWSScore)}
-	newKeywordSpotter, release, err := sensevoice.NewKeywordSpotterFactory(kws)
+	newKeywordSpotter, release, err := sherpa.NewKeywordSpotterFactory(kws)
 	if err != nil {
 		return err
 	}
@@ -170,7 +170,7 @@ func loadSpeakerCheck(settings config.ASRSettings, logger *slog.Logger) (*asrser
 	if settings.SpeakerModel == "" {
 		return nil, func() {}, nil
 	}
-	embedder, err := sensevoice.NewSpeakerEmbedder(settings.SpeakerModel, 2)
+	embedder, err := sherpa.NewSpeakerEmbedder(settings.SpeakerModel, 2)
 	if err != nil {
 		return nil, nil, err
 	}

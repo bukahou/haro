@@ -3,8 +3,8 @@
 // 用真实的 SenseVoice + Silero VAD 跑一遍流式转写会话（默认不跑）：
 //
 //	HARO_ASR_MODEL_DIR=... HARO_VAD_MODEL=... HARO_TEST_WAVS=a.wav,b.wav \
-//	  go test -tags integration -run RealtimeLive -v ./internal/sensevoice/
-package sensevoice
+//	  go test -tags integration -run RealtimeLive -v ./internal/sherpa/
+package sherpa
 
 import (
 	"context"

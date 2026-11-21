@@ -1,11 +1,11 @@
-package sensevoice
+package sherpa
 
 import (
 	"errors"
 	"fmt"
 	"os"
 
-	sherpa "github.com/k2-fsa/sherpa-onnx-go/v2/sherpa_onnx"
+	sherpaonnx "github.com/k2-fsa/sherpa-onnx-go/v2/sherpa_onnx"
 
 	"github.com/bukahou/haro/internal/asrserver"
 	"github.com/bukahou/haro/internal/realtimeproto"
@@ -13,7 +13,7 @@ import (
 
 // SileroDetector 是 sherpa-onnx 的 Silero VAD，一个转写会话一个实例。
 type SileroDetector struct {
-	vad *sherpa.VoiceActivityDetector
+	vad *sherpaonnx.VoiceActivityDetector
 }
 
 // NewSileroDetectorFactory 返回按会话 turn_detection 创建 VAD 的工厂。
@@ -30,8 +30,8 @@ func NewSileroDetectorFactory(modelPath string) (asrserver.VoiceDetectorFactory,
 		if silence <= 0 {
 			silence = 700
 		}
-		config := sherpa.VadModelConfig{
-			SileroVad: sherpa.SileroVadModelConfig{
+		config := sherpaonnx.VadModelConfig{
+			SileroVad: sherpaonnx.SileroVadModelConfig{
 				Model:              modelPath,
 				Threshold:          float32(threshold),
 				MinSilenceDuration: float32(silence) / 1000,
@@ -43,7 +43,7 @@ func NewSileroDetectorFactory(modelPath string) (asrserver.VoiceDetectorFactory,
 			NumThreads: 1,
 			Provider:   "cpu",
 		}
-		vad := sherpa.NewVoiceActivityDetector(&config, 60)
+		vad := sherpaonnx.NewVoiceActivityDetector(&config, 60)
 		if vad == nil {
 			return nil, errors.New("sherpa-onnx 创建 VAD 失败")
 		}
@@ -69,4 +69,4 @@ func (d *SileroDetector) PopSegments() []asrserver.SpeechSegment {
 }
 
 // Close 释放原生资源。
-func (d *SileroDetector) Close() { sherpa.DeleteVoiceActivityDetector(d.vad) }
+func (d *SileroDetector) Close() { sherpaonnx.DeleteVoiceActivityDetector(d.vad) }

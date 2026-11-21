@@ -7,7 +7,7 @@ import (
 	"github.com/bukahou/haro/internal/voiceprint"
 )
 
-// SpeakerEmbedder 把一段 16 kHz 语音算成声纹向量（cgo 实现在 sensevoice，v3 H-3）。
+// SpeakerEmbedder 把一段 16 kHz 语音算成声纹向量（cgo 实现在 internal/sherpa）。
 type SpeakerEmbedder interface {
 	Embed(samples []float32) ([]float32, error)
 }
