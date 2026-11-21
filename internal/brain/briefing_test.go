@@ -37,11 +37,12 @@ func (b *reportBriefer) count() int {
 	return b.delivered
 }
 
-// 附上的结论这一轮说完才确认告诉了；被打断、出错时不确认（下一轮照样附上）。
-func TestBriefingDeliveredOnlyWhenTurnCompletes(t *testing.T) {
+// 附上的情况：这一轮说完、主人也听完了（下一轮开始时还没收到截断）才确认告诉了；
+// 被打断、出错时不确认（下一轮照样附上）。声音在终端播完要比服务端发完晚得多，说完时还不知道主人听没听完。
+func TestBriefingDeliveredOnlyWhenHeard(t *testing.T) {
 	briefer := &reportBriefer{}
 	model := braintest.NewModel(t, braintest.Reply{Chunks: []string{"结论是"}, Hang: true}, braintest.Reply{Err: errors.New("503")},
-		braintest.Say("结论是 A。"))
+		braintest.Say("结论是 A。"), braintest.Say("好。"))
 	k := newTalker(t, brain.Components{Model: model, Synthesizer: fakeSynthesizer{}, Briefers: []brain.Briefer{briefer}},
 		brain.Options{MaxHistoryTurn: 6})
 
@@ -52,8 +53,108 @@ func TestBriefingDeliveredOnlyWhenTurnCompletes(t *testing.T) {
 		t.Fatalf("被打断、出错的轮次不应确认：%d", got)
 	}
 	k.say("有什么事吗")
+	if got := briefer.count(); got != 0 {
+		t.Fatalf("说完了，但还不知道主人听没听完：不应确认（%d）", got)
+	}
+	k.say("嗯")
 	if got := briefer.count(); got != 1 {
-		t.Errorf("说完的那一轮应确认一次：%d", got)
+		t.Errorf("下一轮开始时没收到截断（上一轮播完了）：应确认一次（%d）", got)
+	}
+}
+
+// 说完了、声音还在终端播的时候被打断：附上的情况没听完，不算告诉了（之后照样附上）。
+func TestBriefingNotDeliveredWhenPlaybackCut(t *testing.T) {
+	briefer := &reportBriefer{}
+	model := braintest.NewModel(t, braintest.Say("结论是 A。"), braintest.Say("我在。"))
+	k := newTalker(t, brain.Components{Model: model, Synthesizer: fakeSynthesizer{}, Briefers: []brain.Briefer{briefer}},
+		brain.Options{MaxHistoryTurn: 6})
+
+	k.say("有什么事吗")
+	k.send(realtimeproto.ConversationItemTruncate{AudioEndMs: 100})
+	k.say("哈罗哈罗")
+	if got := briefer.count(); got != 0 {
+		t.Errorf("上一轮播放中被打断：不应确认（%d）", got)
+	}
+}
+
+// 说完之后会话就结束了（终端断开）：不知道主人听没听完，不算告诉了（下次再说一遍，不漏）。
+func TestBriefingNotDeliveredWhenSessionEnds(t *testing.T) {
+	briefer := &reportBriefer{}
+	model := braintest.NewModel(t, braintest.Say("结论是 A。"))
+	k := newTalker(t, brain.Components{Model: model, Synthesizer: fakeSynthesizer{}, Briefers: []brain.Briefer{briefer}},
+		brain.Options{MaxHistoryTurn: 6})
+
+	k.say("有什么事吗")
+	_ = k.session.Close()
+	if got := briefer.count(); got != 0 {
+		t.Errorf("会话结束了、没等到下一轮：不应确认（%d）", got)
+	}
+}
+
+// deliveringToolbox 的 report 工具像 research_status：取出结论交给模型，并登记「主人听完才算告诉了」。
+type deliveringToolbox struct {
+	mu    sync.Mutex
+	heard int
+}
+
+func (b *deliveringToolbox) Specs() []brain.ToolSpec {
+	return []brain.ToolSpec{{Name: "report", Parameters: []byte(`{}`)}}
+}
+
+func (b *deliveringToolbox) Call(ctx context.Context, _ brain.ToolCall) (string, error) {
+	brain.OnDelivered(ctx, func() {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		b.heard++
+	})
+	return "结论是 A", nil
+}
+
+func (b *deliveringToolbox) count() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.heard
+}
+
+// 工具登记的事和附上的情况同一个时机确认：这一轮说完、主人听完；被打断（生成中或播放中）都不确认。
+func TestToolDeliveredOnlyWhenHeard(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		after func(k *talker, model *braintest.Model)
+		want  int
+	}{
+		{"说完、播完", func(*talker, *braintest.Model) {}, 1},
+		{"说完、播放中被打断", func(k *talker, _ *braintest.Model) {
+			k.send(realtimeproto.ConversationItemTruncate{AudioEndMs: 100})
+		}, 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			toolbox := &deliveringToolbox{}
+			model := braintest.NewModel(t, braintest.Call("report", nil), braintest.Say("结论是 A。"), braintest.Say("好。"))
+			k := newTalker(t, brain.Components{Model: model, Synthesizer: fakeSynthesizer{}, Tools: toolbox},
+				brain.Options{MaxHistoryTurn: 6})
+			k.say("调查有结果了吗")
+			if got := toolbox.count(); got != 0 {
+				t.Fatalf("说完时还不知道主人听没听完：不应确认（%d）", got)
+			}
+			c.after(k, model)
+			k.say("嗯")
+			if got := toolbox.count(); got != c.want {
+				t.Errorf("want %d，got %d", c.want, got)
+			}
+		})
+	}
+
+	// 生成中被打断：这一轮不算说完，登记的事作废
+	toolbox := &deliveringToolbox{}
+	model := braintest.NewModel(t, braintest.Call("report", nil), braintest.Reply{Chunks: []string{"结论是"}, Hang: true},
+		braintest.Say("好。"))
+	k := newTalker(t, brain.Components{Model: model, Synthesizer: fakeSynthesizer{}, Tools: toolbox}, brain.Options{MaxHistoryTurn: 6})
+	interruptWhen(t, k, func() bool { return len(model.Requests()) >= 2 }, 0)
+	braintest.Done(t, k.ask("调查有结果了吗"))
+	k.say("嗯")
+	if got := toolbox.count(); got != 0 {
+		t.Errorf("生成中被打断：不应确认（%d）", got)
 	}
 }
 

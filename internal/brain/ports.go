@@ -72,9 +72,30 @@ type Briefer interface {
 // Briefing 是一个 Briefer 这一轮附上的情况。
 type Briefing struct {
 	Lines []string
-	// Delivered 在这一轮说完之后调用：这些情况算是告诉主人了（任务板的结论、额度提醒，下一轮不再附上）。
-	// 被打断、出错时不调用，下一轮照样附上。nil = 不用确认（时间、位置这类每轮重新算的）
+	// Delivered 在这一轮说完、主人也听完了（播放没被打断）之后调用：这些情况算是告诉主人了（任务板上失败的调查、
+	// 额度提醒，下一轮不再附上）。被打断、出错时不调用，下一轮照样附上。nil = 不用确认（时间、位置这类每轮重新算的）
 	Delivered func()
+}
+
+// Deliveries 收集「主人听完这一轮才算数」的事（见 OnDelivered）；会话里是这一轮的记录。
+type Deliveries interface {
+	Add(delivered func())
+}
+
+type deliveriesKey struct{}
+
+// WithDeliveries 把收集处放进工具执行用的 ctx。
+func WithDeliveries(ctx context.Context, deliveries Deliveries) context.Context {
+	return context.WithValue(ctx, deliveriesKey{}, deliveries)
+}
+
+// OnDelivered 让工具登记一件「主人听完这一轮才算数」的事，例如把调查结论取出来讲了，听完才标已汇报：
+// 和 Briefing.Delivered 同一个时机调用（这一轮说完、播放没被打断）；被打断、出错时不调用。
+// ctx 用工具执行时收到的那个（工具在回答的那个 goroutine 里同步执行）；ctx 里没有收集处时不登记。
+func OnDelivered(ctx context.Context, delivered func()) {
+	if deliveries, ok := ctx.Value(deliveriesKey{}).(Deliveries); ok {
+		deliveries.Add(delivered)
+	}
 }
 
 // BriefLines 把只给几行情况、不用确认的函数当作 Briefer（时间、位置这类每轮重新算的）。

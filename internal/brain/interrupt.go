@@ -44,8 +44,21 @@ func (s *Session) truncate(audioEndMs int64) {
 	defer s.mu.Unlock()
 	s.truncateAtMs = audioEndMs
 	if s.cancelResponse == nil { // 回答已经结束（声音还在终端播）
-		s.truncateLastAnswerLocked()
+		s.playbackCutLocked()
 	}
+}
+
+// playbackCutLocked：已经说完的这次回答在终端播放中被打断了。附上的情况没听完，不算告诉了（之后再附上）；
+// 历史里的回答改成听到的部分。没有截断时什么也不做。调用方持有 s.mu。
+func (s *Session) playbackCutLocked() {
+	if s.truncateAtMs < 0 {
+		return
+	}
+	if s.pendingDelivered != nil {
+		s.pendingDelivered = nil
+		s.logger.Info("播放中被打断：这一轮附上的情况没听完，之后再附上", "item", s.responseItem, "played_ms", s.truncateAtMs)
+	}
+	s.truncateLastAnswerLocked()
 }
 
 // truncateLastAnswerLocked 把这次回答记进历史的最后一条（回答文字）改成用户听到的部分；已经是这样就不动。调用方持有 s.mu。

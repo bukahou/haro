@@ -96,6 +96,7 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	ledger = spending.WithChargeLog(ledger, logger)
 	defer ledger.Close()
 	if settings.UsageDB == "" {
 		logger.Warn("没设 HARO_USAGE_DB：用量只记在内存里，服务端重启后额度重新计算")

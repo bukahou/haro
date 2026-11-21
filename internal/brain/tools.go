@@ -183,10 +183,11 @@ func (s *Session) needsConfirmation(calls []ToolCall) bool {
 }
 
 // callTool 执行一次工具调用，返回交给模型的结果文字；出错时把错误也交给模型，让它如实告诉用户。
-func (s *Session) callTool(ctx context.Context, call ToolCall) string {
+// record 是这一轮的记录：工具用 OnDelivered 登记的事记在这里。
+func (s *Session) callTool(ctx context.Context, record *turnRecord, call ToolCall) string {
 	ctx, span := tracer.Start(ctx, "brain.tool")
 	defer span.End()
-	ctx, cancel := context.WithTimeout(WithSpeaker(ctx, s.currentConversation().Person()), toolTimeout)
+	ctx, cancel := context.WithTimeout(WithDeliveries(WithSpeaker(ctx, s.currentConversation().Person()), record), toolTimeout)
 	defer cancel()
 	started := time.Now()
 	result, err := s.parts.Tools.Call(ctx, call)
@@ -300,7 +301,7 @@ func (s *Session) handleConfirmation(ctx context.Context, text string, pending [
 		round := record.beginRound("", pending)
 		trail := []ChatMessage{{Role: RoleAssistant, ToolCalls: pending}}
 		for _, call := range pending {
-			result := s.callTool(ctx, call)
+			result := s.callTool(ctx, record, call)
 			record.recordResult(round, call, result)
 			s.keepOpenTurn(record)
 			trail = append(trail, ChatMessage{Role: RoleTool, ToolName: call.Name, ToolCallID: call.ID, Text: result})

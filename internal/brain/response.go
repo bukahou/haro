@@ -34,14 +34,19 @@ type transcriptionJob struct {
 func (s *Session) runResponse(ctx context.Context, job *transcriptionJob) {
 	s.emit(realtimeproto.ResponseCreated{})
 	s.mu.Lock()
+	heard := s.pendingDelivered // 上一轮说完后一直没收到截断：主人听完了
+	s.pendingDelivered = nil
 	s.spoken, s.truncateAtMs, s.answeredInResponse, s.responseItem = nil, -1, false, job.item // 新的回答：重新记播出的句子
 	s.mu.Unlock()
+	for _, delivered := range heard { // 在这一轮附上情况之前：告诉过的不再附上
+		delivered()
+	}
 	defer func() {
 		s.mu.Lock()
 		s.cancelResponse()
 		s.cancelResponse = nil
 		// 回答已经记进历史之后才收到截断（打断发生在生成刚结束的一瞬间）：回头改
-		s.truncateLastAnswerLocked()
+		s.playbackCutLocked()
 		s.mu.Unlock()
 	}()
 	done := s.respond(ctx, job)
@@ -343,7 +348,7 @@ func (s *Session) generateSentences(ctx context.Context, history []ChatMessage, 
 				frameMessages = append(frameMessages, frames...)
 				record.rounds[toolRoundIndex].frameShown = len(frames) > 0
 			default:
-				result = s.callTool(ctx, call)
+				result = s.callTool(ctx, record, call)
 			}
 			record.recordResult(toolRoundIndex, call, result)
 			s.keepOpenTurn(record) // 做完了一个工具：这一轮中途服务端重启的话，重启后照实接进历史
