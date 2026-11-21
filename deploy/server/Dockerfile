@@ -75,7 +75,6 @@ ENV LD_LIBRARY_PATH=/opt/haro/lib \
     HARO_USAGE_DB=/data/usage.db \
     HARO_RESEARCH_DB=/data/research.db \
     HARO_CONVERSATIONS_DB=/data/conversations.db \
-    HARO_CONVERSATIONS_DIR=/data/conversations \
     HARO_PERSONA_STATE=/data/persona \
     HARO_MODEL_PRICES_CACHE=/data/model-prices.json
 

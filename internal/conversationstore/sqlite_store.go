@@ -189,13 +189,3 @@ type TranscriptKeptError struct {
 func (e *TranscriptKeptError) Error() string {
 	return fmt.Sprintf("完整的对话记录里 %s 的第 %v 轮已经是另一轮（说话的时间不同），没有覆盖；这份对话照样存下了", e.Person, e.Seqs)
 }
-
-// has 判断库里有没有这个人的对话。
-func (s *SQLiteStore) has(ctx context.Context, person string) (bool, error) {
-	var found int
-	err := s.db.QueryRowContext(ctx, `SELECT 1 FROM conversations WHERE person = ?`, person).Scan(&found)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
-	return err == nil, err
-}

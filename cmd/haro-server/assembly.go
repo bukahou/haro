@@ -201,7 +201,7 @@ func assembleBrain(ctx context.Context, settings config.ServerSettings, catalog 
 		components.OverBudget = built.overBudget
 		logger.Info("月度上限到了以后可以口头临时提高", "raise_yen", settings.MonthlyRaiseYen, "daily_checks", settings.OverBudgetDailyCalls)
 	}
-	store, err := openConversationStore(ctx, settings, logger, shutdown)
+	store, err := openConversationStore(ctx, settings, shutdown)
 	if err != nil {
 		return components, options, err
 	}
@@ -221,9 +221,8 @@ func assembleBrain(ctx context.Context, settings config.ServerSettings, catalog 
 	return components, options, nil
 }
 
-// openConversationStore 打开对话库（没设 HARO_CONVERSATIONS_DB 时为 nil：对话只在内存里）；旧的对话文件导入一次，
-// 出错就不启动（不带着空历史开始）。
-func openConversationStore(ctx context.Context, settings config.ServerSettings, logger *slog.Logger, shutdown *shutdownSteps) (brain.ConversationStore, error) {
+// openConversationStore 打开对话库（没设 HARO_CONVERSATIONS_DB 时为 nil：对话只在内存里）；打不开就不启动（不带着空历史开始）。
+func openConversationStore(ctx context.Context, settings config.ServerSettings, shutdown *shutdownSteps) (brain.ConversationStore, error) {
 	if settings.ConversationsDB == "" {
 		return nil, nil
 	}
@@ -232,15 +231,6 @@ func openConversationStore(ctx context.Context, settings config.ServerSettings, 
 		return nil, err
 	}
 	shutdown.add(func() { store.Close() })
-	if settings.ConversationsDir != "" {
-		imported, err := conversationstore.ImportJSONDir(ctx, store, settings.ConversationsDir, logger)
-		if err != nil {
-			return nil, fmt.Errorf("导入旧的对话文件: %w", err)
-		}
-		if imported > 0 {
-			logger.Info("旧的对话文件已导入对话库", "people", imported, "dir", settings.ConversationsDir)
-		}
-	}
 	return store, nil
 }
 

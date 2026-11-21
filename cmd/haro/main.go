@@ -87,6 +87,8 @@ func run(logger *slog.Logger) error {
 	options := assistantOptions(settings, sounds)
 	logger.Info("haro 启动", "version", buildinfo.Version, "server", settings.ServerURL,
 		"turn_detection", settings.TurnDetection, "barge_in", options.BargeIn, "camera_backend", settings.CameraBackend)
+	zone := config.LocalTimeZone(time.Now())
+	logger.Info("时区（日志里的时间按它；用环境变量 TZ 改）", "zone", zone.Name, "utc_offset", zone.Offset, "TZ", zone.TZ)
 	for _, note := range settings.RemovedSettingNotes {
 		logger.Warn(note)
 	}

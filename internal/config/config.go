@@ -3,6 +3,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/caarlos0/env/v11"
+	"golang.org/x/text/language"
 
 	"github.com/bukahou/haro/internal/realtimeproto"
 )
@@ -77,17 +79,20 @@ type ServerSettings struct {
 	ExtraSystemPrompt string `env:"HARO_SYSTEM_PROMPT"`
 	// 代理定义的覆盖目录：里面同名的 *.md 替换程序里带的那份（internal/agents/builtin/）；空 = 用程序里带的
 	AgentsDir string `env:"HARO_AGENTS_DIR"`
-	// 主人资料：household.md（全家）+ 每人一份 *.md（开头 front matter 写 person: <声纹名字>）；空 = 不用
-	ProfileDir     string `env:"HARO_PROFILE_DIR"`
-	MaxHistoryTurn int    `env:"HARO_MAX_HISTORY_TURN" envDefault:"6"`
+	// 主人资料：household.md（全家）+ 每人一份 *.md（开头 front matter 写 person: <声纹名字>）；空 = 不用。
+	// 设了就必须是读得到的目录（挂载没成、名字拼错时起不来，不当作「没有资料」）
+	ProfileDir string `env:"HARO_PROFILE_DIR"`
+	// 带上最近几轮对话（一问一答算一轮），要大于 0；更早的压成摘要或丢掉（HARO_CONVERSATION_SUMMARY）
+	MaxHistoryTurn int `env:"HARO_MAX_HISTORY_TURN" envDefault:"6"`
 	// 一轮里请求模型带的上下文（最大的那次请求的输入 token，模型报的）到了这么多，就提前把较早的几轮移出窗口、压缩（0 = 不看）。
 	// 默认值是估算，没有实测：系统提示词加工具定义约 4k，最近 6 轮一般 5k–12k；24k 只在工具结果特别长时触发。
 	// 待用账本里实际的 prompt_tokens 校准
 	CompactContextTokens int `env:"HARO_CONTEXT_COMPACT_TOKENS" envDefault:"24000"`
-	// 会破坏的操作（删记事等）问了主人之后，多久没确认就作废
-	ConfirmationTimeout time.Duration `env:"HARO_CONFIRMATION_TIMEOUT" envDefault:"60s"`
-	// 单次工具执行最多多久（所有工具共用，包括远程 MCP）；天气这类工具在这个期限里自己分配主力和备用的时间
-	ToolTimeout time.Duration `env:"HARO_TOOL_TIMEOUT" envDefault:"10s"`
+	// 会破坏的操作（删记事等）问了主人之后，多久没确认就作废；不设（0）= 程序里的默认值 brain.DefaultConfirmationTimeout
+	ConfirmationTimeout time.Duration `env:"HARO_CONFIRMATION_TIMEOUT"`
+	// 单次工具执行最多多久（所有工具共用，包括远程 MCP）；天气这类工具在这个期限里自己分配主力和备用的时间。
+	// 不设（0）= 程序里的默认值 brain.DefaultToolTimeout
+	ToolTimeout time.Duration `env:"HARO_TOOL_TIMEOUT"`
 	// 不经模型、直接念的固定的话（每种语言一份，JSON）；空 = 用程序里带的那份
 	PhrasesFile string `env:"HARO_PHRASES_FILE"`
 	// 滚动摘要：掉出最近 N 轮的对话压成摘要放进提示词；false = 直接丢掉（旧行为）
@@ -108,8 +113,8 @@ type ServerSettings struct {
 	// anthropic 的回答力度（low / medium / high；思考写法是 adaptive 时还可以 xhigh / max）：聊天和摘要求快，调查多花点力气
 	CloudLLMEffort  string        `env:"HARO_CLOUD_LLM_EFFORT" envDefault:"low"`
 	ResearchEffort  string        `env:"HARO_RESEARCH_EFFORT" envDefault:"medium"`
-	CloudLLMTimeout time.Duration `env:"HARO_CLOUD_LLM_TIMEOUT" envDefault:"4s"`     // 等云端开始响应的上限，超过就当连不上（正常 2 s 内开始响应）
-	CloudMaxTokens  int           `env:"HARO_CLOUD_LLM_MAX_TOKENS" envDefault:"800"` // 每次最多输出多少 token：要能装下约 300 字的详细回答
+	CloudLLMTimeout time.Duration `env:"HARO_CLOUD_LLM_TIMEOUT" envDefault:"4s"`     // 等云端开始响应的上限（要大于 0），超过就当连不上（正常 2 s 内开始响应）
+	CloudMaxTokens  int           `env:"HARO_CLOUD_LLM_MAX_TOKENS" envDefault:"800"` // 每次最多输出多少 token（要大于 0）：要能装下约 300 字的详细回答
 	// anthropic 的思考：disabled（关掉）/ between_tools（Sonnet 5.5 关掉思考的写法，它不接受 disabled）/ adaptive（思考关不掉的模型）
 	CloudLLMThinking string `env:"HARO_CLOUD_LLM_THINKING" envDefault:"disabled"`
 
@@ -125,18 +130,21 @@ type ServerSettings struct {
 	// takeover = 带画面的那次请求直接换它回答。都要 HARO_STRONG_LLM_USE 里有 vision
 	StrongLLMVisionMode string `env:"HARO_STRONG_LLM_VISION_MODE" envDefault:"expert"`
 
-	// 费用：用量账本与上限。汇率来自配置；云端模型的单价来自公共的模型价格目录（启动时拉取，见 pricecatalog）
-	UsageDB  string  `env:"HARO_USAGE_DB"` // 用量账本（SQLite 文件）；空 = 只在内存里，重启清零
-	USDToYen float64 `env:"HARO_USD_JPY"`  // 1 美元折多少日元；用到云端模型时必填
+	// 费用：用量账本与上限。汇率来自配置；云端模型的单价来自公共的模型价格目录（启动时拉取，见 pricecatalog）。
+	// 用量账本（SQLite 文件）：上限按账本合计，空 = 只在内存里、重启清零 ⇒ 设了月度上限（用到云端模型时必须设）就必须设它
+	UsageDB  string  `env:"HARO_USAGE_DB"`
+	USDToYen float64 `env:"HARO_USD_JPY"` // 1 美元折多少日元；用到云端模型时必填
 	// 模型价格目录（models.dev 的格式）：地址、取哪一家厂商的价格（目录里的 provider，和云端接口对应）、
 	// 拉到的那份存在哪（下次拉不到时用；空 = 不存，拉不到就起不来）
 	ModelPricesURL      string  `env:"HARO_MODEL_PRICES_URL" envDefault:"https://models.dev/api.json"`
 	ModelPricesProvider string  `env:"HARO_MODEL_PRICES_PROVIDER" envDefault:"anthropic"`
 	ModelPricesCache    string  `env:"HARO_MODEL_PRICES_CACHE"`
 	ResearchDailyYen    float64 `env:"HARO_RESEARCH_DAILY_YEN" envDefault:"100"` // 后台调查每天上限；0 = 不限
-	MonthlyYen          float64 `env:"HARO_MONTHLY_YEN"`                         // 每月总费用上限（大模型 + 搜索）；0 = 不限
+	// 每月总费用上限（日元，大模型 + 搜索）。用到云端模型时必须设、要大于 0（没有默认值：漏配时起不来，不悄悄不限）；
+	// 真想不限就写一个足够大的数。只用本地模型（不花钱）时可以不设
+	MonthlyYen float64 `env:"HARO_MONTHLY_YEN"`
 	// 月度上限到了以后：主人口头确认一次提高多少（0 = 不能口头提高，到上限就停到下个月）；
-	// 判断主人要不要提高的那次小调用每天最多几次（它不受额度管，靠这个封顶）
+	// 判断主人要不要提高的那次小调用每天最多几次（它不受额度管，靠这个封顶；能口头提高时要大于 0）
 	MonthlyRaiseYen      float64 `env:"HARO_MONTHLY_RAISE_YEN" envDefault:"500"`
 	OverBudgetDailyCalls int     `env:"HARO_OVER_BUDGET_DAILY_CALLS" envDefault:"30"`
 	SearchDailyCredits   int     `env:"HARO_SEARCH_DAILY_CREDITS" envDefault:"30"` // 搜索积分每天上限（封在 Tavily 免费额度内）；0 = 不限
@@ -153,12 +161,13 @@ type ServerSettings struct {
 	// 联网搜索：Tavily 官方远程 MCP。密钥不设 = 不提供联网搜索（凭证：无默认值，只来自环境变量）
 	TavilyAPIKey string `env:"HARO_TAVILY_API_KEY"`
 	TavilyMCPURL string `env:"HARO_TAVILY_MCP_URL" envDefault:"https://mcp.tavily.com/mcp/"`
-	// 后台调查（有搜索时才有，只用云端模型）：任务账本、每个任务的上限
-	ResearchDB          string        `env:"HARO_RESEARCH_DB"`                            // 任务账本（SQLite）；空 = 只在内存里
-	ResearchTimeout     time.Duration `env:"HARO_RESEARCH_TIMEOUT" envDefault:"3m"`       // 搜索阶段最多多久
-	ResearchMaxRounds   int           `env:"HARO_RESEARCH_MAX_ROUNDS" envDefault:"10"`    // 最多请求模型几轮（搜一次、读一次各占一轮；6 轮实测不够，2026-11-17 改 10）
-	ResearchMaxSearches int           `env:"HARO_RESEARCH_MAX_SEARCHES" envDefault:"5"`   // 最多搜几次
-	ResearchMaxTokens   int           `env:"HARO_RESEARCH_MAX_TOKENS" envDefault:"80000"` // 累计 token 上限
+	// 后台调查（有搜索时才有，只用云端模型）：任务账本、每个任务的上限。
+	// 四个上限不设（0）= 程序里的默认值（research.DefaultLimits，默认值只在那里写）；不能是负数
+	ResearchDB          string        `env:"HARO_RESEARCH_DB"`           // 任务账本（SQLite）；空 = 只在内存里
+	ResearchTimeout     time.Duration `env:"HARO_RESEARCH_TIMEOUT"`      // 搜索阶段最多多久
+	ResearchMaxRounds   int           `env:"HARO_RESEARCH_MAX_ROUNDS"`   // 最多请求模型几轮（搜一次、读一次各占一轮）
+	ResearchMaxSearches int           `env:"HARO_RESEARCH_MAX_SEARCHES"` // 最多搜几次
+	ResearchMaxTokens   int           `env:"HARO_RESEARCH_MAX_TOKENS"`   // 累计 token 上限
 	// 天气：Open-Meteo 公开接口，不用密钥。家的位置：「纬度,经度」（只放在配置里，不进代码），
 	// 或 "ip"（按家里的公网 IP 推定，城市级）；不设 = 查天气时必须说地名
 	Weather             bool   `env:"HARO_WEATHER" envDefault:"true"`
@@ -167,7 +176,8 @@ type ServerSettings struct {
 	WeatherIPLocateURL  string `env:"HARO_WEATHER_IP_LOCATE_URL" envDefault:"https://ipinfo.io/json"` // IP 定位服务（HTTPS，不用密钥）
 	WeatherForecastURL  string `env:"HARO_WEATHER_FORECAST_URL" envDefault:"https://api.open-meteo.com/v1/forecast"`
 	WeatherGeocodingURL string `env:"HARO_WEATHER_GEOCODING_URL" envDefault:"https://geocoding-api.open-meteo.com/v1/search"`
-	// 按地名找坐标时用的语言（地名库返回的名字用这种语言写）
+	// 按地名找坐标时用的语言（地名库返回的名字用这种语言写）：ISO 639 的小写语言代码，例如 ja、en（启动时按语言代码表检查；
+	// 写错时地名库不报错、只是改用英文或当地的名字）
 	WeatherGeocodingLanguage string `env:"HARO_WEATHER_GEOCODING_LANGUAGE" envDefault:"ja"`
 	// Open-Meteo 查不到时的备用：jma = 日本气象厅网站的数据（只覆盖日本、按地区；地区按坐标自动找：
 	// 国土地理院的地址反查 + 气象厅的地区表，所以要查的坐标也会发给国土地理院）；none = 不用备用
@@ -178,29 +188,28 @@ type ServerSettings struct {
 	// 语音合成：HARO_TTS 选引擎；服务都单独运行，服务端只认地址
 	TTS        string        `env:"HARO_TTS" envDefault:"gpt-sovits"`  // piper / gpt-sovits
 	TTSURL     string        `env:"HARO_TTS_URL"`                      // 语音合成服务的根地址（必填）
-	TTSTimeout time.Duration `env:"HARO_TTS_TIMEOUT" envDefault:"30s"` // 单句合成（含边收边播）的超时
+	TTSTimeout time.Duration `env:"HARO_TTS_TIMEOUT" envDefault:"30s"` // 单句合成（含边收边播）的超时（要大于 0）
 	// gpt-sovits：参考录音在服务那台机器上的目录；声音文件（各情绪的参考录音名与文字）；流式档位（2 = 中等，R-2）
 	TTSRefDir        string `env:"HARO_TTS_REF_DIR"`
 	TTSVoiceFile     string `env:"HARO_TTS_VOICE_FILE"`
 	TTSStreamingMode int    `env:"HARO_TTS_STREAMING_MODE" envDefault:"2"`
 
 	// 性格档案：目录下的 *.json；不设目录 = 不分性格（只用基础提示词）
-	PersonasDir      string        `env:"HARO_PERSONAS_DIR"`
-	PersonaDefault   string        `env:"HARO_PERSONA_DEFAULT" envDefault:"buddy"`  // 没记过当前性格时用哪个（ID）
-	PersonaState     string        `env:"HARO_PERSONA_STATE"`                       // 记住当前性格的文件；空 = 重启回到默认
-	ConversationsDB  string        `env:"HARO_CONVERSATIONS_DB"`                    // 对话库（SQLite 文件）：对话跟人走；空 = 只在内存里（服务端重启就没了）
-	ConversationsDir string        `env:"HARO_CONVERSATIONS_DIR"`                   // 旧版每人一个 JSON 文件的目录：设了就在启动时导入对话库（导入后改名 .imported 留底）
-	WakeArbitration  time.Duration `env:"HARO_WAKE_ARBITRATION" envDefault:"300ms"` // 多台终端同时听到唤醒词时等多久再选一台；0 = 不仲裁
+	PersonasDir     string        `env:"HARO_PERSONAS_DIR"`
+	PersonaDefault  string        `env:"HARO_PERSONA_DEFAULT" envDefault:"buddy"`  // 没记过当前性格时用哪个（ID；不在性格档案里就起不来）
+	PersonaState    string        `env:"HARO_PERSONA_STATE"`                       // 记住当前性格的文件；空 = 重启回到默认
+	ConversationsDB string        `env:"HARO_CONVERSATIONS_DB"`                    // 对话库（SQLite 文件）：对话跟人走；空 = 只在内存里（服务端重启就没了）
+	WakeArbitration time.Duration `env:"HARO_WAKE_ARBITRATION" envDefault:"300ms"` // 多台终端同时听到唤醒词时等多久再选一台；0 = 不仲裁
 
 	// 切句
 	// 切句的长短按会念出来的词数算（中文一个汉字算一个词，英文一个单词算一个）；变量名沿用以前按字数算时的
 	FirstSegmentMinRunes int `env:"HARO_FIRST_SEGMENT_MIN_RUNES" envDefault:"4"` // 0 = 第一句不在逗号处提前切
-	MaxSegmentRunes      int `env:"HARO_MAX_SEGMENT_RUNES" envDefault:"40"`
+	MaxSegmentRunes      int `env:"HARO_MAX_SEGMENT_RUNES" envDefault:"40"`      // 超过这么多词还没断开就切（要大于 0）
 
 	// 终端 ↔ 服务端：默认都在本机，服务端只监听本机；终端在别的机器上时改监听地址（只在可信网络里）
 	ServerListen string `env:"HARO_SERVER_LISTEN" envDefault:"127.0.0.1:59130"` // haro-server 监听地址
 
-	// 其他
+	// 其他：普通 HTTP 请求、每次模型请求的总期限（要大于 0）
 	RequestTimeout time.Duration `env:"HARO_REQUEST_TIMEOUT" envDefault:"120s"`
 }
 
@@ -210,12 +219,14 @@ type TerminalSettings struct {
 
 	// 说完判断与 VAD（每次打开识别流时随 session.update 交给 haro-asr）
 	// 说完判断：semantic_vad（默认，Smart Turn 判断语气；haro-asr 要配了 HARO_TURN_MODEL）/ server_vad（只等静音 HARO_VAD_SILENCE）
-	TurnDetection string        `env:"HARO_TURN_DETECTION" envDefault:"semantic_vad"`
-	TurnEagerness string        `env:"HARO_TURN_EAGERNESS" envDefault:"auto"` // semantic_vad：low / auto / high，判定没说完后最长等多久（数值见 asrserver.Timing）
-	VADThreshold  float64       `env:"HARO_VAD_THRESHOLD" envDefault:"0.5"`
-	VADSilence    time.Duration `env:"HARO_VAD_SILENCE" envDefault:"700ms"` // server_vad：静音持续多久算说完（定值；实测判定说完要 716–788 ms，即它加上 VAD 的判定延迟）
-	VADPrefix     time.Duration `env:"HARO_VAD_PREFIX" envDefault:"300ms"`  // 识别时带上语音开始前的这段（定值，没有单独实测）
-	EchoGuard     time.Duration `env:"HARO_ECHO_GUARD" envDefault:"300ms"`  // 播完后再静音这么久才恢复收音（实测音箱的余音会被当成一句话；300 ms 是定值）
+	TurnDetection string `env:"HARO_TURN_DETECTION" envDefault:"semantic_vad"`
+	TurnEagerness string `env:"HARO_TURN_EAGERNESS" envDefault:"auto"` // semantic_vad：low / auto / high，判定没说完后最长等多久（数值见 asrserver.Timing）
+	// 语音概率门槛（0–1）、server_vad 时静音持续多久算说完：不设（0）= 不交给 haro-asr，用它的默认值
+	// （asrserver.Timing 的 VADThreshold、VADSilence，默认值只在那里写）。实测判定说完的时间 ≈ 静音时长 + VAD 的判定延迟
+	VADThreshold float64       `env:"HARO_VAD_THRESHOLD"`
+	VADSilence   time.Duration `env:"HARO_VAD_SILENCE"`
+	VADPrefix    time.Duration `env:"HARO_VAD_PREFIX" envDefault:"300ms"` // 识别时带上语音开始前的这段（定值，没有单独实测）
+	EchoGuard    time.Duration `env:"HARO_ECHO_GUARD" envDefault:"300ms"` // 播完后再静音这么久才恢复收音（实测音箱的余音会被当成一句话；300 ms 是定值）；0 = 不等
 
 	// 唤醒词（唯一的对话方式）
 	WakePhrase string        `env:"HARO_WAKE_PHRASE" envDefault:"哈罗哈罗"` // 提示文字和声纹登记的第一句用它；要和 haro-asr 关键词文件里的唤醒词一致（识别唤醒词的是 haro-asr）
@@ -227,20 +238,20 @@ type TerminalSettings struct {
 	AudioSource  string `env:"HARO_AUDIO_SOURCE"`  // 空 = 自动：跟系统默认，但跳过蓝牙麦克风
 	AudioSink    string `env:"HARO_AUDIO_SINK"`    // 空 = 跟系统默认（蓝牙重连后自动接回）
 	CameraDevice string `env:"HARO_CAMERA_DEVICE"` // 空 = 自动找；none = 不用摄像头
-	// 终端的提示音：目录里放 offline.wav、online.wav、sleep.wav、notice.wav（16 bit PCM，缺哪个就用内置的）；不设 = 内置的不含人声的提示音
+	// 终端的提示音：目录里放 offline.wav、online.wav、sleep.wav、notice.wav（16 bit PCM，缺哪个就用内置的）；不设 = 内置的不含人声的提示音。
+	// 设了就必须是读得到的目录（挂载没成、名字拼错时起不来，不悄悄全用内置的）
 	TonesDir string `env:"HARO_TONES_DIR"`
 	// 拍照用哪套底层：auto / mediadevices / ffmpeg
 	CameraBackend string `env:"HARO_CAMERA_BACKEND" envDefault:"auto"`
 	// 想向摄像头要的分辨率；摄像头没有它时，改要宽度够的里面最小的（都不够宽就要最大的）
 	CameraSize FrameSize `env:"HARO_CAMERA_SIZE" envDefault:"1280x720"`
-	// 送给模型的画面最大宽度：画面更宽就缩到这么宽，更窄就原样送（不放大）。1280×720 约 1,200 token，640×480 约 400
+	// 送给模型的画面最大宽度（要大于 0）：画面更宽就缩到这么宽，更窄就原样送（不放大）。1280×720 约 1,200 token，640×480 约 400
 	FrameWidth int `env:"HARO_FRAME_WIDTH" envDefault:"1280"`
 
 	ServerURL string `env:"HARO_SERVER_URL" envDefault:"http://127.0.0.1:59130"` // 终端连服务端的地址
 }
 
-// parseSettings 从环境变量读配置，并检查还写着的已删除配置项（提醒记在 RemovedSettingNotes 里）。
-// parseSettings 从环境变量读出一种配置，并记下环境里还写着、但已经删掉的配置项。
+// parseSettings 从环境变量读出一种配置，并记下环境里还写着、但已经删掉的配置项（提醒记在 RemovedSettingNotes 里）。
 func parseSettings[T interface {
 	*ServerSettings | *TerminalSettings
 }](settings T, common *Common, side settingSide) error {
@@ -271,6 +282,7 @@ func LoadTerminalSettings() (TerminalSettings, error) {
 }
 
 // TurnDetectionSettings 是交给 haro-asr 的说完判断（每次打开识别流时随 session.update 发出）。
+// 门槛、静音时长没设（0）时不带，由 haro-asr 用它自己的默认值。
 func (settings TerminalSettings) TurnDetectionSettings() realtimeproto.TurnDetection {
 	return realtimeproto.TurnDetection{Type: settings.TurnDetection, Eagerness: settings.TurnEagerness,
 		Threshold: settings.VADThreshold, SilenceDurationMs: int(settings.VADSilence.Milliseconds()),
@@ -284,11 +296,17 @@ func (settings TerminalSettings) validateTerminal() error {
 	if settings.WakeIdle <= 0 {
 		return fmt.Errorf("HARO_WAKE_IDLE 要大于 0（回答播完后安静多久就休眠），现在是 %v", settings.WakeIdle)
 	}
+	if err := errors.Join(notNegative("HARO_ECHO_GUARD", settings.EchoGuard), positive("HARO_FRAME_WIDTH", settings.FrameWidth)); err != nil {
+		return err
+	}
 	switch settings.CameraBackend {
 	case CameraBackendAuto, CameraBackendMediaDevices, CameraBackendFFmpeg:
 	default:
 		return fmt.Errorf("HARO_CAMERA_BACKEND 只能是 %s、%s 或 %s，现在是 %q", CameraBackendAuto, CameraBackendMediaDevices,
 			CameraBackendFFmpeg, settings.CameraBackend)
+	}
+	if err := optionalDir("HARO_TONES_DIR", settings.TonesDir); err != nil {
+		return err
 	}
 	// 对话（WebSocket）和登记声纹（HTTP）都按这个地址连：要是 http(s)
 	return requireHTTPURL("HARO_SERVER_URL", settings.ServerURL, "haro-server 的地址，例如 http://127.0.0.1:59130")
@@ -296,8 +314,9 @@ func (settings TerminalSettings) validateTerminal() error {
 
 // validateBrain 校验服务端的配置。判断说完、唤醒词要用到的模型由服务端（haro-asr）加载，所以也在这里看。
 func (settings ServerSettings) validateBrain() error {
-	for _, validate := range []func() error{settings.validateSpeech, settings.validateModels, settings.validateWeather,
-		settings.validateStorage, settings.validateLimits, settings.validateListen} {
+	for _, validate := range []func() error{settings.validateSpeech, settings.validateModels, settings.validateSpending,
+		settings.validateWeather, settings.validateStorage, settings.validateConversation, settings.validateResearch,
+		settings.validateListen} {
 		if err := validate(); err != nil {
 			return err
 		}
@@ -305,7 +324,7 @@ func (settings ServerSettings) validateBrain() error {
 	return nil
 }
 
-// validateSpeech 检查语音合成和语音识别服务。
+// validateSpeech 检查语音合成和语音识别服务、切句。
 func (settings ServerSettings) validateSpeech() error {
 	if err := requireHTTPURL("HARO_TTS_URL", settings.TTSURL, "语音合成服务的地址；Piper 也要自己先运行起来，例如 python -m piper.http_server"); err != nil {
 		return err
@@ -325,10 +344,11 @@ func (settings ServerSettings) validateSpeech() error {
 	if err := requireHTTPURL("HARO_ASR_URL", settings.ASRURL, "语音识别服务 haro-asr 的地址；haro-asr 单独运行，见 ASRSettings"); err != nil {
 		return err
 	}
-	return nil
+	return errors.Join(positive("HARO_TTS_TIMEOUT", settings.TTSTimeout), positive("HARO_MAX_SEGMENT_RUNES", settings.MaxSegmentRunes),
+		notNegative("HARO_FIRST_SEGMENT_MIN_RUNES", settings.FirstSegmentMinRunes))
 }
 
-// validateModels 检查用哪种模型、云端模型和更强的模型配齐了没有、费用怎么折算。
+// validateModels 检查用哪种模型、云端模型和更强的模型配齐了没有、等待和输出的上限、费用怎么折算。
 func (settings ServerSettings) validateModels() error {
 	switch settings.LLMProvider {
 	case LLMLocal:
@@ -344,6 +364,12 @@ func (settings ServerSettings) validateModels() error {
 			return fmt.Errorf("开着后台调查（设了搜索的密钥）时%w", err)
 		}
 	}
+	if err := errors.Join(positive("HARO_LOCAL_LLM_TIMEOUT", settings.LocalLLMTimeout),
+		positive("HARO_CLOUD_LLM_TIMEOUT", settings.CloudLLMTimeout), positive("HARO_CLOUD_LLM_MAX_TOKENS", settings.CloudMaxTokens),
+		positive("HARO_STRONG_LLM_TIMEOUT", settings.StrongLLMTimeout), positive("HARO_REQUEST_TIMEOUT", settings.RequestTimeout),
+		notNegative("HARO_USD_JPY", settings.USDToYen)); err != nil {
+		return err
+	}
 	if settings.UsesCloudLLM() && (settings.USDToYen <= 0 || settings.ModelPricesURL == "" || settings.ModelPricesProvider == "") {
 		return fmt.Errorf("用到云端模型时必须设 HARO_USD_JPY、HARO_MODEL_PRICES_URL、HARO_MODEL_PRICES_PROVIDER（费用上限要靠汇率和单价折算，v5 R5）")
 	}
@@ -353,39 +379,96 @@ func (settings ServerSettings) validateModels() error {
 	return nil
 }
 
-// validateStorage 检查对话库、记事库。
-func (settings ServerSettings) validateStorage() error {
-	if settings.ConversationsDir != "" && settings.ConversationsDB == "" {
-		return fmt.Errorf("设了 HARO_CONVERSATIONS_DIR（旧的对话文件，只用来导入）就要设 HARO_CONVERSATIONS_DB（对话库）")
+// validateSpending 检查费用的上限：都不能是负数；用到云端模型时必须有月度上限，有月度上限就必须有账本。
+func (settings ServerSettings) validateSpending() error {
+	if err := errors.Join(notNegative("HARO_MONTHLY_YEN", settings.MonthlyYen),
+		notNegative("HARO_RESEARCH_DAILY_YEN", settings.ResearchDailyYen), notNegative("HARO_MONTHLY_RAISE_YEN", settings.MonthlyRaiseYen),
+		notNegative("HARO_OVER_BUDGET_DAILY_CALLS", settings.OverBudgetDailyCalls),
+		notNegative("HARO_SEARCH_DAILY_CREDITS", settings.SearchDailyCredits),
+		notNegative("HARO_SEARCH_CREDIT_USD", settings.SearchCreditUSD)); err != nil {
+		return err
 	}
+	if settings.UsesCloudLLM() && settings.MonthlyYen <= 0 {
+		return fmt.Errorf("用到云端模型时必须设 HARO_MONTHLY_YEN（每月总费用上限，日元）且大于 0；真想不限就写一个足够大的数")
+	}
+	if settings.MonthlyYen > 0 && settings.UsageDB == "" {
+		return fmt.Errorf("设了 HARO_MONTHLY_YEN（月度上限）就必须设 HARO_USAGE_DB：上限按账本合计，只记在内存里时一重启就清零")
+	}
+	if settings.CanRaiseMonthlyCap() && settings.OverBudgetDailyCalls == 0 {
+		return fmt.Errorf("能口头提高月度上限时 HARO_OVER_BUDGET_DAILY_CALLS 要大于 0（是 0 就一次都判断不了）；" +
+			"不让主人口头提高就把 HARO_MONTHLY_RAISE_YEN 设成 0")
+	}
+	return nil
+}
+
+// validateStorage 检查记事库、主人资料的目录。
+func (settings ServerSettings) validateStorage() error {
 	if settings.Tools && settings.NotesDB == "" {
 		return fmt.Errorf("HARO_TOOLS=true 时必须设 HARO_NOTES_DB（或设 HARO_TOOLS=false）")
 	}
 	if settings.Tools && settings.NotesListLimit <= 0 {
 		return fmt.Errorf("HARO_NOTES_LIST_LIMIT 要大于 0（找记事时交给模型挑的最多条数），现在是 %d", settings.NotesListLimit)
 	}
-	return nil
+	return optionalDir("HARO_PROFILE_DIR", settings.ProfileDir)
 }
 
-// validateLimits 检查各种上限、时长不能是负数或零。
-func (settings ServerSettings) validateLimits() error {
-	if settings.MonthlyRaiseYen < 0 || settings.OverBudgetDailyCalls < 0 || settings.CompactContextTokens < 0 {
-		return fmt.Errorf("HARO_MONTHLY_RAISE_YEN、HARO_OVER_BUDGET_DAILY_CALLS、HARO_CONTEXT_COMPACT_TOKENS 不能是负数（现在是 %v、%d、%d）",
-			settings.MonthlyRaiseYen, settings.OverBudgetDailyCalls, settings.CompactContextTokens)
-	}
-	if settings.ToolTimeout <= 0 {
-		return fmt.Errorf("HARO_TOOL_TIMEOUT 要大于 0（单次工具执行最多多久），现在是 %v", settings.ToolTimeout)
-	}
-	if settings.ConfirmationTimeout <= 0 {
-		return fmt.Errorf("HARO_CONFIRMATION_TIMEOUT 要大于 0（会破坏的操作多久没确认就作废），现在是 %v", settings.ConfirmationTimeout)
-	}
-	return nil
+// validateConversation 检查对话：带几轮历史、压缩的门槛、确认时效、工具时限、多台终端的仲裁。
+func (settings ServerSettings) validateConversation() error {
+	return errors.Join(positive("HARO_MAX_HISTORY_TURN", settings.MaxHistoryTurn),
+		notNegative("HARO_CONTEXT_COMPACT_TOKENS", settings.CompactContextTokens),
+		notNegative("HARO_CONFIRMATION_TIMEOUT", settings.ConfirmationTimeout), notNegative("HARO_TOOL_TIMEOUT", settings.ToolTimeout),
+		notNegative("HARO_WAKE_ARBITRATION", settings.WakeArbitration))
+}
+
+// validateResearch 检查后台调查的上限（0 = 程序里的默认值）。
+func (settings ServerSettings) validateResearch() error {
+	return errors.Join(notNegative("HARO_RESEARCH_TIMEOUT", settings.ResearchTimeout),
+		notNegative("HARO_RESEARCH_MAX_ROUNDS", settings.ResearchMaxRounds),
+		notNegative("HARO_RESEARCH_MAX_SEARCHES", settings.ResearchMaxSearches),
+		notNegative("HARO_RESEARCH_MAX_TOKENS", settings.ResearchMaxTokens))
 }
 
 // validateListen 检查服务端的监听地址。
 func (settings ServerSettings) validateListen() error {
 	if settings.ServerListen == "" {
 		return fmt.Errorf("必须设 HARO_SERVER_LISTEN（haro-server 的监听地址）")
+	}
+	return nil
+}
+
+// number 是数值配置的类型：个数、金额、时长。
+type number interface{ ~int | ~int64 | ~float64 }
+
+// positive 检查要大于 0 的配置（时长、token、轮数这类，0 没有意义）。
+func positive[T number](name string, value T) error {
+	if value <= 0 {
+		return fmt.Errorf("%s 要大于 0，现在是 %v", name, value)
+	}
+	return nil
+}
+
+// notNegative 检查不能是负数的配置（上限、单价这类；0 的意思写在各项的注释里：不限、关掉、用程序里的默认值……）。
+func notNegative[T number](name string, value T) error {
+	if value < 0 {
+		return fmt.Errorf("%s 不能是负数，现在是 %v", name, value)
+	}
+	return nil
+}
+
+// optionalDir 检查可选的目录：没设时不管；设了就必须是读得到的目录（挂载没成、名字拼错时起不来，不当作「没有」）。
+func optionalDir(name, path string) error {
+	if path == "" {
+		return nil
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("%s：%w", name, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s 要是目录，%s 不是", name, path)
+	}
+	if _, err := os.ReadDir(path); err != nil {
+		return fmt.Errorf("%s：%w", name, err)
 	}
 	return nil
 }
@@ -522,13 +605,17 @@ func (s ServerSettings) validateStrongLLM() error {
 	return nil
 }
 
-// validateWeather 检查天气相关的配置：家的位置、备用来源。
+// validateWeather 检查天气相关的配置：家的位置、备用来源、地名库用的语言。
 func (s ServerSettings) validateWeather() error {
 	if _, err := s.WeatherHomePlace(); err != nil {
 		return err
 	}
 	if s.WeatherBackup != WeatherBackupJMA && s.WeatherBackup != WeatherBackupNone {
 		return fmt.Errorf("HARO_WEATHER_BACKUP 只能是 %s 或 %s，现在是 %q", WeatherBackupJMA, WeatherBackupNone, s.WeatherBackup)
+	}
+	// 地名库要小写的 ISO 639 语言代码；按语言代码表（x/text/language）查，写法也要是规范的那个（jpn、JA 都不行，要 ja）
+	if base, err := language.ParseBase(s.WeatherGeocodingLanguage); err != nil || base.String() != s.WeatherGeocodingLanguage {
+		return fmt.Errorf("HARO_WEATHER_GEOCODING_LANGUAGE 要是小写的语言代码（例如 ja、en），现在是 %q", s.WeatherGeocodingLanguage)
 	}
 	return nil
 }

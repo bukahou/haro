@@ -2,8 +2,6 @@ package conversationstore
 
 import (
 	"context"
-	"io"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -13,8 +11,6 @@ import (
 
 	"github.com/bukahou/haro/internal/brain"
 )
-
-var discard = slog.New(slog.NewTextHandler(io.Discard, nil))
 
 func openTestStore(t *testing.T) (*SQLiteStore, string) {
 	t.Helper()
@@ -104,55 +100,5 @@ func TestSQLiteStoreConcurrentSaves(t *testing.T) {
 		if got, ok, err := store.LoadConversation(person); !ok || err != nil || len(got.History) != 2 {
 			t.Errorf("%s 的对话应完整：%v %v %+v", person, ok, err, got.History)
 		}
-	}
-}
-
-// 旧的 JSON 文件：导入后改名留底（不删）；库里已经有的人不覆盖；坏文件让导入报错（服务端起不来），文件原样留着。
-func TestImportJSONDir(t *testing.T) {
-	store, _ := openTestStore(t)
-	dir := t.TempDir()
-	write := func(name, content string) {
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	write("主人.json", `{"person":"主人","persona_id":"gentle","history":[[{"role":"user","text":"你好"},{"role":"assistant","text":"你好呀。"}]],"tool_call_count":2,"updated_at":"2026-11-17T10:00:00Z"}`)
-	write("家人.json", `{"person":"家人","history":[[{"role":"user","text":"旧的"},{"role":"assistant","text":"旧的回答"}]]}`)
-	write("主人.json.tmp", `半个文件`)
-	newer := sampleRecord("家人")
-	if err := store.SaveConversation(newer); err != nil {
-		t.Fatal(err)
-	}
-
-	imported, err := ImportJSONDir(context.Background(), store, dir, discard)
-	if err != nil || imported != 1 {
-		t.Fatalf("应导入 1 个人：%d %v", imported, err)
-	}
-	owner, ok, _ := store.LoadConversation("主人")
-	if !ok || owner.PersonaID != "gentle" || owner.ToolCallCount != 2 || len(owner.History) != 1 ||
-		!owner.History[0].At.IsZero() || owner.History[0].Messages[1].Text != "你好呀。" {
-		t.Errorf("导入的对话：%+v", owner)
-	}
-	if family, _, _ := store.LoadConversation("家人"); len(family.History) != 2 {
-		t.Errorf("库里已经有的人不应被旧文件覆盖：%+v", family.History)
-	}
-	for _, name := range []string{"主人.json", "家人.json"} {
-		if _, err := os.Stat(filepath.Join(dir, name+importedSuffix)); err != nil {
-			t.Errorf("%s 应改名留底：%v", name, err)
-		}
-	}
-	if again, err := ImportJSONDir(context.Background(), store, dir, discard); again != 0 || err != nil {
-		t.Errorf("改了名的不再导入：%d %v", again, err)
-	}
-
-	write("坏的.json", `{不是 JSON`)
-	if _, err := ImportJSONDir(context.Background(), store, dir, discard); err == nil {
-		t.Error("坏文件应让导入报错")
-	}
-	if _, err := os.Stat(filepath.Join(dir, "坏的.json")); err != nil {
-		t.Errorf("导入出错时旧文件应原样留着：%v", err)
-	}
-	if n, err := ImportJSONDir(context.Background(), store, filepath.Join(dir, "不存在"), discard); n != 0 || err != nil {
-		t.Errorf("目录不存在 = 没有要导入的：%d %v", n, err)
 	}
 }

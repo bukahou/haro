@@ -5,16 +5,20 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"os"
 	"os/signal"
+	"slices"
+	"strings"
 	"syscall"
 	"time"
 	_ "time/tzdata" // 内置时区数据：镜像里没有 /usr/share/zoneinfo 时 TZ（例如 Asia/Tokyo）照样生效（集群里默认是 UTC）
@@ -58,6 +62,9 @@ func run(logger *slog.Logger) error {
 	for _, note := range settings.RemovedSettingNotes {
 		logger.Warn(note)
 	}
+	zone := config.LocalTimeZone(time.Now())
+	logger.Info("时区：「今天」「这个月」（费用上限什么时候翻篇）、告诉模型的现在时间都按它算（用环境变量 TZ 改）",
+		"zone", zone.Name, "utc_offset", zone.Offset, "TZ", zone.TZ)
 	if err := checkClaudeSettings(settings); err != nil {
 		return err
 	}
@@ -320,9 +327,7 @@ func startResearch(ctx context.Context, settings config.ServerSettings, deps ser
 	// 调查在后台、不急：限流 / 服务端一时出错时让 SDK 重试两次；每次请求不另设期限，受调查自己的总时限管
 	model := deps.meteredCloudModel(settings, cloudModelSpec{model: settings.CloudLLMModel, maxTokens: researchMaxTokens,
 		effort: settings.ResearchEffort, thinking: settings.CloudLLMThinking, retries: 2}, spending.PurposeResearch, logger)
-	limits := research.DefaultLimits
-	limits.Timeout, limits.MaxRounds = settings.ResearchTimeout, settings.ResearchMaxRounds
-	limits.MaxSearches, limits.MaxTokens = settings.ResearchMaxSearches, settings.ResearchMaxTokens
+	limits := researchLimits(settings)
 	meter := spending.NewSearchMeter(deps.guard, deps.ledger, deps.pricing, spending.PurposeResearch, tools.TavilyName)
 	runner := research.NewRunner(store, model, searcher, meter, deps.guard, limits, logger)
 	writer := "（调查模型自己写）"
@@ -353,11 +358,24 @@ func startResearch(ctx context.Context, settings config.ServerSettings, deps ser
 // researchMaxTokens 是调查时每次请求的输出上限（结论比聊天长，聊天用 HARO_CLOUD_LLM_MAX_TOKENS）。
 const researchMaxTokens = 1000
 
+// researchLimits 是每个调查任务的上限：配置里设了的用配置的，没设（0）的用程序里的默认值（research.DefaultLimits，默认值只在那里写）。
+func researchLimits(settings config.ServerSettings) research.Limits {
+	limits := research.DefaultLimits
+	limits.Timeout = cmp.Or(settings.ResearchTimeout, limits.Timeout)
+	limits.MaxRounds = cmp.Or(settings.ResearchMaxRounds, limits.MaxRounds)
+	limits.MaxSearches = cmp.Or(settings.ResearchMaxSearches, limits.MaxSearches)
+	limits.MaxTokens = cmp.Or(settings.ResearchMaxTokens, limits.MaxTokens)
+	return limits
+}
+
 // buildSynthesizer 按 HARO_TTS 选择语音合成实现（服务都单独运行，只按 HARO_TTS_URL 连）。
 func buildSynthesizer(settings config.ServerSettings, httpClient *http.Client, logger *slog.Logger) (brain.SpeechSynthesizer, error) {
 	if settings.TTS == config.TTSGPTSoVITS {
 		voice, err := speech.LoadGPTSoVITSVoice(settings.TTSVoiceFile)
 		if err != nil {
+			return nil, err
+		}
+		if err := checkVoiceEmotions(voice, settings.TTSVoiceFile); err != nil {
 			return nil, err
 		}
 		logger.Info("语音合成：GPT-SoVITS", "url", settings.TTSURL, "voice", voice.Name,
@@ -367,6 +385,20 @@ func buildSynthesizer(settings config.ServerSettings, httpClient *http.Client, l
 	}
 	logger.Info("语音合成：Piper", "url", settings.TTSURL)
 	return speech.NewPiperHTTPSynthesizer(settings.TTSURL, settings.TTSTimeout, httpClient), nil
+}
+
+// checkVoiceEmotions 检查声音档案里每段参考录音的名字：要么是平常语气那段（speech.DefaultReference），要么是情绪清单里的
+// （brain.ParseEmotion，清单只在 brain 定义）。拼错的那段永远选不到、那种语气一直念成平常的，起不来比悄悄不生效好。
+func checkVoiceEmotions(voice speech.GPTSoVITSVoice, file string) error {
+	for _, name := range slices.Sorted(maps.Keys(voice.References)) {
+		if name == speech.DefaultReference {
+			continue
+		}
+		if emotion, err := brain.ParseEmotion(name); err != nil || emotion == brain.EmotionDefault {
+			return fmt.Errorf("声音档案 %s 的参考录音 %q 不是情绪清单里的名字，这段录音永远用不上：%v", file, name, err)
+		}
+	}
+	return nil
 }
 
 // buildBrainOptions 读取性格档案；没设 HARO_PERSONAS_DIR 时不分性格。
@@ -384,6 +416,15 @@ func buildBrainOptions(settings config.ServerSettings) (brain.Options, error) {
 	personas, err := persona.LoadCatalog(settings.PersonasDir)
 	if err != nil {
 		return options, err
+	}
+	// 默认性格写错时起不来（不悄悄换成档案里的第一个）
+	if !slices.ContainsFunc(personas, func(p brain.Persona) bool { return p.ID == settings.PersonaDefault }) {
+		ids := make([]string, len(personas))
+		for i, p := range personas {
+			ids[i] = p.ID
+		}
+		return options, fmt.Errorf("HARO_PERSONA_DEFAULT=%q 不在性格档案（%s）里，档案里有：%s", settings.PersonaDefault,
+			settings.PersonasDir, strings.Join(ids, "、"))
 	}
 	options.Personas, options.DefaultPersona = personas, settings.PersonaDefault
 	if settings.PersonaState != "" {
