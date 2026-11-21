@@ -323,7 +323,7 @@ func (s *Session) generateSentences(ctx context.Context, history []ChatMessage, 
 		var calls []ToolCall
 		var roundText strings.Builder
 		var roundUsage *ReplyUsage
-		truncated := false
+		stop := StopUnknown // 这次请求为什么停：最后一段说了算
 		for delta, err := range agent.Model.StreamReply(ctx, request) {
 			if err != nil {
 				recordSpanError(span, err)
@@ -345,17 +345,22 @@ func (s *Session) generateSentences(ctx context.Context, history []ChatMessage, 
 			if delta.Usage != nil {
 				roundUsage = delta.Usage
 			}
-			truncated = truncated || delta.Stop == StopMaxTokens
+			stop = delta.Stop
 		}
 		usage = usage.add(roundUsage)
 		if roundUsage != nil {
 			record.contextTokens = max(record.contextTokens, roundUsage.PromptTokens)
 		}
+		if stop == StopUnknown { // 流结束了却没说为什么停：不当成说完，按出错收尾（说出口的照样记进历史）
+			s.logger.Warn("模型的流结束了却没说为什么停：按出错收尾", "agent", agent.Name, "round", round, "tools", toolNames(calls))
+			recordSpanError(span, ErrStopUnknown)
+			return usage, ErrStopUnknown
+		}
 		if len(calls) > 0 && request.ForbidToolCalls { // 不许调用时还要调用：不执行，说了的话就是回答
 			s.logger.Warn("模型在不许调用工具的一轮要求调用工具：不执行", "tools", toolNames(calls))
 			calls = nil
 		}
-		if truncated { // 到了输出上限：说出去的就是这些（适配不交出被截断的工具调用）
+		if stop == StopMaxTokens { // 到了输出上限：说出去的就是这些（适配不交出被截断的工具调用）
 			s.logger.Warn("回答到了模型的输出上限，没说完", "round", round, "output_tokens", outputTokens(roundUsage))
 			record.final.WriteString(roundText.String())
 			record.truncated = true

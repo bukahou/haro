@@ -98,6 +98,7 @@ func (stubModel) StreamReply(context.Context, brain.ChatRequest) iter.Seq2[brain
 				return
 			}
 		}
+		yield(brain.ReplyDelta{Stop: brain.StopCompleted}, nil)
 	}
 }
 

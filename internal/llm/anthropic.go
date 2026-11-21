@@ -222,6 +222,7 @@ func (e *RefusalError) Error() string {
 func (e *RefusalError) Phrase() (string, map[string]string) { return brain.PhraseRefused, nil }
 
 // StreamReply 流式产出文字；工具调用、用量和停下的原因在流结束时一次性产出（与 OpenAIChatModel 相同）。
+// 流要以停下的原因（message_delta）和 message_stop 收尾：连接正常关掉却没收到它们，按流没收尾报错（和断开同一类）。
 func (m *AnthropicChatModel) StreamReply(ctx context.Context, request brain.ChatRequest) iter.Seq2[brain.ReplyDelta, error] {
 	return func(yield func(brain.ReplyDelta, error) bool) {
 		params, err := m.request(request)
@@ -234,6 +235,7 @@ func (m *AnthropicChatModel) StreamReply(ctx context.Context, request brain.Chat
 		stream := m.api.client.Messages.NewStreaming(deadline.ctx, params, option.WithMaxRetries(m.maxRetries))
 		defer stream.Close() // 调用方提前 break 时关掉连接，即中止生成
 		var message anthropic.Message
+		stopped := false // 收到了 message_stop
 		for stream.Next() {
 			deadline.started()
 			event := stream.Current()
@@ -241,13 +243,14 @@ func (m *AnthropicChatModel) StreamReply(ctx context.Context, request brain.Chat
 				yield(brain.ReplyDelta{Usage: partialUsage(message)}, fmt.Errorf("解析 Claude 的流式响应: %w", err))
 				return
 			}
-			blockDelta, ok := event.AsAny().(anthropic.ContentBlockDeltaEvent)
-			if !ok {
-				continue
-			}
-			if text, ok := blockDelta.Delta.AsAny().(anthropic.TextDelta); ok && text.Text != "" {
-				if !yield(brain.ReplyDelta{Text: text.Text}, nil) {
-					return
+			switch event := event.AsAny().(type) {
+			case anthropic.MessageStopEvent:
+				stopped = true
+			case anthropic.ContentBlockDeltaEvent:
+				if text, ok := event.Delta.AsAny().(anthropic.TextDelta); ok && text.Text != "" {
+					if !yield(brain.ReplyDelta{Text: text.Text}, nil) {
+						return
+					}
 				}
 			}
 		}
@@ -260,23 +263,29 @@ func (m *AnthropicChatModel) StreamReply(ctx context.Context, request brain.Chat
 			yield(brain.ReplyDelta{Usage: partialUsage(message)}, markUnavailable(ctx, fmt.Errorf("请求 Claude: %w", err)))
 			return
 		}
+		if !stopped || message.StopReason == "" {
+			yield(brain.ReplyDelta{Usage: partialUsage(message)}, markUnavailable(ctx, fmt.Errorf("请求 Claude: %w", errStreamUnfinished)))
+			return
+		}
 		usage := usageOf(message.Usage)
 		switch message.StopReason {
+		case anthropic.StopReasonEndTurn, anthropic.StopReasonToolUse, anthropic.StopReasonStopSequence:
+			calls, err := toolCallsOf(message.Content)
+			if err != nil {
+				yield(brain.ReplyDelta{Usage: usage}, err)
+				return
+			}
+			yield(brain.ReplyDelta{ToolCalls: calls, Usage: usage, Stop: brain.StopCompleted}, nil)
+		case anthropic.StopReasonMaxTokens, anthropic.StopReasonModelContextWindowExceeded:
+			// 截断（到了输出上限，或上下文满了）：不交出工具调用（写到一半的参数不完整）
+			yield(brain.ReplyDelta{Usage: usage, Stop: brain.StopMaxTokens}, nil)
 		case anthropic.StopReasonRefusal:
 			// 带上用量：被拒的请求照样计费，记账的装饰器先记下这一笔
 			yield(brain.ReplyDelta{Usage: usage}, &RefusalError{Category: string(message.StopDetails.Category),
 				Explanation: message.StopDetails.Explanation})
-			return
-		case anthropic.StopReasonMaxTokens: // 截断：不交出工具调用（写到一半的参数不完整）
-			yield(brain.ReplyDelta{Usage: usage, Stop: brain.StopMaxTokens}, nil)
-			return
+		default: // 认不出的原因（pause_turn 要接着请求才说得完，haro 不用服务端工具、接不上；以后新加的）：不当成说完
+			yield(brain.ReplyDelta{Usage: usage}, fmt.Errorf("Claude 停下的原因是 %s: %w", message.StopReason, brain.ErrStopUnknown))
 		}
-		calls, err := toolCallsOf(message.Content)
-		if err != nil {
-			yield(brain.ReplyDelta{Usage: usage}, err)
-			return
-		}
-		yield(brain.ReplyDelta{ToolCalls: calls, Usage: usage}, nil)
 	}
 }
 

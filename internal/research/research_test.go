@@ -107,7 +107,7 @@ func (m *scriptedModel) StreamReply(ctx context.Context, request brain.ChatReque
 			yield(brain.ReplyDelta{}, failure)
 			return
 		}
-		reply.Usage = &brain.ReplyUsage{PromptTokens: 1000, OutputTokens: 100}
+		reply.Usage, reply.Stop = &brain.ReplyUsage{PromptTokens: 1000, OutputTokens: 100}, brain.StopCompleted
 		yield(reply, nil)
 	}
 }
@@ -718,7 +718,7 @@ func (m *writerModel) StreamReply(_ context.Context, request brain.ChatRequest) 
 			return
 		}
 		reply := submit(text, "https://example.com/b")
-		reply.Usage = &brain.ReplyUsage{PromptTokens: 2000, OutputTokens: 300}
+		reply.Usage, reply.Stop = &brain.ReplyUsage{PromptTokens: 2000, OutputTokens: 300}, brain.StopCompleted
 		yield(reply, nil)
 	}
 }

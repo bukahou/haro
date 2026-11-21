@@ -39,7 +39,7 @@ func (m *scriptedModel) StreamReply(_ context.Context, request brain.ChatRequest
 	} else {
 		reply = brain.ReplyDelta{Text: m.final}
 	}
-	reply.Usage = &brain.ReplyUsage{PromptTokens: 100, OutputTokens: 10}
+	reply.Usage, reply.Stop = &brain.ReplyUsage{PromptTokens: 100, OutputTokens: 10}, brain.StopCompleted
 	err := m.err
 	m.mu.Unlock()
 	return func(yield func(brain.ReplyDelta, error) bool) {
@@ -272,7 +272,8 @@ func (m *stubbornModel) StreamReply(context.Context, brain.ChatRequest) iter.Seq
 			yield(brain.ReplyDelta{}, errors.New("请求太多次：专家没有停下来"))
 			return
 		}
-		yield(brain.ReplyDelta{Text: "看着像硬盘盒。", ToolCalls: []brain.ToolCall{{Name: searchTool, Arguments: map[string]any{"query": "再搜"}}}}, nil)
+		yield(brain.ReplyDelta{Text: "看着像硬盘盒。", ToolCalls: []brain.ToolCall{{Name: searchTool, Arguments: map[string]any{"query": "再搜"}}},
+			Stop: brain.StopCompleted}, nil)
 	}
 }
 

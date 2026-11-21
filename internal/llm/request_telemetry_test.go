@@ -46,7 +46,8 @@ func spanAttributes(span sdktrace.ReadOnlySpan) map[attribute.Key]attribute.Valu
 func TestRequestTelemetryFollowsGenAIConventions(t *testing.T) {
 	spans, reader, before := telemetryRecorders(t)
 	inner := &scriptedModel{deltas: []brain.ReplyDelta{{Text: "好的"},
-		{Usage: &brain.ReplyUsage{PromptTokens: 1200, OutputTokens: 30, CacheReadTokens: 1000, CacheWriteTokens: 100, Requests: 1}}}}
+		{Usage: &brain.ReplyUsage{PromptTokens: 1200, OutputTokens: 30, CacheReadTokens: 1000, CacheWriteTokens: 100, Requests: 1},
+			Stop: brain.StopCompleted}}}
 	model := WithRequestTelemetry(inner, ProviderAnthropic, "claude-haiku-5-5")
 	if _, _, _, err := collect(t, model.StreamReply(context.Background(), brain.ChatRequest{})); err != nil {
 		t.Fatal(err)
@@ -80,7 +81,8 @@ func TestRequestTelemetryFollowsGenAIConventions(t *testing.T) {
 	}
 }
 
-// 被截断记 length；连不上记出错（error.type = unavailable）；调用方自己取消（主人打断）不算出错。
+// 被截断记 length；连不上记出错（error.type = unavailable）；调用方自己取消（主人打断）不算出错；
+// 最后一段没说为什么停（StopUnknown）时不记为什么停（不编成 stop）。
 func TestRequestTelemetryRecordsStopsAndErrors(t *testing.T) {
 	spans, _, before := telemetryRecorders(t)
 	truncated := WithRequestTelemetry(&scriptedModel{deltas: []brain.ReplyDelta{{Text: "说到一半", Stop: brain.StopMaxTokens}}},
@@ -92,10 +94,12 @@ func TestRequestTelemetryRecordsStopsAndErrors(t *testing.T) {
 	cancel()
 	cancelled := WithRequestTelemetry(&scriptedModel{err: context.Canceled}, ProviderAnthropic, "m")
 	collect(t, cancelled.StreamReply(ctx, brain.ChatRequest{}))
+	unknown := WithRequestTelemetry(&scriptedModel{deltas: []brain.ReplyDelta{{Text: "说完了吗"}}}, ProviderOllama, "local")
+	collect(t, unknown.StreamReply(context.Background(), brain.ChatRequest{}))
 
 	ended := spans.Ended()[before:]
-	if len(ended) != 3 {
-		t.Fatalf("应有 3 个 span：%d", len(ended))
+	if len(ended) != 4 {
+		t.Fatalf("应有 4 个 span：%d", len(ended))
 	}
 	if got := spanAttributes(ended[0])["gen_ai.response.finish_reasons"].Emit(); got != `["length"]` {
 		t.Errorf("被截断应记 length：%q", got)
@@ -105,5 +109,8 @@ func TestRequestTelemetryRecordsStopsAndErrors(t *testing.T) {
 	}
 	if ended[2].Status().Code == codes.Error {
 		t.Error("主人打断（调用方取消）不算出错")
+	}
+	if reasons, set := spanAttributes(ended[3])["gen_ai.response.finish_reasons"]; set {
+		t.Errorf("没说为什么停时不该记为什么停：%q", reasons.Emit())
 	}
 }

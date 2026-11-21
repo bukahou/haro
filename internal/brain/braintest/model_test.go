@@ -61,6 +61,30 @@ func TestModelFollowsScriptAndRecordsRequests(t *testing.T) {
 	}
 }
 
+// 正常结束的回答最后一段说明为什么停（说完了 / 被截断）；NoStop 时不说；出错时不说。
+func TestModelEndsWithStopReason(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		reply Reply
+		want  brain.StopReason
+	}{
+		{"说完了", Say("好的。"), brain.StopCompleted},
+		{"只调用工具", Call("search_notes", nil), brain.StopCompleted},
+		{"被截断", Reply{Chunks: []string{"从前"}, Truncated: true}, brain.StopMaxTokens},
+		{"不说为什么停", Reply{Chunks: []string{"从前"}, NoStop: true}, brain.StopUnknown},
+		{"出错", Reply{Chunks: []string{"从前"}, Err: errors.New("断了")}, brain.StopUnknown},
+	} {
+		model := NewModel(t, c.reply)
+		last := brain.StopUnknown
+		for delta := range model.StreamReply(context.Background(), brain.ChatRequest{}) {
+			last = delta.Stop
+		}
+		if last != c.want {
+			t.Errorf("%s：最后一段的 Stop 是 %v，应为 %v", c.name, last, c.want)
+		}
+	}
+}
+
 func TestModelReportsExtraRequests(t *testing.T) {
 	report := &recorder{}
 	model := NewModel(report)

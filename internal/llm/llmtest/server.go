@@ -74,6 +74,7 @@ type Script struct {
 	Events   []string // 依次推送的事件（JSON）
 	CutAfter int      // 大于 0 时，推送这么多个事件后直接断开连接（模拟流中途断开）
 	Hang     bool     // 推完 Events 后不结束，一直等到客户端断开（模拟还在生成）
+	OmitDone bool     // OpenAI 兼容：推完 Events 不推「data: [DONE]」，直接正常结束响应
 }
 
 // hang 把已经写出的部分推给客户端，然后等到客户端断开。
@@ -126,7 +127,7 @@ func NewClaudeServer(t testing.TB, scripts ...Script) *Server {
 	return server
 }
 
-// NewOpenAIServer 是假的 OpenAI 兼容接口：按 Script 推送「data:」行，最后推「data: [DONE]」。
+// NewOpenAIServer 是假的 OpenAI 兼容接口：按 Script 推送「data:」行，最后推「data: [DONE]」（OmitDone 时不推）。
 func NewOpenAIServer(t testing.TB, scripts ...Script) *Server {
 	t.Helper()
 	server := &Server{t: t}
@@ -148,7 +149,9 @@ func NewOpenAIServer(t testing.TB, scripts ...Script) *Server {
 			hang(w, r)
 			return
 		}
-		fmt.Fprint(w, "data: [DONE]\n\n")
+		if !script.OmitDone {
+			fmt.Fprint(w, "data: [DONE]\n\n")
+		}
 	}))
 	t.Cleanup(server.Close)
 	return server

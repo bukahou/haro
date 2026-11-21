@@ -21,7 +21,8 @@ type Reporter interface {
 	Errorf(format string, args ...any)
 }
 
-// Reply 是模型某一次被调用时的回答。各部分按字段顺序吐出：文字片段 → 工具调用 → 用量 → 错误。
+// Reply 是模型某一次被调用时的回答。各部分按字段顺序吐出：文字片段 → 工具调用 → 最后一段（用量、为什么停）→ 错误。
+// 没有错误、没有 Hang 时最后一段说明为什么停：说完了（StopCompleted），Truncated 时被截断。
 type Reply struct {
 	Chunks    []string          // 依次吐出的文字片段
 	ToolCalls []brain.ToolCall  // 文字之后要求调用的工具
@@ -30,6 +31,18 @@ type Reply struct {
 	Delay     time.Duration     // 每个文字片段之前等多久（测打断、取消用）
 	Hang      bool              // 吐完之后不结束，直到被取消（模拟还在生成）
 	Truncated bool              // 输出到了上限被截断：最后一段标 StopMaxTokens
+	NoStop    bool              // 流正常结束，最后一段却不说为什么停（Stop 留在 StopUnknown）
+}
+
+// stop 是这条回答最后一段的 Stop。
+func (r Reply) stop() brain.StopReason {
+	switch {
+	case r.Truncated:
+		return brain.StopMaxTokens
+	case r.NoStop:
+		return brain.StopUnknown
+	}
+	return brain.StopCompleted
 }
 
 // Say 是只吐一段文字的回答。
@@ -170,14 +183,15 @@ func (m *Model) StreamReply(ctx context.Context, request brain.ChatRequest) iter
 		if len(reply.ToolCalls) > 0 && !yield(brain.ReplyDelta{ToolCalls: slices.Clone(reply.ToolCalls)}, nil) {
 			return
 		}
-		if reply.Usage != nil || reply.Truncated {
+		ends := reply.Err == nil && !reply.Hang // 正常结束：最后一段说明为什么停
+		if reply.Usage != nil || ends {
 			last := brain.ReplyDelta{}
 			if reply.Usage != nil {
 				usage := *reply.Usage
 				last.Usage = &usage
 			}
-			if reply.Truncated {
-				last.Stop = brain.StopMaxTokens
+			if ends {
+				last.Stop = reply.stop()
 			}
 			if !yield(last, nil) {
 				return

@@ -286,7 +286,7 @@ func (e *Expert) runTool(ctx context.Context, call brain.ToolCall, searches *int
 	return result
 }
 
-// complete 请求模型一次，收齐文字、工具调用与用量；被截断按失败（brain.ErrTruncated，退回把画面交给前台）。
+// complete 请求模型一次，收齐文字、工具调用与用量；被截断、没交代为什么停都按失败（退回把画面交给前台）。
 func complete(ctx context.Context, model brain.ChatModel, messages []brain.ChatMessage, specs []brain.ToolSpec) (string, []brain.ToolCall, brain.ReplyUsage, error) {
 	reply, err := brain.CollectReply(ctx, model, brain.ChatRequest{Messages: messages, Tools: specs})
 	return reply.Text, reply.ToolCalls, reply.Usage, err

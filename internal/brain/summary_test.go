@@ -33,9 +33,11 @@ func (m *summaryModel) StreamReply(ctx context.Context, request ChatRequest) ite
 		if !yield(ReplyDelta{Text: m.reply}, nil) {
 			return
 		}
+		stop := StopCompleted
 		if m.truncated {
-			yield(ReplyDelta{Stop: StopMaxTokens}, nil)
+			stop = StopMaxTokens
 		}
+		yield(ReplyDelta{Stop: stop}, nil)
 	}
 }
 
@@ -159,7 +161,7 @@ type sequenceModel struct {
 func (m *sequenceModel) StreamReply(_ context.Context, request ChatRequest) iter.Seq2[ReplyDelta, error] {
 	m.asked = append(m.asked, request.Messages[len(request.Messages)-1].Text)
 	reply := m.replies[min(len(m.asked), len(m.replies))-1]
-	return func(yield func(ReplyDelta, error) bool) { yield(ReplyDelta{Text: reply}, nil) }
+	return func(yield func(ReplyDelta, error) bool) { yield(ReplyDelta{Text: reply, Stop: StopCompleted}, nil) }
 }
 
 // 摘要写得太长：不截断（会截在句子中间），请它压短一次，用压短后的那份；压短后还太长就不用（留着旧摘要下次再压）。

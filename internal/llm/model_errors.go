@@ -26,8 +26,12 @@ func markUnavailable(callerCtx context.Context, err error) error {
 	return fmt.Errorf("%w: %w", brain.ErrModelUnavailable, err)
 }
 
-// unavailable 判断是不是连不上：网络错误（连不上、DNS、连接被重置、流读到一半断了）、等不到开始回答、整次请求超时、
-// 认证失败（401 / 403）、请求超时（408）、限流（429）、服务端出错或过载（5xx、529）。
+// errStreamUnfinished 表示流读到了结尾（连接正常关掉），却没收到约定的结束标志（Claude：停下的原因和 message_stop；
+// OpenAI 兼容：finish_reason）：回答可能只说了一半。SDK 在连接正常关掉时不报错，要适配层自己认。
+var errStreamUnfinished = errors.New("流没按约定收尾（没收到结束标志）")
+
+// unavailable 判断是不是连不上：网络错误（连不上、DNS、连接被重置、流读到一半断了）、流读到结尾却没收到结束标志、
+// 等不到开始回答、整次请求超时、认证失败（401 / 403）、请求超时（408）、限流（429）、服务端出错或过载（5xx、529）。
 // 流已经开始（HTTP 回了 200）之后才来的错误事件同样按这几类认。请求本身有问题（400 等）不算。
 func unavailable(err error) bool {
 	var anthropicErr *anthropic.Error
@@ -35,7 +39,8 @@ func unavailable(err error) bool {
 	var streamErr *ssestream.StreamError
 	var netErr net.Error
 	switch {
-	case errors.Is(err, errNoFirstToken), errors.Is(err, context.DeadlineExceeded), errors.Is(err, io.ErrUnexpectedEOF):
+	case errors.Is(err, errNoFirstToken), errors.Is(err, errStreamUnfinished), errors.Is(err, context.DeadlineExceeded),
+		errors.Is(err, io.ErrUnexpectedEOF):
 		return true
 	case errors.As(err, &anthropicErr) && anthropicErr.StatusCode == http.StatusOK:
 		// 流开始之后来的 error 事件：SDK 给的状态码是流的 200，按错误体里的错误类型认

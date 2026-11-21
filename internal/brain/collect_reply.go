@@ -16,11 +16,12 @@ type Reply struct {
 // ErrTruncated 表示模型的输出到了上限、被截断：收齐回答的用途按失败处理（写了一半的摘要、结论不能用）。
 var ErrTruncated = errors.New("模型的输出到了上限，被截断")
 
-// CollectReply 把一次回答收齐。出错时返回已经收到的部分和错误；被截断时返回已经收到的文字和 ErrTruncated。
+// CollectReply 把一次回答收齐。出错时返回已经收到的部分和错误；被截断时返回已经收到的文字和 ErrTruncated；
+// 流结束了却没说为什么停时返回已经收到的文字和 ErrStopUnknown（不当成说完）。
 func CollectReply(ctx context.Context, model ChatModel, request ChatRequest) (Reply, error) {
 	var reply Reply
 	var text strings.Builder
-	truncated := false
+	stop := StopUnknown // 为什么停：最后一段说了算
 	for delta, err := range model.StreamReply(ctx, request) {
 		if delta.Usage != nil {
 			reply.Usage = *delta.Usage
@@ -31,11 +32,14 @@ func CollectReply(ctx context.Context, model ChatModel, request ChatRequest) (Re
 		}
 		text.WriteString(delta.Text)
 		reply.ToolCalls = append(reply.ToolCalls, delta.ToolCalls...)
-		truncated = truncated || delta.Stop == StopMaxTokens
+		stop = delta.Stop
 	}
 	reply.Text = text.String()
-	if truncated {
+	switch stop {
+	case StopMaxTokens:
 		return reply, ErrTruncated
+	case StopUnknown:
+		return reply, ErrStopUnknown
 	}
 	return reply, nil
 }
