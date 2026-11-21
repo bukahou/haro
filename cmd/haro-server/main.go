@@ -27,7 +27,6 @@ import (
 	"github.com/bukahou/haro/internal/conversationstore"
 	"github.com/bukahou/haro/internal/graceful"
 	"github.com/bukahou/haro/internal/llm"
-	"github.com/bukahou/haro/internal/netdiag"
 	"github.com/bukahou/haro/internal/notes"
 	"github.com/bukahou/haro/internal/persona"
 	"github.com/bukahou/haro/internal/profile"
@@ -110,14 +109,13 @@ func run(logger *slog.Logger) error {
 	var toolbox brain.Toolbox
 	var expertSearch vision.Search // 看画面的专家联网查：和主对话的快查同一套搜索与额度
 	if settings.Tools {
-		// 自研工具内置：记事本直接连数据库，网络诊断在本进程里执行；MCP 只接第三方（现在还没有）
+		// 自研工具内置：记事本直接连数据库；MCP 只接第三方（现在还没有）
 		store, err := notes.Open(ctx, settings.NotesDB)
 		if err != nil {
 			return err
 		}
 		defer store.Close()
-		checker := netdiag.NewChecker(settings.NetdiagDNSName, settings.NetdiagInternetTarget)
-		builtins := []tools.Builtin{tools.NoteTools(store, settings.NotesListLimit, logger), tools.NetworkDiagnostics(checker)}
+		builtins := []tools.Builtin{tools.NoteTools(store, settings.NotesListLimit, logger)}
 		if settings.Weather { // 天气：Open-Meteo 为主，日本气象厅备用；都不用密钥
 			weatherHTTP := weather.NewHTTPClient() // 连接等得短：连不上就早点交给备用
 			home := weatherHome(ctx, settings, weatherHTTP, logger)

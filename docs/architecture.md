@@ -70,13 +70,13 @@ haro 是一个家用语音助手：家里每个房间放一台**终端**（麦�
 
 ### 工具
 
-自研工具内置在服务端里；**MCP 只用来接第三方服务**（本地子进程或远程 Streamable HTTP）。
+自研工具注册在服务端进程内的 MCP 服务上（参数、结果由结构体定义，调用前校验；每个工具标明只读 / 会改数据 / 会破坏）；第三方服务只接远程 Streamable HTTP。
 
 | 工具 | 说明 |
 |---|---|
 | `get_current_time` | 现在的时间 |
-| `save_note` / `search_notes` / `list_recent_notes` / `delete_note` | 记事本（SQLite）；删除前要口头确认 |
-| `check_network` / `network_interfaces` | 网络诊断（查的是服务端所在机器的网络） |
+| `save_note` / `search_notes` / `delete_note` / `list_deleted_notes` / `restore_note` | 记事本（SQLite）；按编号删，删掉的可以恢复 |
+| `confirm_action` / `cancel_action` | 会破坏的操作（删记事）先存成待确认的操作（有时效），主人算不算同意由模型判断后调用；只在有待确认的操作时提供 |
 | `get_weather` | 天气（Open-Meteo，不用密钥）；家的位置可以配坐标，或按公网 IP 推定。Open-Meteo 查不到时改用日本气象厅（见下） |
 | `look_at_camera` | 看终端摄像头的画面：调用时才经 MCP 让终端拍一帧（终端的工具清单里有「拍一帧」时才提供） |
 | `switch_persona` | 换性格（有两个以上性格时才提供） |

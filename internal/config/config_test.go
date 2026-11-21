@@ -142,6 +142,10 @@ func TestRemovedSettings(t *testing.T) {
 	if err != nil || len(notes) != 6 {
 		t.Errorf("拉起子进程用的配置项只提醒：notes=%v err=%v", notes, err)
 	}
+	notes, err = checkRemovedSettings(lookup(map[string]string{"HARO_NETDIAG_DNS_NAME": "www.cloudflare.com", "HARO_NETDIAG_INTERNET_TARGET": "1.1.1.1:443"}))
+	if err != nil || len(notes) != 2 {
+		t.Errorf("网络诊断的配置项只提醒：notes=%v err=%v", notes, err)
+	}
 	if notes, err := checkRemovedSettings(lookup(nil)); err != nil || len(notes) != 0 {
 		t.Errorf("没写时什么都不说：notes=%v err=%v", notes, err)
 	}

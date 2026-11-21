@@ -176,9 +176,6 @@ type Settings struct {
 	WeatherBackup             string `env:"HARO_WEATHER_BACKUP" envDefault:"jma"`
 	WeatherJMAURL             string `env:"HARO_WEATHER_JMA_URL" envDefault:"https://www.jma.go.jp/bosai"`
 	WeatherReverseGeocoderURL string `env:"HARO_WEATHER_REVERSE_GEOCODER_URL" envDefault:"https://mreversegeocoder.gsi.go.jp/reverse-geocoder/LonLatToAddress"`
-	// 网络诊断：内置在主程序里
-	NetdiagDNSName        string `env:"HARO_NETDIAG_DNS_NAME" envDefault:"www.cloudflare.com"`
-	NetdiagInternetTarget string `env:"HARO_NETDIAG_INTERNET_TARGET" envDefault:"1.1.1.1:443"`
 
 	// 语音合成：HARO_TTS 选引擎；服务都单独运行，服务端只认地址
 	TTS        string        `env:"HARO_TTS" envDefault:"gpt-sovits"`  // piper / gpt-sovits

@@ -19,7 +19,6 @@ import (
 	"github.com/bukahou/haro/internal/brain"
 	"github.com/bukahou/haro/internal/brain/braintest"
 	"github.com/bukahou/haro/internal/llm"
-	"github.com/bukahou/haro/internal/netdiag"
 	"github.com/bukahou/haro/internal/notes"
 	"github.com/bukahou/haro/internal/realtimeproto"
 	"github.com/bukahou/haro/internal/speech"
@@ -42,8 +41,8 @@ func TestConversationLive(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	// 与正式运行一致：记事本、网络诊断都内置
-	builtins := []Builtin{NoteTools(store, 200, logger), NetworkDiagnostics(netdiag.NewChecker("www.cloudflare.com", "1.1.1.1:443"))}
+	// 与正式运行一致：记事本内置
+	builtins := []Builtin{NoteTools(store, 200, logger)}
 	box, err := NewToolbox(ctx, nil, logger, builtins...)
 	if err != nil {
 		t.Fatal(err)
@@ -60,7 +59,7 @@ func TestConversationLive(t *testing.T) {
 	}
 	session := brain.NewSession(parts, brain.Options{MaxHistoryTurn: 6, Instructions: brain.DefaultInstructions}, slog.New(slog.NewTextHandler(os.Stderr, nil)))
 	defer session.Close()
-	turns := []string{"帮我记一下，车停在C3的7号位。", "我的车停在哪了？", "现在几点了？", "家里网络正常吗？",
+	turns := []string{"帮我记一下，车停在C3的7号位。", "我的车停在哪了？", "现在几点了？",
 		"我最近都记了些什么？", "把车停车位那条记录删了。", "确认", "你能看到我吗？"}
 	stream := braintest.Open(t, session, voice, realtimeproto.SessionUpdate{})
 	if conversation := os.Getenv("HARO_TEST_CONVERSATION"); conversation != "" {

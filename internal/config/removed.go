@@ -33,6 +33,8 @@ var removedSettings = []removedSetting{
 	{name: "HARO_PIPER_PYTHON", removed: "服务端不再拉起 Piper：Piper 单独运行，服务端只按 HARO_TTS_URL 连"},
 	{name: "HARO_PIPER_MODEL", removed: "服务端不再拉起 Piper，模型由运行 Piper 的命令指定"},
 	{name: "HARO_PIPER_PORT", removed: "服务端不再拉起 Piper，按 HARO_TTS_URL 连"},
+	{name: "HARO_NETDIAG_DNS_NAME", removed: "网络诊断工具已删除"},
+	{name: "HARO_NETDIAG_INTERNET_TARGET", removed: "网络诊断工具已删除"},
 }
 
 // checkRemovedSettings 检查环境里还写着的已删除配置项：返回给人看的提醒；值要求已删除的行为时返回错误。
