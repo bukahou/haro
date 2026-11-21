@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -30,7 +31,7 @@ func (r *Runner) Tools() tools.Builtin {
 				if ahead > 0 {
 					out.Note = "前面还有别的调查在查或排队，要多等一会儿。"
 				} else {
-					out.Note = "一般一两分钟。"
+					out.Note = r.longestNote()
 				}
 				return out, nil
 			})
@@ -38,7 +39,7 @@ func (r *Runner) Tools() tools.Builtin {
 			Description: "看后台调查的进度和结论：给 id 看那一个；不给就列出最近的几个（带编号）。" +
 				"主人问「查得怎么样了」「上次让你查的那个结果是什么」时用；情况说明里说有调查查完了、还没告诉主人时，也先用它取结论再讲。"},
 			func(ctx context.Context, in statusInput) (statusOutput, error) {
-				return r.status(ctx, brain.SpeakerFrom(ctx), in.ID)
+				return r.lookUpStatus(ctx, brain.SpeakerFrom(ctx), in.ID)
 			})
 		tools.AddTool(server, &mcp.Tool{Name: "cancel_research", Annotations: tools.Changes,
 			Description: "取消后台调查（主人说「别查了」「不用查了」时）。不给 id 就取消最近一个还没查完的。"},
@@ -56,8 +57,14 @@ func (r *Runner) Tools() tools.Builtin {
 	}
 }
 
+// longestNote 是派出后告诉主人最长要等多久：搜索阶段的时限加上写结论的时间（到时限就用查到的资料收尾）。
+func (r *Runner) longestNote() string {
+	longest := r.limits.Timeout + writeUpTimeout
+	return fmt.Sprintf("最长约 %d 分钟（到时限就用已经查到的资料收尾）。", int(math.Ceil(longest.Minutes())))
+}
+
 type startInput struct {
-	Question string `json:"question" jsonschema:"要调查的问题，写完整、具体（包含主人关心的点）"`
+	Question string `json:"question" jsonschema:"要调查的问题，用主人说话的语言写完整、具体（包含主人关心的点）"`
 }
 
 type startOutput struct {
@@ -89,9 +96,9 @@ type cancelOutput struct {
 // statusRecent 是不给编号时列出最近几个调查。
 const statusRecent = 5
 
-// status 给编号就是那一个，不给就是最近几个。列出了还没告诉过的结论（或失败）：这一轮主人听完才标成已告诉
+// lookUpStatus 给编号就是那一个，不给就是最近几个。列出了还没告诉过的结论（或失败）：这一轮主人听完才标成已告诉
 // （brain.OnDelivered；被打断就之后再附在任务板上）。
-func (r *Runner) status(ctx context.Context, person string, id *int64) (statusOutput, error) {
+func (r *Runner) lookUpStatus(ctx context.Context, person string, id *int64) (statusOutput, error) {
 	var tasks []Task
 	if id != nil {
 		task, err := r.store.Get(ctx, *id)
