@@ -141,7 +141,7 @@ func (a agentAssembly) build(toolbox brain.Toolbox, expertSearch vision.Search) 
 		}
 		// 不受额度管（否则上限到了就没法判断），按天限次数、照样记账
 		judge, err := a.agent(definition, spending.NewDailyCallLimit(judgeModel, s.OverBudgetDailyCalls),
-			brain.OverBudgetPromptValues(), toolbox)
+			brain.OverBudgetPromptValues(definition.Tools), toolbox)
 		if err != nil {
 			return built, err
 		}

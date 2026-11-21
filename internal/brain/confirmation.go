@@ -11,7 +11,8 @@ import (
 // 确认闸：标注为「会破坏」的工具（ToolSpec.RequiresConfirmation）不直接执行。
 //  1. 模型调用它 → 先核对这一轮说话的是登记过声纹的人；不是就不做。
 //  2. 是 → 存成一条待确认的操作（编号、工具、参数、到期时间），把要点交给模型，由模型用自己的话问主人。
-//  3. 主人回答。这句话照常交给模型；这一轮多两个会话工具：confirm_action、cancel_action。主人算不算同意，由模型判断。
+//  3. 主人回答。这句话照常交给模型；主人算不算同意由模型判断，同意就调用 confirm_action、不同意就调用 cancel_action
+//     （有会破坏的工具时这两个工具的定义一直带着，见 sessionTool.gate）。
 //  4. confirm_action → 再核对：编号对得上、没过期、是之后的一轮、这一轮说话的是登记过的人 → 用当初存下的参数执行
 //     （不用模型这次给的）。cancel_action → 作废，同一个人其他待确认的一并作废。过期的自动作废。
 // 只有「这一次允许」和「拒绝」，没有「以后都允许」。
@@ -101,7 +102,7 @@ func (s *Session) holdForConfirmation(record *turnRecord, call ToolCall) string 
 	return confirmationResult{Status: "needs_confirmation", ActionID: action.ID, Tool: call.Name, Arguments: call.Arguments,
 		ExpiresIn: int(timeout.Seconds()),
 		Note: "还没有执行。用你自己的话把要做的事（按上面的参数）说清楚，问主人要不要做；" +
-			"主人回答后，同意就调用 confirm_action，不同意就调用 cancel_action。"}.text()
+			"主人回答后，同意就调用 " + confirmActionTool + "，不同意就调用 " + cancelActionTool + "。"}.text()
 }
 
 // confirmAction 执行 confirm_action：四项核对都过了，才用当初存下的参数执行。
@@ -141,5 +142,5 @@ func (s *Session) cancelAction(call ToolCall) string {
 	return confirmationResult{Status: "cancelled", ActionID: in.ActionID, Note: "已作废，没有执行。"}.text()
 }
 
-// confirmationSpecs 是这一轮要不要多给 confirm_action、cancel_action：有没过期的待确认操作时才给。
+// confirmationSpecs 是确认、取消两个工具的定义：有会破坏的工具时一直有（见 sessionTool.gate）。
 func (s *Session) confirmationSpecs() []ToolSpec { return s.sessionToolSpecs(true) }

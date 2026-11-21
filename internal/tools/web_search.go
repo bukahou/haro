@@ -212,10 +212,13 @@ const (
 	quickSearchMaxRunes = 3000
 )
 
+// WebSearchTool 是主对话里快查工具的名字（别的工具的说明里提到它时引用这里）。
+const WebSearchTool = "web_search"
+
 // WebSearchTools 是主对话里的快查（web_search）：先查额度、搜一次、成功后记账（见 QuickSearch）。
 func WebSearchTools(searcher WebSearcher, meter SearchMeter, logger *slog.Logger) Builtin {
 	return func(server *mcp.Server) {
-		AddTextTool(server, &mcp.Tool{Name: "web_search", Annotations: ReadOnly,
+		AddTextTool(server, &mcp.Tool{Name: WebSearchTool, Annotations: ReadOnly,
 			Description: "联网搜索一次，查实时或最新的事实（新闻、价格、比分、营业时间、某件事的最新进展等）。" +
 				"你不确定、或者信息可能过时的时候用它，不要凭记忆回答。搜一次就能答的问题用它。"},
 			func(ctx context.Context, in webSearchInput) (string, error) {

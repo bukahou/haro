@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"time"
 
@@ -30,9 +31,16 @@ type MonthlyCap interface {
 var raiseMonthlyCapSpec = ToolSpec{Name: raiseMonthlyCapTool, Parameters: ParametersFor[struct{}](), RequiresConfirmation: true,
 	Description: "主人明确要临时提高这个月的费用上限时调用（每次提高的金额是固定的）。会先问主人确认，主人同意后才提高。"}
 
-// OverBudgetPromptValues 是代理「额度判断」正文里引用的值：工具名只在代码里定义一处。
-func OverBudgetPromptValues() map[string]any {
-	return map[string]any{"RaiseTool": raiseMonthlyCapTool, "ConfirmTool": confirmActionTool, "CancelTool": cancelActionTool}
+// OverBudgetPromptValues 是代理「额度判断」正文里引用的值：工具名只在代码里定义一处。只填它的允许名单里有的工具
+// （allowed 为 nil = 全部）：正文提到没交给它的工具时填值报错、服务端起不来，不会让模型去调用一个没给它的工具。
+func OverBudgetPromptValues(allowed []string) map[string]any {
+	values := map[string]any{}
+	for key, tool := range map[string]string{"RaiseTool": raiseMonthlyCapTool, "ConfirmTool": confirmActionTool, "CancelTool": cancelActionTool} {
+		if allowed == nil || slices.Contains(allowed, tool) {
+			values[key] = tool
+		}
+	}
+	return values
 }
 
 // canRaiseMonthlyCap 是这个服务端能不能口头提高上限（接了上限、也有判断用的代理）。
@@ -88,6 +96,10 @@ func (s *Session) answerOverBudget(ctx context.Context, record *turnRecord, capE
 		s.logger.Warn("💴 上限到了：判断要不要提高的那次调用没成", "err", err)
 	}
 	for _, call := range reply.ToolCalls {
+		if !slices.ContainsFunc(tools, func(spec ToolSpec) bool { return spec.Name == call.Name }) { // 执行方自己守门：只做给了它的
+			s.logger.Warn("💴 额度判断调用了没给它的工具：不执行", "tool", call.Name)
+			continue
+		}
 		switch call.Name {
 		case raiseMonthlyCapTool:
 			s.holdForConfirmation(record, call)

@@ -80,6 +80,32 @@ func TestOverBudgetOffersOnlyAllowedTools(t *testing.T) {
 	}
 }
 
+// 判断用的模型调用了没给它的工具（允许名单里没有提高上限）：不执行——不存待确认的操作，下一句确认那个编号也提高不了。
+func TestOverBudgetIgnoresToolsNotOffered(t *testing.T) {
+	model := braintest.NewModel(t, braintest.Reply{Err: capReached{}}, braintest.Reply{Err: capReached{}})
+	judge := braintest.NewModel(t, braintest.Call("raise_monthly_cap", nil),
+		braintest.Call("confirm_action", map[string]any{"action_id": "act_1"}))
+	cap := &fakeCap{}
+	k := newCapTalkerWith(t, model, &brain.Agent{Name: "额度判断", Model: judge, Instructions: judgeInstructions,
+		Tools: []string{"confirm_action", "cancel_action"}}, cap)
+	k.owner("把上限提高一点")
+	k.owner("可以")
+	if cap.count() != 0 {
+		t.Errorf("没交给它的工具不该执行：提高了 %d 次", cap.count())
+	}
+}
+
+// 额度判断的正文里引用的工具名只填它允许名单里有的（nil = 全部）。
+func TestOverBudgetPromptValuesFollowAllowList(t *testing.T) {
+	all := brain.OverBudgetPromptValues(nil)
+	if all["RaiseTool"] != "raise_monthly_cap" || all["ConfirmTool"] != "confirm_action" || all["CancelTool"] != "cancel_action" {
+		t.Errorf("不限名单时三个都填：%v", all)
+	}
+	if only := brain.OverBudgetPromptValues([]string{"raise_monthly_cap"}); len(only) != 1 || only["RaiseTool"] != "raise_monthly_cap" {
+		t.Errorf("只填名单里有的：%v", only)
+	}
+}
+
 // 主人要提高：先问（固定的话），下一句同意了（由模型判断，测试直接指定它调用 confirm_action）才提高，念提高后的上限。
 func TestOverBudgetRaiseNeedsConfirmation(t *testing.T) {
 	model := braintest.NewModel(t, braintest.Reply{Err: capReached{}}, braintest.Reply{Err: capReached{}})

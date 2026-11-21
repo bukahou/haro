@@ -13,13 +13,20 @@ import (
 	"github.com/bukahou/haro/internal/tools"
 )
 
+// 主对话里三个调查工具的名字（任务板、说明里提到它们时引用这里）。
+const (
+	startResearchTool  = "start_research"
+	researchStatusTool = "research_status"
+	cancelResearchTool = "cancel_research"
+)
+
 // Tools 是主对话里的三个调查工具：派调查、看进度和结论、取消（复杂问题派后台调查；简单的用 web_search 当场答）。
 // 看哪一个、取消哪一个按编号：编号在任务板（Brief）和 research_status 的结果里。
 func (r *Runner) Tools() tools.Builtin {
 	return func(server *mcp.Server) {
-		tools.AddTool(server, &mcp.Tool{Name: "start_research", Annotations: tools.Changes,
+		tools.AddTool(server, &mcp.Tool{Name: startResearchTool, Annotations: tools.Changes,
 			Description: "派一个后台调查：需要多搜几次、读几篇资料、比较或汇总的问题用它（例如「帮我调查一下 A 和 B 哪个好」「查查 X 最近的情况」）。" +
-				"调用后马上告诉主人已经开始查、查好了再说，然后可以继续聊别的。一次就能搜到答案的问题用 web_search，不用它。"},
+				"调用后马上告诉主人已经开始查、查好了再说，然后可以继续聊别的。一次就能搜到答案的问题用 " + tools.WebSearchTool + "，不用它。"},
 			func(ctx context.Context, in startInput) (startOutput, error) {
 				task, ahead, err := r.Start(ctx, brain.SpeakerFrom(ctx), in.Question)
 				if err != nil {
@@ -35,13 +42,13 @@ func (r *Runner) Tools() tools.Builtin {
 				}
 				return out, nil
 			})
-		tools.AddTool(server, &mcp.Tool{Name: "research_status", Annotations: tools.ReadOnly,
+		tools.AddTool(server, &mcp.Tool{Name: researchStatusTool, Annotations: tools.ReadOnly,
 			Description: "看后台调查的进度和结论：给 id 看那一个；不给就列出最近的几个（带编号）。" +
 				"主人问「查得怎么样了」「上次让你查的那个结果是什么」时用；情况说明里说有调查查完了、还没告诉主人时，也先用它取结论再讲。"},
 			func(ctx context.Context, in statusInput) (statusOutput, error) {
 				return r.lookUpStatus(ctx, brain.SpeakerFrom(ctx), in.ID)
 			})
-		tools.AddTool(server, &mcp.Tool{Name: "cancel_research", Annotations: tools.Changes,
+		tools.AddTool(server, &mcp.Tool{Name: cancelResearchTool, Annotations: tools.Changes,
 			Description: "取消后台调查（主人说「别查了」「不用查了」时）。不给 id 就取消最近一个还没查完的。"},
 			func(ctx context.Context, in cancelInput) (cancelOutput, error) {
 				var id int64
@@ -163,8 +170,8 @@ func (r *Runner) Brief(person string) brain.Briefing {
 			if task.Status == StatusPartial {
 				note = "（到上限收工，可能不全：" + task.StopReason + "）"
 			}
-			lines = append(lines, fmt.Sprintf("后台调查 #%d「%s」查完了%s，还没告诉主人。这一轮先调用 research_status（id 填 %d）取结论讲给主人"+
-				"（按需要的长短说，讲清楚为止），再回答他这次说的话。", task.ID, task.Question, note, task.ID))
+			lines = append(lines, fmt.Sprintf("后台调查 #%d「%s」查完了%s，还没告诉主人。这一轮先调用 %s（id 填 %d）取结论讲给主人"+
+				"（按需要的长短说，讲清楚为止），再回答他这次说的话。", task.ID, task.Question, note, researchStatusTool, task.ID))
 		default:
 			told = append(told, task.ID)
 			lines = append(lines, fmt.Sprintf("后台调查 #%d「%s」没完成（%s：%s）。这一轮顺便告诉主人一声。",

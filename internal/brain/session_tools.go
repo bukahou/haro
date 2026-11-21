@@ -1,9 +1,6 @@
 package brain
 
-import (
-	"slices"
-	"time"
-)
+import "slices"
 
 // 会话自己提供的工具（不在工具箱里）只登记在 sessionTools 这一张表：这一轮提供哪些、说明、要不要过确认闸、
 // 是不是确认 / 取消这类闸门工具，都从这里查（toolSpecs、offeredTools、executable、UnknownTools、requiresConfirmation）。
@@ -14,8 +11,9 @@ type sessionTool struct {
 	name string
 	// offer 返回这一轮提供的说明；false = 这一轮不提供（例如终端不能拍、只有一种性格）
 	offer func(s *Session) (ToolSpec, bool)
-	// gate：确认、取消。只在有待确认的操作时提供，不列进系统提示词的工具介绍（来来去去会让提示词跟着变）；
-	// 没提供时模型照着名字调用也执行，交给它们自己核对并说明为什么不执行
+	// gate：确认、取消。有会破坏的工具时一直提供（sessionToolSpecs 判断；工具定义在提示词缓存的最前面，
+	// 加上、去掉都让整段缓存失效）；没有待确认的操作时调用了照样执行，由它们自己核对并说明为什么不做。
+	// 不列进系统提示词的工具介绍：只在问过主人之后才用得上，用法写在它们自己的说明里
 	gate bool
 }
 
@@ -27,12 +25,15 @@ var sessionTools = []sessionTool{
 	{name: askStrongerTool, offer: func(s *Session) (ToolSpec, bool) { return askStrongerSpec, s.parts.Handoff.corrections() }},
 	// 平时也能口头提高上限（照样过确认闸）
 	{name: raiseMonthlyCapTool, offer: func(s *Session) (ToolSpec, bool) { return raiseMonthlyCapSpec, s.parts.MonthlyCap != nil }},
-	{name: confirmActionTool, gate: true, offer: func(s *Session) (ToolSpec, bool) { return confirmActionSpec, s.hasPendingActions() }},
-	{name: cancelActionTool, gate: true, offer: func(s *Session) (ToolSpec, bool) { return cancelActionSpec, s.hasPendingActions() }},
+	{name: confirmActionTool, gate: true, offer: func(*Session) (ToolSpec, bool) { return confirmActionSpec, true }},
+	{name: cancelActionTool, gate: true, offer: func(*Session) (ToolSpec, bool) { return cancelActionSpec, true }},
 }
 
-// sessionToolSpecs 是这一轮提供的会话工具（gate 决定取闸门工具还是其余的）。
+// sessionToolSpecs 是这一轮提供的会话工具（gate 决定取闸门工具还是其余的）；闸门工具只在有会破坏的工具时提供。
 func (s *Session) sessionToolSpecs(gate bool) []ToolSpec {
+	if gate && !s.hasDestructiveTools() {
+		return nil
+	}
 	var specs []ToolSpec
 	for _, tool := range sessionTools {
 		if tool.gate != gate {
@@ -45,9 +46,17 @@ func (s *Session) sessionToolSpecs(gate bool) []ToolSpec {
 	return specs
 }
 
-// hasPendingActions 判断当前对话有没有还在等主人确认的操作。
-func (s *Session) hasPendingActions() bool {
-	return s.currentConversation().hasPendingActions(time.Now())
+// hasDestructiveTools 判断这一轮提供的工具里有没有会破坏的（要过确认闸的：会话自己的、工具箱里的）。
+func (s *Session) hasDestructiveTools() bool {
+	for _, tool := range sessionTools {
+		if tool.gate {
+			continue
+		}
+		if spec, ok := tool.offer(s); ok && spec.RequiresConfirmation {
+			return true
+		}
+	}
+	return s.parts.Tools != nil && slices.ContainsFunc(s.parts.Tools.Specs(), func(spec ToolSpec) bool { return spec.RequiresConfirmation })
 }
 
 // isGateTool 判断是不是确认 / 取消这类闸门工具。

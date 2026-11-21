@@ -149,6 +149,23 @@ func TestBuildAgentsRejectsBadToolLists(t *testing.T) {
 	}
 }
 
+// 额度判断的正文只能提到交给了它的工具：覆盖的定义去掉了确认、取消，正文却还提到它们时起不来。
+// 阳性对照：正文跟着去掉就起得来。
+func TestOverBudgetPromptMentionsOnlyAllowedTools(t *testing.T) {
+	settings := cloudSettings(nil, config.VisionByExpert)
+	settings.MonthlyYen, settings.MonthlyRaiseYen, settings.OverBudgetDailyCalls = 3000, 500, 30
+	judge := "---\ntitle: 额度判断\nmode: subtask\nmodel: base\npurpose: chat\ntools: [raise_monthly_cap]\nmax_steps: 1\n---\n%s\n"
+	mentionsConfirm := strings.Replace(judge, "%s", "要提高就调用 {{.RaiseTool}}；同意就调用 {{.ConfirmTool}}。", 1)
+	if _, err := testAssembly(t, settings, map[string]string{agents.OverBudget: mentionsConfirm}).build(nil, nil); err == nil {
+		t.Error("正文提到没交给它的确认工具：应起不来")
+	}
+	raiseOnly := strings.Replace(judge, "%s", "要提高就调用 {{.RaiseTool}}。", 1)
+	built, err := testAssembly(t, settings, map[string]string{agents.OverBudget: raiseOnly}).build(nil, nil)
+	if err != nil || built.overBudget == nil || !strings.Contains(built.overBudget.Instructions, "raise_monthly_cap") {
+		t.Errorf("正文只提到交给它的工具：应起得来：%v %+v", err, built.overBudget)
+	}
+}
+
 // Claude 特有的取值（回答力度、思考写法）在启动时检查，报错写明是哪个环境变量；用别的接口时不查。
 func TestCheckClaudeSettings(t *testing.T) {
 	for _, name := range []string{"ANTHROPIC_FEDERATION_RULE_ID", "ANTHROPIC_ORGANIZATION_ID", "ANTHROPIC_IDENTITY_TOKEN_FILE", "ANTHROPIC_IDENTITY_TOKEN"} {

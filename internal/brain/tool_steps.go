@@ -33,8 +33,8 @@ func notOfferedResult(tool string) string {
 }
 
 // executable 判断这一步能不能执行这个调用（执行方自己守门，不假设模型只调用给了它的工具）：要是这一步提供了的。
-// 确认、取消例外：没有待确认的操作、或刚问过主人时这一步不提供它们，但调用了也交给它们自己判断 ——
-// 它们本身就是闸（核对编号、时效、是不是下一句、声纹），会说明为什么不执行（过期了、要等主人回答），
+// 确认、取消例外：这一步没提供它们（没有会破坏的工具）时调用了也交给它们自己判断 ——
+// 它们本身就是闸（核对编号、时效、是不是下一句、声纹），会说明为什么不执行（没有这个编号、过期了、要等主人回答），
 // 模型才能照实告诉主人。代理的允许名单里没有它们、或这一轮不给工具时照样不执行。
 func executable(agent Agent, offered []ToolSpec, restricted bool, tool string) bool {
 	if slices.ContainsFunc(offered, func(spec ToolSpec) bool { return spec.Name == tool }) {

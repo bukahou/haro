@@ -96,7 +96,7 @@ haro 是一个家用语音助手：家里每个房间放一台**终端**（麦�
 | 工具 | 说明 |
 |---|---|
 | `save_note` / `search_notes` / `delete_note` / `list_deleted_notes` / `restore_note` | 记事本（SQLite，时间存 UTC 的 Unix 秒）；按编号删，删掉的可以恢复 |
-| `confirm_action` / `cancel_action` | 会破坏的操作（删记事）先存成待确认的操作（有时效），主人算不算同意由模型判断后调用；只在有待确认的操作时提供 |
+| `confirm_action` / `cancel_action` | 会破坏的操作（删记事、提高月度上限）先存成待确认的操作（有时效），主人算不算同意由模型判断后调用；有会破坏的工具时一直提供（工具定义不变，提示词缓存不失效），系统提示词的工具介绍里不列 |
 | `get_weather` | 天气（Open-Meteo，不用密钥）；家的位置可以配坐标，或按公网 IP 推定。Open-Meteo 查不到时改用日本气象厅（见下） |
 | `look_at_camera` | 看终端摄像头的画面：调用时才经 MCP 让终端拍一帧（终端的工具清单里有「拍一帧」时才提供） |
 | `switch_persona` | 换性格（有两个以上性格时才提供） |

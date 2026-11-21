@@ -404,11 +404,3 @@ func (c *Conversation) unexpiredPendingActions(now time.Time) []pendingAction {
 	c.pendingActions = slices.DeleteFunc(c.pendingActions, func(action pendingAction) bool { return now.After(action.ExpiresAt) })
 	return slices.Clone(c.pendingActions)
 }
-
-// hasPendingActions 去掉过期的，看还有没有待确认的操作。
-func (c *Conversation) hasPendingActions(now time.Time) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.pendingActions = slices.DeleteFunc(c.pendingActions, func(action pendingAction) bool { return now.After(action.ExpiresAt) })
-	return len(c.pendingActions) > 0
-}

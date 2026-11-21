@@ -37,7 +37,7 @@ func newGateTalker(t *testing.T, model brain.ChatModel, toolbox brain.Toolbox, t
 }
 
 // 同意：会破坏的调用先存下、要点交给模型去问；主人回答后，算不算同意由模型判断（测试直接指定它调用 confirm_action），
-// 用当初存下的参数执行。执行完，确认的两个工具不再出现。
+// 用当初存下的参数执行。有会破坏的工具时确认、取消的定义一直带着：每次请求的工具清单都一样（提示词缓存不失效）。
 func TestConfirmationGateExecutesStoredCallOnConfirm(t *testing.T) {
 	model := braintest.NewModel(t, deleteNoteThree, braintest.Say("要删掉第 3 条吗？"),
 		braintest.Call("confirm_action", map[string]any{"action_id": "act_1"}), braintest.Say("删好了。"),
@@ -57,8 +57,8 @@ func TestConfirmationGateExecutesStoredCallOnConfirm(t *testing.T) {
 	}
 
 	k.owner("嗯，删吧")
-	if names := model.Requests()[2].ToolNames(); !slices.Contains(names, "confirm_action") || !slices.Contains(names, "cancel_action") {
-		t.Errorf("有待确认的操作时，这一轮要多给确认、取消两个工具：%v", names)
+	if names := model.Requests()[0].ToolNames(); !slices.Contains(names, "confirm_action") || !slices.Contains(names, "cancel_action") {
+		t.Errorf("有会破坏的工具时，第一轮就带着确认、取消两个工具：%v", names)
 	}
 	if got := toolbox.called(); !slices.Equal(got, []string{"delete_note"}) {
 		t.Fatalf("确认后应执行：%v", got)
@@ -71,16 +71,18 @@ func TestConfirmationGateExecutesStoredCallOnConfirm(t *testing.T) {
 	}
 
 	k.owner("谢谢")
-	if names := model.Requests()[4].ToolNames(); slices.Contains(names, "confirm_action") {
-		t.Errorf("执行过了，确认工具不该再出现：%v", names)
+	for i, request := range model.Requests() {
+		if names := request.ToolNames(); !slices.Equal(names, model.Requests()[0].ToolNames()) {
+			t.Errorf("第 %d 次请求的工具清单变了（提示词缓存会失效）：%v", i+1, names)
+		}
 	}
 }
 
-// 拒绝：模型调用 cancel_action，作废、不执行，之后确认工具不再出现。
+// 拒绝：模型调用 cancel_action，作废、不执行；作废之后再确认那个编号也不执行。
 func TestConfirmationGateCancel(t *testing.T) {
 	model := braintest.NewModel(t, deleteNoteThree, braintest.Say("要删掉第 3 条吗？"),
 		braintest.Call("cancel_action", map[string]any{"action_id": "act_1"}), braintest.Say("好，不删了。"),
-		braintest.Say("好的。"))
+		braintest.Call("confirm_action", map[string]any{"action_id": "act_1"}), braintest.Say("已经取消了。"))
 	toolbox := &fakeToolbox{}
 	k := newGateTalker(t, model, toolbox, 0)
 	k.owner("把那条删了")
@@ -91,9 +93,9 @@ func TestConfirmationGateCancel(t *testing.T) {
 	if result := toolResultOf(t, model.Requests()[3]); result["status"] != "cancelled" {
 		t.Errorf("取消的结果：%v", result)
 	}
-	k.owner("嗯")
-	if names := model.Requests()[4].ToolNames(); slices.Contains(names, "confirm_action") {
-		t.Errorf("作废了，确认工具不该再出现：%v", names)
+	k.owner("嗯，删吧")
+	if result := toolResultOf(t, model.Requests()[5]); result["status"] != "refused" || len(toolbox.called()) != 0 {
+		t.Errorf("作废了的编号再确认也不执行：%v %v", result, toolbox.called())
 	}
 }
 
@@ -113,18 +115,19 @@ func TestConfirmationGateExpires(t *testing.T) {
 	}
 }
 
-// 不是登记过的人说的（没认出声纹）：会破坏的操作不做，也不存下等确认。
+// 不是登记过的人说的（没认出声纹）：会破坏的操作不做，也不存下等确认（之后主人确认那个编号也没有可执行的）。
 func TestConfirmationGateDeniesUnverifiedVoice(t *testing.T) {
-	model := braintest.NewModel(t, deleteNoteThree, braintest.Say("这个我不能帮你删。"), braintest.Say("好的。"))
+	model := braintest.NewModel(t, deleteNoteThree, braintest.Say("这个我不能帮你删。"),
+		braintest.Call("confirm_action", map[string]any{"action_id": "act_1"}), braintest.Say("好的。"))
 	toolbox := &fakeToolbox{}
 	k := newGateTalker(t, model, toolbox, 0)
 	k.say("把那条删了")
 	if result := toolResultOf(t, model.Requests()[1]); result["status"] != "denied" {
 		t.Errorf("没认出声纹：应直接不做：%v", result)
 	}
-	k.say("嗯")
-	if names := model.Requests()[2].ToolNames(); slices.Contains(names, "confirm_action") || len(toolbox.called()) != 0 {
-		t.Errorf("不应存下待确认的操作、不应执行：%v %v", names, toolbox.called())
+	k.owner("嗯，删吧")
+	if result := toolResultOf(t, model.Requests()[3]); result["status"] != "refused" || len(toolbox.called()) != 0 {
+		t.Errorf("不应存下待确认的操作、不应执行：%v %v", result, toolbox.called())
 	}
 }
 

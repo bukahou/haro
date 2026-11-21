@@ -242,10 +242,11 @@ type investigationReport struct {
 }
 
 // noMaterialYet 是一份资料都没拿到就想交结论时退回给模型的话。
-const noMaterialYet = "还没有拿到任何资料（搜索、读网页都还没成功过）。这是调查任务，结论必须以查到的资料为准：先用 search_web 搜，再交结论。"
+var noMaterialYet = "还没有拿到任何资料（搜索、读网页都还没成功过）。这是调查任务，结论必须以查到的资料为准：先用 " +
+	searchWebSpec.Name + " 搜，再交结论。"
 
 // conclusionNotTaken 是同一步里既查资料又交结论时，给那次 submit_conclusion 的结果：先看查到的，再交。
-const conclusionNotTaken = "这一步同时在查资料，结论没收下：看完这一步查到的结果，再用 submit_conclusion 交结论。"
+var conclusionNotTaken = "这一步同时在查资料，结论没收下：看完这一步查到的结果，再用 " + submitConclusionSpec.Name + " 交结论。"
 
 // investigate 是调查的主循环：模型决定搜什么、读哪几页；到任何一个上限就不再给工具，逼它用已有材料写结论。
 // 一份资料都没拿到时不交出结论（模型凭印象的话不能当成调查结果）。
@@ -342,7 +343,8 @@ func (r *Runner) investigate(ctx context.Context, question string) investigation
 			r.logger.Warn("调查模型没用 submit_conclusion 交结论：整段文字当结论")
 		}
 		if r.writer != nil { // 交给写结论的模型重写（不带调查模型的草稿，免得被它带偏）；写不成就用草稿
-			instruction := brain.ChatMessage{Role: brain.RoleUser, Text: "资料已经查够了。不要再搜索，根据上面查到的资料写结论，用 submit_conclusion 交出来。"}
+			instruction := brain.ChatMessage{Role: brain.RoleUser,
+				Text: "资料已经查够了。不要再搜索，根据上面查到的资料写结论，用 " + submitConclusionSpec.Name + " 交出来。"}
 			if written, err := r.writeConclusion(ctx, append(messages, instruction), &report, r.writer); err == nil {
 				draft = written
 			} else if ctx.Err() == nil {
@@ -362,7 +364,8 @@ func (r *Runner) investigate(ctx context.Context, question string) investigation
 	}
 	// 到上限：不再给工具，用已有材料写结论（写结论的时间单算；超出的这一点费用在额度上允许）
 	messages = append(messages, brain.ChatMessage{Role: brain.RoleUser,
-		Text: "调查到此为止（" + stop + "）。不要再搜索，根据上面已经查到的资料写结论，用 submit_conclusion 交出来；没查清的地方明确说没查完。"})
+		Text: "调查到此为止（" + stop + "）。不要再搜索，根据上面已经查到的资料写结论，用 " + submitConclusionSpec.Name +
+			" 交出来；没查清的地方明确说没查完。"})
 	writers := []brain.ChatModel{r.model}
 	if r.writer != nil {
 		writers = []brain.ChatModel{r.writer, r.model} // 写结论的模型出错时由调查模型写
@@ -466,7 +469,7 @@ func submittedConclusion(calls []brain.ToolCall) (draft conclusionDraft, submitt
 // 成功拿到的才算资料（report.gathered）；没成功的记下原因。
 func (r *Runner) runTool(ctx context.Context, call brain.ToolCall, question string, report *investigationReport) string {
 	switch call.Name {
-	case "search_web":
+	case searchWebSpec.Name:
 		if report.searches >= r.limits.MaxSearches {
 			return fmt.Sprintf("搜索次数已经用完（上限 %d 次）。请根据已有资料写结论。", r.limits.MaxSearches)
 		}
@@ -480,7 +483,7 @@ func (r *Runner) runTool(ctx context.Context, call brain.ToolCall, question stri
 		report.searches++
 		r.logger.Info("调查：搜索", "query", in.Query, "err", err)
 		return report.lookupResult(text, err)
-	case "read_pages":
+	case readPagesSpec.Name:
 		in, err := brain.DecodeArguments[readPagesInput](call.Arguments)
 		if err != nil || len(in.URLs) == 0 {
 			return failureText(errors.Join(errors.New("urls 不能为空"), err))
@@ -496,8 +499,8 @@ func (r *Runner) runTool(ctx context.Context, call brain.ToolCall, question stri
 		r.logger.Info("调查：读网页", "urls", len(urls), "skipped", len(skipped), "err", err)
 		result := report.lookupResult(text, err)
 		if len(skipped) > 0 { // 多给的网址没读：告诉模型是哪几个，需要的话它再分批读
-			result += fmt.Sprintf("\n一次最多读 %d 个网址，这次没读：%s。需要的话再调用一次 read_pages 读它们。",
-				maxPagesPerRead, strings.Join(skipped, "、"))
+			result += fmt.Sprintf("\n一次最多读 %d 个网址，这次没读：%s。需要的话再调用一次 %s 读它们。",
+				maxPagesPerRead, strings.Join(skipped, "、"), readPagesSpec.Name)
 		}
 		return result
 	default:
@@ -549,21 +552,23 @@ type readPagesInput struct {
 	URLs []string `json:"urls" jsonschema:"要读的网址，取自搜索结果"`
 }
 
-var submitConclusionSpec = brain.ToolSpec{Name: "submit_conclusion",
-	Description: "交出调查结论（结论和来源分开）。查够了就调用它，不要把结论直接写在回答里。",
-	Parameters:  brain.ParametersFor[conclusionDraft]()}
-
-var researchToolSpecs = []brain.ToolSpec{
-	{Name: "search_web", Description: "联网搜索，返回几条结果（标题、网址、摘要）。", Parameters: brain.ParametersFor[searchInput]()},
-	{Name: "read_pages", Description: fmt.Sprintf("读网页正文（一次最多 %d 个网址；每页给出和调查的问题相关的段落）。摘要不够用时才读。",
-		maxPagesPerRead), Parameters: brain.ParametersFor[readPagesInput]()},
-	submitConclusionSpec,
-}
+// 调查用的三个工具：提示词、退回的话里提到它们时都从这里取名字。
+var (
+	searchWebSpec = brain.ToolSpec{Name: "search_web", Description: "联网搜索，返回几条结果（标题、网址、摘要）。",
+		Parameters: brain.ParametersFor[searchInput]()}
+	readPagesSpec = brain.ToolSpec{Name: "read_pages",
+		Description: fmt.Sprintf("读网页正文（一次最多 %d 个网址；每页给出和调查的问题相关的段落）。摘要不够用时才读。", maxPagesPerRead),
+		Parameters:  brain.ParametersFor[readPagesInput]()}
+	submitConclusionSpec = brain.ToolSpec{Name: "submit_conclusion",
+		Description: "交出调查结论（结论和来源分开）。查够了就调用它，不要把结论直接写在回答里。",
+		Parameters:  brain.ParametersFor[conclusionDraft]()}
+	researchToolSpecs = []brain.ToolSpec{searchWebSpec, readPagesSpec, submitConclusionSpec}
+)
 
 func researchPrompt(limits Limits, now time.Time) string {
 	// 告诉模型今天的日期（2026-11-17 实测：不说的话搜索词里写的是两年前的年份，搜回来的都是旧资料）
 	today := fmt.Sprintf("今天是 %s（%s）。要查「现在」「最近」的事时按这个日期来，不要用别的年份。\n", now.Format("2006年1月2日"), brain.WeekdayName(now))
-	return today + fmt.Sprintf(`你是调查助手，在后台替主人查资料。用 search_web 搜索、必要时用 read_pages 读正文，查清楚后直接给出结论。
+	return today + fmt.Sprintf(`你是调查助手，在后台替主人查资料。用 %s 搜索、必要时用 %s 读正文，查清楚后直接给出结论。
 限制：最多搜索 %d 次、最多 %d 轮；够用就停，不要为了凑数多查。搜索词按资料所在的地区和语言写（那里的资料多半用什么语言，就用什么语言搜），不一定和问题的语言相同。
-查清楚后调用 submit_conclusion 交出结论和来源。`, limits.MaxSearches, limits.MaxRounds)
+查清楚后调用 %s 交出结论和来源。`, searchWebSpec.Name, readPagesSpec.Name, limits.MaxSearches, limits.MaxRounds, submitConclusionSpec.Name)
 }
