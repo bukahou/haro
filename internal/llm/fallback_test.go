@@ -81,6 +81,33 @@ func TestFallbackCircuitBreaker(t *testing.T) {
 	}
 }
 
+// 冷却过后放一个请求去试：还是连不上就再冷却一段（这期间不再试）；试探的请求被调用方中途不要了也算主模型通着，
+// 名额照样还回去（不然一直半开，再也不试主模型）。
+func TestFallbackTrialAfterCooldown(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	input := brain.ChatRequest{Messages: []brain.ChatMessage{{Role: brain.RoleUser, Text: "hi"}}}
+	primary := &scriptedModel{err: fmt.Errorf("断网：%w", brain.ErrModelUnavailable)}
+	secondary := &scriptedModel{deltas: []brain.ReplyDelta{{Text: "备用"}}}
+	model := NewFallbackChatModel(primary, "strong", secondary, "cloud", 50*time.Millisecond, logger)
+
+	collect(t, model.StreamReply(context.Background(), input)) // 连不上 → 冷却
+	time.Sleep(80 * time.Millisecond)
+	collect(t, model.StreamReply(context.Background(), input)) // 过了冷却去试：还是连不上 → 再冷却
+	collect(t, model.StreamReply(context.Background(), input)) // 冷却中：不试
+	if primary.calls != 2 || secondary.calls != 3 {
+		t.Fatalf("试探没通应再冷却：主模型 %d 次、备用 %d 次", primary.calls, secondary.calls)
+	}
+
+	time.Sleep(80 * time.Millisecond)
+	primary.err, primary.deltas = nil, []brain.ReplyDelta{{Text: "一"}, {Text: "二"}}
+	for range model.StreamReply(context.Background(), input) {
+		break // 试探的请求：调用方拿到第一段就不要了
+	}
+	if text, _, _, _ := collect(t, model.StreamReply(context.Background(), input)); text != "一二" || primary.calls != 4 {
+		t.Errorf("试探被中途放弃后应照常用主模型：%q（主模型被试了 %d 次）", text, primary.calls)
+	}
+}
+
 // 主模型不是连不上、而是这一次失败了（拒答、请求被拒）：这一次改用备用模型，但不进冷却，下一次照常先试主模型。
 func TestFallbackCoolsDownOnlyWhenUnavailable(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
