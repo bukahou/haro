@@ -99,6 +99,8 @@ func (s *SQLiteStore) LoadConversation(person string) (brain.ConversationRecord,
 }
 
 // SaveConversation 在一个事务里整份替换一个人的对话，并把其中编了号的轮次写进完整的对话记录。
+// 完整记录只增不删：同一编号已经有一轮时，只有说话的时间相同（同一轮：被打断后改成主人听到的部分）才更新；
+// 时间不同就是另一轮，不覆盖它（这份对话照样存下），提交之后返回说明哪几轮没写进记录的错误。
 func (s *SQLiteStore) SaveConversation(record brain.ConversationRecord) error {
 	ctx, cancel := context.WithTimeout(context.Background(), operationTimeout)
 	defer cancel()
@@ -126,6 +128,7 @@ func (s *SQLiteStore) SaveConversation(record brain.ConversationRecord) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM turns WHERE person = ?`, record.Person); err != nil {
 		return err
 	}
+	var kept []int64 // 完整记录里已经是另一轮、没有覆盖的编号
 	for _, part := range []struct {
 		name  string
 		turns []brain.ConversationTurn
@@ -150,15 +153,41 @@ func (s *SQLiteStore) SaveConversation(record brain.ConversationRecord) error {
 			if !seq.Valid { // 没编号的不进完整记录（大脑读出来时会补编号，下次保存再写）
 				continue
 			}
-			// 完整记录：只增不删；同一轮再写一次（被打断、改成主人听到的部分）时跟着更新
-			if _, err := tx.ExecContext(ctx, `INSERT INTO transcript (person, seq, at, messages) VALUES (?, ?, ?, ?)
-				ON CONFLICT (person, seq) DO UPDATE SET at = excluded.at, messages = excluded.messages`,
-				record.Person, seq, at, string(messages)); err != nil {
+			// 完整记录：只增不删；同一轮再写一次（被打断、改成主人听到的部分）时跟着更新。
+			// 同一轮 = 说话的时间相同（IS：旧记录里都不知道时间的也算同一轮）；不同时改 0 行
+			result, err := tx.ExecContext(ctx, `INSERT INTO transcript (person, seq, at, messages) VALUES (?, ?, ?, ?)
+				ON CONFLICT (person, seq) DO UPDATE SET messages = excluded.messages WHERE transcript.at IS excluded.at`,
+				record.Person, seq, at, string(messages))
+			if err != nil {
 				return err
+			}
+			changed, err := result.RowsAffected()
+			if err != nil {
+				return err
+			}
+			if changed == 0 {
+				kept = append(kept, seq.Int64)
 			}
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if len(kept) > 0 {
+		return &TranscriptKeptError{Person: record.Person, Seqs: kept}
+	}
+	return nil
+}
+
+// TranscriptKeptError 表示保存时有几轮没写进完整的对话记录：记录里同一编号已经是另一轮（说话的时间不同），没有覆盖它。
+// 这份对话本身照样存下了。
+type TranscriptKeptError struct {
+	Person string
+	Seqs   []int64
+}
+
+func (e *TranscriptKeptError) Error() string {
+	return fmt.Sprintf("完整的对话记录里 %s 的第 %v 轮已经是另一轮（说话的时间不同），没有覆盖；这份对话照样存下了", e.Person, e.Seqs)
 }
 
 // has 判断库里有没有这个人的对话。

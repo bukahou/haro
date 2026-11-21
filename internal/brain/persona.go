@@ -147,17 +147,25 @@ func (s *Session) systemPrompt() string {
 // 要「说完才算告诉了」的情况（任务板的结论、额度提醒）记进 record，这一轮说完时才确认（closeTurn）。
 func (s *Session) userTurn(text string, record *turnRecord) (situation []ChatMessage, input ChatMessage) {
 	input = ChatMessage{Role: RoleUser, Text: text}
-	if briefing := s.briefing(s.currentConversation().Person(), record); briefing != "" {
+	if briefing := s.briefing(s.currentConversation(), record); briefing != "" {
 		situation = []ChatMessage{{Role: RoleUser, Text: briefing, Synthetic: true}}
 	}
 	return situation, input
 }
 
-// briefing 汇总这一轮要补充的情况：谁在说话 + 各 Briefer。
-func (s *Session) briefing(person string, record *turnRecord) string {
+// conversationUnreadableNote 是之前的对话这一轮没读出来时（存储出错，见 Conversation.detached）给模型的附注。
+const conversationUnreadableNote = "存对话的地方这一轮读不出来：你不记得之前聊过什么，这一轮说的也记不下来。" +
+	"主人提到之前的事、或者要你记住什么时，照实告诉他现在记不住，不要编。"
+
+// briefing 汇总这一轮要补充的情况：谁在说话（之前的对话没读出来时说明）+ 各 Briefer。
+func (s *Session) briefing(conversation *Conversation, record *turnRecord) string {
+	person := conversation.Person()
 	var lines []string
 	if person != "" && person != SharedPerson {
 		lines = append(lines, "现在说话的是："+person+"（按声纹认出）。")
+	}
+	if conversation.detached {
+		lines = append(lines, conversationUnreadableNote)
 	}
 	lines = append(lines, record.extraNotes...)
 	for _, briefer := range s.parts.Briefers {
