@@ -186,6 +186,9 @@ type InputAudioTranscriptionCompleted struct {
 	// 没有登记声纹时不比对（SpeakerChecked = false）。
 	Speaker        string
 	SpeakerChecked bool
+	// SpeakerCheckFailed：开着声纹，但这句算不出声纹（SpeakerChecked 为 false、Speaker 为空）。和没开声纹不是一回事，
+	// 收到的一方自己决定怎么处理
+	SpeakerCheckFailed bool
 	// SpeakerTentative：叫醒这句的声纹只过了唤醒的门槛、没确认时，像是谁（Speaker 为空）
 	SpeakerTentative string
 	Language         string // 识别出的语种（例如 zh、ja、en）；不知道时为空

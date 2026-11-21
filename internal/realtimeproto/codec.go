@@ -283,9 +283,12 @@ func decodeSpeechStopped(data []byte) (ServerEvent, error) {
 }
 
 func (e InputAudioTranscriptionCompleted) toWire() (any, error) {
+	if err := checkSpeakerResult(e.SpeakerCheckFailed, e.SpeakerChecked, e.Speaker); err != nil {
+		return nil, err
+	}
 	wire := wireTranscriptionCompleted{Type: typeTranscriptionCompleted, ItemID: e.ItemID, Transcript: e.Transcript}
-	extra := wireTranscriptExtra{Speaker: e.Speaker, Checked: e.SpeakerChecked, Tentative: e.SpeakerTentative,
-		Language: e.Language, Wake: e.Wake, BargeIn: e.BargeIn, AudioMs: e.AudioMs}
+	extra := wireTranscriptExtra{Speaker: e.Speaker, Checked: e.SpeakerChecked, CheckFailed: e.SpeakerCheckFailed,
+		Tentative: e.SpeakerTentative, Language: e.Language, Wake: e.Wake, BargeIn: e.BargeIn, AudioMs: e.AudioMs}
 	if extra != (wireTranscriptExtra{}) {
 		wire.Haro = &extra
 	}
@@ -294,13 +297,27 @@ func (e InputAudioTranscriptionCompleted) toWire() (any, error) {
 
 func decodeTranscriptionCompleted(data []byte) (ServerEvent, error) {
 	var wire wireTranscriptionCompleted
-	err := json.Unmarshal(data, &wire)
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return nil, err
+	}
 	completed := InputAudioTranscriptionCompleted{ItemID: wire.ItemID, Transcript: wire.Transcript}
 	if extra := wire.Haro; extra != nil {
+		if err := checkSpeakerResult(extra.CheckFailed, extra.Checked, extra.Speaker); err != nil {
+			return nil, err
+		}
 		completed.Speaker, completed.SpeakerChecked, completed.SpeakerTentative = extra.Speaker, extra.Checked, extra.Tentative
+		completed.SpeakerCheckFailed = extra.CheckFailed
 		completed.Language, completed.Wake, completed.BargeIn, completed.AudioMs = extra.Language, extra.Wake, extra.BargeIn, extra.AudioMs
 	}
-	return completed, err
+	return completed, nil
+}
+
+// checkSpeakerResult：声纹的三种结果（没比对 / 比对过 / 算不出来）只能是其中一种，算不出来时不会同时比对过、认出了谁。
+func checkSpeakerResult(failed, checked bool, speaker string) error {
+	if failed && (checked || speaker != "") {
+		return errors.New("speaker_check_failed 时 speaker_checked 要是 false、speaker 要为空")
+	}
+	return nil
 }
 
 func (e InputAudioTranscriptionFailed) toWire() (any, error) {

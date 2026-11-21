@@ -183,6 +183,7 @@ func (s *Session) pumpStreamEvents(stream RecognizerStream) {
 			if job := s.takeJob(e.ItemID); job != nil {
 				job.text = strings.TrimSpace(e.Transcript)
 				job.speaker, job.speakerChecked, job.tentative = e.Speaker, e.SpeakerChecked, e.SpeakerTentative
+				job.speakerCheckFailed = e.SpeakerCheckFailed
 				job.language, job.wake, job.bargeIn = e.Language, e.Wake, e.BargeIn
 				job.audio = time.Duration(e.AudioMs) * time.Millisecond
 				s.logger.Info("阶段耗时", "stage", "brain.recognize", "elapsed", since(job.started))

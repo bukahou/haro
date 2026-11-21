@@ -34,6 +34,7 @@ type Utterance struct {
 	Text           string
 	Speaker        string        // 声纹认出的人
 	SpeakerChecked bool          // 比对过声纹；为 true 且 Speaker 为空表示不是登记的人
+	CheckFailed    bool          // 开着声纹，但这句算不出声纹
 	Tentative      string        // 声纹只过了唤醒的门槛时像是谁
 	Wake           bool          // 这句话之前叫了唤醒词（叫醒后的第一句）
 	BargeIn        bool          // 在 haro 说话时打断说的
@@ -70,8 +71,8 @@ func Speak(t testing.TB, session *brain.Session, stream *Stream, u Utterance) {
 func Recognized(t testing.TB, stream *Stream, u Utterance) {
 	t.Helper()
 	emit(t, stream, realtimeproto.InputAudioTranscriptionCompleted{ItemID: stream.LastItemID(), Transcript: u.Text,
-		Speaker: u.Speaker, SpeakerChecked: u.SpeakerChecked, SpeakerTentative: u.Tentative, Wake: u.Wake, BargeIn: u.BargeIn,
-		Language: u.Language, AudioMs: u.Audio.Milliseconds()})
+		Speaker: u.Speaker, SpeakerChecked: u.SpeakerChecked, SpeakerCheckFailed: u.CheckFailed, SpeakerTentative: u.Tentative,
+		Wake: u.Wake, BargeIn: u.BargeIn, Language: u.Language, AudioMs: u.Audio.Milliseconds()})
 }
 
 // Next 等会话发出下一个事件。

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -430,6 +431,62 @@ func TestUnknownSpeakerIsIgnored(t *testing.T) {
 	}
 	if done := ask("主人"); done.Status != realtimeproto.StatusCompleted {
 		t.Errorf("主人的话应照常回答：%+v", done)
+	}
+}
+
+// warnKeys 记下每条告警级别日志带的属性名（只看级别和属性名，不比对文字）。
+type warnKeys struct {
+	mu   sync.Mutex
+	keys []map[string]bool
+}
+
+func (w *warnKeys) Enabled(context.Context, slog.Level) bool { return true }
+func (w *warnKeys) WithAttrs([]slog.Attr) slog.Handler       { return w }
+func (w *warnKeys) WithGroup(string) slog.Handler            { return w }
+func (w *warnKeys) Handle(_ context.Context, record slog.Record) error {
+	if record.Level < slog.LevelWarn {
+		return nil
+	}
+	keys := map[string]bool{}
+	record.Attrs(func(attr slog.Attr) bool {
+		keys[attr.Key] = true
+		return true
+	})
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.keys = append(w.keys, keys)
+	return nil
+}
+
+// with 是带 key 属性的告警条数。
+func (w *warnKeys) with(key string) int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	count := 0
+	for _, keys := range w.keys {
+		if keys[key] {
+			count++
+		}
+	}
+	return count
+}
+
+// 开着声纹、这句却算不出声纹（第三种结果）：怎么处理还没定，现在照没比对处理（照样回答），但记一条明确的警告。
+func TestUncheckableSpeakerIsAnsweredAndLogged(t *testing.T) {
+	voice := braintest.NewVoice()
+	logs := &warnKeys{}
+	session := brain.NewSession(brain.Components{Front: brain.Agent{Model: &fakeModel{tokens: []string{"好的。"}}},
+		Synthesizer: fakeSynthesizer{}, Streaming: voice,
+		NewSegmenter: func() brain.TextSegmenter { return speech.NewSentenceSegmenter(4, 40) }},
+		brain.Options{MaxHistoryTurn: 6}, slog.New(logs))
+	t.Cleanup(func() { _ = session.Close() })
+	stream := braintest.Open(t, session, voice, realtimeproto.SessionUpdate{})
+	done := braintest.Done(t, braintest.Ask(t, session, stream, braintest.Utterance{Text: "你好", CheckFailed: true}))
+	if done.Status != realtimeproto.StatusCompleted {
+		t.Errorf("现在照没比对处理、照样回答：%+v", done)
+	}
+	if logs.with("speaker_check_failed") != 1 {
+		t.Error("算不出声纹的这句应记一条明确的警告")
 	}
 }
 

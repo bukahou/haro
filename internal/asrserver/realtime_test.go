@@ -617,6 +617,29 @@ func TestVoiceprintGatesWakeAndLabelsSpeaker(t *testing.T) {
 	}
 }
 
+// failingEmbedder 什么都算不出声纹（像句子太短时那样）。
+type failingEmbedder struct{}
+
+func (failingEmbedder) Embed([]float32) ([]float32, error) {
+	return nil, errors.New("语音太短，算不出声纹")
+}
+
+// 开着声纹、这句却算不出声纹：报成第三种结果（speaker_check_failed），不和「没开声纹」混成一个值。
+func TestUncheckableSpeakerIsReported(t *testing.T) {
+	speakers := &SpeakerCheck{Embedder: failingEmbedder{}, Threshold: 0.5,
+		Voiceprints: []voiceprint.Voiceprint{{Name: "主人", Embeddings: [][]float32{{1, 0, 0}}}}}
+	conn, ctx := dialRealtimeWith(t, Dependencies{Transcriber: &fixedTranscriber{text: "几点了"}, Speakers: speakers,
+		NewVoiceDetector: func(VoiceDetectorConfig) (VoiceDetector, error) {
+			return &energyDetector{silenceSamples: 300 * 16}, nil
+		}})
+	startSession(t, ctx, conn, realtimeproto.TurnDetection{Type: "server_vad", SilenceDurationMs: 300}, false)
+	sendPattern(t, ctx, conn, [2]int{200, 0}, [2]int{500, 1}, [2]int{400, 0})
+	completed, ok := readEvents(t, ctx, conn, 3)[2].(realtimeproto.InputAudioTranscriptionCompleted)
+	if !ok || !completed.SpeakerCheckFailed || completed.SpeakerChecked || completed.Speaker != "" {
+		t.Errorf("算不出声纹应报 speaker_check_failed（不算比对过）：%+v", completed)
+	}
+}
+
 // 唤醒时认出来的人，这一句沿用——不让很短的唤醒句重新比对推翻它（真机：唤醒 0.52 认出、唤醒句重比 0.49 判成不认识）。
 func TestWakeUtteranceKeepsWakeSpeaker(t *testing.T) {
 	owner, stranger := []float32{1, 0, 0}, []float32{0, 1, 0}

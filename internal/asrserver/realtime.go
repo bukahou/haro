@@ -465,34 +465,36 @@ func (s *transcriptionSession) finishUtterance(ctx context.Context) error {
 	s.deps.Logger.Info("识别完成", "item", current.itemID, "audio", audio.Duration().Round(time.Millisecond),
 		"elapsed", time.Since(started).Round(time.Millisecond), "text", transcript.Text, "language", transcript.Language,
 		"wake", current.wake, "barge_in", current.bargeIn)
-	speaker, checked := s.identifySpeaker(current.itemID, audio.Data)
+	speaker, checked, failed := s.identifySpeaker(current.itemID, audio.Data)
 	tentative := ""
 	switch {
 	case current.wakeSpeaker != "": // 唤醒时已经认出来了：这句沿用，不让很短的唤醒句重新比对推翻它
-		speaker, checked = current.wakeSpeaker, true
+		speaker, checked, failed = current.wakeSpeaker, true, false
 	case current.wakeGuess != "" && speaker == "":
 		// 唤醒时只过了唤醒门槛：不算认出来，告诉服务端像是谁，由它按这句话的长短决定怎么回（短句受限回答）
 		tentative = current.wakeGuess
 	}
 	return writeEvent(ctx, s.conn, realtimeproto.InputAudioTranscriptionCompleted{ItemID: current.itemID,
-		Transcript: transcript.Text, Speaker: speaker, SpeakerChecked: checked, SpeakerTentative: tentative,
-		Language: transcript.Language, Wake: current.wake, BargeIn: current.bargeIn, AudioMs: audio.Duration().Milliseconds()})
+		Transcript: transcript.Text, Speaker: speaker, SpeakerChecked: checked, SpeakerCheckFailed: failed,
+		SpeakerTentative: tentative, Language: transcript.Language, Wake: current.wake, BargeIn: current.bargeIn,
+		AudioMs: audio.Duration().Milliseconds()})
 }
 
-// identifySpeaker 比对这句话的声纹；没登记声纹或算不出来时 checked = false（服务端不过滤）。
-func (s *transcriptionSession) identifySpeaker(itemID string, pcm []byte) (string, bool) {
+// identifySpeaker 比对这句话的声纹。没登记声纹时不比对（checked、failed 都是 false）；
+// 算不出声纹时 failed = true：和「没比对」分开报，由服务端决定怎么处理。
+func (s *transcriptionSession) identifySpeaker(itemID string, pcm []byte) (name string, checked, failed bool) {
 	if !s.deps.Speakers.enabled() {
-		return "", false
+		return "", false, false
 	}
 	started := time.Now()
 	name, score, err := s.deps.Speakers.identify(pcm16ToFloat(pcm))
 	if err != nil {
-		s.deps.Logger.Warn("声纹算不出来，不过滤", "item", itemID, "err", err)
-		return "", false
+		s.deps.Logger.Warn("这句的声纹算不出来：报给服务端（speaker_check_failed）", "item", itemID, "err", err)
+		return "", false, true
 	}
 	s.deps.Logger.Info("声纹", "item", itemID, "speaker", name, "score", fmt.Sprintf("%.2f", score),
 		"elapsed", time.Since(started).Round(time.Millisecond))
-	return name, true
+	return name, true, false
 }
 
 // applyWakeEvent 处理唤醒门的四个控制事件（会话启用了唤醒门时才会走到这里）。

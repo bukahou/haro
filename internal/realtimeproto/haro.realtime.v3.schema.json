@@ -314,6 +314,10 @@
             "speaker_checked": {
               "type": "boolean"
             },
+            "speaker_check_failed": {
+              "type": "boolean",
+              "description": "开着声纹，但这句算不出声纹（这时 speaker_checked 为 false、speaker 为空）：和没开声纹不是一回事"
+            },
             "speaker_tentative": {
               "type": "string",
               "description": "叫醒这句的声纹只过了唤醒的门槛、没确认时，像是谁"

@@ -62,6 +62,7 @@ func TestServerEventsRoundTrip(t *testing.T) {
 		InputAudioTranscriptionCompleted{ItemID: "item_1", Transcript: "讲个冷笑话"},
 		InputAudioTranscriptionCompleted{ItemID: "item_2", Transcript: "你是谁", Speaker: "主人", SpeakerChecked: true},
 		InputAudioTranscriptionCompleted{ItemID: "item_3", Transcript: "别理我", SpeakerChecked: true},
+		InputAudioTranscriptionCompleted{ItemID: "item_3", Transcript: "嗯", SpeakerCheckFailed: true}, // 开着声纹、这句算不出来
 		InputAudioTranscriptionCompleted{ItemID: "item_4", Transcript: "哈罗哈罗，在吗", SpeakerChecked: true, SpeakerTentative: "主人",
 			Language: "zh", Wake: true, BargeIn: true, AudioMs: 1500},
 		InputAudioTranscriptionFailed{ItemID: "item_4", Code: CodeTranscriptionFailed, Message: "识别失败"},
@@ -110,6 +111,23 @@ func TestErrorWireShape(t *testing.T) {
 		if wire.Error.Code != c.code || wire.Error.Type != c.errType {
 			t.Errorf("%+v 编码成 %s", c.event, data)
 		}
+	}
+}
+
+// 声纹的三种结果只能是一种：算不出来（speaker_check_failed）时还说比对过、认出了谁，编码和解码都拒绝。
+func TestSpeakerCheckFailedIsExclusive(t *testing.T) {
+	for _, event := range []InputAudioTranscriptionCompleted{
+		{ItemID: "item_1", SpeakerCheckFailed: true, SpeakerChecked: true},
+		{ItemID: "item_1", SpeakerCheckFailed: true, Speaker: "主人"},
+	} {
+		if _, err := EncodeServerEvent(event); err == nil {
+			t.Errorf("矛盾的声纹结果不应编码出去：%+v", event)
+		}
+	}
+	data := []byte(`{"type":"conversation.item.input_audio_transcription.completed","item_id":"item_1","transcript":"嗯",` +
+		`"haro":{"speaker":"主人","speaker_checked":true,"speaker_check_failed":true}}`)
+	if _, err := DecodeServerEvent(data); err == nil {
+		t.Errorf("矛盾的声纹结果应解码失败：%s", data)
 	}
 }
 

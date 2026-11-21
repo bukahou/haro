@@ -33,6 +33,8 @@ type transcriptionJob struct {
 	language       string        // 识别出的语种（固定的话用哪种语言念）
 	wake, bargeIn  bool          // 叫醒后的第一句；在 haro 说话时打断说的
 	audio          time.Duration // 这句话多长
+
+	speakerCheckFailed bool // 开着声纹、这句却算不出声纹（声纹的第三种结果，和没比对分开）
 }
 
 // runResponse 执行一次回答：开始时发 response.created，结束时恰好发出一个 response.done。
@@ -97,6 +99,10 @@ func (s *Session) respond(ctx context.Context, job *transcriptionJob) (done real
 	if job.speakerChecked { // 对话跟人走：认出是谁就接这个人的对话
 		s.useConversationOf(job.speaker)
 	} else {
+		if job.speakerCheckFailed { // 开着声纹、这句却算不出来：和没比对一样处理，单独记一条
+			s.logger.Warn("这句的声纹没算出来：按没比对处理（进全家共用的对话、照样回答）", "item", job.item,
+				"speaker_check_failed", true)
+		}
 		s.useConversationOf(SharedPerson)
 	}
 	s.rememberLanguage(job.language)
