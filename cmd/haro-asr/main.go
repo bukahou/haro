@@ -11,8 +11,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
@@ -178,22 +180,48 @@ func loadSpeakerCheck(settings config.ASRSettings, logger *slog.Logger) (*asrser
 	if err != nil {
 		return nil, nil, err
 	}
-	voiceprints, err := voiceprint.LoadAll(settings.VoiceprintsDir, embedder.ModelName())
+	voiceprints, err := loadVoiceprints(settings, embedder.ModelName(), logger)
 	if err != nil {
 		embedder.Close()
 		return nil, nil, err
+	}
+	return &asrserver.SpeakerCheck{Embedder: embedder, Voiceprints: voiceprints, Threshold: settings.SpeakerThreshold,
+			WakeThreshold: settings.WakeSpeakerThreshold, Dir: settings.VoiceprintsDir, Model: embedder.ModelName()},
+		embedder.Close, nil
+}
+
+// loadVoiceprints 读登记的声纹（model 算的才用得上）并记下情况：用不上的（换了说话人识别模型的旧声纹等）逐个警告，
+// 一个都用不上时写明是这个原因，不说成「还没有人登记」。
+// 声纹目录不存在时建出来（第一次登记之前本来就没有，之后登记也存在这里）；建不了、读不了时报错，haro-asr 起不来：
+// 配了目录却读不到多半是路径、挂载或权限不对，当成「没人登记」会悄悄关掉声纹过滤。
+func loadVoiceprints(settings config.ASRSettings, model string, logger *slog.Logger) ([]voiceprint.Voiceprint, error) {
+	dir := settings.VoiceprintsDir
+	if _, err := os.Stat(dir); errors.Is(err, fs.ErrNotExist) {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return nil, fmt.Errorf("建声纹目录: %w", err)
+		}
+		logger.Info("声纹目录还没有：建好了", "dir", dir)
+	}
+	voiceprints, skipped, err := voiceprint.LoadAll(dir, model)
+	if err != nil {
+		return nil, err
+	}
+	for _, unusable := range skipped {
+		logger.Warn("这份声纹用不上（这个人会被当成没登记的人）：重新登记", "file", unusable.File, "name", unusable.Name,
+			"model", unusable.Model, "err", unusable.Err)
 	}
 	names := make([]string, 0, len(voiceprints))
 	for _, v := range voiceprints {
 		names = append(names, v.Name)
 	}
-	if len(voiceprints) == 0 {
-		logger.Warn("声纹已启用，但还没有人登记（在终端用 haro -enroll <名字> 登记）：暂不过滤", "dir", settings.VoiceprintsDir)
-	} else {
-		logger.Info("声纹已启用", "speakers", names, "threshold", settings.SpeakerThreshold,
+	switch {
+	case len(voiceprints) > 0:
+		logger.Info("声纹已启用", "speakers", names, "unusable", len(skipped), "threshold", settings.SpeakerThreshold,
 			"wake_threshold", settings.WakeSpeakerThreshold)
+	case len(skipped) > 0:
+		logger.Warn("声纹已启用，但登记过的声纹都用不上（原因见上面每一份）：重新登记之前暂不过滤", "unusable", len(skipped), "dir", dir)
+	default:
+		logger.Warn("声纹已启用，但还没有人登记（在终端用 haro -enroll <名字> 登记）：暂不过滤", "dir", dir)
 	}
-	return &asrserver.SpeakerCheck{Embedder: embedder, Voiceprints: voiceprints, Threshold: settings.SpeakerThreshold,
-			WakeThreshold: settings.WakeSpeakerThreshold, Dir: settings.VoiceprintsDir, Model: embedder.ModelName()},
-		embedder.Close, nil
+	return voiceprints, nil
 }

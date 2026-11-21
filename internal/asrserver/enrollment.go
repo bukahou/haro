@@ -113,7 +113,7 @@ func (c *SpeakerCheck) enroll(name string, clips [][]float32, appendMode bool) (
 		return result, fmt.Errorf("保存声纹: %w", err)
 	}
 	result.Sentences = len(embeddings)
-	all, err := voiceprint.LoadAll(c.Dir, c.Model)
+	all, _, err := voiceprint.LoadAll(c.Dir, c.Model) // 用不上的那几份（换了模型的）启动时已经逐个记过
 	if err != nil {
 		return result, fmt.Errorf("已保存，但重新加载声纹失败（重启 haro-asr 后生效）: %w", err)
 	}
