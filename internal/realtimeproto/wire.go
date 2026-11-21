@@ -1,6 +1,10 @@
 package realtimeproto
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+	"net/url"
+)
 
 // 本文件是事件在 WebSocket 上的 JSON 结构，全协议只有这一份：编解码在 codec.go，JSON Schema 由它生成（schema.go）。
 //
@@ -13,13 +17,37 @@ import "encoding/json"
 //
 // 两种会话共用这份定义：
 //   - 对话会话（session.type = realtime）：终端 ↔ haro-server，路径 ConversationPath；
-//   - 转写会话（session.type = transcription）：haro-server ↔ haro-asr，路径 TranscriptionPath，只用其中一部分事件。
+//   - 转写会话（session.type = transcription）：haro-server ↔ haro-asr，路径 TranscriptionPath、带 intent=TranscriptionIntent，
+//     只用其中一部分事件。
 
 // ConversationPath 是对话会话的 WebSocket 路径（haro-server 提供）。
 const ConversationPath = "/v1/realtime"
 
-// TranscriptionPath 是转写会话的 WebSocket 路径（haro-asr 提供）。
-const TranscriptionPath = "/v1/realtime?intent=transcription"
+// TranscriptionPath 是转写会话的 WebSocket 路径（haro-asr 提供）；连接地址上带 intent 参数 TranscriptionIntent。
+const TranscriptionPath = "/v1/realtime"
+
+// TranscriptionIntent 是转写会话连接地址上 intent 参数的值（照 OpenAI Realtime 的转写会话）。
+const TranscriptionIntent = "transcription"
+
+// TranscriptionURL 由转写服务的根地址（http(s)://host:port）拼出转写会话的 WebSocket 地址：
+// 按结构把 scheme 换成 ws(s)、接上 TranscriptionPath、带上 intent 参数。
+func TranscriptionURL(base string) (string, error) {
+	address, err := url.Parse(base)
+	if err != nil {
+		return "", fmt.Errorf("转写服务地址 %q: %w", base, err)
+	}
+	switch address.Scheme {
+	case "http":
+		address.Scheme = "ws"
+	case "https":
+		address.Scheme = "wss"
+	default:
+		return "", fmt.Errorf("转写服务地址要是 http(s)://，现在是 %q", base)
+	}
+	address = address.JoinPath(TranscriptionPath)
+	address.RawQuery = url.Values{"intent": {TranscriptionIntent}}.Encode()
+	return address.String(), nil
+}
 
 // TranscriptionSampleRate 是转写会话要求的采样率（识别、唤醒词、声纹的模型都按 16 kHz）。
 const TranscriptionSampleRate = 16000
@@ -50,6 +78,7 @@ const (
 	typeSpeechStarted          = "input_audio_buffer.speech_started"
 	typeSpeechStopped          = "input_audio_buffer.speech_stopped"
 	typeTranscriptionCompleted = "conversation.item.input_audio_transcription.completed"
+	typeTranscriptionFailed    = "conversation.item.input_audio_transcription.failed"
 	typeHaroWakeWordDetected   = "haro.wake_word.detected"
 	typeTranscriptDelta        = "response.output_audio_transcript.delta"
 	typeAudioDelta             = "response.output_audio.delta"
@@ -136,6 +165,13 @@ type wireTranscriptionCompleted struct {
 	ItemID     string                 `json:"item_id"`
 	Transcript string                 `json:"transcript"`
 	Haro       *wireTranscriptSpeaker `json:"haro,omitempty" jsonschema:"haro 扩展：声纹比对结果；没比对时不带"`
+}
+
+type wireTranscriptionFailed struct {
+	Type         string        `json:"type"`
+	ItemID       string        `json:"item_id" jsonschema:"识别失败的是哪一句话（和 speech_stopped 的 item_id 一致）"`
+	ContentIndex int           `json:"content_index"`
+	Error        wireErrorBody `json:"error"`
 }
 
 type wireTranscriptSpeaker struct {

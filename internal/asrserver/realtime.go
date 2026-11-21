@@ -75,8 +75,8 @@ func semanticMaxWait(eagerness string) time.Duration {
 
 // handleRealtimeTranscription 实现 Realtime 转写会话的子集（事件定义见 realtimeproto）。
 func handleRealtimeTranscription(w http.ResponseWriter, r *http.Request, deps Dependencies) {
-	if r.URL.Query().Get("intent") != "transcription" {
-		writeError(w, http.StatusBadRequest, "只支持 intent=transcription")
+	if r.URL.Query().Get("intent") != realtimeproto.TranscriptionIntent {
+		writeError(w, http.StatusBadRequest, "只支持 intent="+realtimeproto.TranscriptionIntent)
 		return
 	}
 	if deps.NewVoiceDetector == nil {
@@ -106,7 +106,11 @@ func handleRealtimeTranscription(w http.ResponseWriter, r *http.Request, deps De
 		"eagerness", turn.Eagerness, "prefix_ms", turn.PrefixPaddingMs, "threshold", turn.Threshold,
 		"wake_word", session.wakeEnabled)
 	err = session.run(ctx)
-	if websocket.CloseStatus(err) == websocket.StatusNormalClosure || errors.Is(err, io.EOF) || ctx.Err() != nil {
+	switch {
+	case ctx.Err() != nil: // 会话的 context 由服务派生：取消 = 服务在关停（客户端断开时连接读取会先报错）
+		deps.Logger.Info("转写会话结束", "reason", "服务关停")
+		return
+	case websocket.CloseStatus(err) == websocket.StatusNormalClosure || errors.Is(err, io.EOF):
 		deps.Logger.Info("转写会话结束", "reason", "客户端关闭")
 		return
 	}
@@ -482,8 +486,10 @@ func (s *transcriptionSession) finishUtterance(ctx context.Context) error {
 	}
 	started := time.Now()
 	transcript, err := s.deps.Transcriber.Transcribe(ctx, audio)
-	if err != nil {
-		return writeEvent(ctx, s.conn, realtimeproto.Error{Code: realtimeproto.CodeTranscriptionFailed, Message: "识别失败: " + err.Error()})
+	if err != nil { // 带上是哪一句：服务端等这句结果的回答据此结束（只发不带编号的 error 时那一轮会一直等）
+		s.deps.Logger.Warn("识别失败", "item", current.itemID, "err", err)
+		return writeEvent(ctx, s.conn, realtimeproto.InputAudioTranscriptionFailed{ItemID: current.itemID,
+			Code: realtimeproto.CodeTranscriptionFailed, Message: "识别失败: " + err.Error()})
 	}
 	s.deps.Logger.Info("一句话的范围", "item", current.itemID, "start_ms", current.startSample/samplesPerMs,
 		"end_ms", current.endSample/samplesPerMs, "after_wake_ms", s.sinceWakeMs(current.startSample), "wake", current.wake)

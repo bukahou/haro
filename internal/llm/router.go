@@ -63,10 +63,10 @@ func carriesImage(messages []brain.ChatMessage) bool {
 	return false
 }
 
-// escalated 看本轮主人那句话（最后一条不带画面的用户消息；之后只有工具往来和承载画面的消息）有没有标 Escalate。
+// escalated 看本轮主人那句话（最后一条主人说的用户消息：跳过承载画面的和系统合成的）有没有标 Escalate。
 func escalated(messages []brain.ChatMessage) bool {
 	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Role == brain.RoleUser && len(messages[i].Image) == 0 {
+		if messages[i].Role == brain.RoleUser && len(messages[i].Image) == 0 && !messages[i].Synthetic {
 			return messages[i].Escalate
 		}
 	}

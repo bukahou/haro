@@ -63,11 +63,25 @@ type ProfileSource interface {
 }
 
 // Briefer 在每轮对话前给模型补充即时情况（时间、位置、额度提醒、后台调查的任务板……）。
-// 返回的几行附在这一轮主人的话前面（不放系统提示词：见 Session.userTurn）、不进历史；person 是这一轮说话人的对话名。
+// 给出的几行附在这一轮主人的话前面（不放系统提示词：见 Session.userTurn）、不进历史；person 是这一轮说话人的对话名。
 // 每轮都会调用：不要在这里做网络请求。
 type Briefer interface {
-	Brief(person string) []string
+	Brief(person string) Briefing
 }
+
+// Briefing 是一个 Briefer 这一轮附上的情况。
+type Briefing struct {
+	Lines []string
+	// Delivered 在这一轮说完之后调用：这些情况算是告诉主人了（任务板的结论、额度提醒，下一轮不再附上）。
+	// 被打断、出错时不调用，下一轮照样附上。nil = 不用确认（时间、位置这类每轮重新算的）
+	Delivered func()
+}
+
+// BriefLines 把只给几行情况、不用确认的函数当作 Briefer（时间、位置这类每轮重新算的）。
+type BriefLines func(person string) []string
+
+// Brief 实现 Briefer。
+func (f BriefLines) Brief(person string) Briefing { return Briefing{Lines: f(person)} }
 
 // SpeechSynthesizer 把一句话合成为语音（在内存里传，不落临时文件）。
 // 边合成边产出：第一段声音一到就交给调用方，不等整句合成完。
@@ -134,6 +148,9 @@ type ChatMessage struct {
 	ToolCallID string     `json:"tool_call_id,omitempty"` // tool：对应哪一次调用（ToolCall.ID）
 	// Escalate：这一句交给更强的模型重答（前台模型调用了 ask_stronger_model），选模型的包装层据此换模型。只标在本轮输入上，不存盘
 	Escalate bool `json:"-"`
+	// Synthetic：用户角色里系统合成的消息，不是主人说的话（每轮附带的「现在的情况」、历史里「当时看了画面」的替身）。
+	// 怎么交给模型由各适配层决定；找「本轮主人那句话」时跳过它
+	Synthetic bool `json:"synthetic,omitempty"`
 }
 
 // ReplyDelta 是模型流式输出的一段。
@@ -177,6 +194,10 @@ type ReplyUsage struct {
 	ThinkingChars    int   // 思考内容的字数（只统计，不朗读）；用来查「看不见的输出」
 	LoadMillis       int64 // 本次请求里加载模型花的时间
 	Requests         int   // 这次回答请求了模型几次（调工具时不止一次；add 累加时计数）
+	// Incomplete：请求被打断或出错，用量只知道一部分：OutputTokens 不知道（为 0，不编）；
+	// 知道多少输入取决于厂商（Claude 在流的开头就报了输入）。TokensUnknown：连输入也不知道（还没开始就失败了）
+	Incomplete    bool
+	TokensUnknown bool
 }
 
 // add 把一次模型请求的用量累加进来：调工具时一次回答要请求模型好几次，每次都要计费，
@@ -196,6 +217,7 @@ func (u *ReplyUsage) add(request *ReplyUsage) *ReplyUsage {
 	total.ThinkingChars += request.ThinkingChars
 	total.LoadMillis += request.LoadMillis
 	total.Requests++
+	total.Incomplete = total.Incomplete || request.Incomplete
 	return &total
 }
 

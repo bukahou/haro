@@ -159,8 +159,8 @@ func TestSessionStreamsSentencesInOrder(t *testing.T) {
 
 	// 第二轮：历史里有系统提示词 + 上一轮问答，且不带图片
 	k.ask("你能看到我吗")
-	if len(model.history) != 3 || model.history[0].Role != brain.RoleSystem ||
-		model.history[2].Text != "我看到你坐在电脑前面，旁边有一个杯子。还有键盘。" {
+	if history := withoutSynthetic(model.history); len(history) != 3 || history[0].Role != brain.RoleSystem ||
+		history[2].Text != "我看到你坐在电脑前面，旁边有一个杯子。还有键盘。" {
 		t.Errorf("第二轮历史 = %+v", model.history)
 	}
 	if model.lastInput.Image != nil {
@@ -307,7 +307,18 @@ func TestConversationSurvivesReconnect(t *testing.T) {
 
 	second := newTalker(t, parts, opts)
 	second.ask("你好")
-	if len(model.history) != 2 || model.history[0].Text != "你好" || model.history[1].Text != "你好呀。" { // 没设系统提示词
+	if history := withoutSynthetic(model.history); len(history) != 2 || history[0].Text != "你好" || history[1].Text != "你好呀。" { // 没设系统提示词
 		t.Errorf("重连后应接上之前的对话：%+v", model.history)
 	}
+}
+
+// withoutSynthetic 去掉系统合成的消息（每轮的时间标记、情况说明），只看主人说的话、工具往来和回答。
+func withoutSynthetic(messages []brain.ChatMessage) []brain.ChatMessage {
+	var kept []brain.ChatMessage
+	for _, msg := range messages {
+		if !msg.Synthetic {
+			kept = append(kept, msg)
+		}
+	}
+	return kept
 }

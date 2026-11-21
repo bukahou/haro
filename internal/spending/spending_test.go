@@ -84,7 +84,7 @@ func TestPricing(t *testing.T) {
 func TestGuardLimits(t *testing.T) {
 	ctx := context.Background()
 	ledger := openTestLedger(t)
-	guard := NewGuard(ledger, Limits{ResearchDailyYen: 100, LLMMonthlyYen: 1000, SearchDailyCredits: 30, WarnRatio: 0.8}, quietLogger)
+	guard := NewGuard(ledger, Limits{ResearchDailyYen: 100, MonthlyYen: 1000, SearchDailyCredits: 30, WarnRatio: 0.8}, quietLogger)
 
 	if err := guard.AllowResearch(ctx); err != nil {
 		t.Fatalf("还没花钱，应允许调查：%v", err)
@@ -102,20 +102,26 @@ func TestGuardLimits(t *testing.T) {
 		t.Errorf("28+3 > 30 次应拒绝：%v", err)
 	}
 
-	// 月度：用到 80% 提醒一次（只进一轮提示词），超过上限拒绝
-	if lines := guard.Brief("主人"); lines != nil {
-		t.Errorf("没到 80%% 不该提醒：%v", lines)
+	// 月度：用到 80% 提醒一次（说完那一轮之后不再附上），超过上限拒绝
+	if briefing := guard.Brief("主人"); briefing.Lines != nil || briefing.Delivered != nil {
+		t.Errorf("没到 80%% 不该提醒：%+v", briefing)
 	}
 	_ = ledger.Record(ctx, Charge{Purpose: PurposeChat, Item: "llm:x", Yen: 750})
 	if err := guard.AllowPaidLLM(ctx); err != nil {
 		t.Fatalf("850 < 1000，应允许：%v", err)
 	}
-	if lines := guard.Brief("主人"); len(lines) != 1 || !strings.Contains(lines[0], "1000 日元") {
-		t.Errorf("到 80%% 应提醒一次：%v", lines)
+	briefing := guard.Brief("主人")
+	if len(briefing.Lines) != 1 || !strings.Contains(briefing.Lines[0], "1000 日元") || briefing.Delivered == nil {
+		t.Errorf("到 80%% 应提醒一次：%+v", briefing)
 	}
+	// 那一轮没说完（没确认）：下一轮照样附上
+	if again := guard.Brief("主人"); len(again.Lines) != 1 {
+		t.Errorf("没确认说过之前应一直附上：%+v", again)
+	}
+	briefing.Delivered()
 	_ = guard.AllowPaidLLM(ctx)
-	if lines := guard.Brief("主人"); lines != nil {
-		t.Errorf("同一个月只提醒一次：%v", lines)
+	if again := guard.Brief("主人"); again.Lines != nil {
+		t.Errorf("同一个月只提醒一次：%+v", again)
 	}
 	_ = ledger.Record(ctx, Charge{Purpose: PurposeChat, Item: "llm:x", Yen: 200})
 	if err := guard.AllowPaidLLM(ctx); !errors.Is(err, ErrOverBudget) {
@@ -220,8 +226,8 @@ func TestLedgerUpgradesOldSchema(t *testing.T) {
 func TestMeteredAndBudgetedModels(t *testing.T) {
 	ctx := context.Background()
 	ledger := openTestLedger(t)
-	pricing := Pricing{USDToYen: 100, Models: map[string]TokenPrice{"cloud": {InputUSDPerMillion: 1}}}
-	guard := NewGuard(ledger, Limits{LLMMonthlyYen: 150}, quietLogger)
+	pricing := Pricing{USDToYen: 100, Models: map[string]TokenPrice{"cloud": {InputUSDPerMillion: 1}, "local": {Free: true}}}
+	guard := NewGuard(ledger, Limits{MonthlyYen: 150}, quietLogger)
 	cloud, local := &replyModel{text: "云端"}, &replyModel{text: "本地"}
 	model := NewBudgetedChatModel(
 		NewMeteredChatModel(cloud, "cloud", PurposeChat, pricing, ledger, quietLogger), // 每次 100 万 token = 1 美元 = 100 日元
@@ -262,5 +268,42 @@ func TestLedgerCheckWritable(t *testing.T) {
 			t.Errorf("检查不应改数据：%+v %v", totals, err)
 		}
 		ledger.Close()
+	}
+}
+
+// 模型不在价格表里：记账模型建不起来（服务端起不来），不会悄悄按 0 日元记、让额度管不住它。
+func TestMeteredRequiresPrice(t *testing.T) {
+	pricing := Pricing{USDToYen: 100, Models: map[string]TokenPrice{"cloud": {InputUSDPerMillion: 1}, "local": {Free: true}}}
+	for _, known := range []string{"cloud", "local"} {
+		NewMeteredChatModel(&replyModel{text: "好"}, known, PurposeChat, pricing, openTestLedger(t), quietLogger)
+	}
+	defer func() {
+		if recover() == nil {
+			t.Error("不在价格表里的模型应建不起来")
+		}
+	}()
+	NewMeteredChatModel(&replyModel{text: "好"}, "unknown", PurposeChat, pricing, openTestLedger(t), quietLogger)
+}
+
+// brokenLedger 读不出合计（库坏了、文件被锁住）。
+type brokenLedger struct{ Ledger }
+
+func (brokenLedger) Total(context.Context, time.Time, ...Purpose) (Totals, error) {
+	return Totals{}, errors.New("database disk image is malformed")
+}
+
+// 读不出账本：不知道这个月花了多少，就不调用要花钱的模型，并把原因念给主人（以前照常放行，账本一坏花费就没有上限）。
+func TestBudgetedRefusesWhenLedgerUnreadable(t *testing.T) {
+	ledger := openTestLedger(t)
+	guard := NewGuard(brokenLedger{ledger}, Limits{MonthlyYen: 3000}, quietLogger)
+	cloud := &replyModel{text: "云端"}
+	model := NewBudgetedChatModel(cloud, nil, guard, quietLogger)
+	_, err := collectText(t, model)
+	var spoken brain.SpokenError
+	if !errors.Is(err, ErrLedgerUnavailable) || !errors.As(err, &spoken) || spoken.SpokenMessage() == "" {
+		t.Errorf("应拒绝并给出念给主人的原因：%v", err)
+	}
+	if cloud.calls != 0 {
+		t.Errorf("读不出账本时不应调用要花钱的模型：调用了 %d 次", cloud.calls)
 	}
 }

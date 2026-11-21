@@ -3,10 +3,13 @@ package terminal
 import (
 	"context"
 	"errors"
+	"fmt"
 )
 
-// 选设备规则（v3 H-1 / H-2，v4 第 5 步从 hardware 包搬来）：只看 Device 的 Bus / Default，不认操作系统。
-// override 是配置指定的设备 ID（HARO_AUDIO_SOURCE / HARO_AUDIO_SINK / HARO_CAMERA_DEVICE），非空时直接用（P-2）。
+// 选设备规则：只看 Device 的 Bus / Default，不认操作系统。
+// override 是配置指定的设备 ID（HARO_AUDIO_SOURCE / HARO_AUDIO_SINK / HARO_CAMERA_DEVICE）。
+// 麦克风、音箱指定了也要在这次列出的设备里：不在（被拔掉、蓝牙断了、ID 写错了）就当没有，看守待机等它回来，
+// 而不是拿一个不存在的 ID 去打开、失败、重来。
 
 // CameraNone 是「不用摄像头」的配置值（HARO_CAMERA_DEVICE=none）。
 const CameraNone = "none"
@@ -16,10 +19,38 @@ var (
 	errNoSpeaker    = errors.New("没有找到可用的音箱")
 )
 
+// MissingDeviceError 是配置指定的设备不在这次列出的设备里。Present 是现在有的设备 ID（ID 写错时照着改）。
+type MissingDeviceError struct {
+	Setting string   // 配置项，例如 HARO_AUDIO_SOURCE
+	ID      string   // 配置的设备 ID
+	Present []string // 现在列出的设备 ID
+}
+
+func (e *MissingDeviceError) Error() string {
+	return fmt.Sprintf("配置指定的设备现在不在：%s=%q（现在有：%q）", e.Setting, e.ID, e.Present)
+}
+
+// findConfigured 按 ID 在列出的设备里找配置指定的那个。
+func findConfigured(devices []Device, setting, id string) (Device, error) {
+	present := make([]string, 0, len(devices))
+	for _, device := range devices {
+		if device.ID == id {
+			return device, nil
+		}
+		present = append(present, device.ID)
+	}
+	return Device{}, &MissingDeviceError{Setting: setting, ID: id, Present: present}
+}
+
 // ChooseMicrophone 跟系统默认，但有别的麦克风时不用蓝牙麦克风（蓝牙麦克风会把耳机切到通话模式）。
+// 配置指定了就用指定的那个（不在时返回 *MissingDeviceError）。
 func ChooseMicrophone(devices []Device, override string) (Choice, error) {
 	if override != "" {
-		return Choice{ID: override, Name: override, Reason: "配置指定（HARO_AUDIO_SOURCE）"}, nil
+		device, err := findConfigured(devices, "HARO_AUDIO_SOURCE", override)
+		if err != nil {
+			return Choice{}, err
+		}
+		return Choice{ID: device.ID, Name: device.Name, Reason: "配置指定（HARO_AUDIO_SOURCE）"}, nil
 	}
 	var candidates, bluetooth []Device
 	defaultIsBluetooth := false
@@ -57,9 +88,14 @@ func ChooseMicrophone(devices []Device, override string) (Choice, error) {
 }
 
 // ChooseSpeaker 跟系统默认：ID 留空（每轮打开时用当时的默认设备，蓝牙重连后自动接回），只查出名字写日志。
+// 配置指定了就用指定的那个（不在时返回 *MissingDeviceError）。
 func ChooseSpeaker(devices []Device, override string) (Choice, error) {
 	if override != "" {
-		return Choice{ID: override, Name: override, Reason: "配置指定（HARO_AUDIO_SINK）"}, nil
+		device, err := findConfigured(devices, "HARO_AUDIO_SINK", override)
+		if err != nil {
+			return Choice{}, err
+		}
+		return Choice{ID: device.ID, Name: device.Name, Reason: "配置指定（HARO_AUDIO_SINK）"}, nil
 	}
 	if len(devices) == 0 {
 		return Choice{}, errNoSpeaker

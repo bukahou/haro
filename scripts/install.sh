@@ -186,7 +186,8 @@ else
 # 每行 KEY="value"，启动时由 sh 读取。全部配置项：https://github.com/$repo/blob/main/internal/config/config.go
 HARO_SERVER_URL="$server_url"
 
-# 麦克风 / 音箱：空 = 跟系统默认（麦克风会跳过蓝牙的）。设备名见启动日志里 🎤 / 🔊 那两行
+# 麦克风 / 音箱：空 = 跟系统默认（麦克风会跳过蓝牙的）。要指定就填设备 ID（麦克风的 ID 见启动日志 🎤 那一行的 id）；
+# 填的设备不在时终端待机，日志里列出这台机器上现有的 ID
 #HARO_AUDIO_SOURCE=""
 #HARO_AUDIO_SINK=""
 # 摄像头：空 = 自动找（macOS 上要装 ffmpeg）；none = 不用摄像头

@@ -154,6 +154,13 @@ type InputAudioBufferSpeechStopped struct {
 	ItemID     string
 }
 
+// InputAudioTranscriptionFailed 是用户这句话没识别出来（带着是哪一句：等这句结果的回答据此结束，不会一直等着）。
+type InputAudioTranscriptionFailed struct {
+	ItemID  string
+	Code    ErrorCode // 例如 CodeTranscriptionFailed
+	Message string    // 给人看的说明
+}
+
 // InputAudioTranscriptionCompleted 是用户这句话的识别结果。
 type InputAudioTranscriptionCompleted struct {
 	ItemID     string
@@ -195,6 +202,7 @@ func (HaroNotice) Type() string                         { return typeHaroNotice 
 func (InputAudioBufferSpeechStarted) Type() string      { return typeSpeechStarted }
 func (InputAudioBufferSpeechStopped) Type() string      { return typeSpeechStopped }
 func (InputAudioTranscriptionCompleted) Type() string   { return typeTranscriptionCompleted }
+func (InputAudioTranscriptionFailed) Type() string      { return typeTranscriptionFailed }
 func (ResponseOutputAudioTranscriptDelta) Type() string { return typeTranscriptDelta }
 func (ResponseOutputAudioDelta) Type() string           { return typeAudioDelta }
 func (ResponseCreated) Type() string                    { return typeResponseCreated }
@@ -206,6 +214,7 @@ func (HaroNotice) serverEvent()                         {}
 func (InputAudioBufferSpeechStarted) serverEvent()      {}
 func (InputAudioBufferSpeechStopped) serverEvent()      {}
 func (InputAudioTranscriptionCompleted) serverEvent()   {}
+func (InputAudioTranscriptionFailed) serverEvent()      {}
 func (ResponseOutputAudioTranscriptDelta) serverEvent() {}
 func (ResponseOutputAudioDelta) serverEvent()           {}
 func (ResponseCreated) serverEvent()                    {}

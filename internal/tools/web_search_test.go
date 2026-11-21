@@ -19,7 +19,8 @@ import (
 )
 
 // fakeTavily 是假的 Tavily 远程 MCP（Streamable HTTP）：只认 Bearer 密钥，记下收到的参数。
-func fakeTavily(t *testing.T, wantKey string, lastQuery *atomic.Value) *httptest.Server {
+// 返回的 restart 像 Tavily 重启那样忘掉所有会话（之前的会话再来请求就是「会话不存在」）。
+func fakeTavily(t *testing.T, wantKey string, lastQuery *atomic.Value) (*httptest.Server, func()) {
 	t.Helper()
 	server := mcp.NewServer(&mcp.Implementation{Name: "fake-tavily", Version: "0.0.1"}, nil)
 	type searchInput struct {
@@ -47,14 +48,18 @@ func fakeTavily(t *testing.T, wantKey string, lastQuery *atomic.Value) *httptest
 		body, _ := json.Marshal(map[string]any{"results": results, "failed_results": []map[string]any{{"url": "https://bad.example", "error": "404"}}})
 		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: string(body)}}}, nil, nil
 	})
-	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, nil)
+	var handler atomic.Pointer[mcp.StreamableHTTPHandler]
+	restart := func() {
+		handler.Store(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, nil))
+	}
+	restart()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer "+wantKey {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		handler.ServeHTTP(w, r)
-	}))
+		handler.Load().ServeHTTP(w, r)
+	})), restart
 }
 
 // countingMeter 记下额度检查与记账；allowErr 非空时拒绝。
@@ -73,16 +78,13 @@ func TestTavilyQuickSearch(t *testing.T) {
 	ctx := context.Background()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	var lastQuery atomic.Value
-	server := fakeTavily(t, "tvly-test", &lastQuery)
+	server, _ := fakeTavily(t, "tvly-test", &lastQuery)
 	defer server.Close()
 
-	if _, err := ConnectTavily(ctx, server.URL, "tvly-wrong", nil, logger); err == nil {
+	if _, err := NewTavilySearcher(server.URL, "tvly-wrong", nil, logger).Search(ctx, "x", 3); err == nil {
 		t.Fatal("密钥不对应连不上")
 	}
-	searcher, err := ConnectTavily(ctx, server.URL, "tvly-test", nil, logger)
-	if err != nil {
-		t.Fatal(err)
-	}
+	searcher := NewTavilySearcher(server.URL, "tvly-test", nil, logger)
 	defer searcher.Close()
 
 	meter := &countingMeter{}
@@ -127,5 +129,49 @@ func TestTavilyQuickSearch(t *testing.T) {
 	}
 	if searcher.ReadCredits(1) != 1 || searcher.ReadCredits(5) != 1 || searcher.ReadCredits(6) != 2 {
 		t.Error("抓取每 5 页 1 积分")
+	}
+}
+
+// 启动时不连；第一次用到时才连。Tavily 重启（会话没了）后：当次丢掉旧会话、重连再试一次，照样搜得到。
+func TestTavilyConnectsLazilyAndReconnects(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	var lastQuery atomic.Value
+	var requests atomic.Int32
+	fake, restart := fakeTavily(t, "tvly-test", &lastQuery)
+	defer fake.Close()
+	counting := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		proxy := fake.URL + r.URL.Path
+		request, _ := http.NewRequestWithContext(r.Context(), r.Method, proxy, r.Body)
+		request.Header = r.Header.Clone()
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		defer response.Body.Close()
+		for key, values := range response.Header {
+			w.Header()[key] = values
+		}
+		w.WriteHeader(response.StatusCode)
+		_, _ = io.Copy(w, response.Body)
+	}))
+	defer counting.Close()
+
+	searcher := NewTavilySearcher(counting.URL, "tvly-test", nil, logger)
+	defer searcher.Close()
+	if requests.Load() != 0 {
+		t.Fatal("创建时不应连 Tavily")
+	}
+	if _, err := searcher.Search(ctx, "第一次", 3); err != nil {
+		t.Fatalf("第一次用到时应连上并搜到：%v", err)
+	}
+	restart() // Tavily 重启：旧会话没了
+	if _, err := searcher.Search(ctx, "重启之后", 3); err != nil {
+		t.Fatalf("会话断了应重连再试一次：%v", err)
+	}
+	if got := lastQuery.Load(); got != "重启之后|3|basic|false" {
+		t.Errorf("重连后的搜索应到达服务：%v", got)
 	}
 }

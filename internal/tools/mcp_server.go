@@ -83,7 +83,16 @@ func (s *MCPServer) Tool(name string) *mcp.Tool {
 	return nil
 }
 
-// Call 调用一个工具，返回文字结果；工具报错时返回 error。
+// ToolError 是工具服务正常回应、但说这次调用出错了（参数不对、查不到……）：连接没问题，重连也没用。
+// 其他错误（连不上、会话断了）不是这个类型。
+type ToolError struct {
+	Tool string
+	Text string // 服务给的说明
+}
+
+func (e *ToolError) Error() string { return e.Text }
+
+// Call 调用一个工具，返回文字结果；工具报错时返回 *ToolError，连接出问题时返回其他错误。
 func (s *MCPServer) Call(ctx context.Context, name string, arguments map[string]any) (string, error) {
 	if arguments == nil {
 		arguments = map[string]any{}
@@ -94,7 +103,7 @@ func (s *MCPServer) Call(ctx context.Context, name string, arguments map[string]
 	}
 	text := resultText(result)
 	if result.IsError {
-		return "", fmt.Errorf("%s", text)
+		return "", &ToolError{Tool: name, Text: text}
 	}
 	return text, nil
 }

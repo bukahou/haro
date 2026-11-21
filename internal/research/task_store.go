@@ -78,13 +78,17 @@ type TaskStore interface {
 	Create(ctx context.Context, person, question string) (Task, error)
 	Get(ctx context.Context, id int64) (Task, error)
 	MarkRunning(ctx context.Context, id int64) error
-	Finish(ctx context.Context, id int64, status Status, conclusion string, sources []string, reason string) error
+	// Finish 结束一个还在排队或在查的任务；返回这次有没有结束它（已经结束的不改：取消和查完同时到时，先到的算数）。
+	Finish(ctx context.Context, id int64, status Status, conclusion string, sources []string, reason string) (bool, error)
 	// Active 是所有人排队中、在查的任务（按派出顺序）。
 	Active(ctx context.Context) ([]Task, error)
 	// Recent 是某人最近的任务（新的在前）。
 	Recent(ctx context.Context, person string, limit int) ([]Task, error)
 	// Unreported 是某人已经结束、还没告诉过的任务。
 	Unreported(ctx context.Context, person string) ([]Task, error)
+	// Board 是某人的任务板：排队中、在查的，加上已经结束、还没告诉过的（按派出顺序）。
+	// 一次查询读出来，是同一时刻的快照：同一个任务不会既算在查、又算查完。
+	Board(ctx context.Context, person string) ([]Task, error)
 	MarkReported(ctx context.Context, ids ...int64) error
 	// Search 按问题或结论里的关键词找某人以前的任务（「上周让你查的那个」）。
 	Search(ctx context.Context, person, query string, limit int) ([]Task, error)
@@ -208,11 +212,17 @@ func (s *sqliteTaskStore) MarkRunning(ctx context.Context, id int64) error {
 	return err
 }
 
-func (s *sqliteTaskStore) Finish(ctx context.Context, id int64, status Status, conclusion string, sources []string, reason string) error {
-	_, err := s.db.ExecContext(ctx,
-		`UPDATE research_tasks SET status = ?, conclusion = ?, sources = ?, stop_reason = ?, finished_at = ? WHERE id = ?`,
-		string(status), conclusion, strings.Join(sources, "\n"), reason, time.Now().Unix(), id)
-	return err
+func (s *sqliteTaskStore) Finish(ctx context.Context, id int64, status Status, conclusion string, sources []string, reason string) (bool, error) {
+	result, err := s.db.ExecContext(ctx,
+		`UPDATE research_tasks SET status = ?, conclusion = ?, sources = ?, stop_reason = ?, finished_at = ?
+		 WHERE id = ? AND status IN (?, ?)`,
+		string(status), conclusion, strings.Join(sources, "\n"), reason, time.Now().Unix(), id,
+		string(StatusQueued), string(StatusRunning))
+	if err != nil {
+		return false, err
+	}
+	changed, err := result.RowsAffected()
+	return changed == 1, err
 }
 
 func (s *sqliteTaskStore) Active(ctx context.Context) ([]Task, error) {
@@ -226,6 +236,11 @@ func (s *sqliteTaskStore) Recent(ctx context.Context, person string, limit int) 
 func (s *sqliteTaskStore) Unreported(ctx context.Context, person string) ([]Task, error) {
 	return s.query(ctx, `WHERE person = ? AND reported = 0 AND status NOT IN (?, ?, ?) ORDER BY id`,
 		person, string(StatusQueued), string(StatusRunning), string(StatusCancelled))
+}
+
+func (s *sqliteTaskStore) Board(ctx context.Context, person string) ([]Task, error) {
+	return s.query(ctx, `WHERE person = ? AND (status IN (?, ?) OR (reported = 0 AND status NOT IN (?, ?, ?))) ORDER BY id`,
+		person, string(StatusQueued), string(StatusRunning), string(StatusQueued), string(StatusRunning), string(StatusCancelled))
 }
 
 func (s *sqliteTaskStore) MarkReported(ctx context.Context, ids ...int64) error {

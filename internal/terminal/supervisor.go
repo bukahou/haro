@@ -1,12 +1,13 @@
 // Package terminal 是终端的看守：按状态机把终端一直跑下去，除非收到关机信号，否则不退出。
 //
-//	连服务端（断了就按 1→2→4…→30 秒的间隔重连）
-//	  → 等麦克风（没有就待机，每 2 秒查一次）
-//	  → 运行对话（assistant）；同时每 2 秒按选择规则重新选一次设备
+//	连服务端（断了就按翻倍的间隔重连）
+//	  → 等麦克风（没有、或指定的那个不在，就待机，按翻倍的间隔再查）
+//	  → 运行对话（assistant）；同时每隔 Poll 按选择规则重新选一次设备
 //
 // 运行中任何一处出错（服务端断了、麦克风没了、该换麦克风了），都关掉这条连接、退回「连服务端」重来。
-// 服务端断开超过 10 秒，用本地提示音说一声；恢复时再说一声（断开时终端听不出唤醒词，只能主动说）。
+// 服务端断开超过 OfflineNotice，用本地提示音说一声；恢复时再说一声（断开时终端听不出唤醒词，只能主动说）。
 // 协议版本和服务端不兼容时重连没用：提示一次，之后隔很久才再试，等人把两端升到同一版本。
+// 各个时间的默认值见 DefaultTiming。
 package terminal
 
 import (
@@ -15,6 +16,8 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/failsafe-go/failsafe-go"
+	"github.com/failsafe-go/failsafe-go/retrypolicy"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/bukahou/haro/internal/assistant"
@@ -32,11 +35,13 @@ type Connection interface {
 
 // Devices 是某一刻的设备情况。
 type Devices struct {
-	Microphone    Choice
-	HasMicrophone bool
-	Speaker       Choice
-	HasSpeaker    bool
-	Camera        string // 现在能用的摄像头名字；空 = 没有
+	Microphone      Choice
+	HasMicrophone   bool
+	WhyNoMicrophone error // 没有麦克风的原因（列不出来、一个都没有、指定的那个不在）；有麦克风时为 nil
+	Speaker         Choice
+	HasSpeaker      bool
+	WhyNoSpeaker    error  // 没有音箱的原因；有音箱时为 nil
+	Camera          string // 现在能用的摄像头名字；空 = 没有
 }
 
 // Session 是一次对话运行（assistant.Assistant 满足它）。
@@ -62,16 +67,17 @@ type Parts struct {
 // Timing 是看守的各个时间。
 type Timing struct {
 	OfflineNotice time.Duration // 服务端断开这么久才提示（躲开 make deploy 这种几秒的重启）
-	Poll          time.Duration // 多久查一次设备
-	BackoffMin    time.Duration // 重连间隔：从这么久开始翻倍
-	BackoffMax    time.Duration // 重连间隔上限
+	Poll          time.Duration // 运行中多久查一次设备；待机等麦克风时从这个间隔开始翻倍
+	BackoffMin    time.Duration // 重连服务端的间隔：从这么久开始翻倍
+	BackoffMax    time.Duration // 重试间隔的上限（重连服务端、待机等麦克风都不超过它）
 	// IncompatibleRetry 是协议版本不兼容时多久再试一次（要等人升级，频繁重试没用）；零值 = DefaultTiming 的
 	IncompatibleRetry time.Duration
 }
 
-// DefaultTiming 是看守的默认时间。
+// DefaultTiming 是看守的默认时间。重试间隔上限 5 秒：服务端重启（make deploy、集群里换新版本）几秒就回来，
+// 上限再长，它回来以后终端还要白等十几秒才去连。
 var DefaultTiming = Timing{OfflineNotice: 10 * time.Second, Poll: 2 * time.Second,
-	BackoffMin: time.Second, BackoffMax: 30 * time.Second, IncompatibleRetry: 5 * time.Minute}
+	BackoffMin: time.Second, BackoffMax: 5 * time.Second, IncompatibleRetry: 5 * time.Minute}
 
 // Supervisor 是终端的看守。
 type Supervisor struct {
@@ -233,29 +239,43 @@ func (s *Supervisor) serve(ctx context.Context, conn Connection) error {
 	return errShutdown // Run 正常返回 = 键盘输入结束等，按关机处理
 }
 
-// waitForMicrophone 等到有麦克风为止（没有就待机）；期间服务端断了就返回 errBrainLost。
+// waitForMicrophone 等到有麦克风为止：没有（或指定的那个不在）就待机，按翻倍的间隔再查（从 Poll 开始，最长 BackoffMax）；
+// 进入待机、麦克风回来各记一条日志。期间服务端断了返回 errBrainLost，关机返回 errShutdown。
 func (s *Supervisor) waitForMicrophone(ctx context.Context, conn Connection) (Devices, error) {
-	logged := false
-	for {
-		devices := s.scan()
-		if devices.HasMicrophone {
-			if logged {
-				s.logger.Info("麦克风回来了", "device", devices.Microphone.Name)
-			}
-			return devices, nil
-		}
-		if !logged {
-			s.logger.Warn("没有麦克风：待机，等设备接上")
-			logged = true
-		}
+	waitCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() { // 待机期间服务端断了：不再等，回去重连
 		select {
-		case <-ctx.Done():
-			return Devices{}, errShutdown
 		case <-conn.Done():
-			return Devices{}, errBrainLost
-		case <-time.After(s.timing.Poll):
+			cancel()
+		case <-waitCtx.Done():
 		}
+	}()
+	standby := false
+	policy := retrypolicy.NewBuilder[Devices]().
+		WithBackoff(s.timing.Poll, max(s.timing.Poll, s.timing.BackoffMax)).
+		WithMaxRetries(-1).
+		OnRetryScheduled(func(event failsafe.ExecutionScheduledEvent[Devices]) {
+			if !standby {
+				standby = true
+				s.logger.Warn("没有麦克风：待机，等设备接上", "why", event.LastError())
+			}
+		}).
+		Build()
+	devices, err := failsafe.With(policy).WithContext(waitCtx).Get(func() (Devices, error) {
+		devices := s.scan()
+		return devices, devices.WhyNoMicrophone
+	})
+	switch {
+	case ctx.Err() != nil:
+		return Devices{}, errShutdown
+	case err != nil: // 重试不设次数上限：只有等待被取消（服务端断了）才会带着错误结束
+		return Devices{}, errBrainLost
 	}
+	if standby {
+		s.logger.Info("麦克风回来了", "device", devices.Microphone.Name)
+	}
+	return devices, nil
 }
 
 // watch 在对话运行期间看着连接和设备：服务端断了就结束；该换麦克风时（不在回答中）结束、重来；
@@ -285,7 +305,7 @@ func (s *Supervisor) watch(ctx context.Context, stop context.CancelCauseFunc, co
 			if current.HasSpeaker {
 				s.logger.Info("🔊 音箱", "device", current.Speaker.Name, "why", current.Speaker.Reason)
 			} else {
-				s.logger.Warn("没有音箱：照常听，回答只写日志")
+				s.logger.Warn("没有音箱：照常听，回答只写日志", "why", latest.WhyNoSpeaker)
 			}
 			changed = true
 		}
@@ -331,20 +351,22 @@ func (s *Supervisor) playTone(ctx context.Context, tone realtimeproto.PCMAudio, 
 	}
 }
 
-// scan 列一次设备、按规则选出麦克风和音箱（列不出来、选不出来的就标成没有）。
+// scan 列一次设备、按规则选出麦克风和音箱（列不出来、选不出来的就标成没有，原因记在 WhyNo…）。
 func (s *Supervisor) scan() Devices {
 	var devices Devices
 	if s.parts.CameraName != nil {
 		devices.Camera = s.parts.CameraName()
 	}
-	if microphones, err := s.parts.Catalog.Microphones(); err == nil {
+	microphones, err := s.parts.Catalog.Microphones()
+	if err == nil {
 		devices.Microphone, err = ChooseMicrophone(microphones, s.parts.MicrophoneOverride)
-		devices.HasMicrophone = err == nil
 	}
-	if speakers, err := s.parts.Catalog.Speakers(); err == nil {
+	devices.HasMicrophone, devices.WhyNoMicrophone = err == nil, err
+	speakers, err := s.parts.Catalog.Speakers()
+	if err == nil {
 		devices.Speaker, err = ChooseSpeaker(speakers, s.parts.SpeakerOverride)
-		devices.HasSpeaker = err == nil
 	}
+	devices.HasSpeaker, devices.WhyNoSpeaker = err == nil, err
 	return devices
 }
 

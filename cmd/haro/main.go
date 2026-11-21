@@ -106,11 +106,11 @@ func run(logger *slog.Logger) error {
 		CameraName:         cameraName(camera),
 		Tools:              terminaltools.NewServer(camera, buildinfo.Version, logger),
 		NewSession: func(conn terminal.Connection, devices terminal.Devices) terminal.Session {
-			logger.Info("🎤 麦克风", "device", devices.Microphone.Name, "why", devices.Microphone.Reason)
+			logger.Info("🎤 麦克风", "device", devices.Microphone.Name, "id", devices.Microphone.ID, "why", devices.Microphone.Reason)
 			if devices.HasSpeaker {
 				logger.Info("🔊 音箱", "device", devices.Speaker.Name, "why", devices.Speaker.Reason)
 			} else {
-				logger.Warn("没有音箱：照常听，回答只写日志")
+				logger.Warn("没有音箱：照常听，回答只写日志", "why", devices.WhyNoSpeaker)
 			}
 			return assistant.NewAssistant(assistant.Components{
 				Manual:     keyboard,

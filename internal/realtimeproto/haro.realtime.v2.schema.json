@@ -328,6 +328,50 @@
         "transcript"
       ]
     },
+    "server.conversation.item.input_audio_transcription.failed": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "conversation.item.input_audio_transcription.failed"
+        },
+        "item_id": {
+          "type": "string",
+          "description": "识别失败的是哪一句话（和 speech_stopped 的 item_id 一致）"
+        },
+        "content_index": {
+          "type": "integer"
+        },
+        "error": {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "description": "invalid_request_error 或 server_error"
+            },
+            "code": {
+              "type": "string",
+              "description": "稳定的错误码，客户端按它判断"
+            },
+            "message": {
+              "type": "string",
+              "description": "给人看的说明；措辞会变，不要拿来判断"
+            }
+          },
+          "required": [
+            "type",
+            "code",
+            "message"
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "item_id",
+        "content_index",
+        "error"
+      ]
+    },
     "server.error": {
       "type": "object",
       "properties": {
@@ -663,6 +707,9 @@
     },
     {
       "$ref": "#/$defs/server.conversation.item.input_audio_transcription.completed"
+    },
+    {
+      "$ref": "#/$defs/server.conversation.item.input_audio_transcription.failed"
     },
     {
       "$ref": "#/$defs/server.error"

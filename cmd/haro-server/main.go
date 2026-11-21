@@ -25,6 +25,7 @@ import (
 	"github.com/bukahou/haro/internal/buildinfo"
 	"github.com/bukahou/haro/internal/config"
 	"github.com/bukahou/haro/internal/conversationstore"
+	"github.com/bukahou/haro/internal/graceful"
 	"github.com/bukahou/haro/internal/llm"
 	"github.com/bukahou/haro/internal/netdiag"
 	"github.com/bukahou/haro/internal/notes"
@@ -72,7 +73,11 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	defer shutdownTelemetry(context.Background())
+	defer func() { // 最后一步：在期限内把还没发出的遥测发出去（采集器连不上时不卡住退出）
+		flushCtx, cancel := context.WithTimeout(context.Background(), shutdownTelemetryFlush)
+		defer cancel()
+		_ = shutdownTelemetry(flushCtx)
+	}()
 
 	httpClient := &http.Client{Timeout: settings.RequestTimeout}
 	// Claude 的客户端全进程只建一个，所有用途共用（见 llm.ClaudeAPI：多一个客户端 / HTTP 客户端就多一份令牌缓存，
@@ -96,7 +101,7 @@ func run(logger *slog.Logger) error {
 		logger.Warn("没设 HARO_USAGE_DB：用量只记在内存里，服务端重启后额度重新计算")
 	}
 	guard := spending.NewGuard(ledger, spending.Limits{ResearchDailyYen: settings.ResearchDailyYen,
-		LLMMonthlyYen: settings.MonthlyYen, SearchDailyCredits: settings.SearchDailyCredits, WarnRatio: 0.8}, logger)
+		MonthlyYen: settings.MonthlyYen, SearchDailyCredits: settings.SearchDailyCredits, WarnRatio: 0.8}, logger)
 	logger.Info("费用上限", "research_daily_yen", settings.ResearchDailyYen, "monthly_yen", settings.MonthlyYen,
 		"search_daily_credits", settings.SearchDailyCredits)
 	briefers := []brain.Briefer{brain.ClockBriefer{}, guard} // 每轮补充给模型的即时情况：现在几号几点、额度提醒、任务板
@@ -119,10 +124,10 @@ func run(logger *slog.Logger) error {
 			forecaster := weatherForecaster(ctx, settings, openMeteo, home, weatherHTTP, logger)
 			builtins = append(builtins, tools.WeatherTools(openMeteo, forecaster, home, logger)...)
 			if home != nil {
-				briefers = append(briefers, weather.LocationNote{Home: home}) // 每轮告诉模型主人家大致在哪（城市级）
+				briefers = append(briefers, brain.BriefLines(weather.LocationNote{Home: home}.Brief)) // 每轮告诉模型主人家大致在哪（城市级）
 			}
 		}
-		if searcher := connectWebSearch(ctx, settings, httpClient, logger); searcher != nil {
+		if searcher := connectWebSearch(settings, httpClient, logger); searcher != nil {
 			defer searcher.Close()
 			meter := spending.NewSearchMeter(guard, ledger, pricingOf(settings), spending.PurposeSearch, "tavily")
 			builtins = append(builtins, tools.WebSearchTools(searcher, meter, logger)...)
@@ -170,8 +175,22 @@ func run(logger *slog.Logger) error {
 	}
 	// 对话簿所有终端连接共用：换终端、重连、服务端重启都接得上
 	var conversationStore brain.ConversationStore
-	if settings.ConversationsDir != "" {
-		conversationStore = conversationstore.NewFileStore(settings.ConversationsDir)
+	if settings.ConversationsDB != "" {
+		store, err := conversationstore.OpenSQLite(ctx, settings.ConversationsDB)
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		if settings.ConversationsDir != "" { // 旧的对话文件：导入一次（出错就不启动，不带着空历史开始）
+			imported, err := conversationstore.ImportJSONDir(ctx, store, settings.ConversationsDir, logger)
+			if err != nil {
+				return fmt.Errorf("导入旧的对话文件: %w", err)
+			}
+			if imported > 0 {
+				logger.Info("旧的对话文件已导入对话库", "people", imported, "dir", settings.ConversationsDir)
+			}
+		}
+		conversationStore = store
 	}
 	components.Conversations = brain.NewConversationBook(conversationStore, options, logger)
 	if settings.ProfileDir != "" { // 主人资料：外部注入，改了文件下一轮就生效
@@ -209,20 +228,24 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	server := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second}
-	go func() {
-		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = server.Shutdown(shutdownCtx)
-	}()
 	logger.Info("haro-server 启动", "version", buildinfo.Version, "listen", listener.Addr().String(), "model", activeModel(settings), "tts", settings.TTS,
 		"personas", len(options.Personas))
-	if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	// 收到退出信号：停止接新连接 → 结束会话（每一轮收尾、落盘）→ 返回后 defer 依次停后台调查、关数据库、发出遥测
+	if _, err := graceful.Serve(ctx, listener, handler, graceful.Timing{Shutdown: shutdownRequests, Drain: shutdownSessions},
+		logger); err != nil {
 		return err
 	}
 	return ctx.Err()
 }
+
+// 关停各步的期限（加起来 10 秒，比 k8s 的宽限期 30 秒短）：停止接新连接、等普通请求 2 秒 → 会话收尾 5 秒 →
+// 后台调查停下 2 秒 → 遥测发出 1 秒。
+const (
+	shutdownRequests       = 2 * time.Second
+	shutdownSessions       = 5 * time.Second
+	shutdownResearch       = 2 * time.Second
+	shutdownTelemetryFlush = 1 * time.Second
+)
 
 // brainHandler 是服务端的全部 HTTP 入口：对话（WebSocket）+ 远程登记声纹（转给 haro-asr）+ 存活 / 就绪检查。
 // 终端只认识服务端的地址；haro-asr 只监听本机（集群里在同一个 Pod）。
@@ -281,7 +304,7 @@ func buildChatModel(settings config.Settings, claude *llm.ClaudeAPI, httpClient 
 	if purpose == spending.PurposeSummary && maxTokens < summaryMaxTokens {
 		maxTokens = summaryMaxTokens // 摘要最长 300 字，聊天的输出上限可能不够
 	}
-	// 每个具体模型都记账（本地模型不在价目表里，按 0 日元记 token）
+	// 每个具体模型都记账（本地模型在价格表里标了不花钱，照样记 token）
 	newLocal := func(client *http.Client) brain.ChatModel {
 		return spending.NewMeteredChatModel(
 			llm.NewOllamaChatModel(settings.OllamaURL, settings.Model, settings.ContextSize, settings.ModelKeepAlive, client),
@@ -375,9 +398,9 @@ func newCloudChatModel(settings config.Settings, claude *llm.ClaudeAPI, model st
 	return llm.NewOpenAIChatModel(settings.CloudLLMURL, model, settings.CloudLLMAPIKey, maxTokens, client)
 }
 
-// pricingOf 是把用量折成日元的单价（都来自配置）：云端模型，以及设了的话更强的模型。
+// pricingOf 是把用量折成日元的单价（都来自配置）：云端模型、设了的话更强的模型；本地模型标成不花钱。
 func pricingOf(settings config.Settings) spending.Pricing {
-	models := map[string]spending.TokenPrice{settings.CloudLLMModel: {
+	models := map[string]spending.TokenPrice{settings.Model: {Free: true}, settings.CloudLLMModel: {
 		InputUSDPerMillion: settings.CloudLLMPriceIn, OutputUSDPerMillion: settings.CloudLLMPriceOut,
 		CacheReadUSDPerMillion: settings.CloudLLMPriceCacheRead, CacheWriteUSDPerMillion: settings.CloudLLMPriceCacheWrite}}
 	if settings.StrongLLMModel != "" {
@@ -445,20 +468,14 @@ func weatherForecaster(ctx context.Context, settings config.Settings, primary *w
 	return weather.WithBackup(primary, "Open-Meteo", jma, "日本气象厅", logger)
 }
 
-// connectWebSearch 连接联网搜索；没设密钥或连不上时返回 nil：第三方服务出问题不影响服务端启动，只是没有联网搜索。
-func connectWebSearch(ctx context.Context, settings config.Settings, httpClient *http.Client, logger *slog.Logger) *tools.TavilySearcher {
+// connectWebSearch 准备联网搜索（这时不连：用到时才连，断了自动重连）；没设密钥时返回 nil。
+func connectWebSearch(settings config.Settings, httpClient *http.Client, logger *slog.Logger) *tools.TavilySearcher {
 	if settings.TavilyAPIKey == "" {
 		logger.Info("联网搜索：没设 HARO_TAVILY_API_KEY，不提供")
 		return nil
 	}
-	connectCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	searcher, err := tools.ConnectTavily(connectCtx, settings.TavilyMCPURL, settings.TavilyAPIKey, httpClient, logger)
-	if err != nil {
-		logger.Warn("联网搜索：连不上 Tavily，这次不提供（重启服务端再试）", "err", err)
-		return nil
-	}
-	return searcher
+	logger.Info("联网搜索：Tavily（用到时才连，断了自动重连）")
+	return tools.NewTavilySearcher(settings.TavilyMCPURL, settings.TavilyAPIKey, httpClient, logger)
 }
 
 // startResearch 开启后台调查：任务账本、调查用的模型、上限，并在后台开始处理队列。
@@ -492,10 +509,22 @@ func startResearch(ctx context.Context, settings config.Settings, claude *llm.Cl
 			settings.ResearchEffort, settings.StrongLLMThinking, 2, 0, httpClient), settings.StrongLLMModel, spending.PurposeResearch, pricing, ledger, logger))
 		writer = settings.StrongLLMModel
 	}
-	go runner.Run(ctx)
+	running := make(chan struct{})
+	go func() {
+		defer close(running)
+		runner.Run(ctx) // ctx 随退出信号结束：手上的调查停下（下次启动标成被中断）
+	}()
 	logger.Info("后台调查已开启", "model", settings.ResearchLLM, "conclusion_writer", writer, "timeout", limits.Timeout,
 		"max_rounds", limits.MaxRounds, "max_searches", limits.MaxSearches, "max_tokens", limits.MaxTokens)
-	return runner, func() { store.Close() }, nil
+	stop := func() { // 先等调查的循环退出，再关任务账本：不然它最后一次写任务时库已经关了
+		select {
+		case <-running:
+		case <-time.After(shutdownResearch):
+			logger.Warn("后台调查没在期限内停下：照样关任务账本", "timeout", shutdownResearch)
+		}
+		store.Close()
+	}
+	return runner, stop, nil
 }
 
 // summaryMaxTokens 是写滚动摘要时每次请求的输出上限。

@@ -11,10 +11,10 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -25,6 +25,7 @@ import (
 	"github.com/bukahou/haro/internal/asrserver"
 	"github.com/bukahou/haro/internal/buildinfo"
 	"github.com/bukahou/haro/internal/config"
+	"github.com/bukahou/haro/internal/graceful"
 	"github.com/bukahou/haro/internal/sensevoice"
 	"github.com/bukahou/haro/internal/smartturn"
 	"github.com/bukahou/haro/internal/voiceprint"
@@ -78,13 +79,30 @@ func probeSelf(listen, check string) error {
 	return nil
 }
 
+// 关停：停止接新连接（最多等 shutdownTimeout 让普通请求做完）→ 结束进行中的转写会话 → 等它们退出（最多 sessionDrainTimeout）
+// → 释放模型。两个期限加起来要比 k8s 的宽限期（30 秒）短。
+const (
+	shutdownTimeout     = 3 * time.Second
+	sessionDrainTimeout = 5 * time.Second
+)
+
 func run(settings config.ASRSettings, logger *slog.Logger) error {
+	// 模型是 cgo 里的内存：会话还在用时释放会段错误。所以只在会话都退出之后才释放（见 serve 的返回值）；
+	// 会话没在期限内退出就不释放，进程退出时由系统回收。
+	var models modelReleases
+	releaseModels := true
+	defer func() {
+		if releaseModels {
+			models.releaseAll()
+		}
+	}()
+
 	loadStarted := time.Now()
 	recognizer, err := sensevoice.NewRecognizer(settings.ModelDir, settings.Threads, settings.Language)
 	if err != nil {
 		return err
 	}
-	defer recognizer.Close()
+	models.add(func() { recognizer.Close() })
 	logger.Info("模型已加载", "elapsed", time.Since(loadStarted).Round(time.Millisecond), "threads", settings.Threads)
 
 	newDetector, err := sensevoice.NewSileroDetectorFactory(settings.VADModel)
@@ -97,7 +115,7 @@ func run(settings config.ASRSettings, logger *slog.Logger) error {
 		if err != nil {
 			return err
 		}
-		defer detector.Close()
+		models.add(func() { detector.Close() })
 		turnDetector = detector
 		logger.Info("说完判断（semantic_vad）已启用", "turn_model", settings.TurnModel)
 	}
@@ -108,35 +126,42 @@ func run(settings config.ASRSettings, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	defer release()
+	models.add(release)
 	logger.Info("唤醒词已启用", "keywords_file", kws.KeywordsFile, "threshold", kws.Threshold)
 
 	speakers, closeSpeakers, err := loadSpeakerCheck(settings, logger)
 	if err != nil {
 		return err
 	}
-	defer closeSpeakers()
+	models.add(closeSpeakers)
 
-	server := &http.Server{
-		Addr: settings.Listen,
-		Handler: asrserver.NewHandler(asrserver.Dependencies{Transcriber: recognizer,
-			NewVoiceDetector: newDetector, TurnDetector: turnDetector, NewKeywordSpotter: newKeywordSpotter,
-			Speakers: speakers, Logger: logger}),
-		ReadHeaderTimeout: 10 * time.Second,
-	}
+	handler := asrserver.NewHandler(asrserver.Dependencies{Transcriber: recognizer,
+		NewVoiceDetector: newDetector, TurnDetector: turnDetector, NewKeywordSpotter: newKeywordSpotter,
+		Speakers: speakers, Logger: logger})
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	go func() {
-		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		_ = server.Shutdown(shutdownCtx)
-	}()
-	logger.Info("开始监听", "addr", settings.Listen)
-	if err := server.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+	listener, err := net.Listen("tcp", settings.Listen)
+	if err != nil {
 		return err
 	}
-	return nil
+	logger.Info("开始监听", "addr", settings.Listen)
+	drained, err := graceful.Serve(ctx, listener, handler, graceful.Timing{Shutdown: shutdownTimeout, Drain: sessionDrainTimeout}, logger)
+	releaseModels = drained
+	if drained && err == nil {
+		logger.Info("释放模型后退出")
+	}
+	return err
+}
+
+// modelReleases 是要在退出时释放的模型（按加载的逆序释放）。
+type modelReleases []func()
+
+func (m *modelReleases) add(release func()) { *m = append(*m, release) }
+
+func (m modelReleases) releaseAll() {
+	for i := len(m) - 1; i >= 0; i-- {
+		m[i]()
+	}
 }
 
 // loadSpeakerCheck 加载说话人识别模型和登记的声纹；没指定模型时返回 nil（不比对）。

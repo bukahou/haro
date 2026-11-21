@@ -40,9 +40,9 @@ func TestRollingSummary(t *testing.T) {
 	model := &summaryModel{reply: "主人的车停在 B2。"}
 	book.SummarizeWith(model)
 	conversation := book.Conversation("主人")
-	turn := func(text string) []ChatMessage {
-		return []ChatMessage{{Role: RoleUser, Text: text}, {Role: RoleAssistant, Text: "好的，" + text + "。"},
-			{Role: RoleTool, Text: "工具结果不进摘要"}}
+	turn := func(text string) ConversationTurn {
+		return ConversationTurn{Messages: []ChatMessage{{Role: RoleUser, Text: text}, {Role: RoleAssistant, Text: "好的，" + text + "。"},
+			{Role: RoleTool, Text: "工具结果不进摘要"}}}
 	}
 	for _, text := range []string{"车停在 B2", "第二句", "第三句", "第四句"} {
 		conversation.appendTurn(turn(text), 2) // 窗口 2 轮：第 3、4 轮时掉出 2 轮，还不够一批
@@ -50,7 +50,7 @@ func TestRollingSummary(t *testing.T) {
 	if model.count() != 0 {
 		t.Fatal("没攒够一批不该压缩")
 	}
-	if messages := conversation.messages(); len(messages) != 4*3 {
+	if messages := conversation.messages(); len(messages) != 4*4 { // 每轮：时间标记 + 三条
 		t.Errorf("还没压进摘要的照常带着：%d 条", len(messages))
 	}
 	conversation.appendTurn(turn("第五句"), 2) // 掉出第 3 轮：够 3 轮了
@@ -65,7 +65,7 @@ func TestRollingSummary(t *testing.T) {
 	if !strings.Contains(request, "主人：车停在 B2") || strings.Contains(request, "工具结果") {
 		t.Errorf("压缩的输入：%s", request)
 	}
-	if messages := conversation.messages(); len(messages) != 2*3 {
+	if messages := conversation.messages(); len(messages) != 2*4 {
 		t.Errorf("压进摘要后只带窗口内的 2 轮：%d 条", len(messages))
 	}
 	if record := conversation.record(); record.Summary == "" || len(record.Unsummarized) != 0 {
@@ -80,9 +80,9 @@ func TestNoSummaryKeepsOldBehaviour(t *testing.T) {
 	book := NewConversationBook(nil, Options{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	conversation := book.Conversation("主人")
 	for i := 0; i < 5; i++ {
-		conversation.appendTurn([]ChatMessage{{Role: RoleUser, Text: "x"}, {Role: RoleAssistant, Text: "y"}}, 2)
+		conversation.appendTurn(ConversationTurn{Messages: []ChatMessage{{Role: RoleUser, Text: "x"}, {Role: RoleAssistant, Text: "y"}}}, 2)
 	}
-	if len(conversation.messages()) != 4 || conversation.currentSummary() != "" {
+	if len(conversation.messages()) != 2*3 || conversation.currentSummary() != "" {
 		t.Error("没开摘要：掉出窗口的直接丢")
 	}
 }

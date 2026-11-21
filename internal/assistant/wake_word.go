@@ -80,12 +80,15 @@ func (a *Assistant) handleWakeEvent(ctx context.Context, window *conversationWin
 		a.logger.Info("👂 已唤醒", "keyword", e.Keyword)
 	case realtimeproto.InputAudioBufferSpeechStarted:
 		if window.awake {
+			a.hearing.Store(true)
 			window.hold() // 用户在说话，对话窗口不倒计时
 		}
 	case realtimeproto.InputAudioBufferSpeechStopped:
 		if window.awake {
 			window.hold()
-			if a.respondHandsFree(ctx, e.ItemID, a.uplink.wallClockAt(e.AudioEndMs)) {
+			interrupted := a.respondHandsFree(ctx, e.ItemID, a.uplink.wallClockAt(e.AudioEndMs))
+			a.hearing.Store(false) // 这一轮答完才放开：说完到开始回答之间也不算空闲
+			if interrupted {
 				window.wake() // 被打断：已经醒了，等用户接着说
 				a.logger.Info("👂 打断了，请说")
 				return
@@ -93,6 +96,13 @@ func (a *Assistant) handleWakeEvent(ctx context.Context, window *conversationWin
 			window.restart() // 从回答播完开始重新计时
 		}
 	case realtimeproto.HaroNotice:
+		if e.Kind == realtimeproto.NoticeTranscriptionLost {
+			// 服务端听不见了：正在说的这句已经丢了，不会再有「说完」——不再算在说话，对话窗口照常倒计时
+			a.hearing.Store(false)
+			if window.awake {
+				window.restart()
+			}
+		}
 		a.playNotice(ctx, e)
 	case realtimeproto.Error:
 		a.logger.Error("服务端出错", "message", e.Message)
@@ -108,6 +118,7 @@ func (a *Assistant) sleep(ctx context.Context, window *conversationWindow, reaso
 		return
 	}
 	window.sleep()
+	a.hearing.Store(false) // 说到一半休眠（例如按回车）：之后不会再有「说完」
 	a.logger.Info("💤 " + reason + "，休眠中：叫「" + a.opts.WakeWord.Phrase + "」唤醒（或按回车）")
 	a.playSleepTone(ctx)
 }

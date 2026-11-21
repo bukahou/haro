@@ -127,12 +127,16 @@ func (f *fakeStream) Played() time.Duration { return 0 }
 // rig 是一套可操控的假部件。
 type rig struct {
 	brainUp      atomic.Bool
+	upAfterDials atomic.Int32 // 服务端在第几次连接失败之后起来（0 = 不自己起来）
 	incompatible atomic.Bool  // 服务端的协议版本和终端不兼容
 	dials        atomic.Int32 // 连了几次服务端
-	microphone   atomic.Value // string：空 = 没有麦克风
+	microphone   atomic.Value // string：列出的那一个麦克风的 ID；空 = 没有麦克风
+	micOverride  string       // 配置指定的麦克风 ID
 	speaker      atomic.Bool
 	camera       atomic.Value // string：空 = 摄像头现在不可用
 	mu           sync.Mutex
+	dialedAt     []time.Time // 每次连服务端的时刻
+	micScannedAt []time.Time // 每次列麦克风的时刻
 	conns        []*fakeConn
 	sessions     []Devices
 	fail         chan error
@@ -152,11 +156,17 @@ func newRig() *rig {
 func (r *rig) parts() Parts {
 	return Parts{
 		Dial: func(context.Context) (Connection, error) {
-			r.dials.Add(1)
+			n := r.dials.Add(1)
+			r.mu.Lock()
+			r.dialedAt = append(r.dialedAt, time.Now())
+			r.mu.Unlock()
 			if r.incompatible.Load() {
 				return nil, fmt.Errorf("%w：服务端只支持更新的版本", realtimeproto.ErrIncompatibleProtocol)
 			}
 			if !r.brainUp.Load() {
+				if n == r.upAfterDials.Load() { // 这次还连不上，下一次就起来了
+					r.brainUp.Store(true)
+				}
 				return nil, errors.New("连不上")
 			}
 			conn := newFakeConn()
@@ -165,9 +175,10 @@ func (r *rig) parts() Parts {
 			r.mu.Unlock()
 			return conn, nil
 		},
-		Catalog:    rigCatalog{r},
-		CameraName: func() string { return r.camera.Load().(string) },
-		Tools:      &r.tools,
+		Catalog:            rigCatalog{r},
+		MicrophoneOverride: r.micOverride,
+		CameraName:         func() string { return r.camera.Load().(string) },
+		Tools:              &r.tools,
 		NewSession: func(_ Connection, devices Devices) Session {
 			r.mu.Lock()
 			r.sessions = append(r.sessions, devices)
@@ -184,6 +195,9 @@ func (r *rig) parts() Parts {
 type rigCatalog struct{ r *rig }
 
 func (c rigCatalog) Microphones() ([]Device, error) {
+	c.r.mu.Lock()
+	c.r.micScannedAt = append(c.r.micScannedAt, time.Now())
+	c.r.mu.Unlock()
 	if mic := c.r.microphone.Load().(string); mic != "" {
 		return []Device{{ID: mic, Name: mic, Default: true, Bus: BusUSB}}, nil
 	}
@@ -203,6 +217,16 @@ func (r *rig) lastConn() *fakeConn {
 	return r.conns[len(r.conns)-1]
 }
 func (r *rig) sessionCount() int { r.mu.Lock(); defer r.mu.Unlock(); return len(r.sessions) }
+func (r *rig) micScans() int     { r.mu.Lock(); defer r.mu.Unlock(); return len(r.micScannedAt) }
+
+// gap 是第 i 次和第 i+1 次之间隔了多久（从 0 数）。
+func gap(times []time.Time, i int) time.Duration { return times[i+1].Sub(times[i]) }
+
+func (r *rig) times(which *[]time.Time) []time.Time {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]time.Time(nil), *which...)
+}
 func (r *rig) lastSession() Devices {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -265,17 +289,19 @@ func TestSupervisorReconnectsAndAnnouncesLongOutage(t *testing.T) {
 func TestSupervisorRetriesBeforeAnnouncing(t *testing.T) {
 	r := newRig()
 	r.brainUp.Store(false)
+	r.upAfterDials.Store(2) // 第二次重试（200 ms）失败之后起来：下一次按间隔要到 600 ms，提示时间 300 ms 在这之前
 	timing := Timing{OfflineNotice: 300 * time.Millisecond, Poll: 10 * time.Millisecond,
 		BackoffMin: 200 * time.Millisecond, BackoffMax: time.Second} // 重试在 0、200、600 ms：提示时间 300 ms 落在中间
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go NewSupervisor(r.parts(), timing, slog.New(slog.NewTextHandler(io.Discard, nil))).Run(ctx)
-	time.Sleep(250 * time.Millisecond)
-	r.brainUp.Store(true) // 第二次重试（200 ms）之后、提示时间（300 ms）之前起来
 	eventually(t, "连上并运行", func() bool { return r.sessionCount() == 1 })
-	time.Sleep(50 * time.Millisecond)
+	// 提示音在连上之前播（connect 返回前），所以连上时还没出声就是没出声
 	if n := r.sink.count(); n != 0 {
 		t.Fatalf("到提示时间时服务端已经起来了，不该出声：%d", n)
+	}
+	if n := r.dials.Load(); n != 3 {
+		t.Errorf("应在提示时间先再连一次（第 3 次就连上）：连了 %d 次", n)
 	}
 }
 
@@ -284,7 +310,7 @@ func TestSupervisorWaitsForAndSwitchesMicrophone(t *testing.T) {
 	r := newRig()
 	r.microphone.Store("")
 	stop := startSupervisor(t, r)
-	time.Sleep(50 * time.Millisecond)
+	eventually(t, "待机时查了几次设备", func() bool { return r.micScans() >= 3 })
 	if r.sessionCount() != 0 {
 		t.Fatal("没有麦克风时不该开始运行")
 	}
@@ -352,11 +378,47 @@ func TestSupervisorBacksOffOnIncompatibleProtocol(t *testing.T) {
 	defer cancel()
 	go NewSupervisor(r.parts(), timing, slog.New(slog.NewTextHandler(io.Discard, nil))).Run(ctx)
 	eventually(t, "提示一次", func() bool { return r.sink.count() == 1 })
-	time.Sleep(200 * time.Millisecond) // 平常的重连间隔是 10–20 ms，这段时间里会连十几次
-	if n := r.dials.Load(); n != 1 {
-		t.Fatalf("不兼容时不该频繁重连：连了 %d 次", n)
-	}
 	r.incompatible.Store(false)
 	eventually(t, "隔一段时间再试，连上并运行", func() bool { return r.sessionCount() == 1 })
 	eventually(t, "提示「回来了」", func() bool { return r.sink.count() == 2 })
+	// 平常的重连间隔是 10–20 ms：不兼容之后的下一次要隔够 IncompatibleRetry
+	if dials := r.times(&r.dialedAt); len(dials) != 2 || gap(dials, 0) < timing.IncompatibleRetry {
+		t.Fatalf("不兼容时不该频繁重连：连了 %d 次，前两次间隔 %v", len(dials), gap(dials, 0))
+	}
+}
+
+// 指定的麦克风不在（被拔掉、蓝牙断了、ID 写错了）：待机，不开始运行、不反复重连服务端；它接上后开始运行，用的就是它。
+func TestSupervisorWaitsForConfiguredMicrophone(t *testing.T) {
+	r := newRig()
+	r.micOverride = "bluetooth" // 列出的是 usb，不是指定的这个
+	stop := startSupervisor(t, r)
+	eventually(t, "待机时查了几次设备", func() bool { return r.micScans() >= 3 })
+	if r.sessionCount() != 0 {
+		t.Fatal("指定的麦克风不在：不该开始运行")
+	}
+	if n := r.dials.Load(); n != 1 {
+		t.Fatalf("待机时不该反复重连服务端：连了 %d 次", n)
+	}
+	r.microphone.Store("bluetooth")
+	eventually(t, "指定的麦克风接上后运行", func() bool {
+		return r.sessionCount() == 1 && r.lastSession().Microphone.ID == "bluetooth"
+	})
+	_ = stop()
+}
+
+// 待机时查设备的间隔从 Poll 开始翻倍，到 BackoffMax 为止（只查下限：计时器不会提前到，慢机器上也不会误报）。
+func TestSupervisorStandbyBacksOff(t *testing.T) {
+	r := newRig()
+	r.microphone.Store("")
+	timing := testTiming
+	timing.Poll, timing.BackoffMax = 10*time.Millisecond, 40*time.Millisecond // 间隔 10、20、40、40……
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go NewSupervisor(r.parts(), timing, slog.New(slog.NewTextHandler(io.Discard, nil))).Run(ctx)
+	eventually(t, "待机时查了 5 次设备", func() bool { return r.micScans() >= 5 })
+	scans := r.times(&r.micScannedAt)
+	if gap(scans, 0) < timing.Poll || gap(scans, 2) < 4*timing.Poll || gap(scans, 3) < timing.BackoffMax {
+		t.Errorf("待机时查设备的间隔应从 %v 翻倍到 %v：%v、%v、%v、%v", timing.Poll, timing.BackoffMax,
+			gap(scans, 0), gap(scans, 1), gap(scans, 2), gap(scans, 3))
+	}
 }

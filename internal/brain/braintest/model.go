@@ -73,7 +73,7 @@ func (r Request) System() string {
 // Input 是这一轮主人说的话：从后往前第一条不带图片的用户消息（画面消息排在工具结果之后，不算）。
 func (r Request) Input() brain.ChatMessage {
 	for i := len(r.Messages) - 1; i >= 0; i-- {
-		if msg := r.Messages[i]; msg.Role == brain.RoleUser && len(msg.Image) == 0 {
+		if msg := r.Messages[i]; msg.Role == brain.RoleUser && len(msg.Image) == 0 && !msg.Synthetic {
 			return msg
 		}
 	}

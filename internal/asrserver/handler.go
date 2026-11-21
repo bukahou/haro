@@ -43,7 +43,7 @@ type Dependencies struct {
 // NewHandler 返回挂好路由的 HTTP handler。
 func NewHandler(deps Dependencies) http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /v1/realtime", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET "+realtimeproto.TranscriptionPath, func(w http.ResponseWriter, r *http.Request) {
 		handleRealtimeTranscription(w, r, deps)
 	})
 	mux.HandleFunc(realtimeproto.VoiceprintRoute, func(w http.ResponseWriter, r *http.Request) {

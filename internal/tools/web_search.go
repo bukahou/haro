@@ -8,7 +8,11 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"unicode/utf8"
+
+	"github.com/failsafe-go/failsafe-go"
+	"github.com/failsafe-go/failsafe-go/retrypolicy"
 
 	"github.com/bukahou/haro/internal/brain"
 )
@@ -34,8 +38,13 @@ type SearchMeter interface {
 
 // TavilySearcher 经 Tavily 官方远程 MCP（https://mcp.tavily.com/mcp/）搜索。
 // 只用 tavily_search / tavily_extract 两个工具；crawl / map / research 不用（贵、慢，调查流程由服务端自己控制）。
+// 第一次用到时才连；会话断了（Tavily 重启、网络断过）丢掉旧的，当次重连再试一次，之后用到时照样重连。
 type TavilySearcher struct {
-	server *MCPServer
+	spec   ServerSpec
+	logger *slog.Logger
+
+	mu     sync.Mutex
+	server *MCPServer // nil = 还没连上，或者断了
 }
 
 // Tavily 的积分规则（官方文档）：基础搜索 1 积分；基础抓取每 5 个网页 1 积分。
@@ -44,10 +53,20 @@ const (
 	tavilyPagesPerCredit = 5
 )
 
-// ConnectTavily 连接 Tavily 远程 MCP；密钥放在 Authorization 请求头里（不放网址，免得进日志）。
-func ConnectTavily(ctx context.Context, endpoint, apiKey string, client *http.Client, logger *slog.Logger) (*TavilySearcher, error) {
-	server, err := ConnectMCPServer(ctx, ServerSpec{Name: "tavily", URL: endpoint, Client: client,
-		Headers: map[string]string{"Authorization": "Bearer " + apiKey}}, logger)
+// NewTavilySearcher 准备经 Tavily 远程 MCP 搜索（这时不连）；密钥放在 Authorization 请求头里（不放网址，免得进日志）。
+func NewTavilySearcher(endpoint, apiKey string, client *http.Client, logger *slog.Logger) *TavilySearcher {
+	return &TavilySearcher{logger: logger, spec: ServerSpec{Name: "tavily", URL: endpoint, Client: client,
+		Headers: map[string]string{"Authorization": "Bearer " + apiKey}}}
+}
+
+// connected 返回连着的会话；还没连就连上（并核对要用的两个工具都在）。
+func (t *TavilySearcher) connected(ctx context.Context) (*MCPServer, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.server != nil {
+		return t.server, nil
+	}
+	server, err := ConnectMCPServer(ctx, t.spec, t.logger)
 	if err != nil {
 		return nil, err
 	}
@@ -57,12 +76,45 @@ func ConnectTavily(ctx context.Context, endpoint, apiKey string, client *http.Cl
 			return nil, fmt.Errorf("Tavily 的工具清单里没有 %s（服务改版了？）", name)
 		}
 	}
-	return &TavilySearcher{server: server}, nil
+	t.server = server
+	return server, nil
+}
+
+// drop 丢掉断了的会话（下次用到时重连）。
+func (t *TavilySearcher) drop(server *MCPServer) {
+	t.mu.Lock()
+	if t.server == server {
+		t.server = nil
+	}
+	t.mu.Unlock()
+	_ = server.Close()
+	t.logger.Warn("联网搜索：和 Tavily 的会话断了，下次用到时重连")
+}
+
+// call 调用一个 Tavily 工具。连接出问题（不是 Tavily 说这次调用有错）时丢掉会话、重连再试一次。
+func (t *TavilySearcher) call(ctx context.Context, name string, arguments map[string]any) (string, error) {
+	retry := retrypolicy.NewBuilder[string]().WithMaxRetries(1).
+		HandleIf(func(_ string, err error) bool {
+			var toolErr *ToolError
+			return err != nil && !errors.As(err, &toolErr) && ctx.Err() == nil
+		}).Build()
+	return failsafe.With(retry).WithContext(ctx).Get(func() (string, error) {
+		server, err := t.connected(ctx)
+		if err != nil {
+			return "", fmt.Errorf("连不上 Tavily: %w", err)
+		}
+		text, err := server.CallKnown(ctx, name, arguments)
+		var toolErr *ToolError
+		if err != nil && !errors.As(err, &toolErr) && ctx.Err() == nil {
+			t.drop(server)
+		}
+		return text, err
+	})
 }
 
 // Search 基础深度、不带网页全文（快）。只留标题、网址、摘要给模型（request_id、图片等杂项去掉，省 token）。
 func (t *TavilySearcher) Search(ctx context.Context, query string, maxResults int) (string, error) {
-	text, err := t.server.CallKnown(ctx, "tavily_search", map[string]any{
+	text, err := t.call(ctx, "tavily_search", map[string]any{
 		"query": query, "max_results": maxResults, "search_depth": "basic", "include_raw_content": false})
 	if err != nil {
 		return "", err
@@ -96,7 +148,7 @@ func (t *TavilySearcher) ReadPages(ctx context.Context, urls []string, maxRunesP
 	if focus != "" {
 		arguments["query"] = focus
 	}
-	text, err := t.server.CallKnown(ctx, "tavily_extract", arguments)
+	text, err := t.call(ctx, "tavily_extract", arguments)
 	if err != nil {
 		return "", err
 	}
@@ -135,7 +187,16 @@ func (t *TavilySearcher) ReadCredits(pages int) int {
 }
 
 // Close 断开。
-func (t *TavilySearcher) Close() error { return t.server.Close() }
+func (t *TavilySearcher) Close() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.server == nil {
+		return nil
+	}
+	err := t.server.Close()
+	t.server = nil
+	return err
+}
 
 // 快查（R1）：一次搜索、最多 3 条，当场回答。结果截到这个长度（够模型回答，又不至于每轮都贵）。
 const (

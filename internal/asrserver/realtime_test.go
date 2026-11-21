@@ -3,11 +3,12 @@ package asrserver
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"strings"
+	"net/url"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -86,7 +87,7 @@ func dialRealtime(t *testing.T, factory VoiceDetectorFactory, transcriber Transc
 	t.Cleanup(server.Close)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	t.Cleanup(cancel)
-	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http")+realtimeproto.TranscriptionPath, nil)
+	conn, _, err := websocket.Dial(ctx, transcriptionURL(t, server.URL), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +167,13 @@ func TestRealtimeRejectsBadSessionUpdate(t *testing.T) {
 func TestRealtimeWithoutVADModel(t *testing.T) {
 	server := httptest.NewServer(NewHandler(Dependencies{Transcriber: &lengthTranscriber{}, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}))
 	defer server.Close()
-	resp, err := http.Get(server.URL + realtimeproto.TranscriptionPath)
+	address, err := url.Parse(server.URL) // 普通 HTTP 请求（不升级成 WebSocket）：地址按结构拼
+	if err != nil {
+		t.Fatal(err)
+	}
+	address = address.JoinPath(realtimeproto.TranscriptionPath)
+	address.RawQuery = url.Values{"intent": {realtimeproto.TranscriptionIntent}}.Encode()
+	resp, err := http.Get(address.String())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -331,7 +338,7 @@ func dialWakeSessionWith(t *testing.T, transcriber Transcriber, spotter *fakeSpo
 	t.Cleanup(server.Close)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	t.Cleanup(cancel)
-	conn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(server.URL, "http")+realtimeproto.TranscriptionPath, nil)
+	conn, _, err := websocket.Dial(ctx, transcriptionURL(t, server.URL), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -645,4 +652,59 @@ func writeClientEvent(ctx context.Context, conn *websocket.Conn, event realtimep
 		return err
 	}
 	return conn.Write(ctx, websocket.MessageText, data)
+}
+
+// transcriptionURL 是测试用的转写服务（httptest）上转写会话的地址。
+func transcriptionURL(t *testing.T, base string) string {
+	t.Helper()
+	address, err := realtimeproto.TranscriptionURL(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return address
+}
+
+type failingTranscriber struct{}
+
+func (failingTranscriber) Transcribe(context.Context, realtimeproto.PCMAudio) (Transcript, error) {
+	return Transcript{}, errors.New("模型出错")
+}
+
+// 识别失败：发带编号的 transcription.failed（和 speech_stopped 的编号一致），服务端据此结束等这句的回答。
+func TestRealtimeTranscriptionFailureNamesTheItem(t *testing.T) {
+	factory := func(realtimeproto.TurnDetection) (VoiceDetector, error) {
+		return &energyDetector{silenceSamples: 300 * 16}, nil
+	}
+	conn, ctx := dialRealtime(t, factory, failingTranscriber{}, nil)
+	turn := realtimeproto.TurnDetection{Type: "server_vad", SilenceDurationMs: 300}
+	if err := writeClientEvent(ctx, conn, transcriptionUpdate(turn, false)); err != nil {
+		t.Fatal(err)
+	}
+	for _, part := range []struct {
+		ms   int
+		loud bool
+	}{{200, false}, {500, true}, {400, false}} {
+		for sent := 0; sent < part.ms; sent += 20 {
+			if err := writeClientEvent(ctx, conn, audioChunk(pcmChunk(20, part.loud))); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	var events []realtimeproto.ServerEvent
+	for len(events) < 3 {
+		_, data, err := conn.Read(ctx)
+		if err != nil {
+			t.Fatalf("已收到 %v，读取出错 %v", events, err)
+		}
+		event, err := realtimeproto.DecodeServerEvent(data)
+		if err != nil || event == nil {
+			t.Fatalf("解析 %s: %v", data, err)
+		}
+		events = append(events, event)
+	}
+	stopped, ok1 := events[1].(realtimeproto.InputAudioBufferSpeechStopped)
+	failed, ok2 := events[2].(realtimeproto.InputAudioTranscriptionFailed)
+	if !ok1 || !ok2 || failed.ItemID != stopped.ItemID || failed.Code != realtimeproto.CodeTranscriptionFailed {
+		t.Errorf("识别失败应发带编号的 transcription.failed：%#v", events)
+	}
 }

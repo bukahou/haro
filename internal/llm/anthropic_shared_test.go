@@ -276,3 +276,38 @@ func TestClaudeCheckCredentials(t *testing.T) {
 		t.Errorf("就绪检查不重试：请求了 %d 次", len(paths))
 	}
 }
+
+// 回答被打断（请求被取消）：Claude 在流的开头报了输入，结尾才报输出；照样交出知道的输入，输出不编，标不完整。
+func TestClaudeReportsPartialUsageWhenCancelled(t *testing.T) {
+	started := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeEvents(w, []string{
+			`{"type":"message_start","message":{"id":"msg_p","type":"message","role":"assistant","model":"claude-haiku-5-5","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1200,"cache_read_input_tokens":800,"output_tokens":1}}}`,
+			`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+			`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"从前"}}`,
+		})
+		w.(http.Flusher).Flush()
+		close(started)
+		<-r.Context().Done() // 还在生成
+	}))
+	defer server.Close()
+	model := NewAnthropicChatModel(AnthropicOptions{API: NewClaudeAPI("test-key", server.URL, server.Client()), Model: "claude-haiku-5-5", MaxTokens: 100})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var usage *brain.ReplyUsage
+	for delta, err := range model.StreamReply(ctx, []brain.ChatMessage{{Role: brain.RoleUser, Text: "讲个故事"}}, nil) {
+		if delta.Text != "" {
+			<-started
+			cancel() // 主人打断
+		}
+		if delta.Usage != nil {
+			usage = delta.Usage
+		}
+		if err != nil {
+			break
+		}
+	}
+	if usage == nil || !usage.Incomplete || usage.TokensUnknown || usage.PromptTokens != 2000 || usage.CacheReadTokens != 800 || usage.OutputTokens != 0 {
+		t.Errorf("被取消时应交出开头报的输入（含缓存读）、输出不编、标不完整：%+v", usage)
+	}
+}

@@ -58,11 +58,13 @@ type Assistant struct {
 	logger *slog.Logger
 	uplink micUplink                      // 上传音频的时间轴与静音开关
 	replay chan realtimeproto.ServerEvent // 打断后等取消确认期间收到的事件，留给主循环处理
-	busy   atomic.Bool                    // 正在回答这一轮（请求回答 → 播完）：看守换设备要等它结束
+	busy   atomic.Bool                    // 正在回答这一轮（请求回答 → 播完）
+	// hearing：主人正在说话（服务端报了开始说话，这一轮还没答完）
+	hearing atomic.Bool
 }
 
-// Busy 表示正在回答（从请求回答到播完）；此时不该换麦克风、断开重连。
-func (a *Assistant) Busy() bool { return a.busy.Load() }
+// Busy 表示主人正在说话或正在回答（从开始说话到这一轮播完）；此时换麦克风、断开重连会丢掉这句话。
+func (a *Assistant) Busy() bool { return a.hearing.Load() || a.busy.Load() }
 
 // NewAssistant 组装一个 Assistant。
 func NewAssistant(parts Components, opts Options, logger *slog.Logger) *Assistant {

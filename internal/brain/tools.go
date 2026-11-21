@@ -76,6 +76,7 @@ func expertReport(report FrameReport, spokenDirectly bool) string {
 
 var (
 	expertSaidNote   = "看图更准的专家看了当前画面，已经直接把这句告诉主人：\n"
+	expertRecordNote = "看图更准的专家看了当前画面，它的结论："
 	expertSpokenNote = "看图更准的专家看了当前画面，替你写好了说给主人听的话。照这句说（不用提专家；可以带上你的口吻，" +
 		"但不加内容、不说得更长；调用前说过的话不要再说一遍）：\n"
 	expertDetailsHeading = "\n\n专家看到的细节和依据（主人追问时用，不要念出来；它已经按需要联网核对过，不要再为画面里的东西另外去搜）：\n"
@@ -147,12 +148,26 @@ func (look cameraLook) speakDirectly(calls []ToolCall) bool {
 	return len(calls) == 1 && look.report != nil && look.report.Spoken != ""
 }
 
-// toolResult 是交给模型（并存进历史）的工具结果。
+// toolResult 是交给模型的工具结果。
 func (look cameraLook) toolResult(spokenDirectly bool) string {
 	if look.report != nil {
 		return expertReport(*look.report, spokenDirectly)
 	}
 	return look.result
+}
+
+// historyResult 是历史里这次看画面记成的样子：专家的结论和细节（主人追问时用），不带「照这句说」这类只对这一轮的要求。
+func (look cameraLook) historyResult(spokenDirectly bool) string {
+	switch {
+	case look.report == nil:
+		return look.result
+	case spokenDirectly:
+		return expertReport(*look.report, true) // 已经是记录：告诉了主人什么 + 细节
+	case look.report.Spoken == "":
+		return expertRecordNote + look.report.Details
+	default:
+		return expertRecordNote + "「" + look.report.Spoken + "」" + expertDetailsHeading + look.report.Details
+	}
 }
 
 // needsConfirmation 判断这批调用里有没有要用户口头确认的（MCP destructiveHint）。
@@ -279,29 +294,24 @@ func (s *Session) setPendingConfirmation(calls []ToolCall) {
 func (s *Session) handleConfirmation(ctx context.Context, text string, pending []ToolCall) (realtimeproto.ResponseDone, bool) {
 	switch classifyConfirmation(text) {
 	case confirmYes:
-		trail := []ChatMessage{{Role: RoleAssistant, ToolCalls: pending}} // 真正执行的操作也记进历史
+		// 真正执行的操作也记进这一轮（之后被打断、出错，历史里照样有它）
+		record := newTurnRecord(text)
+		situation, input := s.userTurn(text, record)
+		round := record.beginRound("", pending)
+		trail := []ChatMessage{{Role: RoleAssistant, ToolCalls: pending}}
 		for _, call := range pending {
-			trail = append(trail, ChatMessage{Role: RoleTool, ToolName: call.Name, ToolCallID: call.ID,
-				Text: s.callTool(ctx, call)})
+			result := s.callTool(ctx, call)
+			record.recordResult(round, call, result)
+			s.keepOpenTurn(record)
+			trail = append(trail, ChatMessage{Role: RoleTool, ToolName: call.Name, ToolCallID: call.ID, Text: result})
 		}
 		// 由模型根据执行结果回答：删了哪几条、哪些没找到、失败了为什么，固定的「删掉了」说不清这些。
-		history := append(s.historyWithInstructions(), s.userTurn(text))
+		history := append(append(s.historyWithInstructions(), situation...), input)
 		history = append(history, trail[:len(trail)-1]...)
-		answer, moreTrail, usage, err := s.speakAnswer(ctx, history, trail[len(trail)-1], cameraView{})
-		if ctx.Err() != nil {
-			return realtimeproto.ResponseDone{Status: realtimeproto.StatusCancelled}, true
-		}
-		if err != nil {
-			return s.failed(realtimeproto.ReasonGenerationFailed, "生成回答", err), true
-		}
-		s.remember(text, append(trail, moreTrail...), answer)
-		done := realtimeproto.ResponseDone{Status: realtimeproto.StatusCompleted}
-		if usage != nil {
-			done.Usage = &realtimeproto.Usage{InputTokens: usage.PromptTokens, OutputTokens: usage.OutputTokens}
-		}
-		return done, true
+		answer, usage, err := s.speakAnswer(ctx, history, trail[len(trail)-1], cameraView{}, record)
+		return s.finishAnswer(ctx, record, answer, usage, err), true
 	case confirmNo:
-		s.remember(text, nil, "好的，不做了。")
+		s.rememberTurn(time.Now(), []ChatMessage{{Role: RoleUser, Text: text}, {Role: RoleAssistant, Text: "好的，不做了。"}})
 		return s.speakFixedReply(ctx, "好的，不做了。"), true
 	default:
 		s.logger.Info("用户没有确认，放弃待确认的操作")
