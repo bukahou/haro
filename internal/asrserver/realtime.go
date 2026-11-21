@@ -152,22 +152,23 @@ func startTranscriptionSession(ctx context.Context, conn *websocket.Conn, deps D
 		return nil, realtimeproto.ProtocolErrorf(realtimeproto.CodeInvalidEvent, "必须指定 turn_detection")
 	}
 	turn := *update.TurnDetection
+	if err := turn.Validate(); err != nil { // 写错的取值明确拒绝，不悄悄当成默认值
+		return nil, realtimeproto.ProtocolErrorf(realtimeproto.CodeInvalidEvent, "%v", err)
+	}
 	timing := deps.Timing.orDefault()
 	session := &transcriptionSession{conn: conn, deps: deps, turnDetection: turn, timing: timing,
 		timeline: audioTimeline{keep: samplesIn(timing.History)}, echo: newEchoWindow(timing),
 		turn: turnEnd{cutoff: timing.EndOfTurnCutoff, defaultWait: samplesIn(timing.DefaultWait)}}
 	vadConfig := turn
 	switch turn.Type {
-	case "server_vad":
-	case "semantic_vad":
+	case realtimeproto.TurnServerVAD:
+	case realtimeproto.TurnSemanticVAD:
 		if deps.TurnDetector == nil {
 			return nil, realtimeproto.ProtocolErrorf(realtimeproto.CodeUnsupportedFeature, "haro-asr 启动时没有指定 -turn-model，不支持 semantic_vad")
 		}
 		session.turn.semantic, session.turn.detector = true, deps.TurnDetector
 		session.turn.maxWait = samplesIn(session.timing.maxWait(turn.Eagerness))
 		vadConfig.SilenceDurationMs = int(session.timing.SemanticSilence.Milliseconds())
-	default:
-		return nil, realtimeproto.ProtocolErrorf(realtimeproto.CodeInvalidEvent, "不支持的 turn_detection.type %q（支持 server_vad / semantic_vad）", turn.Type)
 	}
 	if update.WakeWord {
 		if deps.NewKeywordSpotter == nil {

@@ -112,8 +112,6 @@ func (m *scriptedModel) StreamReply(ctx context.Context, request brain.ChatReque
 	}
 }
 
-func (m *scriptedModel) Warmup(context.Context) error { return nil }
-
 // setGate 换掉（或去掉）每次回答前要等的闸。
 func (m *scriptedModel) setGate(gate chan struct{}) {
 	m.mu.Lock()
@@ -724,8 +722,6 @@ func (m *writerModel) StreamReply(_ context.Context, request brain.ChatRequest) 
 		yield(reply, nil)
 	}
 }
-
-func (m *writerModel) Warmup(context.Context) error { return nil }
 
 // 调查模型搜完，结论交给写结论的模型重写：不带调查模型的草稿、不给工具；写结论的模型出错时用草稿。
 func TestResearchWriterWritesConclusion(t *testing.T) {

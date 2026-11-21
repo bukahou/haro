@@ -323,7 +323,7 @@ func startResearch(ctx context.Context, settings config.ServerSettings, deps ser
 	limits := research.DefaultLimits
 	limits.Timeout, limits.MaxRounds = settings.ResearchTimeout, settings.ResearchMaxRounds
 	limits.MaxSearches, limits.MaxTokens = settings.ResearchMaxSearches, settings.ResearchMaxTokens
-	meter := spending.NewSearchMeter(deps.guard, deps.ledger, deps.pricing, spending.PurposeResearch, "tavily")
+	meter := spending.NewSearchMeter(deps.guard, deps.ledger, deps.pricing, spending.PurposeResearch, tools.TavilyName)
 	runner := research.NewRunner(store, model, searcher, meter, deps.guard, limits, logger)
 	writer := "（调查模型自己写）"
 	if settings.StrongLLMFor(config.StrongForResearch) { // 搜索和读网页用便宜的模型，结论交给更强的模型写

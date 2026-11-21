@@ -82,12 +82,15 @@ func (p Pricing) SearchYen(credits int) float64 {
 	return float64(credits) * p.SearchCreditUSD * p.USDToYen
 }
 
+// DefaultWarnRatio 是月度费用用到上限的这个比例时提醒一次（提醒的话由 Guard 交给前台）。
+const DefaultWarnRatio = 0.8
+
 // Limits 是费用上限；0 = 不设上限。
 type Limits struct {
 	ResearchDailyYen   float64 // 后台调查每天最多花多少（默认 100 日元）
 	MonthlyYen         float64 // 每月总费用上限：大模型 + 搜索，不分用途合计
 	SearchDailyCredits int     // 搜索积分每天最多用多少（默认封在 Tavily 免费额度内：每月 1,000 ≈ 每天 30）
-	WarnRatio          float64 // 月度用到这个比例时提醒一次（R5：0.8）
+	WarnRatio          float64 // 月度用到这个比例时提醒一次（DefaultWarnRatio）；0 = 不提醒
 	// MonthlyRaiseYen：主人口头确认一次，这个月的上限临时提高多少；0 = 不能口头提高（到上限就停到下个月）
 	MonthlyRaiseYen float64
 }

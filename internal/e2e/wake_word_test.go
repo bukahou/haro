@@ -100,7 +100,6 @@ func (stubModel) StreamReply(context.Context, brain.ChatRequest) iter.Seq2[brain
 		}
 	}
 }
-func (stubModel) Warmup(context.Context) error { return nil }
 
 // echoSynthesizer 把句子的文字原样当成声音，播出了什么一看便知。
 type echoSynthesizer struct{}

@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/caarlos0/env/v11"
 )
@@ -176,7 +177,7 @@ func TestFrameSizeParsing(t *testing.T) {
 
 // 拍照底层只认三个值；写错时启动失败。
 func TestCameraBackendIsValidated(t *testing.T) {
-	settings := TerminalSettings{TurnDetection: "server_vad", ServerURL: "http://127.0.0.1:59130"}
+	settings := TerminalSettings{TurnDetection: "server_vad", ServerURL: "http://127.0.0.1:59130", WakeIdle: time.Minute}
 	for _, backend := range []string{CameraBackendAuto, CameraBackendMediaDevices, CameraBackendFFmpeg} {
 		settings.CameraBackend = backend
 		if err := settings.validateTerminal(); err != nil {

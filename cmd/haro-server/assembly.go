@@ -106,7 +106,7 @@ func connectServices(ctx context.Context, settings config.ServerSettings, logger
 		logger.Warn("没设 HARO_USAGE_DB：用量只记在内存里，服务端重启后额度重新计算")
 	}
 	deps.guard = spending.NewGuard(deps.ledger, spending.Limits{ResearchDailyYen: settings.ResearchDailyYen,
-		MonthlyYen: settings.MonthlyYen, SearchDailyCredits: settings.SearchDailyCredits, WarnRatio: 0.8,
+		MonthlyYen: settings.MonthlyYen, SearchDailyCredits: settings.SearchDailyCredits, WarnRatio: spending.DefaultWarnRatio,
 		MonthlyRaiseYen: settings.MonthlyRaiseYen}, logger)
 	logger.Info("费用上限", "research_daily_yen", settings.ResearchDailyYen, "monthly_yen", settings.MonthlyYen,
 		"search_daily_credits", settings.SearchDailyCredits)
@@ -146,7 +146,7 @@ func buildTooling(ctx context.Context, settings config.ServerSettings, deps serv
 	}
 	if searcher := connectWebSearch(settings, deps.httpClient, logger); searcher != nil {
 		shutdown.add(func() { searcher.Close() })
-		meter := spending.NewSearchMeter(deps.guard, deps.ledger, deps.pricing, spending.PurposeSearch, "tavily")
+		meter := spending.NewSearchMeter(deps.guard, deps.ledger, deps.pricing, spending.PurposeSearch, tools.TavilyName)
 		builtins = append(builtins, tools.WebSearchTools(searcher, meter, logger))
 		kit.expertSearch = func(ctx context.Context, query string) (string, error) {
 			return tools.QuickSearch(ctx, searcher, meter, query, logger)
@@ -163,7 +163,7 @@ func buildTooling(ctx context.Context, settings config.ServerSettings, deps serv
 			logger.Info("调查结束：通知终端", "id", task.ID, "status", task.Status, "terminals", delivered)
 		})
 	}
-	box, err := tools.NewToolbox(ctx, nil, logger, builtins...)
+	box, err := tools.NewToolbox(ctx, logger, builtins...)
 	if err != nil {
 		return kit, err
 	}

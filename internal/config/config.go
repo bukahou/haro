@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/caarlos0/env/v11"
+
+	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
 // 前台的模型从哪来（HARO_LLM_PROVIDER）。
@@ -216,7 +218,7 @@ type TerminalSettings struct {
 	EchoGuard     time.Duration `env:"HARO_ECHO_GUARD" envDefault:"300ms"`  // 播完后再静音这么久才恢复收音（实测音箱的余音会被当成一句话；300 ms 是定值）
 
 	// 唤醒词（唯一的对话方式）
-	WakePhrase string        `env:"HARO_WAKE_PHRASE" envDefault:"哈罗哈罗"` // 只用于提示；真正生效的是 haro-asr 的关键词文件
+	WakePhrase string        `env:"HARO_WAKE_PHRASE" envDefault:"哈罗哈罗"` // 提示文字和声纹登记的第一句用它；要和 haro-asr 关键词文件里的唤醒词一致（识别唤醒词的是 haro-asr）
 	WakeIdle   time.Duration `env:"HARO_WAKE_IDLE" envDefault:"40s"`    // 对话窗口：回答播完后安静这么久就休眠（20 秒太快，接着问时已经睡了），休眠时说一声
 	BargeIn    bool          `env:"HARO_BARGE_IN" envDefault:"true"`    // 回答时喊唤醒词可以打断（需要唤醒词）
 
@@ -225,7 +227,7 @@ type TerminalSettings struct {
 	AudioSource  string `env:"HARO_AUDIO_SOURCE"`  // 空 = 自动：跟系统默认，但跳过蓝牙麦克风
 	AudioSink    string `env:"HARO_AUDIO_SINK"`    // 空 = 跟系统默认（蓝牙重连后自动接回）
 	CameraDevice string `env:"HARO_CAMERA_DEVICE"` // 空 = 自动找；none = 不用摄像头
-	// 终端的提示音（服务端连不上 / 回来了）：目录里放 offline.wav、online.wav（16 bit PCM）；不设 = 内置的不含人声的提示音
+	// 终端的提示音：目录里放 offline.wav、online.wav、sleep.wav、notice.wav（16 bit PCM，缺哪个就用内置的）；不设 = 内置的不含人声的提示音
 	TonesDir string `env:"HARO_TONES_DIR"`
 	// 拍照用哪套底层：auto / mediadevices / ffmpeg
 	CameraBackend string `env:"HARO_CAMERA_BACKEND" envDefault:"auto"`
@@ -268,9 +270,19 @@ func LoadTerminalSettings() (TerminalSettings, error) {
 	return settings, settings.validateTerminal()
 }
 
+// TurnDetectionSettings 是交给 haro-asr 的说完判断（每次打开识别流时随 session.update 发出）。
+func (settings TerminalSettings) TurnDetectionSettings() realtimeproto.TurnDetection {
+	return realtimeproto.TurnDetection{Type: settings.TurnDetection, Eagerness: settings.TurnEagerness,
+		Threshold: settings.VADThreshold, SilenceDurationMs: int(settings.VADSilence.Milliseconds()),
+		PrefixPaddingMs: int(settings.VADPrefix.Milliseconds())}
+}
+
 func (settings TerminalSettings) validateTerminal() error {
-	if settings.TurnDetection != "server_vad" && settings.TurnDetection != "semantic_vad" {
-		return fmt.Errorf("HARO_TURN_DETECTION 只能是 semantic_vad 或 server_vad，现在是 %q", settings.TurnDetection)
+	if err := settings.TurnDetectionSettings().Validate(); err != nil { // 取值只在 realtimeproto 定义一处，haro-asr 收到时也按它查
+		return fmt.Errorf("说完判断的配置（HARO_TURN_DETECTION、HARO_TURN_EAGERNESS、HARO_VAD_THRESHOLD、HARO_VAD_SILENCE、HARO_VAD_PREFIX）：%w", err)
+	}
+	if settings.WakeIdle <= 0 {
+		return fmt.Errorf("HARO_WAKE_IDLE 要大于 0（回答播完后安静多久就休眠），现在是 %v", settings.WakeIdle)
 	}
 	switch settings.CameraBackend {
 	case CameraBackendAuto, CameraBackendMediaDevices, CameraBackendFFmpeg:

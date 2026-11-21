@@ -32,7 +32,7 @@ import (
 )
 
 func main() {
-	enrollName := flag.String("enroll", "", "登记声纹：在这台终端上录 3 句话，发给服务端登记，例如 -enroll 主人")
+	enrollName := flag.String("enroll", "", "登记声纹：在这台终端上照着念几句话，发给服务端登记，例如 -enroll 主人")
 	enrollAppend := flag.Bool("append", false, "和 -enroll 一起用：补录（换了麦克风、换了位置时），加进原来的声纹")
 	enrollSeconds := flag.Duration("seconds", 5*time.Second, "和 -enroll 一起用：每句录多久")
 	showVersion := flag.Bool("version", false, "打印版本号后退出")
@@ -152,16 +152,11 @@ func enroll(logger *slog.Logger, name string, appendMode bool, seconds time.Dura
 // assistantOptions 由配置组装对话选项（系统提示词由服务端持有，终端不发）。
 func assistantOptions(settings config.TerminalSettings, sounds tones.Tones) assistant.Options {
 	return assistant.Options{
-		TurnDetection: realtimeproto.TurnDetection{ // create_response 不填 = 服务端判定说完时自己开始回答
-			Type: settings.TurnDetection, Eagerness: settings.TurnEagerness,
-			Threshold:         settings.VADThreshold,
-			SilenceDurationMs: int(settings.VADSilence.Milliseconds()),
-			PrefixPaddingMs:   int(settings.VADPrefix.Milliseconds()),
-		},
-		EchoGuard:  settings.EchoGuard,
-		WakeWord:   assistant.WakeWordOptions{Phrase: settings.WakePhrase, IdleTimeout: settings.WakeIdle, SleepTone: sounds.Sleep},
-		BargeIn:    settings.BargeIn,
-		NoticeTone: sounds.Notice,
+		TurnDetection: settings.TurnDetectionSettings(), // create_response 不填 = 服务端判定说完时自己开始回答
+		EchoGuard:     settings.EchoGuard,
+		WakeWord:      assistant.WakeWordOptions{Phrase: settings.WakePhrase, IdleTimeout: settings.WakeIdle, SleepTone: sounds.Sleep},
+		BargeIn:       settings.BargeIn,
+		NoticeTone:    sounds.Notice,
 		NoticeTones: map[string]realtimeproto.PCMAudio{ // 服务端那边听不见了：和服务端断开时同样的两声
 			realtimeproto.NoticeTranscriptionLost:     sounds.Offline,
 			realtimeproto.NoticeTranscriptionRestored: sounds.Online,

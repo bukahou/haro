@@ -51,8 +51,6 @@ func (f *fakeModel) StreamReply(ctx context.Context, request brain.ChatRequest) 
 	}
 }
 
-func (f *fakeModel) Warmup(context.Context) error { return nil }
-
 // fakeSynthesizer 把句子原样放进 PCM，方便断言顺序；failOn 非空时对该句报错；seen 非空时记下收到的每一句。
 type fakeSynthesizer struct {
 	failOn string

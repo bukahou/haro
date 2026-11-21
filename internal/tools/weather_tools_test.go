@@ -68,7 +68,7 @@ func TestWeatherTool(t *testing.T) {
 	defer server.Close()
 	client := weather.NewOpenMeteoClient(server.URL+"/forecast", server.URL+"/search", server.Client())
 	home := weather.FixedHome{Place: weather.Place{Latitude: 10.5, Longitude: 20.5}}
-	box, err := NewToolbox(ctx, nil, logger, WeatherTools(client, client, home, "ja", logger))
+	box, err := NewToolbox(ctx, logger, WeatherTools(client, client, home, "ja", logger))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +124,7 @@ func TestWeatherTool(t *testing.T) {
 		}
 	}
 
-	noHome, err := NewToolbox(ctx, nil, logger, WeatherTools(client, client, nil, "ja", logger))
+	noHome, err := NewToolbox(ctx, logger, WeatherTools(client, client, nil, "ja", logger))
 	if err != nil {
 		t.Fatal(err)
 	}

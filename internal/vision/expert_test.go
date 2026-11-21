@@ -50,7 +50,6 @@ func (m *scriptedModel) StreamReply(_ context.Context, request brain.ChatRequest
 		yield(reply, nil)
 	}
 }
-func (m *scriptedModel) Warmup(context.Context) error { return nil }
 
 func searchCall(query string) brain.ReplyDelta {
 	return brain.ReplyDelta{Text: "我查一下。", ToolCalls: []brain.ToolCall{{Name: searchTool, Arguments: map[string]any{"query": query}}}}
@@ -276,7 +275,6 @@ func (m *stubbornModel) StreamReply(context.Context, brain.ChatRequest) iter.Seq
 		yield(brain.ReplyDelta{Text: "看着像硬盘盒。", ToolCalls: []brain.ToolCall{{Name: searchTool, Arguments: map[string]any{"query": "再搜"}}}}, nil)
 	}
 }
-func (m *stubbornModel) Warmup(context.Context) error { return nil }
 
 func TestExpertStopsAfterMaxRounds(t *testing.T) {
 	model, searches := &stubbornModel{}, &recordedSearch{}

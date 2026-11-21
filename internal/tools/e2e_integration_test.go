@@ -44,7 +44,7 @@ func TestConversationLive(t *testing.T) {
 	defer store.Close()
 	// 与正式运行一致：记事本内置
 	builtins := []Builtin{NoteTools(store, 200, logger)}
-	box, err := NewToolbox(ctx, nil, logger, builtins...)
+	box, err := NewToolbox(ctx, logger, builtins...)
 	if err != nil {
 		t.Fatal(err)
 	}

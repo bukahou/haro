@@ -26,9 +26,9 @@ type toolCaller interface {
 	call(ctx context.Context, name string, arguments map[string]any) (string, error)
 }
 
-// NewToolbox 建进程内的工具服务（内置工具）并连上各远程服务，汇总工具清单。
-// 任何一个起不来、或者工具重名，就整体失败（并清理已连上的）。ctx 是服务端的运行期。
-func NewToolbox(ctx context.Context, remote []ServerSpec, logger *slog.Logger, builtins ...Builtin) (*Toolbox, error) {
+// NewToolbox 建进程内的工具服务（内置工具），汇总工具清单。起不来、或者工具重名，就失败。ctx 是服务端的运行期。
+// 远程的第三方 MCP 服务现在没有接：要接时在这里按 ServerSpec 连上并 add（重名检查照样生效）。
+func NewToolbox(ctx context.Context, logger *slog.Logger, builtins ...Builtin) (*Toolbox, error) {
 	box := &Toolbox{callers: map[string]toolCaller{}}
 	builtin, err := startBuiltinServer(ctx, builtins, logger)
 	if err != nil {
@@ -38,18 +38,6 @@ func NewToolbox(ctx context.Context, remote []ServerSpec, logger *slog.Logger, b
 	if err := box.add(builtin.MCPServer, builtin); err != nil {
 		box.Close()
 		return nil, err
-	}
-	for _, spec := range remote {
-		server, err := ConnectMCPServer(ctx, spec, logger)
-		if err != nil {
-			box.Close()
-			return nil, err
-		}
-		box.servers = append(box.servers, server)
-		if err := box.add(server, server); err != nil {
-			box.Close()
-			return nil, err
-		}
 	}
 	return box, nil
 }

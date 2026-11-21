@@ -67,7 +67,6 @@ func (s streamScript) StreamReply(ctx context.Context, _ brain.ChatRequest) iter
 		}
 	}
 }
-func (streamScript) Warmup(context.Context) error { return nil }
 
 var testPricing = Pricing{USDToYen: 150, Models: map[string]TokenPrice{"m": {InputUSDPerMillion: 1, OutputUSDPerMillion: 5}}}
 

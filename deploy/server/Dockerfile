@@ -42,7 +42,8 @@ COPY LICENSE /opt/haro/LICENSE
 COPY assets/wake-words.txt /opt/haro/assets/wake-words.txt
 COPY deploy/server/MODELS.md deploy/server/MODEL-LICENSES.txt /opt/haro/models/
 # 模型（只拷用到的文件，和 deploy/server/models.lock 一一对应：SenseVoice 用 int8 版；唤醒词用 chunk-16 的那一组）。
-# 声纹模型保留原文件名：声纹记录里存的是模型文件名，换名字旧声纹就对不上了
+# 识别、唤醒词的文件名要和 haro-asr 配置的默认值一致（HARO_ASR_MODEL_FILE、HARO_KWS_*_FILE，见 internal/config/asr.go），
+# 换文件时同时改配置。声纹模型保留原文件名：声纹记录里存的是模型文件名，换名字旧声纹就对不上了
 COPY --from=models asr/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/model.int8.onnx asr/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/tokens.txt /opt/haro/models/sensevoice/
 COPY --from=models asr/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20/encoder-epoch-13-avg-2-chunk-16-left-64.int8.onnx \
      asr/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20/decoder-epoch-13-avg-2-chunk-16-left-64.onnx \

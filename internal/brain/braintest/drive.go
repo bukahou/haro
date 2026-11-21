@@ -17,7 +17,7 @@ const EventTimeout = 5 * time.Second
 func Open(t testing.TB, session *brain.Session, voice *Voice, update realtimeproto.SessionUpdate) *Stream {
 	t.Helper()
 	if update.TurnDetection == nil {
-		update.TurnDetection = &realtimeproto.TurnDetection{Type: "server_vad"}
+		update.TurnDetection = &realtimeproto.TurnDetection{Type: realtimeproto.TurnServerVAD}
 	}
 	before := voice.Opened()
 	if err := session.Send(context.Background(), update); err != nil {

@@ -172,6 +172,19 @@ func TestRealtimeRejectsBadSessionUpdate(t *testing.T) {
 	}
 }
 
+// 说完方式、积极度写错：明确拒绝（不悄悄当成默认值）。
+func TestRealtimeRejectsUnknownTurnSettings(t *testing.T) {
+	factory := func(VoiceDetectorConfig) (VoiceDetector, error) { return &energyDetector{}, nil }
+	for _, turn := range []realtimeproto.TurnDetection{{Type: "vad"}, {Type: realtimeproto.TurnSemanticVAD, Eagerness: "fast"}} {
+		conn, ctx := dialRealtime(t, factory, &lengthTranscriber{}, nil)
+		_ = writeClientEvent(ctx, conn, transcriptionUpdate(turn, false))
+		events := readEvents(t, ctx, conn, 1)
+		if e, ok := events[0].(realtimeproto.Error); !ok || e.Code != realtimeproto.CodeInvalidEvent {
+			t.Errorf("%+v 应被拒绝：%v", turn, events)
+		}
+	}
+}
+
 func TestRealtimeWithoutVADModel(t *testing.T) {
 	server := httptest.NewServer(NewHandler(Dependencies{Transcriber: &lengthTranscriber{}, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}))
 	defer server.Close()

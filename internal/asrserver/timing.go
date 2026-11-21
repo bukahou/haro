@@ -80,12 +80,13 @@ func (t Timing) orDefault() Timing {
 	return t
 }
 
-// maxWait 是 semantic_vad 判定「没说完」之后最多再等多久（按 eagerness；medium / auto / 空都按 auto）。
+// maxWait 是 semantic_vad 判定「没说完」之后最多再等多久（按 eagerness；medium / auto / 空都按 auto，
+// 别的取值在收到 session.update 时已经拒绝了，见 realtimeproto.TurnDetection.Validate）。
 func (t Timing) maxWait(eagerness string) time.Duration {
 	switch eagerness {
-	case "low":
+	case realtimeproto.EagernessLow:
 		return t.MaxWaitLow
-	case "high":
+	case realtimeproto.EagernessHigh:
 		return t.MaxWaitHigh
 	default:
 		return t.MaxWaitAuto
