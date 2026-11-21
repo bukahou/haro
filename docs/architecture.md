@@ -32,7 +32,7 @@ haro 是一个家用语音助手：家里每个房间放一台**终端**（麦�
 - 握手时用 WebSocket 子协议协商版本（`haro.realtime.v3`）：报了不认识的 haro 版本、或者旧版终端没报版本，服务端拒绝握手，
   响应里给错误码和它支持的版本；什么都不报的当普通 Realtime 客户端（只用标准事件）。终端被拒后提示一次，隔几分钟才再试；
 - 两端各自每 10 秒 ping 一次，5 秒内等不到 pong 就断开（`internal/heartbeat`），终端的看守随即重连。
-- 服务端同时最多 `brainserver.DefaultMaxSessions` 条对话会话（每条在 haro-asr 占一个识别流），满了新连接在握手前回 503（错误码 `too_many_sessions`）。
+- 服务端的对话会话、haro-asr 的转写会话同时最多 `realtimeproto.MaxSessions` 条（两边同一个数：每条对话会话在 haro-asr 占一个转写会话），满了新连接在握手前回 503（错误码 `too_many_sessions`）。
 - 照办不了的请求整条拒绝、不悄悄忽略：`session.update` 声明的输入格式不是 16 kHz 单声道，或识别流打开以后再改说完判断、唤醒门；
   `conversation.item.truncate` 缺 `audio_end_ms`（或为负）、带了 `item_id`（haro 不发回答的 item_id，只截最近一次回答）。
 - 终端的设备能力（现在是「拍一帧」）走 MCP：终端是 MCP 服务端，服务端是 MCP 客户端，消息装在 `haro.mcp.message` 事件里，

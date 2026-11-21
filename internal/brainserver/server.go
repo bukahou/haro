@@ -55,13 +55,8 @@ type SessionFactory func(terminal Terminal) Session
 // Options 是连接层的设置。零值可用。
 type Options struct {
 	Heartbeat   heartbeat.Timing // 零值 = heartbeat.Default
-	MaxSessions int              // 同时最多几条对话会话；零值 = DefaultMaxSessions
+	MaxSessions int              // 同时最多几条对话会话；零值 = realtimeproto.MaxSessions（和 haro-asr 的转写会话同一个数）
 }
-
-// DefaultMaxSessions 是同时最多几条对话会话：每条会话在 haro-asr 占一个识别流（VAD、唤醒词各一份），连接一多，haro-asr 的
-// 内存跟着涨，最坏被杀掉、整个助手停摆。定值，没有实测每条会话占多少：家里一个房间一台终端，16 条绰绰有余，
-// 又挡得住重连出错、或局域网里有设备乱连时连接越开越多。
-const DefaultMaxSessions = 16
 
 // haroProtocolPrefix 是 haro 各版本子协议名的共同开头。
 const haroProtocolPrefix = "haro.realtime."
@@ -69,7 +64,7 @@ const haroProtocolPrefix = "haro.realtime."
 // NewHandler 返回挂好路由的 HTTP handler。
 func NewHandler(newSession SessionFactory, opts Options, logger *slog.Logger) http.Handler {
 	opts.Heartbeat = opts.Heartbeat.OrDefault()
-	opts.MaxSessions = cmp.Or(opts.MaxSessions, DefaultMaxSessions)
+	opts.MaxSessions = cmp.Or(opts.MaxSessions, realtimeproto.MaxSessions)
 	sessions := semaphore.NewWeighted(int64(opts.MaxSessions))
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET "+realtimeproto.ConversationPath, func(w http.ResponseWriter, r *http.Request) {

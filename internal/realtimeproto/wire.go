@@ -59,6 +59,12 @@ var TranscriptionFormat = AudioFormat{SampleRate: TranscriptionSampleRate, Chann
 // MaxMessageBytes 是一条消息的大小上限，两端读消息时都按它限。
 const MaxMessageBytes = 8 << 20
 
+// MaxSessions 是同时最多几条会话，两种会话用同一个数：haro-server 的对话会话、haro-asr 的转写会话。每条对话会话在 haro-asr
+// 占一个转写会话，服务端多接下的会话那边开不了识别流，所以两边一样多，满了都在握手时拒绝（too_many_sessions）。
+// 每个转写会话自己建一个 Silero VAD（重新载入模型）和唤醒词流，不设上限时连接失控（终端重连出错、局域网里谁都能连）
+// 会撑爆原生内存。家里每台终端一个会话（断线重连时新旧两个会短暂重叠），远到不了这个数；定值，没有实测每个会话占多少内存
+const MaxSessions = 8
+
 // DefaultOutputFormat 是官方 Realtime 的输出音频格式；delta 没声明格式时用它。
 var DefaultOutputFormat = AudioFormat{SampleRate: 24000, Channels: 1}
 

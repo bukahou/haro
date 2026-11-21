@@ -50,8 +50,7 @@ type Dependencies struct {
 // Limits 是转写会话入口的上限：先限量，再做事。
 type Limits struct {
 	// MaxSessions：同时进行的转写会话最多几个，满了的新会话回 too_many_sessions（haro-server 照断开重开那样退避再试）。
-	// 每个会话自己建一个 Silero VAD（重新载入模型）和唤醒词流，数量不设上限时连接失控（终端重连出错、局域网里谁都能连）
-	// 会撑爆原生内存。家里每台终端一个会话（断线重连时新旧两个会短暂重叠），远到不了这个数；定值，没有实测每个会话占多少内存
+	// 默认 realtimeproto.MaxSessions（和 haro-server 的对话会话同一个数，来历写在那里）
 	MaxSessions int
 	// SessionUpdateWait：连上之后最多等这么久收到第一条 session.update，过了就断开（haro-server 连上马上就发）。
 	// 不设的话，连上却不说话的连接会一直占着。定值
@@ -59,7 +58,7 @@ type Limits struct {
 }
 
 // DefaultLimits 是现在在用的上限（来历见 Limits 的各字段）。
-var DefaultLimits = Limits{MaxSessions: 8, SessionUpdateWait: 10 * time.Second}
+var DefaultLimits = Limits{MaxSessions: realtimeproto.MaxSessions, SessionUpdateWait: 10 * time.Second}
 
 func (l Limits) orDefault() Limits {
 	l.MaxSessions = cmp.Or(l.MaxSessions, DefaultLimits.MaxSessions)
