@@ -85,10 +85,18 @@ func (c *fakeConn) reports() []realtimeproto.HaroTerminalDevices {
 	return append([]realtimeproto.HaroTerminalDevices(nil), c.devices...)
 }
 
-// fakeSession 一直运行到被取消（或 fail 里来了错误）。
-type fakeSession struct{ fail chan error }
+// fakeSession 一直运行到被取消（或 fail 里来了错误）；openErr 有值时一开始就以它结束（设备打不开）。
+type fakeSession struct {
+	fail    chan error
+	openErr func() error
+	running *atomic.Int32 // 正在运行（没有一开始就出错）的次数
+}
 
 func (s fakeSession) Run(ctx context.Context) error {
+	if err := s.openErr(); err != nil {
+		return err
+	}
+	s.running.Add(1)
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
@@ -140,9 +148,14 @@ type rig struct {
 	conns        []*fakeConn
 	sessions     []Devices
 	fail         chan error
+	openErr      error        // 设了：每次对话运行一开始就以它结束（设备在列表里、却打不开）
+	running      atomic.Int32 // 对话正常运行起来的次数
 	sink         fakeSink
 	tools        fakeTools
 }
+
+func (r *rig) setOpenError(err error) { r.mu.Lock(); defer r.mu.Unlock(); r.openErr = err }
+func (r *rig) openError() error       { r.mu.Lock(); defer r.mu.Unlock(); return r.openErr }
 
 func newRig() *rig {
 	r := &rig{fail: make(chan error, 1)}
@@ -183,7 +196,7 @@ func (r *rig) parts() Parts {
 			r.mu.Lock()
 			r.sessions = append(r.sessions, devices)
 			r.mu.Unlock()
-			return fakeSession{fail: r.fail}
+			return fakeSession{fail: r.fail, openErr: r.openError, running: &r.running}
 		},
 		ToneSink: &r.sink,
 		Offline:  realtimeproto.PCMAudio{Format: realtimeproto.AudioFormat{SampleRate: 16000, Channels: 1}, Data: make([]byte, 100)},
@@ -420,5 +433,48 @@ func TestSupervisorStandbyBacksOff(t *testing.T) {
 	if gap(scans, 0) < timing.Poll || gap(scans, 2) < 4*timing.Poll || gap(scans, 3) < timing.BackoffMax {
 		t.Errorf("待机时查设备的间隔应从 %v 翻倍到 %v：%v、%v、%v、%v", timing.Poll, timing.BackoffMax,
 			gap(scans, 0), gap(scans, 1), gap(scans, 2), gap(scans, 3))
+	}
+}
+
+// 设备在列表里、却打不开（被别的程序独占、权限）：对话运行一开始就出错 —— 按翻倍的间隔重来，到 BackoffMax 为止，
+// 不每隔固定时间就重连服务端、刷日志（只查下限：计时器不会提前到）；能打开以后照常运行。
+func TestSupervisorBacksOffWhenRunKeepsFailing(t *testing.T) {
+	r := newRig()
+	r.setOpenError(errors.New("设备被别的程序占着"))
+	timing := testTiming
+	timing.BackoffMin, timing.BackoffMax = 10*time.Millisecond, 40*time.Millisecond // 间隔 10、20、40、40……
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go NewSupervisor(r.parts(), timing, slog.New(slog.NewTextHandler(io.Discard, nil))).Run(ctx)
+	eventually(t, "重来了 5 次", func() bool { return r.dials.Load() >= 5 })
+	dials := r.times(&r.dialedAt)
+	if gap(dials, 0) < timing.BackoffMin || gap(dials, 2) < 4*timing.BackoffMin || gap(dials, 3) < timing.BackoffMax {
+		t.Errorf("运行一直出错时，重来的间隔应从 %v 翻倍到 %v：%v、%v、%v、%v", timing.BackoffMin, timing.BackoffMax,
+			gap(dials, 0), gap(dials, 1), gap(dials, 2), gap(dials, 3))
+	}
+	r.setOpenError(nil)
+	eventually(t, "能打开以后照常运行", func() bool { return r.running.Load() == 1 })
+}
+
+// 重连的间隔：从 BackoffMin 翻倍到 BackoffMax；协议版本不兼容隔 IncompatibleRetry；还没提示断开时不越过提示时间。
+func TestReconnectDelay(t *testing.T) {
+	timing := Timing{OfflineNotice: 10 * time.Second, BackoffMin: time.Second, BackoffMax: 5 * time.Second, IncompatibleRetry: 5 * time.Minute}
+	s := NewSupervisor(Parts{}, timing, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	announced := &offlineState{since: time.Now().Add(-time.Hour), announced: true}
+	refused := errors.New("连不上")
+	for retries, want := range []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, 5 * time.Second, 5 * time.Second} {
+		if got := s.reconnectDelay(refused, retries, announced); got != want {
+			t.Errorf("第 %d 次重试前应等 %v：%v", retries, want, got)
+		}
+	}
+	if got := s.reconnectDelay(fmt.Errorf("%w：要更新的版本", realtimeproto.ErrIncompatibleProtocol), 0, announced); got != timing.IncompatibleRetry {
+		t.Errorf("协议版本不兼容应隔 %v：%v", timing.IncompatibleRetry, got)
+	}
+	nearNotice := &offlineState{since: time.Now().Add(-9 * time.Second)} // 再过 1 秒就到提示时间
+	if got := s.reconnectDelay(refused, 3, nearNotice); got > time.Second {
+		t.Errorf("还没提示时不越过提示时间（按翻倍该等 5 秒）：%v", got)
+	}
+	if got := s.reconnectDelay(refused, 50, announced); got != timing.BackoffMax {
+		t.Errorf("重试很多次以后也只等 BackoffMax：%v", got)
 	}
 }
