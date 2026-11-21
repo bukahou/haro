@@ -1,7 +1,8 @@
 // Package enrollment 是终端一侧的远程登记声纹（`haro -enroll 名字`）：在终端这台机器上录几句话，
 // 发给服务端（服务端转给 haro-asr 算向量、存进服务端的数据目录、立刻生效）。终端不需要说话人识别模型。
 //
-// ⚠️ 录音经与对话同一个 WebSocket 接口发给服务端（没有加密和鉴权，只在可信网络里用）；声纹只存在服务端那边。
+// ⚠️ 录音经 HTTP POST 发给服务端（和对话连的是同一个地址 HARO_SERVER_URL；没有加密和鉴权，只在可信网络里用）；
+// 声纹只存在服务端那边。
 package enrollment
 
 import (
@@ -27,32 +28,42 @@ import (
 
 // Options 是一次登记的参数。
 type Options struct {
-	ServerURL string // 服务端的地址（同 HARO_SERVER_URL）
-	Name      string
-	Append    bool          // 补录（换了麦克风、换了位置时）
-	Seconds   time.Duration // 每句录多久
-	Recorder  assistant.AudioRecorder
-	In        io.Reader // 按回车开始录（一般是 os.Stdin）
-	Out       io.Writer
-	Client    *http.Client
+	ServerURL  string // 服务端的地址（同 HARO_SERVER_URL）
+	Name       string
+	WakePhrase string        // 终端配置的唤醒词（HARO_WAKE_PHRASE）：登记的第一句以它开头
+	Append     bool          // 补录（换了麦克风、换了位置时）
+	Seconds    time.Duration // 每句录多久
+	MinLevel   float64       // 一句的音量（RMS，0–1）低于这个就让用户重读；0 = DefaultMinLevel
+	Recorder   assistant.AudioRecorder
+	In         io.Reader // 按回车开始录（一般是 os.Stdin）
+	Out        io.Writer
+	Client     *http.Client
 }
 
-// minLevel：音量（RMS）低于这个就让用户重读。
-const minLevel = 0.005
+// DefaultMinLevel 是默认的音量门槛（RMS）。定值，没有单独实测：约 -46 dBFS，只拦下几乎没录到声音的情况
+// （麦克风静音、离得太远）。
+const DefaultMinLevel = 0.005
 
 // Run 录 voiceprint.EnrollmentSentences 里的每一句，发给服务端登记，打印结果。
 func Run(ctx context.Context, opts Options) error {
 	if opts.Name == "" {
 		return fmt.Errorf("要给出登记的名字")
 	}
+	if opts.WakePhrase == "" {
+		return fmt.Errorf("要给出唤醒词（登记的第一句以它开头）")
+	}
+	minLevel := opts.MinLevel
+	if minLevel <= 0 {
+		minLevel = DefaultMinLevel
+	}
+	sentences := voiceprint.EnrollmentSentences(opts.WakePhrase)
 	if opts.Append {
-		fmt.Fprintf(opts.Out, "补录「%s」：录 %d 句，加进原来的声纹\n", opts.Name, len(voiceprint.EnrollmentSentences))
+		fmt.Fprintf(opts.Out, "补录「%s」：录 %d 句，加进原来的声纹\n", opts.Name, len(sentences))
 	}
 	input := bufio.NewReader(opts.In)
 	var clips []string
-	for i := 0; i < len(voiceprint.EnrollmentSentences); {
-		fmt.Fprintf(opts.Out, "\n第 %d/%d 句。按回车后，用平时说话的音量读：\n    「%s」\n",
-			i+1, len(voiceprint.EnrollmentSentences), voiceprint.EnrollmentSentences[i])
+	for i := 0; i < len(sentences); {
+		fmt.Fprintf(opts.Out, "\n第 %d/%d 句。按回车后，用平时说话的音量读：\n    「%s」\n", i+1, len(sentences), sentences[i])
 		if _, err := input.ReadString('\n'); err != nil {
 			return err
 		}

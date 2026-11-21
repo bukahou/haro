@@ -18,12 +18,14 @@ import (
 	"time"
 )
 
-// EnrollmentSentences 是登记时要读的话：第一句带唤醒词（唤醒时比对的就是喊唤醒词的声音），其余是日常说话。
-// 终端的 haro -enroll（远程登记，v4 C-3）用。
-var EnrollmentSentences = []string{
-	"哈罗哈罗，今天天气怎么样？帮我看看外面会不会下雨。",
-	"帮我记一下，周三下午要去取干洗的衣服，别让我忘了。",
-	"我今天有点累，想早点休息，明天早上再说吧。",
+// EnrollmentSentences 是登记时要读的话（给人朗读的文本）：第一句以唤醒词开头（唤醒时比对的就是喊唤醒词的声音），
+// 其余是日常说话。wakePhrase 是终端配置的唤醒词（HARO_WAKE_PHRASE）。终端的 haro -enroll 用。
+func EnrollmentSentences(wakePhrase string) []string {
+	return []string{
+		wakePhrase + "，今天天气怎么样？帮我看看外面会不会下雨。",
+		"帮我记一下，周三下午要去取干洗的衣服，别让我忘了。",
+		"我今天有点累，想早点休息，明天早上再说吧。",
+	}
 }
 
 // Voiceprint 是一个人登记的声纹：几句话各算一个向量。
