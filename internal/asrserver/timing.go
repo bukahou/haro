@@ -33,14 +33,14 @@ type Timing struct {
 	MinWakeWindow time.Duration
 	// MinAfterEcho：语音段剪掉开头的回声后剩下不到这么长，就当整段都是回声。定值，没有单独实测
 	MinAfterEcho time.Duration
-	// VADThreshold / VADSilence：会话的 turn_detection 没给语音概率门槛 / 静音时长时用的值。门槛取自 Silero VAD 的默认值；
-	// 静音时长是定值，和终端 HARO_VAD_SILENCE 的默认值相同
+	// VADThreshold / VADSilence：会话的 turn_detection 没给语音概率门槛 / 静音时长时用的值。门槛取自 Silero VAD
+	// 参考实现的默认值；静音时长是定值，和终端 HARO_VAD_SILENCE 的默认值相同
 	VADThreshold float64
 	VADSilence   time.Duration
-	// VADMinSpeech：短于这么长的声音（咳嗽、碰桌子）不算说话。定值（同 sherpa-onnx 的默认值），没有单独实测
+	// VADMinSpeech：短于这么长的声音（咳嗽、碰桌子）不算说话。取自 Silero VAD 参考实现的默认值，没有单独实测
 	VADMinSpeech time.Duration
 	// VADMaxSpeech：一口气说到这么长，VAD 设法在下一个短停顿处切段（sherpa-onnx 的做法是临时提高门槛，所以一段可能比它
-	// 略长）。定值（同 sherpa-onnx 的默认值），没有单独实测
+	// 略长）。定值，没有单独实测
 	VADMaxSpeech time.Duration
 	// MergeLimit：semantic_vad 把停顿前后的几段并成一句，并到这么长（从这句开头到刚结束的那一段）就不再等接着说、按说完
 	// 处理，后面的话另成一句。不设上限时一句可以无限长，保留的音频（History）就装不下了。定值：对着音箱说的一句话
