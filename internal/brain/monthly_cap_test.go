@@ -34,9 +34,17 @@ func (f *fakeCap) RaiseMonthlyCap(_ context.Context, person string) (float64, er
 
 func (f *fakeCap) count() int { f.mu.Lock(); defer f.mu.Unlock(); return len(f.raises) }
 
+// judgeInstructions 是测试里代理「额度判断」的正文。
+const judgeInstructions = "只判断要不要提高上限、同不同意。"
+
 func newCapTalker(t *testing.T, model, judge brain.ChatModel, cap brain.MonthlyCap) *talker {
 	t.Helper()
-	return newTalker(t, brain.Components{Front: brain.Agent{Model: model}, Synthesizer: fakeSynthesizer{}, MonthlyCap: cap, OverBudgetModel: judge},
+	return newCapTalkerWith(t, model, &brain.Agent{Name: "额度判断", Model: judge, Instructions: judgeInstructions}, cap)
+}
+
+func newCapTalkerWith(t *testing.T, model brain.ChatModel, overBudget *brain.Agent, cap brain.MonthlyCap) *talker {
+	t.Helper()
+	return newTalker(t, brain.Components{Front: brain.Agent{Model: model}, Synthesizer: fakeSynthesizer{}, MonthlyCap: cap, OverBudget: overBudget},
 		brain.Options{MaxHistoryTurn: 6, MonthlyRaiseYen: 500})
 }
 
@@ -51,11 +59,24 @@ func TestOverBudgetSpeaksFixedPhrase(t *testing.T) {
 		t.Errorf("应只念固定的话（判断用的模型说的不念）：%q", spoken)
 	}
 	request := judge.LastRequest()
-	if len(request.Messages) != 2 || request.Last().Text != "今天天气怎么样" || !slicesContains(request.ToolNames(), "raise_monthly_cap") {
-		t.Errorf("判断用的调用不带历史，只给提高上限的工具：%+v %v", request.Messages, request.ToolNames())
+	if len(request.Messages) != 2 || request.Messages[0].Text != judgeInstructions || request.Last().Text != "今天天气怎么样" ||
+		!slicesContains(request.ToolNames(), "raise_monthly_cap") {
+		t.Errorf("判断用的调用用代理的正文、不带历史，只给提高上限的工具：%+v %v", request.Messages, request.ToolNames())
 	}
 	if cap.count() != 0 {
 		t.Error("没要提高就不该提高")
+	}
+}
+
+// 判断用的调用只给代理允许名单里的工具（覆盖目录里的定义去掉了提高上限：就不给它）。
+func TestOverBudgetOffersOnlyAllowedTools(t *testing.T) {
+	model := braintest.NewModel(t, braintest.Reply{Err: capReached{}})
+	judge := braintest.NewModel(t, braintest.Say(""))
+	k := newCapTalkerWith(t, model, &brain.Agent{Name: "额度判断", Model: judge, Instructions: judgeInstructions,
+		Tools: []string{"confirm_action", "cancel_action"}}, &fakeCap{})
+	k.owner("把上限提高一点")
+	if names := judge.LastRequest().ToolNames(); slicesContains(names, "raise_monthly_cap") {
+		t.Errorf("允许名单里没有提高上限：不该给它 %v", names)
 	}
 }
 

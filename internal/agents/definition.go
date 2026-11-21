@@ -44,14 +44,16 @@ const (
 
 // 程序用到的代理（文件名，不含 .md）。
 const (
-	Front   = "front"   // 前台：主对话
-	Strong  = "strong"  // 强模型：主人纠正时（或看画面接手时）接手这一轮
-	Vision  = "vision"  // 看画面：幕后专家
-	Summary = "summary" // 摘要：滚动摘要
+	Front      = "front"       // 前台：主对话
+	Strong     = "strong"      // 强模型：主人纠正时（或看画面接手时）接手这一轮
+	Vision     = "vision"      // 看画面：幕后专家
+	Summary    = "summary"     // 摘要：滚动摘要
+	OverBudget = "over_budget" // 额度判断：月度上限到了以后判断主人要不要临时提高
 )
 
 // known 是程序认识的代理，以及每个该用的调用方式（程序按这个方式调用它）。
-var known = map[string]Mode{Front: ModePrimary, Strong: ModeHandoff, Vision: ModeSubtask, Summary: ModeSubtask}
+var known = map[string]Mode{Front: ModePrimary, Strong: ModeHandoff, Vision: ModeSubtask, Summary: ModeSubtask,
+	OverBudget: ModeSubtask}
 
 // agentFields 是只有部分代理认的配置项：值为 true 表示这个代理必须写。写在不认的代理上不会生效，起不来比悄悄不生效好。
 var agentFields = map[string]map[string]bool{

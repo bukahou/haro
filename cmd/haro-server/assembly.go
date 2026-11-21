@@ -196,13 +196,9 @@ func assembleBrain(ctx context.Context, settings config.ServerSettings, catalog 
 			return speech.NewSentenceSegmenter(settings.FirstSegmentMinRunes, settings.MaxSegmentRunes)
 		},
 	}
-	if settings.MonthlyYen > 0 && settings.MonthlyRaiseYen > 0 && settings.LLMProvider == config.LLMCloud {
-		// 月度上限到了以后，主人可以口头临时提高：判断用的小调用不受额度管（否则上限到了就没法判断），按天限次数、照样记账
+	if built.overBudget != nil { // 月度上限到了以后，主人可以口头临时提高（判断交给代理「额度判断」）
 		components.MonthlyCap = deps.guard
-		components.OverBudgetModel = spending.NewDailyCallLimit(deps.meteredCloudModel(settings, cloudModelSpec{model: settings.CloudLLMModel,
-			maxTokens: overBudgetMaxTokens, effort: settings.CloudLLMEffort, thinking: settings.CloudLLMThinking,
-			firstTokenTimeout: settings.CloudLLMTimeout, requestTimeout: settings.RequestTimeout}, spending.PurposeChat, logger),
-			settings.OverBudgetDailyCalls)
+		components.OverBudget = built.overBudget
 		logger.Info("月度上限到了以后可以口头临时提高", "raise_yen", settings.MonthlyRaiseYen, "daily_checks", settings.OverBudgetDailyCalls)
 	}
 	store, err := openConversationStore(ctx, settings, logger, shutdown)

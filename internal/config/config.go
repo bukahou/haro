@@ -480,6 +480,11 @@ const (
 	VisionByTakeover = "takeover" // 带画面的那次请求直接换它回答
 )
 
+// CanRaiseMonthlyCap 判断主人能不能在月度上限到了以后口头临时提高：设了上限和每次提高的金额，判断用云端的模型。
+func (s ServerSettings) CanRaiseMonthlyCap() bool {
+	return s.MonthlyYen > 0 && s.MonthlyRaiseYen > 0 && s.LLMProvider == LLMCloud
+}
+
 // VisionExpert 判断看画面是否交给幕后专家（更强的模型）。
 func (s ServerSettings) VisionExpert() bool {
 	return s.StrongLLMFor(StrongForVision) && s.StrongLLMVisionMode == VisionByExpert

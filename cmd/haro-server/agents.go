@@ -55,6 +55,8 @@ type conversationAgents struct {
 	handoff brain.Handoff     // 主人纠正时（或看画面接手时）接手的强模型；没配时为零值
 	expert  brain.FrameExpert // 看画面的专家；没配时为 nil
 	summary *brain.Agent      // 写滚动摘要；没开时为 nil
+	// overBudget：月度上限到了以后判断主人要不要临时提高（不受额度管、按天限次数）；不能口头提高时为 nil
+	overBudget *brain.Agent
 	// breaker：前台和接手的模型共用的「连不上」熔断；刚恢复时由它告诉模型断过多久（每轮的情况说明）
 	breaker *llm.UnavailabilityBreaker
 }
@@ -129,6 +131,21 @@ func (a agentAssembly) build(toolbox brain.Toolbox, expertSearch vision.Search) 
 			return built, err
 		}
 		built.summary = &summary
+	}
+
+	if s.CanRaiseMonthlyCap() {
+		definition := a.catalog[agents.OverBudget]
+		judgeModel, _, err := a.metered(definition)
+		if err != nil {
+			return built, err
+		}
+		// 不受额度管（否则上限到了就没法判断），按天限次数、照样记账
+		judge, err := a.agent(definition, spending.NewDailyCallLimit(judgeModel, s.OverBudgetDailyCalls),
+			brain.OverBudgetPromptValues(), toolbox)
+		if err != nil {
+			return built, err
+		}
+		built.overBudget = &judge
 	}
 	return built, nil
 }

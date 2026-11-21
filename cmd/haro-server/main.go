@@ -350,9 +350,6 @@ func startResearch(ctx context.Context, settings config.ServerSettings, deps ser
 	return runner, stop, nil
 }
 
-// overBudgetMaxTokens：月度上限到了以后，判断主人要不要提高上限的那次小调用的输出上限（只交工具调用，不说话）。
-const overBudgetMaxTokens = 200
-
 // researchMaxTokens 是调查时每次请求的输出上限（结论比聊天长，聊天用 HARO_CLOUD_LLM_MAX_TOKENS）。
 const researchMaxTokens = 1000
 

@@ -13,8 +13,8 @@ import (
 
 // 月度费用到了上限时：普通的问题不回答，念固定的话（到上限了、下个月一号恢复、可以口头临时提高）；
 // 主人要临时提高时过确认闸（登记过的声纹 + 有时效的确认），确认后才提高。
-// 听懂「要提高」只能靠模型（不靠词表）：上限到了以后每句话用一次很小的调用判断 —— 不带历史，
-// 只给「提高上限」和确认的两个工具；模型说的话不念，念给主人的都是固定的话。
+// 听懂「要提高」只能靠模型（不靠词表）：上限到了以后每句话交给代理「额度判断」（internal/agents/builtin/over_budget.md）
+// 用一次很小的调用判断 —— 不带历史，只给「提高上限」和确认的两个工具；模型说的话不念，念给主人的都是固定的话。
 
 const raiseMonthlyCapTool = "raise_monthly_cap"
 
@@ -30,15 +30,14 @@ type MonthlyCap interface {
 var raiseMonthlyCapSpec = ToolSpec{Name: raiseMonthlyCapTool, Parameters: ParametersFor[struct{}](), RequiresConfirmation: true,
 	Description: "主人明确要临时提高这个月的费用上限时调用（每次提高的金额是固定的）。会先问主人确认，主人同意后才提高。"}
 
-// overBudgetInstructions 是上限到了以后那次小调用的系统提示词：只判断要不要提高、同不同意，不回答问题。
-const overBudgetInstructions = `这个月的费用到了上限，现在不回答任何问题，也不要输出文字。只判断主人这句话：
-- 要临时提高这个月的费用上限：调用 raise_monthly_cap；
-- 情况说明里列着待确认的操作：主人同意就调用 confirm_action，不同意就调用 cancel_action；
-- 其余情况：什么都不调用。`
+// OverBudgetPromptValues 是代理「额度判断」正文里引用的值：工具名只在代码里定义一处。
+func OverBudgetPromptValues() map[string]any {
+	return map[string]any{"RaiseTool": raiseMonthlyCapTool, "ConfirmTool": confirmActionTool, "CancelTool": cancelActionTool}
+}
 
-// canRaiseMonthlyCap 是这个服务端能不能口头提高上限（接了上限、也有判断用的模型）。
+// canRaiseMonthlyCap 是这个服务端能不能口头提高上限（接了上限、也有判断用的代理）。
 func (s *Session) canRaiseMonthlyCap() bool {
-	return s.parts.MonthlyCap != nil && s.parts.OverBudgetModel != nil
+	return s.parts.MonthlyCap != nil && s.parts.OverBudget != nil
 }
 
 // capRaiseResult 是「提高上限」交给模型的结果。
@@ -74,13 +73,14 @@ func (s *Session) executeConfirmed(ctx context.Context, record *turnRecord, call
 
 // answerOverBudget 上限到了时回答这一句（见文件开头）。capErr 是额度那一层交出的错误（能念给主人）。
 func (s *Session) answerOverBudget(ctx context.Context, record *turnRecord, capErr error) realtimeproto.ResponseDone {
-	messages := []ChatMessage{{Role: RoleSystem, Text: overBudgetInstructions}}
+	judge := s.parts.OverBudget
+	messages := []ChatMessage{{Role: RoleSystem, Text: judge.Instructions}}
 	if notes := s.pendingActionNotes(); len(notes) > 0 {
 		messages = append(messages, ChatMessage{Role: RoleUser, Text: situationHeading + joinLines(notes), Synthetic: true})
 	}
 	messages = append(messages, ChatMessage{Role: RoleUser, Text: record.question})
-	tools := append([]ToolSpec{raiseMonthlyCapSpec}, s.confirmationSpecs()...)
-	reply, err := CollectReply(ctx, s.parts.OverBudgetModel, ChatRequest{Messages: messages, Tools: tools})
+	tools := judge.offer(append([]ToolSpec{raiseMonthlyCapSpec}, s.confirmationSpecs()...))
+	reply, err := CollectReply(ctx, judge.Model, ChatRequest{Messages: messages, Tools: tools})
 	if ctx.Err() != nil {
 		return realtimeproto.ResponseDone{Status: realtimeproto.StatusCancelled}
 	}

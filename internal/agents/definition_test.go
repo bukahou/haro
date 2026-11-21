@@ -19,10 +19,11 @@ func TestBuiltinDefinitions(t *testing.T) {
 		mode           agents.Mode
 		model, purpose string
 	}{
-		agents.Front:   {agents.ModePrimary, agents.TierBase, "chat"},
-		agents.Strong:  {agents.ModeHandoff, agents.TierStrong, "strong"},
-		agents.Vision:  {agents.ModeSubtask, agents.TierStrong, "vision"},
-		agents.Summary: {agents.ModeSubtask, agents.TierBase, "summary"},
+		agents.Front:      {agents.ModePrimary, agents.TierBase, "chat"},
+		agents.Strong:     {agents.ModeHandoff, agents.TierStrong, "strong"},
+		agents.Vision:     {agents.ModeSubtask, agents.TierStrong, "vision"},
+		agents.Summary:    {agents.ModeSubtask, agents.TierBase, "summary"},
+		agents.OverBudget: {agents.ModeSubtask, agents.TierBase, "chat"},
 	}
 	for name, w := range want {
 		definition, err := catalog.Get(name)

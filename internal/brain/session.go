@@ -34,10 +34,10 @@ type Components struct {
 	Profiles ProfileSource
 	// Notices 是所有终端连接共用的提示中转（后台调查查完了让终端响一声）；nil = 不发提示
 	Notices *NoticeHub
-	// MonthlyCap、OverBudgetModel：月度上限到了以后，主人可以口头临时提高（见 monthly_cap.go）；
-	// 都设了才有这个能力。OverBudgetModel 不受额度管（否则上限到了就没法判断），由组装处限每天的次数
-	MonthlyCap      MonthlyCap
-	OverBudgetModel ChatModel
+	// MonthlyCap、OverBudget：月度上限到了以后，主人可以口头临时提高（见 monthly_cap.go）；
+	// 都设了才有这个能力。OverBudget 的模型不受额度管（否则上限到了就没法判断），由组装处限每天的次数
+	MonthlyCap MonthlyCap
+	OverBudget *Agent
 }
 
 // Options 是服务端的可调参数。

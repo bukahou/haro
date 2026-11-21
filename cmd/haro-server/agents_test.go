@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -68,6 +69,33 @@ func TestBuildAgentsFromBuiltinDefinitions(t *testing.T) {
 	}
 	if built.summary == nil || !strings.Contains(built.summary.Instructions, "摘要") {
 		t.Errorf("开了滚动摘要：应有代理「摘要」：%+v", built.summary)
+	}
+}
+
+// 设了月度上限和每次提高的金额（云端模型）时有代理「额度判断」：正文里的工具名由代码填，只给它那三个工具；
+// 没设上限时没有。
+func TestBuildOverBudgetAgent(t *testing.T) {
+	settings := cloudSettings(nil, config.VisionByExpert)
+	settings.MonthlyYen, settings.MonthlyRaiseYen, settings.OverBudgetDailyCalls = 3000, 500, 30
+	built, err := testAssembly(t, settings, nil).build(nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	judge := built.overBudget
+	if judge == nil {
+		t.Fatal("设了上限和提高的金额：应有代理「额度判断」")
+	}
+	for _, tool := range []string{"raise_monthly_cap", "confirm_action", "cancel_action"} {
+		if !strings.Contains(judge.Instructions, tool) || !slices.Contains(judge.Tools, tool) {
+			t.Errorf("正文和允许名单里都应有 %s：%+v", tool, judge)
+		}
+	}
+	if strings.Contains(judge.Instructions, "{{") || judge.MaxSteps != 1 {
+		t.Errorf("额度判断：%+v", judge)
+	}
+	settings.MonthlyYen = 0
+	if built, err := testAssembly(t, settings, nil).build(nil, nil); err != nil || built.overBudget != nil {
+		t.Errorf("不限月度费用时不应有额度判断：%v %+v", err, built.overBudget)
 	}
 }
 
