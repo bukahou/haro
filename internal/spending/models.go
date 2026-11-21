@@ -10,7 +10,12 @@ import (
 	"time"
 
 	"github.com/bukahou/haro/internal/brain"
+	"github.com/bukahou/haro/internal/sqliteschema"
 )
+
+// recordTimeout 是每次请求收尾时记一笔最多等多久：账本是 SQLite，等写锁最多 sqliteschema.BusyTimeout，再等下去就是账本
+// 出了问题；写不进的由账本留在内存里补写（见 pendingChargesLedger），回答的收尾不跟着一直等。
+const recordTimeout = sqliteschema.BusyTimeout
 
 // MeteredChatModel 给一个模型记账（装饰器）：每次请求结束时按 Usage 记一笔。
 // 套在具体模型（云端 / 本地）外面，所以退路切换后记的是实际回答的那个模型。
@@ -43,12 +48,12 @@ func (m *MeteredChatModel) StreamReply(ctx context.Context, request brain.ChatRe
 		recorded, callerGone := false, false
 		defer func() {
 			if !recorded {
-				m.record(&brain.ReplyUsage{Incomplete: true, TokensUnknown: true})
+				m.record(ctx, &brain.ReplyUsage{Incomplete: true, TokensUnknown: true})
 			}
 		}()
 		for delta, err := range m.inner.StreamReply(ctx, request) {
 			if delta.Usage != nil && !recorded {
-				m.record(delta.Usage)
+				m.record(ctx, delta.Usage)
 				recorded = true
 			}
 			if callerGone {
@@ -68,13 +73,15 @@ func (m *MeteredChatModel) StreamReply(ctx context.Context, request brain.ChatRe
 	}
 }
 
-func (m *MeteredChatModel) record(usage *brain.ReplyUsage) {
+func (m *MeteredChatModel) record(ctx context.Context, usage *brain.ReplyUsage) {
 	charge := Charge{Purpose: m.purpose, Item: "llm:" + m.model, InputTokens: usage.PromptTokens, OutputTokens: usage.OutputTokens,
 		CacheReadTokens: usage.CacheReadTokens, CacheWriteTokens: usage.CacheWriteTokens, Yen: m.pricing.LLMYen(m.model, *usage),
 		Incomplete: usage.Incomplete, TokensUnknown: usage.TokensUnknown}
-	// 用独立的 context：回答被打断（ctx 取消）时，已经产生的费用照样要记（记上的每一笔由账本那层打日志；
-	// 写不进的由账本留着补写，补写成功之前不放行有上限的付费调用，见 WithBookkeeping）
-	if err := m.ledger.Record(context.Background(), charge); err != nil {
+	// 不跟着这一轮取消：回答被打断（ctx 取消）时，已经产生的费用照样要记；期限另算（recordTimeout）。
+	// 记上的每一笔由账本那层打日志；写不进的由账本留着补写，补写成功之前不放行有上限的付费调用，见 WithBookkeeping
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
+	defer cancel()
+	if err := m.ledger.Record(ctx, charge); err != nil {
 		m.logger.Warn("💴 这次的用量没写进账本", "err", err, "item", charge.Item, "yen", charge.Yen, "incomplete", charge.Incomplete)
 	}
 }

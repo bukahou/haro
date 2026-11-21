@@ -126,6 +126,40 @@ func TestMeteredRecordsInterruptedRequest(t *testing.T) {
 	}
 }
 
+// 记账不跟着这一轮取消（主人打断了，已经花的照样要记），但有自己的期限（账本卡住时回答的收尾不一直等）。
+func TestMeteredRecordsWithItsOwnDeadline(t *testing.T) {
+	ledger := &contextLog{}
+	inner := streamScript{deltas: []brain.ReplyDelta{{Text: "从前"}}, untilCancelled: true,
+		cancelled: brain.ReplyDelta{Usage: &brain.ReplyUsage{PromptTokens: 2000, Incomplete: true}}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	for range metered(inner, ledger).StreamReply(ctx, brain.ChatRequest{}) {
+		cancel() // 主人打断
+		break
+	}
+	if len(ledger.recorded()) != 1 || ledger.err != nil {
+		t.Errorf("回答被取消后应照样记一笔、记账用的 ctx 不跟着取消：%d 笔，%v", len(ledger.recorded()), ledger.err)
+	}
+	if !ledger.hasDeadline || ledger.remaining <= 0 || ledger.remaining > recordTimeout {
+		t.Errorf("记账要有期限（不超过 %v）：有没有 %v，还剩 %v", recordTimeout, ledger.hasDeadline, ledger.remaining)
+	}
+}
+
+// contextLog 记下账本收到的 ctx 是什么样（取消了没有、期限还剩多久）。
+type contextLog struct {
+	chargeLog
+	err         error
+	hasDeadline bool
+	remaining   time.Duration
+}
+
+func (l *contextLog) Record(ctx context.Context, charge Charge) error {
+	l.err = ctx.Err()
+	deadline, ok := ctx.Deadline()
+	l.hasDeadline, l.remaining = ok, time.Until(deadline)
+	return l.chargeLog.Record(ctx, charge)
+}
+
 // 没取消却中途不要了：不等内层（它还会接着生成），记一行 token 不知道的。
 func TestMeteredRecordsAbandonedRequestAsUnknown(t *testing.T) {
 	ledger := &chargeLog{}

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"testing/fstest"
 )
@@ -33,7 +34,7 @@ func TestOpenFileDatabase(t *testing.T) {
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("库文件应建在给的路径上：%v", err)
 	}
-	if got := pragma(t, db, "busy_timeout"); got != "5000" {
+	if got := pragma(t, db, "busy_timeout"); got != strconv.FormatInt(BusyTimeout.Milliseconds(), 10) {
 		t.Errorf("等锁时间：%s", got)
 	}
 	if got := pragma(t, db, "journal_mode"); got != "wal" {

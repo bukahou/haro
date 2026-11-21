@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/bukahou/haro/internal/sqliteschema"
 )
 
 // maxPendingCharges 是账本写不进时内存里最多留几笔待补写。写不进之后，有上限的付费调用、搜索都不放行（Guard），
@@ -13,7 +15,7 @@ import (
 const maxPendingCharges = 500
 
 // closeFlushTimeout 是关停时最后补写一次最多等多久（和 SQLite 等锁的上限一样长）。
-const closeFlushTimeout = 5 * time.Second
+const closeFlushTimeout = sqliteschema.BusyTimeout
 
 // pendingChargesLedger 给账本套一层：写不进的那笔留在内存里（最多 maxPendingCharges 笔），之后补写。
 // 补写的时机：下一次记账之前、额度检查之前（FlushPending）、就绪检查（CheckWritable）、关停（Close）。
