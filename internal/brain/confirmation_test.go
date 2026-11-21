@@ -1,8 +1,12 @@
 package brain_test
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"slices"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -161,5 +165,71 @@ func TestConfirmationGateIgnoresChangedArguments(t *testing.T) {
 	k.owner("就删刚才那条")
 	if got := toolbox.called(); len(got) != 1 || !slices.Equal(toolbox.argumentsOf(0)["ids"].([]any), []any{3}) {
 		t.Errorf("执行的应是当初存下的参数：%v %v", got, toolbox.arguments)
+	}
+}
+
+// deleteNotesArguments 是 delete_note 的参数（定义和内置工具一样由结构体生成）。
+type deleteNotesArguments struct {
+	IDs []int64 `json:"ids" jsonschema:"要删的记录的编号"`
+}
+
+// strictToolbox 的 delete_note 带着真正的参数定义；fail 不为 nil 时执行出错。记下每次调用带的主人的确认。
+type strictToolbox struct {
+	mu            sync.Mutex
+	fail          error
+	confirmations []brain.Confirmation
+}
+
+func (b *strictToolbox) Specs() []brain.ToolSpec {
+	return []brain.ToolSpec{{Name: "delete_note", Parameters: brain.ParametersFor[deleteNotesArguments](), RequiresConfirmation: true}}
+}
+
+func (b *strictToolbox) Call(ctx context.Context, _ brain.ToolCall) (string, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	confirmation, _ := brain.ConfirmationFrom(ctx)
+	b.confirmations = append(b.confirmations, confirmation)
+	if b.fail != nil {
+		return "", b.fail
+	}
+	return `{"deleted":true}`, nil
+}
+
+func (b *strictToolbox) calls() []brain.Confirmation {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return slices.Clone(b.confirmations)
+}
+
+// 参数不合工具的定义（编号写成了字符串）：问主人之前就交回哪里不对，不存下待确认的操作（之后确认那个编号也没有可执行的）。
+func TestConfirmationGateRejectsInvalidArgumentsBeforeAsking(t *testing.T) {
+	model := braintest.NewModel(t, braintest.Call("delete_note", map[string]any{"ids": "3"}), braintest.Say("编号不对，我再看看。"),
+		braintest.Call("confirm_action", map[string]any{"action_id": "act_1"}), braintest.Say("好的。"))
+	toolbox := &strictToolbox{}
+	k := newGateTalker(t, model, toolbox, 0)
+	k.owner("把 3 号删了")
+	if result := toolResultOf(t, model.Requests()[1]); result["status"] != "invalid_arguments" || result["action_id"] != nil {
+		t.Errorf("参数不对：应交回哪里不对、不存下：%v", result)
+	}
+	k.owner("删吧")
+	if result := toolResultOf(t, model.Requests()[3]); result["status"] != "refused" || len(toolbox.calls()) != 0 {
+		t.Errorf("没存下的操作不能确认、不执行：%v（执行了 %d 次）", result, len(toolbox.calls()))
+	}
+}
+
+// 主人确认后执行：带上主人的确认（编号、工具、谁确认的）交给工具箱；执行失败时交回 failed（不是 done），模型不会说「删好了」。
+func TestConfirmedExecutionCarriesConfirmationAndReportsFailure(t *testing.T) {
+	model := braintest.NewModel(t, deleteNoteThree, braintest.Say("要删掉第 3 条吗？"),
+		braintest.Call("confirm_action", map[string]any{"action_id": "act_1"}), braintest.Say("没删成。"))
+	toolbox := &strictToolbox{fail: errors.New("记事本数据库写不进去")}
+	k := newGateTalker(t, model, toolbox, 0)
+	k.owner("把 3 号删了")
+	k.owner("删吧")
+	if got := toolbox.calls(); len(got) != 1 || got[0] != (brain.Confirmation{ActionID: "act_1", Tool: "delete_note", Person: "主人"}) {
+		t.Fatalf("执行时要带上主人的确认：%+v", got)
+	}
+	result := toolResultOf(t, model.Requests()[3])
+	if result["status"] != "failed" || !strings.Contains(result["result"].(string), "写不进去") {
+		t.Errorf("确认后执行失败：应交回 failed 和出错的原因：%v", result)
 	}
 }

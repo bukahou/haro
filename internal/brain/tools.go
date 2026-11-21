@@ -211,9 +211,9 @@ func (look cameraLook) historyResult(spokenDirectly bool) string {
 	}
 }
 
-// callTool 执行一次工具调用，返回交给模型的结果文字；出错时把错误也交给模型，让它如实告诉用户。
+// runTool 执行一次工具调用（带说话人、这一轮的收集处和工具的期限），交回工具的结果或错误。
 // record 是这一轮的记录：工具用 OnDelivered 登记的事记在这里。
-func (s *Session) callTool(ctx context.Context, record *turnRecord, call ToolCall) string {
+func (s *Session) runTool(ctx context.Context, record *turnRecord, call ToolCall) (string, error) {
 	ctx, span := tracer.Start(ctx, "brain.tool")
 	defer span.End()
 	ctx, cancel := context.WithTimeout(WithDeliveries(WithSpeaker(ctx, s.currentConversation().Person()), record), s.toolTimeout())
@@ -224,6 +224,12 @@ func (s *Session) callTool(ctx context.Context, record *turnRecord, call ToolCal
 	recordSpanError(span, err)
 	arguments, _ := json.Marshal(call.Arguments)
 	s.logger.Info("调用工具", "tool", call.Name, "arguments", string(arguments), "elapsed", since(started), "err", err)
+	return result, err
+}
+
+// callTool 执行一次工具调用，返回交给模型的结果文字；出错时把错误也交给模型，让它如实告诉用户。
+func (s *Session) callTool(ctx context.Context, record *turnRecord, call ToolCall) string {
+	result, err := s.runTool(ctx, record, call)
 	if err != nil {
 		var spoken SpokenError
 		if errors.As(err, &spoken) { // 例如额度用完：不是暂时的，不提示重试

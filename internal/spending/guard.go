@@ -264,7 +264,11 @@ func (g *Guard) overMonthly(spent, limit float64) error {
 }
 
 // RaiseMonthlyCap 实现 brain.MonthlyCap：主人口头确认后，把这个月的上限提高 MonthlyRaiseYen（记进账本，重启后照样算）。
+// 执行方自己守门：ctx 里没有 person 对提高上限的确认（brain.WithConfirmation）就不提高，交回 brain.ErrNotConfirmed。
 func (g *Guard) RaiseMonthlyCap(ctx context.Context, person string) (float64, error) {
+	if _, err := brain.RequireConfirmation(ctx, brain.RaiseMonthlyCapTool, person); err != nil {
+		return 0, err
+	}
 	if g.limits.MonthlyYen <= 0 || g.limits.MonthlyRaiseYen <= 0 {
 		return 0, errors.New("没有设月度上限，或者不允许口头提高")
 	}

@@ -24,7 +24,7 @@ var sessionTools = []sessionTool{
 	{name: switchPersonaTool, offer: func(s *Session) (ToolSpec, bool) { return switchPersonaSpec(s.opts.Personas) }},
 	{name: askStrongerTool, offer: func(s *Session) (ToolSpec, bool) { return askStrongerSpec, s.parts.Handoff.corrections() }},
 	// 平时也能口头提高上限（照样过确认闸）
-	{name: raiseMonthlyCapTool, offer: func(s *Session) (ToolSpec, bool) { return raiseMonthlyCapSpec, s.parts.MonthlyCap != nil }},
+	{name: RaiseMonthlyCapTool, offer: func(s *Session) (ToolSpec, bool) { return raiseMonthlyCapSpec, s.parts.MonthlyCap != nil }},
 	{name: confirmActionTool, gate: true, offer: func(*Session) (ToolSpec, bool) { return confirmActionSpec, true }},
 	{name: cancelActionTool, gate: true, offer: func(*Session) (ToolSpec, bool) { return cancelActionSpec, true }},
 }
@@ -71,15 +71,4 @@ func sessionToolNames() []string {
 		names[i] = tool.name
 	}
 	return names
-}
-
-// sessionToolRequiresConfirmation 判断会话工具 name 要不要过确认闸（看它的说明上的标注）；不是会话工具时 ok 为 false。
-func (s *Session) sessionToolRequiresConfirmation(name string) (required, ok bool) {
-	for _, tool := range sessionTools {
-		if tool.name == name {
-			spec, _ := tool.offer(s)
-			return spec.RequiresConfirmation, true
-		}
-	}
-	return false, false
 }

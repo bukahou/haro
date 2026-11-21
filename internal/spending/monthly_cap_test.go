@@ -34,7 +34,7 @@ func TestMonthlyCapRaise(t *testing.T) {
 	if key, values := spoken.Phrase(); key != brain.PhraseOverMonthlyBudgetRaisable || values["raise"] != "50" || values["limit"] != "100" {
 		t.Errorf("念的那句要说能提高多少：%s %v", key, values)
 	}
-	limit, err := guard.RaiseMonthlyCap(ctx, "主人")
+	limit, err := guard.RaiseMonthlyCap(confirmedRaise("主人"), "主人")
 	if err != nil || limit != 150 {
 		t.Fatalf("提高后上限应为 150：%v %v", limit, err)
 	}
@@ -64,6 +64,34 @@ func TestMonthlyCapRaise(t *testing.T) {
 	}
 }
 
+// confirmedRaise 是带着 person 对提高上限的确认的 ctx（确认闸执行时就是这样带的）。
+func confirmedRaise(person string) context.Context {
+	return brain.WithConfirmation(context.Background(), brain.Confirmation{ActionID: "act_1", Tool: brain.RaiseMonthlyCapTool, Person: person})
+}
+
+// 提高上限由额度那一层自己守门：绕过会话直接调用、带着别的工具的确认、确认的不是这个人，都不提高（账本里没有记录）；
+// 阳性对照：带着这个人对提高上限的确认就提高。
+func TestMonthlyCapRaiseNeedsConfirmation(t *testing.T) {
+	ctx := context.Background()
+	ledger := openTestLedger(t)
+	guard := NewGuard(ledger, Limits{MonthlyYen: 100, MonthlyRaiseYen: 50}, quietLogger)
+	for label, call := range map[string]context.Context{
+		"绕过会话直接调用":  ctx,
+		"带着别的工具的确认": brain.WithConfirmation(ctx, brain.Confirmation{ActionID: "act_1", Tool: "delete_note", Person: "主人"}),
+		"确认的不是这个人":  confirmedRaise("家人"),
+	} {
+		if _, err := guard.RaiseMonthlyCap(call, "主人"); !errors.Is(err, brain.ErrNotConfirmed) {
+			t.Errorf("%s：应拒绝：%v", label, err)
+		}
+	}
+	if raised, err := ledger.CapRaised(ctx, time.Time{}); err != nil || raised != 0 {
+		t.Fatalf("没确认的不该提高：%v %v", raised, err)
+	}
+	if limit, err := guard.RaiseMonthlyCap(confirmedRaise("主人"), "主人"); err != nil || limit != 150 {
+		t.Errorf("带着主人的确认应能提高：%v %v", limit, err)
+	}
+}
+
 // 不允许口头提高：念的那句不提提高，提高的调用报错；别的额度（搜索每天的次数）不算月度上限。
 func TestMonthlyCapWithoutRaise(t *testing.T) {
 	ctx := context.Background()
@@ -78,7 +106,7 @@ func TestMonthlyCapWithoutRaise(t *testing.T) {
 	} else if key, _ := spoken.Phrase(); key != brain.PhraseOverMonthlyBudget {
 		t.Errorf("不能口头提高时念原来那句：%s", key)
 	}
-	if _, err := guard.RaiseMonthlyCap(ctx, "主人"); err == nil {
+	if _, err := guard.RaiseMonthlyCap(confirmedRaise("主人"), "主人"); err == nil || errors.Is(err, brain.ErrNotConfirmed) {
 		t.Error("不允许口头提高时应报错")
 	}
 	if err := guard.AllowSearch(ctx, 1); err == nil || errors.Is(err, brain.ErrMonthlyCapReached) {

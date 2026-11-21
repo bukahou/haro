@@ -19,16 +19,19 @@ func (capReached) Phrase() (string, map[string]string) {
 	return brain.PhraseOverMonthlyBudgetRaisable, map[string]string{"spent": "3001", "limit": "3000", "raise": "500"}
 }
 
-// fakeCap 记下被提高了几次。
+// fakeCap 记下被提高了几次、每次带的主人的确认。
 type fakeCap struct {
-	mu     sync.Mutex
-	raises []string
+	mu            sync.Mutex
+	raises        []string
+	confirmations []brain.Confirmation
 }
 
-func (f *fakeCap) RaiseMonthlyCap(_ context.Context, person string) (float64, error) {
+func (f *fakeCap) RaiseMonthlyCap(ctx context.Context, person string) (float64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	confirmation, _ := brain.ConfirmationFrom(ctx)
 	f.raises = append(f.raises, person)
+	f.confirmations = append(f.confirmations, confirmation)
 	return 3000 + 500*float64(len(f.raises)), nil
 }
 
@@ -119,6 +122,9 @@ func TestOverBudgetRaiseNeedsConfirmation(t *testing.T) {
 	}
 	if spoken := braintest.Spoken(k.owner("可以")); !strings.Contains(spoken, "3500") || cap.count() != 1 {
 		t.Fatalf("同意后提高，并念提高后的上限：%q 提高了 %d 次", spoken, cap.count())
+	}
+	if got := cap.confirmations[0]; got != (brain.Confirmation{ActionID: "act_1", Tool: brain.RaiseMonthlyCapTool, Person: "主人"}) {
+		t.Errorf("提高时要带上主人的确认（额度那一层据此守门）：%+v", got)
 	}
 	second := judge.Requests()[1]
 	if !slicesContains(second.ToolNames(), "confirm_action") || !strings.Contains(second.Messages[1].Text, "act_1") {

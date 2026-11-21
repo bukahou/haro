@@ -17,7 +17,8 @@ import (
 // 听懂「要提高」只能靠模型（不靠词表）：上限到了以后每句话交给代理「额度判断」（internal/agents/builtin/over_budget.md）
 // 用一次很小的调用判断 —— 不带历史，只给「提高上限」和确认的两个工具；模型说的话不念，念给主人的都是固定的话。
 
-const raiseMonthlyCapTool = "raise_monthly_cap"
+// RaiseMonthlyCapTool 是「提高月度上限」的工具名（额度那一层核对主人的确认时也按它，见 RequireConfirmation）。
+const RaiseMonthlyCapTool = "raise_monthly_cap"
 
 // ErrMonthlyCapReached 表示这个月的费用到了上限（errors.Is 判断：额度那一层交出的错误要能认出它）。
 var ErrMonthlyCapReached = errors.New("这个月的费用到了上限")
@@ -25,17 +26,18 @@ var ErrMonthlyCapReached = errors.New("这个月的费用到了上限")
 // MonthlyCap 是月度费用上限：主人口头确认后可以临时提高（额度那一层实现）。
 type MonthlyCap interface {
 	// RaiseMonthlyCap 把这个月的上限提高一次（加多少由配置定），返回提高后的上限（日元）。
+	// ctx 里要带着 person 对 RaiseMonthlyCapTool 的确认（WithConfirmation），没有就拒绝。
 	RaiseMonthlyCap(ctx context.Context, person string) (float64, error)
 }
 
-var raiseMonthlyCapSpec = ToolSpec{Name: raiseMonthlyCapTool, Parameters: ParametersFor[struct{}](), RequiresConfirmation: true,
+var raiseMonthlyCapSpec = ToolSpec{Name: RaiseMonthlyCapTool, Parameters: ParametersFor[struct{}](), RequiresConfirmation: true,
 	Description: "主人明确要临时提高这个月的费用上限时调用（每次提高的金额是固定的）。会先问主人确认，主人同意后才提高。"}
 
 // OverBudgetPromptValues 是代理「额度判断」正文里引用的值：工具名只在代码里定义一处。只填它的允许名单里有的工具
 // （allowed 为 nil = 全部）：正文提到没交给它的工具时填值报错、服务端起不来，不会让模型去调用一个没给它的工具。
 func OverBudgetPromptValues(allowed []string) map[string]any {
 	values := map[string]any{}
-	for key, tool := range map[string]string{"RaiseTool": raiseMonthlyCapTool, "ConfirmTool": confirmActionTool, "CancelTool": cancelActionTool} {
+	for key, tool := range map[string]string{"RaiseTool": RaiseMonthlyCapTool, "ConfirmTool": confirmActionTool, "CancelTool": cancelActionTool} {
 		if allowed == nil || slices.Contains(allowed, tool) {
 			values[key] = tool
 		}
@@ -50,33 +52,29 @@ func (s *Session) canRaiseMonthlyCap() bool {
 
 // capRaiseResult 是「提高上限」交给模型的结果。
 type capRaiseResult struct {
-	RaisedYen       float64 `json:"raised_yen,omitempty"`
-	MonthlyLimitYen float64 `json:"monthly_limit_yen,omitempty"`
-	Error           string  `json:"error,omitempty"`
+	RaisedYen       float64 `json:"raised_yen"`
+	MonthlyLimitYen float64 `json:"monthly_limit_yen"`
 }
 
-// raiseMonthlyCap 执行主人确认过的「提高上限」。
-func (s *Session) raiseMonthlyCap(ctx context.Context, record *turnRecord) string {
-	result := capRaiseResult{RaisedYen: s.opts.MonthlyRaiseYen}
+// raiseMonthlyCap 执行主人确认过的「提高上限」（ctx 里带着主人的确认）。
+func (s *Session) raiseMonthlyCap(ctx context.Context, record *turnRecord) (string, error) {
 	limit, err := s.parts.MonthlyCap.RaiseMonthlyCap(ctx, s.currentConversation().Person())
 	if err != nil {
 		s.logger.Warn("💴 提高这个月的上限失败", "err", err)
-		result = capRaiseResult{Error: err.Error()}
-	} else {
-		record.capRaisedTo = limit
-		result.MonthlyLimitYen = limit
-		s.logger.Info("💴 主人确认：这个月的上限提高了", "raised_yen", s.opts.MonthlyRaiseYen, "limit_yen", limit)
+		return "", err
 	}
-	data, _ := json.Marshal(result)
-	return string(data)
+	record.capRaisedTo = limit
+	s.logger.Info("💴 主人确认：这个月的上限提高了", "raised_yen", s.opts.MonthlyRaiseYen, "limit_yen", limit)
+	data, err := json.Marshal(capRaiseResult{RaisedYen: s.opts.MonthlyRaiseYen, MonthlyLimitYen: limit})
+	return string(data), err
 }
 
-// executeConfirmed 执行主人确认过的操作：会话自己的工具在这里做，别的交给工具箱。
-func (s *Session) executeConfirmed(ctx context.Context, record *turnRecord, call ToolCall) string {
-	if call.Name == raiseMonthlyCapTool && s.parts.MonthlyCap != nil {
+// executeConfirmed 执行主人确认过的操作（ctx 里带着主人的确认）：会话自己的工具在这里做，别的交给工具箱。
+func (s *Session) executeConfirmed(ctx context.Context, record *turnRecord, call ToolCall) (string, error) {
+	if call.Name == RaiseMonthlyCapTool && s.parts.MonthlyCap != nil {
 		return s.raiseMonthlyCap(ctx, record)
 	}
-	return s.callTool(ctx, record, call)
+	return s.runTool(ctx, record, call)
 }
 
 // answerOverBudget 上限到了时回答这一句（见文件开头）。capErr 是额度那一层交出的错误（能念给主人）。
@@ -101,7 +99,7 @@ func (s *Session) answerOverBudget(ctx context.Context, record *turnRecord, capE
 			continue
 		}
 		switch call.Name {
-		case raiseMonthlyCapTool:
+		case RaiseMonthlyCapTool:
 			s.holdForConfirmation(record, call)
 		case confirmActionTool:
 			s.confirmAction(ctx, record, call)
@@ -133,7 +131,7 @@ func (s *Session) pendingActionNotes() []string {
 	var notes []string
 	for _, action := range s.currentConversation().unexpiredPendingActions(time.Now()) {
 		what := action.Call.Name
-		if action.Call.Name == raiseMonthlyCapTool {
+		if action.Call.Name == RaiseMonthlyCapTool {
 			what = fmt.Sprintf("把这个月的费用上限临时提高 %.0f 日元", s.opts.MonthlyRaiseYen)
 		}
 		notes = append(notes, fmt.Sprintf("待确认的操作 %s：%s（刚才已经问过主人要不要做）", action.ID, what))
