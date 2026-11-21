@@ -45,7 +45,7 @@ haro 是一个家用语音助手：家里每个房间放一台**终端**（麦�
 | 接口 | 实现 |
 |---|---|
 | `StreamingRecognizer` | `internal/speech`：按 `HARO_ASR_URL` 连 haro-asr（或其他照 OpenAI Realtime 转写会话的服务） |
-| `ChatModel` | `internal/llm`：Claude API（官方 SDK）、OpenAI 兼容接口（官方 openai-go；本地 Ollama 走它的兼容端点）；主备切换（`FallbackChatModel`）。请求可以「工具照给、这轮不许调用」（提示词缓存不失效）；输出到上限时明确报「被截断」；需要预热的模型另实现 `ModelWarmer`。三个适配跑同一组契约测试（`internal/llm/contract_test.go`） |
+| `ChatModel` | `internal/llm`：Claude API（官方 SDK）、OpenAI 兼容接口（官方 openai-go；本地 Ollama 走它的兼容端点），本地和云端按配置二选一、不自动互相顶替。请求可以「工具照给、这轮不许调用」（提示词缓存不失效）；输出到上限时明确报「被截断」；需要预热的模型另实现 `ModelWarmer`。三个适配跑同一组契约测试（`internal/llm/contract_test.go`） |
 | `SpeechSynthesizer` | `internal/speech`：GPT-SoVITS（边合成边播放）、Piper |
 | `Toolbox` | `internal/tools`：内置工具 + 第三方 MCP 服务 |
 | `ConversationStore` | `internal/conversationstore`：SQLite（goose 迁移）；每一轮带说话的时间，发给模型时每轮前标日期和时刻 |
@@ -105,12 +105,20 @@ Open-Meteo 连不上或报错时，日本境内的地点改查日本气象厅网
 - 调查必须先搜：模型想不搜就下结论时会被退回去。
 - 查完时，服务端给主人最近说话的那台终端发一个提示（`haro.notice`），终端响一声「叮咚」（睡着也响）；
   主人叫醒后，服务端先说结论。服务端还不能主动开口说话。
-- 调查用的模型可以单独配置（例如聊天用本地模型、调查用云端模型）。
+- 调查只用云端模型（本地小模型调工具不可靠）。
 
 ### 费用（`internal/spending`）
 
 大模型和搜索按量计费时：每次调用都记账（token、搜索积分，按单价与汇率折成本地货币），
-按天、按月封顶。超过月度上限后改用本地模型；没有本地模型时直接告诉主人额度用完了。
+按天、按月封顶。超过月度上限后不再回答，念一句固定的话（到上限了、下个月一号恢复）；主人可以口头临时提高这个月的上限
+（`HARO_MONTHLY_RAISE_YEN`，每次加多少），要过确认闸（登记过的声纹 + 有时效的确认）。听懂「要提高」靠一次很小的模型调用
+（不带历史，只给提高上限和确认的工具，模型说的话不念），它不受额度管，按天限次数（`HARO_OVER_BUDGET_DAILY_CALLS`）。
+
+### 连不上云端时（最低能力）
+
+适配层把连不上（网络错误、等不到开始回答、超时、认证失败、限流、服务端出错）标成带类型的错误。这时不调用任何模型，
+无论主人说什么，都念一句固定的话：连不上 + 现在的时间（中日英各一份）。连不上一次就熔断：之后马上告诉主人，
+不用每句都等超时；30 秒后放一个请求去试，通了就恢复，下一轮由模型顺带交代刚才断过。
 
 云端模型的单价来自公共的模型价格目录（`internal/pricecatalog`，默认 [models.dev](https://models.dev)，`HARO_MODEL_PRICES_*`）：
 服务端启动时拉取（含缓存读写的单价、按上下文大小分的档），拉到的那一家存一份到 `HARO_MODEL_PRICES_CACHE`，

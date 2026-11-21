@@ -56,6 +56,12 @@ func TestLedgerMigratesOldLayouts(t *testing.T) {
 				t.Fatalf("再打开：%v", err)
 			}
 			defer ledger.Close()
+			if err := ledger.RaiseCap(ctx, CapRaise{Yen: 50, Person: "主人"}); err != nil {
+				t.Fatalf("迁移后的旧账本也要能记临时提高的上限：%v", err)
+			}
+			if raised, err := ledger.CapRaised(ctx, time.Unix(0, 0)); err != nil || raised != 50 {
+				t.Errorf("提高的上限：%v %v", raised, err)
+			}
 			db := ledger.(*sqliteLedger).db
 			type row struct {
 				id                    int64

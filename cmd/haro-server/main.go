@@ -108,7 +108,8 @@ func run(logger *slog.Logger) error {
 		logger.Warn("没设 HARO_USAGE_DB：用量只记在内存里，服务端重启后额度重新计算")
 	}
 	guard := spending.NewGuard(ledger, spending.Limits{ResearchDailyYen: settings.ResearchDailyYen,
-		MonthlyYen: settings.MonthlyYen, SearchDailyCredits: settings.SearchDailyCredits, WarnRatio: 0.8}, logger)
+		MonthlyYen: settings.MonthlyYen, SearchDailyCredits: settings.SearchDailyCredits, WarnRatio: 0.8,
+		MonthlyRaiseYen: settings.MonthlyRaiseYen}, logger)
 	logger.Info("费用上限", "research_daily_yen", settings.ResearchDailyYen, "monthly_yen", settings.MonthlyYen,
 		"search_daily_credits", settings.SearchDailyCredits)
 	pricing, err := loadPricing(ctx, settings, httpClient, logger)
@@ -183,6 +184,15 @@ func run(logger *slog.Logger) error {
 	}
 	if settings.VisionExpert() {
 		components.FrameExpert = newVisionExpert(settings, claude, modelHTTP, pricing, ledger, guard, expertSearch, logger)
+	}
+	if settings.MonthlyYen > 0 && settings.MonthlyRaiseYen > 0 && settings.LLMProvider == config.LLMCloud {
+		// 月度上限到了以后，主人可以口头临时提高：判断用的小调用不受额度管（否则上限到了就没法判断），按天限次数、照样记账
+		components.MonthlyCap = guard
+		components.OverBudgetModel = spending.NewDailyCallLimit(spending.NewMeteredChatModel(newCloudChatModel(settings, claude,
+			cloudModelSpec{model: settings.CloudLLMModel, maxTokens: overBudgetMaxTokens, effort: settings.CloudLLMEffort,
+				thinking: settings.CloudLLMThinking, firstTokenTimeout: settings.CloudLLMTimeout, requestTimeout: settings.RequestTimeout},
+			modelHTTP), settings.CloudLLMModel, spending.PurposeChat, pricing, ledger, logger), settings.OverBudgetDailyCalls)
+		logger.Info("月度上限到了以后可以口头临时提高", "raise_yen", settings.MonthlyRaiseYen, "daily_checks", settings.OverBudgetDailyCalls)
 	}
 	// 对话簿所有终端连接共用：换终端、重连、服务端重启都接得上
 	var conversationStore brain.ConversationStore
@@ -564,6 +574,9 @@ func startResearch(ctx context.Context, settings config.Settings, claude *llm.Cl
 	return runner, stop, nil
 }
 
+// overBudgetMaxTokens：月度上限到了以后，判断主人要不要提高上限的那次小调用的输出上限（只交工具调用，不说话）。
+const overBudgetMaxTokens = 200
+
 // summaryMaxTokens 是写滚动摘要时每次请求的输出上限。
 const summaryMaxTokens = 600
 
@@ -594,7 +607,7 @@ func buildBrainOptions(settings config.Settings) (brain.Options, error) {
 	}
 	// 基础提示词：内置的永远生效，HARO_SYSTEM_PROMPT 只能追加
 	options := brain.Options{MaxHistoryTurn: settings.MaxHistoryTurn, Instructions: brain.ComposeInstructions(settings.ExtraSystemPrompt),
-		ConfirmationTimeout: settings.ConfirmationTimeout, Phrases: phrases,
+		ConfirmationTimeout: settings.ConfirmationTimeout, Phrases: phrases, MonthlyRaiseYen: settings.MonthlyRaiseYen,
 		Escalation: settings.StrongLLMFor(config.StrongForCorrection)} // 和 routeToStrong 配「重答」那条路的条件一致
 	if settings.PersonasDir == "" {
 		return options, nil

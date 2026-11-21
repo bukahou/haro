@@ -68,6 +68,9 @@ func (r confirmationResult) text() string {
 
 // requiresConfirmation 判断这个工具是不是要过确认闸。
 func (s *Session) requiresConfirmation(name string) bool {
+	if name == raiseMonthlyCapTool {
+		return raiseMonthlyCapSpec.RequiresConfirmation
+	}
 	if s.parts.Tools == nil {
 		return false
 	}
@@ -127,7 +130,7 @@ func (s *Session) confirmAction(ctx context.Context, record *turnRecord, call To
 	conversation.takePendingAction(in.ActionID)
 	s.logger.Info("主人确认了：执行", "action", action.ID, "tool", action.Call.Name)
 	return confirmationResult{Status: "done", ActionID: action.ID, Tool: action.Call.Name,
-		Result: s.callTool(ctx, record, action.Call)}.text()
+		Result: s.executeConfirmed(ctx, record, action.Call)}.text()
 }
 
 // cancelAction 执行 cancel_action：作废这个人所有待确认的操作。

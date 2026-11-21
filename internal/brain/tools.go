@@ -51,6 +51,9 @@ func (s *Session) toolSpecs() []ToolSpec {
 	if s.opts.Escalation {
 		specs = append(specs, askStrongerSpec)
 	}
+	if s.parts.MonthlyCap != nil { // 平时也能口头提高上限（照样过确认闸）
+		specs = append(specs, raiseMonthlyCapSpec)
+	}
 	if s.parts.Tools != nil {
 		specs = append(specs, s.parts.Tools.Specs()...)
 	}

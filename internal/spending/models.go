@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"iter"
 	"log/slog"
+	"sync"
+	"time"
 
 	"github.com/bukahou/haro/internal/brain"
 )
@@ -109,3 +111,38 @@ func (b *BudgetedChatModel) StreamReply(ctx context.Context, request brain.ChatR
 
 // Warmup 预热主用的那套（需要预热的话）。
 func (b *BudgetedChatModel) Warmup(ctx context.Context) error { return brain.WarmUp(ctx, b.paid) }
+
+// DailyCallLimit 限一个模型每天最多调用几次（按本地时区的日子算，只记在内存里）：给不受额度管的那次小调用兜底
+// （月度上限到了以后，判断主人要不要提高上限），免得它成了没有上限的花费。
+type DailyCallLimit struct {
+	inner brain.ChatModel
+	limit int
+	now   func() time.Time
+
+	mu   sync.Mutex
+	day  string
+	used int
+}
+
+// NewDailyCallLimit 创建每天最多调用 perDay 次的模型。
+func NewDailyCallLimit(inner brain.ChatModel, perDay int) *DailyCallLimit {
+	return &DailyCallLimit{inner: inner, limit: perDay, now: time.Now}
+}
+
+// StreamReply 今天的次数没用完就转发；用完了不调用，交出 ErrOverBudget。
+func (d *DailyCallLimit) StreamReply(ctx context.Context, request brain.ChatRequest) iter.Seq2[brain.ReplyDelta, error] {
+	d.mu.Lock()
+	if today := d.now().Format("2006-01-02"); today != d.day {
+		d.day, d.used = today, 0
+	}
+	allowed := d.used < d.limit
+	if allowed {
+		d.used++
+	}
+	d.mu.Unlock()
+	if !allowed {
+		err := fmt.Errorf("%w：这个模型今天已经调用了 %d 次（每天的上限）", ErrOverBudget, d.limit)
+		return func(yield func(brain.ReplyDelta, error) bool) { yield(brain.ReplyDelta{}, err) }
+	}
+	return d.inner.StreamReply(ctx, request)
+}

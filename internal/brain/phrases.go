@@ -20,10 +20,15 @@ const (
 	PhraseLedgerUnavailable = "ledger_unavailable"  // 读不出费用账本
 	PhraseRefused           = "refused"             // 模型拒绝回答
 	PhraseModelUnavailable  = "model_unavailable"   // {time}：连不上云端的模型（最低能力：说明状态，顺带报时）
+	// {spent} {limit} {raise}：每月总费用到上限，可以口头临时提高 {raise} 日元
+	PhraseOverMonthlyBudgetRaisable = "over_monthly_budget_raisable"
+	PhraseConfirmCapRaise           = "confirm_cap_raise"  // {raise}：问主人要不要临时提高上限
+	PhraseMonthlyCapRaised          = "monthly_cap_raised" // {limit}：上限提高了
 )
 
 var phraseKeys = []string{PhraseOverMonthlyBudget, PhraseOverResearchDaily, PhraseOverSearchDaily,
-	PhraseLedgerUnavailable, PhraseRefused, PhraseModelUnavailable}
+	PhraseLedgerUnavailable, PhraseRefused, PhraseModelUnavailable, PhraseOverMonthlyBudgetRaisable, PhraseConfirmCapRaise,
+	PhraseMonthlyCapRaised}
 
 // Phrases 是每种语言的固定的话：语种（识别给的，例如 zh、ja、en）→ 键 → 话。Default 是没有这种语言时用的。
 type Phrases struct {

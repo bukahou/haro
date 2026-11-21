@@ -28,6 +28,10 @@ type Components struct {
 	Profiles ProfileSource
 	// Notices 是所有终端连接共用的提示中转（后台调查查完了让终端响一声）；nil = 不发提示
 	Notices *NoticeHub
+	// MonthlyCap、OverBudgetModel：月度上限到了以后，主人可以口头临时提高（见 monthly_cap.go）；
+	// 都设了才有这个能力。OverBudgetModel 不受额度管（否则上限到了就没法判断），由组装处限每天的次数
+	MonthlyCap      MonthlyCap
+	OverBudgetModel ChatModel
 }
 
 // Options 是服务端的可调参数。
@@ -39,6 +43,8 @@ type Options struct {
 	ConfirmationTimeout time.Duration
 	// Phrases：不经模型、直接念的固定的话（每种语言一份）；零值 = 程序里带的那份
 	Phrases Phrases
+	// MonthlyRaiseYen：口头提高月度上限时每次加多少（念给主人听的数，和额度那一层用同一个配置）
+	MonthlyRaiseYen float64
 
 	// Instructions 是基础提示词（身份、能力、底线），只由服务端持有：客户端不能经 session.update 替换。
 	Instructions string

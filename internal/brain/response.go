@@ -130,6 +130,8 @@ func (s *Session) finishAnswer(ctx context.Context, record *turnRecord, answer s
 		s.mu.Unlock()
 		return s.speakFixedReply(ctx, s.opts.Phrases.Say(language, PhraseModelUnavailable,
 			map[string]string{"time": time.Now().Format("15:04")}))
+	case err != nil && errors.Is(err, ErrMonthlyCapReached) && answer == "" && record.executedTools() == 0 && s.canRaiseMonthlyCap():
+		return s.answerOverBudget(ctx, record, err) // 上限到了：不回答，但主人可以口头临时提高（第 7 段）
 	case err != nil:
 		var spoken SpokenError
 		if errors.As(err, &spoken) && answer == "" && record.executedTools() == 0 { // 例如额度用完了：直接告诉主人

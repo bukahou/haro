@@ -320,6 +320,14 @@ func (c *Conversation) dropPendingActionsFrom(turn int64) int {
 	return before - len(c.pendingActions)
 }
 
+// unexpiredPendingActions 去掉过期的，返回剩下的待确认操作（副本）。
+func (c *Conversation) unexpiredPendingActions(now time.Time) []pendingAction {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.pendingActions = slices.DeleteFunc(c.pendingActions, func(action pendingAction) bool { return now.After(action.ExpiresAt) })
+	return slices.Clone(c.pendingActions)
+}
+
 // hasPendingActions 去掉过期的，看还有没有待确认的操作。
 func (c *Conversation) hasPendingActions(now time.Time) bool {
 	c.mu.Lock()

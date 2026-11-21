@@ -42,3 +42,12 @@ func (l *loggingLedger) Record(ctx context.Context, charge Charge) error {
 	l.logger.Info("记账", args...)
 	return nil
 }
+
+// RaiseCap 记下提高上限，记上了就打一行（谁、多少）。
+func (l *loggingLedger) RaiseCap(ctx context.Context, raise CapRaise) error {
+	if err := l.Ledger.RaiseCap(ctx, raise); err != nil {
+		return err
+	}
+	l.logger.Info("记账：主人确认临时提高这个月的上限", "yen", raise.Yen, "person", raise.Person)
+	return nil
+}

@@ -60,7 +60,17 @@ type Ledger interface {
 	Total(ctx context.Context, since time.Time, purposes ...Purpose) (Totals, error)
 	// CheckWritable 确认账本现在写得进去（就绪检查用）：不改任何数据。
 	CheckWritable(ctx context.Context) error
+	// RaiseCap 记下一次主人确认的临时提高上限；CapRaised 合计 since 之后提高了多少日元。
+	RaiseCap(ctx context.Context, raise CapRaise) error
+	CapRaised(ctx context.Context, since time.Time) (float64, error)
 	Close() error
+}
+
+// CapRaise 是主人口头确认的一次临时提高上限。
+type CapRaise struct {
+	At     time.Time // 零值 = 现在
+	Yen    float64
+	Person string // 谁确认的（对话名）
 }
 
 // OpenLedger 打开用量账本：path 是 SQLite 文件路径；空 = 只在内存里（服务端重启就清零，额度也跟着重置）。
@@ -135,6 +145,20 @@ func (l *sqliteLedger) CheckWritable(ctx context.Context) error {
 	// 回滚不受 ctx 影响：拿到写锁后一定要放掉
 	_, err = conn.ExecContext(context.WithoutCancel(ctx), "ROLLBACK")
 	return err
+}
+
+func (l *sqliteLedger) RaiseCap(ctx context.Context, raise CapRaise) error {
+	if raise.At.IsZero() {
+		raise.At = time.Now()
+	}
+	_, err := l.db.ExecContext(ctx, `INSERT INTO cap_raises (at, yen, person) VALUES (?, ?, ?)`, raise.At.Unix(), raise.Yen, raise.Person)
+	return err
+}
+
+func (l *sqliteLedger) CapRaised(ctx context.Context, since time.Time) (float64, error) {
+	var yen float64
+	err := l.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(yen), 0) FROM cap_raises WHERE at >= ?`, since.Unix()).Scan(&yen)
+	return yen, err
 }
 
 func (l *sqliteLedger) Close() error { return l.db.Close() }

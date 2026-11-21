@@ -39,6 +39,8 @@ type turnRecord struct {
 	restricted bool
 	// truncated：最后一段到了模型的输出上限，没说完
 	truncated bool
+	// capRaisedTo：这一轮主人确认后把月度上限提高到了多少（日元）；0 = 没提高
+	capRaisedTo float64
 	// extraNotes：这一轮情况说明里额外的附注（例如叫醒后的第一句）
 	extraNotes []string
 	// delivered：要「主人听完这一轮才算告诉了」的事——附上的情况的确认（任务板、额度提醒）和工具登记的（OnDelivered）；

@@ -117,10 +117,14 @@ type Settings struct {
 	ModelPricesURL      string  `env:"HARO_MODEL_PRICES_URL" envDefault:"https://models.dev/api.json"`
 	ModelPricesProvider string  `env:"HARO_MODEL_PRICES_PROVIDER" envDefault:"anthropic"`
 	ModelPricesCache    string  `env:"HARO_MODEL_PRICES_CACHE"`
-	ResearchDailyYen    float64 `env:"HARO_RESEARCH_DAILY_YEN" envDefault:"100"`  // 后台调查每天上限；0 = 不限
-	MonthlyYen          float64 `env:"HARO_MONTHLY_YEN"`                          // 每月总费用上限（大模型 + 搜索）；0 = 不限（未定）
-	SearchDailyCredits  int     `env:"HARO_SEARCH_DAILY_CREDITS" envDefault:"30"` // 搜索积分每天上限（封在 Tavily 免费额度内）；0 = 不限
-	SearchCreditUSD     float64 `env:"HARO_SEARCH_CREDIT_USD"`                    // 每个搜索积分的美元价；0 = 免费额度内
+	ResearchDailyYen    float64 `env:"HARO_RESEARCH_DAILY_YEN" envDefault:"100"` // 后台调查每天上限；0 = 不限
+	MonthlyYen          float64 `env:"HARO_MONTHLY_YEN"`                         // 每月总费用上限（大模型 + 搜索）；0 = 不限（未定）
+	// 月度上限到了以后：主人口头确认一次提高多少（0 = 不能口头提高，到上限就停到下个月）；
+	// 判断主人要不要提高的那次小调用每天最多几次（它不受额度管，靠这个封顶）
+	MonthlyRaiseYen      float64 `env:"HARO_MONTHLY_RAISE_YEN" envDefault:"500"`
+	OverBudgetDailyCalls int     `env:"HARO_OVER_BUDGET_DAILY_CALLS" envDefault:"30"`
+	SearchDailyCredits   int     `env:"HARO_SEARCH_DAILY_CREDITS" envDefault:"30"` // 搜索积分每天上限（封在 Tavily 免费额度内）；0 = 不限
+	SearchCreditUSD      float64 `env:"HARO_SEARCH_CREDIT_USD"`                    // 每个搜索积分的美元价；0 = 免费额度内
 
 	// 语音识别：haro-asr 单独运行（模型等配置见 ASRSettings），服务端只认它的地址
 	ASRURL string `env:"HARO_ASR_URL"` // 流式转写服务的根地址（协议照 OpenAI Realtime 的转写会话），例如 http://127.0.0.1:59126
@@ -310,6 +314,10 @@ func (settings Settings) validateBrain() error {
 	}
 	if settings.Tools && settings.NotesDB == "" {
 		return fmt.Errorf("HARO_TOOLS=true 时必须设 HARO_NOTES_DB（或设 HARO_TOOLS=false）")
+	}
+	if settings.MonthlyRaiseYen < 0 || settings.OverBudgetDailyCalls < 0 {
+		return fmt.Errorf("HARO_MONTHLY_RAISE_YEN、HARO_OVER_BUDGET_DAILY_CALLS 不能是负数（现在是 %v、%d）", settings.MonthlyRaiseYen,
+			settings.OverBudgetDailyCalls)
 	}
 	if settings.ConfirmationTimeout <= 0 {
 		return fmt.Errorf("HARO_CONFIRMATION_TIMEOUT 要大于 0（会破坏的操作多久没确认就作废），现在是 %v", settings.ConfirmationTimeout)
