@@ -38,10 +38,13 @@ type contractVendor struct {
 	forbids   func(body map[string]any) bool // 请求体里声明了这一轮不许调用工具
 	// omitsForbiddenTools：服务端不认「不许调用」的选项，这一轮干脆不带工具（Ollama）
 	omitsForbiddenTools bool
+	// overloaded 是流已经开始（HTTP 回了 200）之后服务端推来的错误事件：过载
+	overloaded string
 }
 
 var contractVendors = []contractVendor{
 	{name: "claude", newServer: llmtest.NewClaudeServer, events: claudeEvents, firstText: 2,
+		overloaded: `{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`,
 		newModel: func(server *llmtest.Server) brain.ChatModel {
 			return NewAnthropicChatModel(AnthropicOptions{API: claudeAPIForTest("test-key", server.URL, server.Client()),
 				Model: "claude-haiku-5-5", MaxTokens: 800})
@@ -52,13 +55,14 @@ var contractVendors = []contractVendor{
 			choice, _ := body["tool_choice"].(map[string]any)
 			return choice["type"] == "none"
 		}},
-	{name: "openai", newServer: llmtest.NewOpenAIServer, events: openAIEvents, firstText: 0,
+	{name: "openai", newServer: llmtest.NewOpenAIServer, events: openAIEvents, firstText: 0, overloaded: openAIOverloaded,
 		newModel: func(server *llmtest.Server) brain.ChatModel {
 			return NewOpenAIChatModel(OpenAIOptions{BaseURL: server.URL, Model: "gpt-test", APIKey: "k", MaxTokens: 800,
 				HTTPClient: server.Client()})
 		},
 		tools: openAITools, toolName: openAIToolName, forbids: openAIForbids},
 	{name: "ollama", newServer: llmtest.NewOpenAIServer, events: openAIEvents, firstText: 0, omitsForbiddenTools: true,
+		overloaded: openAIOverloaded,
 		newModel: func(server *llmtest.Server) brain.ChatModel {
 			return NewOllamaChatModel(server.URL, "qwen3-vl:8b-instruct", 800, OpenAIOptions{HTTPClient: server.Client()})
 		},
@@ -81,6 +85,9 @@ func claudeEvents(texts []string, call *brain.ToolCall, stop contractStop) []str
 	return append(events, fmt.Sprintf(`{"type":"message_delta","delta":{"stop_reason":%q,"stop_sequence":null},"usage":{"output_tokens":20}}`, reason),
 		`{"type":"message_stop"}`)
 }
+
+// openAIOverloaded 是 OpenAI 兼容接口流中途的错误事件（OpenAI 的写法：错误类型是字符串，不带数字状态码）。
+const openAIOverloaded = `{"error":{"message":"Overloaded","type":"server_error","code":null}}`
 
 func openAIEvents(texts []string, call *brain.ToolCall, stop contractStop) []string {
 	var events []string
