@@ -9,6 +9,8 @@ import (
 	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/bukahou/haro/internal/buildinfo"
 )
 
 // ServerSpec 描述一个远程的第三方 MCP 工具服务（Streamable HTTP）。
@@ -44,9 +46,9 @@ func ConnectMCPServer(ctx context.Context, spec ServerSpec, logger *slog.Logger)
 		DisableStandaloneSSE: true}, logger)
 }
 
-// connectMCP 经 transport 连上一个 MCP 服务并读出它的工具清单。
+// connectMCP 经 transport 连上一个 MCP 服务并读出它的工具清单。握手时报的客户端版本是程序的版本号。
 func connectMCP(ctx context.Context, name string, transport mcp.Transport, logger *slog.Logger) (*MCPServer, error) {
-	client := mcp.NewClient(&mcp.Implementation{Name: "haro", Version: "0.1.0"}, nil)
+	client := mcp.NewClient(&mcp.Implementation{Name: "haro", Version: buildinfo.Version}, nil)
 	session, err := client.Connect(ctx, transport, nil)
 	if err != nil {
 		return nil, fmt.Errorf("连接工具服务 %s: %w", name, err)
@@ -151,7 +153,7 @@ func declaredProperties(schema any) map[string]bool {
 	return known
 }
 
-// Close 断开（本地子进程会被结束）。
+// Close 断开和这个服务的会话。
 func (s *MCPServer) Close() error { return s.session.Close() }
 
 // spokenIn 从结果元数据里取出「能念给主人的错误」（元数据是 JSON 解出来的，按 JSON 再解一次）。

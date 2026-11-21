@@ -12,6 +12,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/bukahou/haro/internal/brain"
+	"github.com/bukahou/haro/internal/buildinfo"
 )
 
 // Builtin 往进程内的工具服务上注册一组内置工具（用 AddTool）。
@@ -116,7 +117,7 @@ type builtinServer struct {
 
 // startBuiltinServer 建进程内的 MCP 服务、注册内置工具，用内存连接接上客户端。ctx 是服务端的运行期。
 func startBuiltinServer(ctx context.Context, builtins []Builtin, logger *slog.Logger) (*builtinServer, error) {
-	server := mcp.NewServer(&mcp.Implementation{Name: "haro-builtin", Version: "1"}, nil)
+	server := mcp.NewServer(&mcp.Implementation{Name: "haro-builtin", Version: buildinfo.Version}, nil)
 	b := &builtinServer{}
 	server.AddReceivingMiddleware(b.restoreContext)
 	for _, register := range builtins {

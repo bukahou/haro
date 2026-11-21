@@ -26,7 +26,7 @@ type toolCaller interface {
 	call(ctx context.Context, name string, arguments map[string]any) (string, error)
 }
 
-// NewToolbox 建进程内的工具服务（内置工具，「现在几点」总在）并连上各远程服务，汇总工具清单。
+// NewToolbox 建进程内的工具服务（内置工具）并连上各远程服务，汇总工具清单。
 // 任何一个起不来、或者工具重名，就整体失败（并清理已连上的）。ctx 是服务端的运行期。
 func NewToolbox(ctx context.Context, remote []ServerSpec, logger *slog.Logger, builtins ...Builtin) (*Toolbox, error) {
 	box := &Toolbox{callers: map[string]toolCaller{}}

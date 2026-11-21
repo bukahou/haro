@@ -12,10 +12,12 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/bukahou/haro/internal/brain"
+	"github.com/bukahou/haro/internal/buildinfo"
 	"github.com/bukahou/haro/internal/notes"
 )
 
@@ -83,6 +85,41 @@ func TestToolboxWithRemoteServer(t *testing.T) {
 	}
 	if _, err := box.Call(ctx, brain.ToolCall{Name: "no_such_tool"}); err == nil {
 		t.Error("不存在的工具应返回错误")
+	}
+}
+
+// 和工具服务握手时报的版本是程序的版本号：进程内的内置服务、连远程服务的客户端都是。
+func TestToolboxReportsProgramVersion(t *testing.T) {
+	saved := buildinfo.Version
+	buildinfo.Version = "v0.0.0-test"
+	t.Cleanup(func() { buildinfo.Version = saved })
+	clientVersions := make(chan string, 1)
+	server := mcp.NewServer(&mcp.Implementation{Name: "fake", Version: "0.0.1"}, &mcp.ServerOptions{
+		InitializedHandler: func(_ context.Context, request *mcp.InitializedRequest) {
+			clientVersions <- request.Session.InitializeParams().ClientInfo.Version
+		}})
+	mcp.AddTool(server, &mcp.Tool{Name: "read_echo", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true}},
+		func(_ context.Context, _ *mcp.CallToolRequest, in echoInput) (*mcp.CallToolResult, echoOutput, error) {
+			return nil, echoOutput{Echo: in.Text}, nil
+		})
+	remote := httptest.NewServer(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, nil))
+	defer remote.Close()
+
+	box, err := NewToolbox(context.Background(), []ServerSpec{{Name: "fake", URL: remote.URL}}, quietLogger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer box.Close()
+	if got := box.servers[0].session.InitializeResult().ServerInfo.Version; got != buildinfo.Version {
+		t.Errorf("内置服务报的版本：%q", got)
+	}
+	select {
+	case got := <-clientVersions:
+		if got != buildinfo.Version {
+			t.Errorf("连远程服务时报的客户端版本：%q", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("远程服务没收到握手")
 	}
 }
 
