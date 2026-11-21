@@ -75,6 +75,29 @@ func TestTerminalSettingsAreValidated(t *testing.T) {
 	}
 }
 
+// 遥测的地址（终端和服务端都有）：不设 = 不导出；设了就要是 http(s)://主机，写错时两边都起不来。
+func TestOTLPEndpointIsValidated(t *testing.T) {
+	terminal, server := terminalSettingsFrom(t, nil), localServerSettings(t)
+	for _, good := range []string{"", "http://127.0.0.1:4318", "https://otel.example.com"} {
+		terminal.OTLPEndpoint, server.OTLPEndpoint = good, good
+		if err := terminal.validateTerminal(); err != nil {
+			t.Errorf("终端：%q 应该可以：%v", good, err)
+		}
+		if err := server.validateBrain(); err != nil {
+			t.Errorf("服务端：%q 应该可以：%v", good, err)
+		}
+	}
+	for _, bad := range []string{"127.0.0.1:4318", "grpc://127.0.0.1:4317", "http://"} {
+		terminal.OTLPEndpoint, server.OTLPEndpoint = bad, bad
+		if err := terminal.validateTerminal(); err == nil || !strings.Contains(err.Error(), "HARO_OTLP_ENDPOINT") {
+			t.Errorf("终端：%q 应起不来并写明 HARO_OTLP_ENDPOINT：%v", bad, err)
+		}
+		if err := server.validateBrain(); err == nil || !strings.Contains(err.Error(), "HARO_OTLP_ENDPOINT") {
+			t.Errorf("服务端：%q 应起不来并写明 HARO_OTLP_ENDPOINT：%v", bad, err)
+		}
+	}
+}
+
 // 语音概率门槛和静音时长不设时不交给 haro-asr（默认值只在 asrserver.Timing 写），交出去的说完判断里是 0（不带这两项）。
 func TestVADDefaultsComeFromASR(t *testing.T) {
 	settings := terminalSettingsFrom(t, nil)

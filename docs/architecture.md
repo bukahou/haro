@@ -60,7 +60,9 @@ haro 是一个家用语音助手：家里每个房间放一台**终端**（麦�
 | `ConversationStore` | `internal/conversationstore`：SQLite（goose 迁移）；每一轮带说话的时间，发给模型时每轮前标日期和时刻 |
 | `Briefer` | 每轮补充给模型的即时情况：现在几号几点、主人家大致在哪（城市级）、额度提醒、后台调查的任务板 |
 
-- **观测**：OpenTelemetry（`HARO_OTLP_ENDPOINT`，OTLP/HTTP）。大模型相关的按语义约定 `gen_ai.*` 记：每次请求一个 span
+- **观测**：OpenTelemetry（OTLP/HTTP，`internal/telemetry`）。往哪发：标准的 `OTEL_EXPORTER_OTLP_ENDPOINT`（或分信号的）设了时以它为准，
+  否则用 `HARO_OTLP_ENDPOINT`，都没有就只打日志；终端、服务端各报自己的 service.name（`haro-terminal` / `haro-server`），
+  `OTEL_SERVICE_NAME`、`OTEL_RESOURCE_ATTRIBUTES` 可以覆盖；退出时最多等 1 秒把没发出的发出去。大模型相关的按语义约定 `gen_ai.*` 记：每次请求一个 span
   「chat <模型>」（提供方、模型、用量含缓存读写、为什么停；不知道的不写）和标准指标 `gen_ai.client.operation.duration`、`gen_ai.client.token.usage`；
   一轮回答记成 `invoke_agent`（代理名，交接记成事件），工具调用记成 `execute_tool`。haro 自己的（说完到第一个字、合成、打断、唤醒）用 `haro.` 前缀。
 - **坏了要出声**：服务端和 haro-asr 之间的识别流断了会自己重开（带退避），重开后把「醒着还是睡着 / 正在播放」重新告诉它；

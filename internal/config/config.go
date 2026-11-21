@@ -62,7 +62,17 @@ func (s *FrameSize) UnmarshalText(text []byte) error {
 type Common struct {
 	// RemovedSettingNotes 是环境里还写着、但已经删掉的配置项的提醒（不从环境变量读；启动时写进日志）
 	RemovedSettingNotes []string
-	OTLPEndpoint        string `env:"HARO_OTLP_ENDPOINT"` // OTLP/HTTP 根地址，如 http://collector:4318；空 = 不导出，只打日志
+	// OTLP/HTTP 的根地址，如 http://collector:4318。标准的 OTEL_EXPORTER_OTLP_ENDPOINT（或分信号的 _TRACES_ / _METRICS_）
+	// 设了时以标准的为准；都没设 = 不导出，只打日志（见 internal/telemetry）
+	OTLPEndpoint string `env:"HARO_OTLP_ENDPOINT"`
+}
+
+// validateCommon 检查终端和服务端都有的配置：遥测的地址设了就要是 http(s)。
+func (c Common) validateCommon() error {
+	if c.OTLPEndpoint == "" {
+		return nil
+	}
+	return requireHTTPURL("HARO_OTLP_ENDPOINT", c.OTLPEndpoint, "OTLP/HTTP 的根地址")
 }
 
 // ServerSettings 是服务端（haro-server）的配置：模型、代理、识别与语音合成服务、工具、费用、对话。
@@ -290,6 +300,9 @@ func (settings TerminalSettings) TurnDetectionSettings() realtimeproto.TurnDetec
 }
 
 func (settings TerminalSettings) validateTerminal() error {
+	if err := settings.validateCommon(); err != nil {
+		return err
+	}
 	if err := settings.TurnDetectionSettings().Validate(); err != nil { // 取值只在 realtimeproto 定义一处，haro-asr 收到时也按它查
 		return fmt.Errorf("说完判断的配置（HARO_TURN_DETECTION、HARO_TURN_EAGERNESS、HARO_VAD_THRESHOLD、HARO_VAD_SILENCE、HARO_VAD_PREFIX）：%w", err)
 	}
@@ -314,9 +327,9 @@ func (settings TerminalSettings) validateTerminal() error {
 
 // validateBrain 校验服务端的配置。判断说完、唤醒词要用到的模型由服务端（haro-asr）加载，所以也在这里看。
 func (settings ServerSettings) validateBrain() error {
-	for _, validate := range []func() error{settings.validateSpeech, settings.validateModels, settings.validateSpending,
-		settings.validateWeather, settings.validateStorage, settings.validateConversation, settings.validateResearch,
-		settings.validateListen} {
+	for _, validate := range []func() error{settings.validateCommon, settings.validateSpeech, settings.validateModels,
+		settings.validateSpending, settings.validateWeather, settings.validateStorage, settings.validateConversation,
+		settings.validateResearch, settings.validateListen} {
 		if err := validate(); err != nil {
 			return err
 		}

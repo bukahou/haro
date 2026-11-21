@@ -64,11 +64,15 @@ func run(logger *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	shutdownTelemetry, err := telemetry.SetupTelemetry(ctx, settings.OTLPEndpoint)
+	shutdownTelemetry, err := telemetry.Setup(ctx, telemetry.ServiceTerminal, settings.OTLPEndpoint)
 	if err != nil {
 		return err
 	}
-	defer shutdownTelemetry(context.Background())
+	defer func() { // 最多等 telemetry.ShutdownTimeout：采集器连不上时不拖住停止 / 重启
+		if err := shutdownTelemetry(); err != nil {
+			logger.Warn("退出时遥测没发出去", "err", err)
+		}
+	}()
 
 	local, err := platform.OpenLocalDevices(logger)
 	if err != nil {

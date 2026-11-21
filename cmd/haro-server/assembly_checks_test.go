@@ -1,7 +1,11 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"log/slog"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -10,6 +14,57 @@ import (
 	"github.com/bukahou/haro/internal/research"
 	"github.com/bukahou/haro/internal/speech"
 )
+
+// warnRecorder 收下警告级以上的日志记录（按记录的属性判断，不看日志文字）。
+type warnRecorder struct{ records *[]slog.Record }
+
+func (h warnRecorder) Enabled(_ context.Context, level slog.Level) bool {
+	return level >= slog.LevelWarn
+}
+func (h warnRecorder) Handle(_ context.Context, record slog.Record) error {
+	*h.records = append(*h.records, record)
+	return nil
+}
+func (h warnRecorder) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h warnRecorder) WithGroup(string) slog.Handler      { return h }
+
+// 关停时各步后开的先关；出错的不吞掉：全部做完后合成一行警告，写明几步、各是什么错。
+func TestShutdownStepsReportFailures(t *testing.T) {
+	var order []string
+	var steps shutdownSteps
+	steps.add("对话库", func() error { order = append(order, "对话库"); return errors.New("WAL 没合并") })
+	steps.add("工具箱", func() error { order = append(order, "工具箱"); return nil })
+	steps.add("遥测", func() error { order = append(order, "遥测"); return errors.New("采集器连不上") })
+	var records []slog.Record
+	steps.run(slog.New(warnRecorder{records: &records}))
+	if !slices.Equal(order, []string{"遥测", "工具箱", "对话库"}) {
+		t.Errorf("后开的先关：%v", order)
+	}
+	if len(records) != 1 {
+		t.Fatalf("出错的几步合成一行警告，得到 %d 行", len(records))
+	}
+	var count int64
+	var joined error
+	records[0].Attrs(func(attr slog.Attr) bool {
+		switch attr.Key {
+		case "steps":
+			count = attr.Value.Int64()
+		case "err":
+			joined, _ = attr.Value.Any().(error)
+		}
+		return true
+	})
+	if count != 2 || joined == nil || !strings.Contains(joined.Error(), "对话库") || !strings.Contains(joined.Error(), "遥测") {
+		t.Errorf("警告里应写明两步出错：steps=%d err=%v", count, joined)
+	}
+	records = nil
+	var clean shutdownSteps
+	clean.add("工具箱", func() error { return nil })
+	clean.run(slog.New(warnRecorder{records: &records}))
+	if len(records) != 0 {
+		t.Errorf("都没出错时不记警告：%d", len(records))
+	}
+}
 
 // 调查的上限：配置没设（0）的用程序里的默认值（research.DefaultLimits），设了的用配置的。
 func TestResearchLimits(t *testing.T) {

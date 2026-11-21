@@ -35,6 +35,7 @@ import (
 	"github.com/bukahou/haro/internal/research"
 	"github.com/bukahou/haro/internal/speech"
 	"github.com/bukahou/haro/internal/spending"
+	"github.com/bukahou/haro/internal/telemetry"
 	"github.com/bukahou/haro/internal/tools"
 	"github.com/bukahou/haro/internal/weather"
 )
@@ -46,7 +47,7 @@ func main() {
 		fmt.Println(buildinfo.Describe("haro-server"))
 		return
 	}
-	logger := slog.New(slog.NewTextHandler(os.Stderr, nil)).With("service", "haro-server")
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil)).With("service", telemetry.ServiceServer)
 	slog.SetDefault(logger)
 	if err := run(logger); err != nil && !errors.Is(err, context.Canceled) {
 		logger.Error("haro-server 退出", "err", err)
@@ -76,7 +77,7 @@ func run(logger *slog.Logger) error {
 	defer stop()
 	// 关停时依次收尾（后开的先关）：会话都结束之后才停后台调查、关数据库，最后发出遥测
 	var shutdown shutdownSteps
-	defer shutdown.run()
+	defer shutdown.run(logger)
 
 	if err := startTelemetry(ctx, settings, &shutdown); err != nil {
 		return err
@@ -97,12 +98,11 @@ func run(logger *slog.Logger) error {
 }
 
 // 关停各步的期限（加起来 10 秒，比 k8s 的宽限期 30 秒短）：停止接新连接、等普通请求 2 秒 → 会话收尾 5 秒 →
-// 后台调查停下 2 秒 → 遥测发出 1 秒。
+// 后台调查停下 2 秒 → 遥测发出 1 秒（telemetry.ShutdownTimeout，终端也用它）。
 const (
-	shutdownRequests       = 2 * time.Second
-	shutdownSessions       = 5 * time.Second
-	shutdownResearch       = 2 * time.Second
-	shutdownTelemetryFlush = 1 * time.Second
+	shutdownRequests = 2 * time.Second
+	shutdownSessions = 5 * time.Second
+	shutdownResearch = 2 * time.Second
 )
 
 // brainHandler 是服务端的全部 HTTP 入口：对话（WebSocket）+ 远程登记声纹（转给 haro-asr）+ 存活 / 就绪检查。
@@ -316,7 +316,7 @@ func connectWebSearch(settings config.ServerSettings, httpClient *http.Client, l
 
 // startResearch 开启后台调查：任务账本、调查用的模型、上限，并在后台开始处理队列。
 func startResearch(ctx context.Context, settings config.ServerSettings, deps services, searcher tools.WebSearcher,
-	logger *slog.Logger) (*research.Runner, func(), error) {
+	logger *slog.Logger) (*research.Runner, func() error, error) {
 	store, err := research.OpenTaskStore(ctx, settings.ResearchDB)
 	if err != nil {
 		return nil, nil, err
@@ -344,13 +344,13 @@ func startResearch(ctx context.Context, settings config.ServerSettings, deps ser
 	}()
 	logger.Info("后台调查已开启", "model", settings.CloudLLMModel, "conclusion_writer", writer, "timeout", limits.Timeout,
 		"max_rounds", limits.MaxRounds, "max_searches", limits.MaxSearches, "max_tokens", limits.MaxTokens)
-	stop := func() { // 先等调查的循环退出，再关任务账本：不然它最后一次写任务时库已经关了
+	stop := func() error { // 先等调查的循环退出，再关任务账本：不然它最后一次写任务时库已经关了
 		select {
 		case <-running:
 		case <-time.After(shutdownResearch):
 			logger.Warn("后台调查没在期限内停下：照样关任务账本", "timeout", shutdownResearch)
 		}
-		store.Close()
+		return store.Close()
 	}
 	return runner, stop, nil
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -32,27 +33,38 @@ import (
 // 服务端按部件装配：外部服务与费用 → 工具 → 大脑 → 对外服务。每一步把关停时要收尾的事登记进 shutdownSteps。
 
 // shutdownSteps 是关停时要依次收尾的事：后开的先关（和 defer 一样）。
-type shutdownSteps []func()
+type shutdownSteps []shutdownStep
 
-func (s *shutdownSteps) add(step func()) { *s = append(*s, step) }
+// shutdownStep 是关停时的一步：name 是日志里写的名字。
+type shutdownStep struct {
+	name string
+	run  func() error
+}
 
-func (s shutdownSteps) run() {
+func (s *shutdownSteps) add(name string, step func() error) {
+	*s = append(*s, shutdownStep{name: name, run: step})
+}
+
+// run 依次收尾；出了错的各步不吞掉，最后合成一行警告（数据库的 WAL 没合并、遥测没发出去之类：数据还在，但要留痕）。
+func (s shutdownSteps) run(logger *slog.Logger) {
+	var problems []error
 	for i := len(s) - 1; i >= 0; i-- {
-		s[i]()
+		if err := s[i].run(); err != nil {
+			problems = append(problems, fmt.Errorf("%s：%w", s[i].name, err))
+		}
+	}
+	if len(problems) > 0 {
+		logger.Warn("关停时有几步没做好", "steps", len(problems), "err", errors.Join(problems...))
 	}
 }
 
-// startTelemetry 开启遥测；关停的最后一步在期限内把还没发出的发出去（采集器连不上时不卡住退出）。
+// startTelemetry 开启遥测；关停的最后一步在期限内（telemetry.ShutdownTimeout）把还没发出的发出去，采集器连不上时不卡住退出。
 func startTelemetry(ctx context.Context, settings config.ServerSettings, shutdown *shutdownSteps) error {
-	shutdownTelemetry, err := telemetry.SetupTelemetry(ctx, settings.OTLPEndpoint)
+	shutdownTelemetry, err := telemetry.Setup(ctx, telemetry.ServiceServer, settings.OTLPEndpoint)
 	if err != nil {
 		return err
 	}
-	shutdown.add(func() {
-		flushCtx, cancel := context.WithTimeout(context.Background(), shutdownTelemetryFlush)
-		defer cancel()
-		_ = shutdownTelemetry(flushCtx)
-	})
+	shutdown.add("遥测", shutdownTelemetry)
 	return nil
 }
 
@@ -101,7 +113,7 @@ func connectServices(ctx context.Context, settings config.ServerSettings, logger
 		return deps, err
 	}
 	deps.ledger = spending.WithBookkeeping(ledger, logger)
-	shutdown.add(func() { deps.ledger.Close() })
+	shutdown.add("用量账本", deps.ledger.Close)
 	if settings.UsageDB == "" {
 		logger.Warn("没设 HARO_USAGE_DB：用量只记在内存里，服务端重启后额度重新计算")
 	}
@@ -132,7 +144,7 @@ func buildTooling(ctx context.Context, settings config.ServerSettings, deps serv
 	if err != nil {
 		return kit, err
 	}
-	shutdown.add(func() { store.Close() })
+	shutdown.add("记事库", store.Close)
 	builtins := []tools.Builtin{tools.NoteTools(store, settings.NotesListLimit, logger)}
 	if settings.Weather { // 天气：Open-Meteo 为主，日本气象厅备用；都不用密钥
 		weatherHTTP := weather.NewHTTPClient() // 连接等得短：连不上就早点交给备用
@@ -145,7 +157,7 @@ func buildTooling(ctx context.Context, settings config.ServerSettings, deps serv
 		}
 	}
 	if searcher := connectWebSearch(settings, deps.httpClient, logger); searcher != nil {
-		shutdown.add(func() { searcher.Close() })
+		shutdown.add("联网搜索", searcher.Close)
 		meter := spending.NewSearchMeter(deps.guard, deps.ledger, deps.pricing, spending.PurposeSearch, tools.TavilyName)
 		builtins = append(builtins, tools.WebSearchTools(searcher, meter, logger))
 		kit.expertSearch = func(ctx context.Context, query string) (string, error) {
@@ -155,7 +167,7 @@ func buildTooling(ctx context.Context, settings config.ServerSettings, deps serv
 		if err != nil {
 			return kit, err
 		}
-		shutdown.add(closeRunner)
+		shutdown.add("后台调查", closeRunner)
 		builtins = append(builtins, runner.Tools())
 		kit.briefers = append(kit.briefers, runner)
 		runner.OnFinished(func(task research.Task) { // 查完了：让他最近说话的那台终端响一声，叫醒后任务板会先说结论
@@ -167,7 +179,7 @@ func buildTooling(ctx context.Context, settings config.ServerSettings, deps serv
 	if err != nil {
 		return kit, err
 	}
-	shutdown.add(box.Close)
+	shutdown.add("工具箱", func() error { box.Close(); return nil })
 	kit.toolbox = box
 	return kit, nil
 }
@@ -230,7 +242,7 @@ func openConversationStore(ctx context.Context, settings config.ServerSettings, 
 	if err != nil {
 		return nil, err
 	}
-	shutdown.add(func() { store.Close() })
+	shutdown.add("对话库", store.Close)
 	return store, nil
 }
 
