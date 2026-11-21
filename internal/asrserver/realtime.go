@@ -62,7 +62,7 @@ func handleRealtimeTranscription(w http.ResponseWriter, r *http.Request, deps De
 		return
 	}
 	if deps.NewVoiceDetector == nil {
-		writeError(w, http.StatusServiceUnavailable, "haro-asr 启动时没有指定 -vad-model，无法提供流式转写")
+		writeError(w, http.StatusServiceUnavailable, "haro-asr "+missing("VAD 模型", deps.Settings.VoiceDetector)+"，提供不了流式转写")
 		return
 	}
 	conn, err := websocket.Accept(w, r, nil)
@@ -170,7 +170,8 @@ func startTranscriptionSession(ctx context.Context, conn *websocket.Conn, deps D
 	case realtimeproto.TurnServerVAD:
 	case realtimeproto.TurnSemanticVAD:
 		if deps.TurnDetector == nil {
-			return nil, realtimeproto.ProtocolErrorf(realtimeproto.CodeUnsupportedFeature, "haro-asr 启动时没有指定 -turn-model，不支持 semantic_vad")
+			return nil, realtimeproto.ProtocolErrorf(realtimeproto.CodeUnsupportedFeature, "haro-asr %s，不支持 semantic_vad",
+				missing("说完判断模型", deps.Settings.TurnDetector))
 		}
 		session.turn.semantic, session.turn.detector = true, deps.TurnDetector
 		session.turn.maxWait = samplesIn(session.timing.maxWait(turn.Eagerness))
@@ -178,7 +179,8 @@ func startTranscriptionSession(ctx context.Context, conn *websocket.Conn, deps D
 	}
 	if update.WakeWord {
 		if deps.NewKeywordSpotter == nil {
-			return nil, realtimeproto.ProtocolErrorf(realtimeproto.CodeUnsupportedFeature, "haro-asr 启动时没有指定 -kws-model-dir / -keywords-file，不支持唤醒词")
+			return nil, realtimeproto.ProtocolErrorf(realtimeproto.CodeUnsupportedFeature, "haro-asr %s，不支持唤醒词",
+				missing("唤醒词模型", deps.Settings.KeywordSpotter))
 		}
 		spotter, err := deps.NewKeywordSpotter()
 		if err != nil {

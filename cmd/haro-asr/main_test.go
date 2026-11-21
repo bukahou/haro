@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"sync"
 	"testing"
 
@@ -48,6 +50,25 @@ func (l *logRecords) with(level slog.Level, keys ...string) int {
 		}
 	}
 	return count
+}
+
+// 被拒时说明里写的配置项名字取自 config.ASRSettings 的 env 标签：每个都要真是 haro-asr 的配置项（字段改了名会落空）。
+func TestCapabilitySettingsComeFromConfig(t *testing.T) {
+	known := map[string]bool{}
+	settings := reflect.TypeFor[config.ASRSettings]()
+	for i := range settings.NumField() {
+		name, _, _ := strings.Cut(settings.Field(i).Tag.Get("env"), ",")
+		known[name] = true
+	}
+	capabilities := capabilitySettings()
+	for capability, names := range map[string]string{"VAD": capabilities.VoiceDetector, "说完判断": capabilities.TurnDetector,
+		"唤醒词": capabilities.KeywordSpotter} {
+		for _, name := range strings.Split(names, "、") {
+			if name == "" || !known[name] {
+				t.Errorf("%s 的配置项 %q 不是 haro-asr 的配置项", capability, name)
+			}
+		}
+	}
 }
 
 const model = "campplus.onnx"

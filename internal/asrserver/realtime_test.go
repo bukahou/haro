@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -300,15 +301,18 @@ func TestSemanticVADTimesOutWhenUserStopsTalking(t *testing.T) {
 	}
 }
 
-// 没有说完判断模型时拒绝 semantic_vad：回带码的 error（不发 session.updated），自己也记一条带码的警告。
+// 没有说完判断模型时拒绝 semantic_vad：回带码的 error（不发 session.updated），说明里写上要设哪个配置项，
+// 自己也记一条带码的警告。
 func TestSemanticVADRequiresTurnModel(t *testing.T) {
 	logs := &recordingHandler{}
 	conn, ctx := dialRealtimeWith(t, Dependencies{Transcriber: &lengthTranscriber{}, NewVoiceDetector: semanticFactory(t),
-		Logger: slog.New(logs)})
+		Settings: CapabilitySettings{TurnDetector: "TURN_MODEL_SETTING"}, Logger: slog.New(logs)})
 	_ = writeClientEvent(ctx, conn, transcriptionUpdate(realtimeproto.TurnDetection{Type: "semantic_vad"}, false))
 	events := readEvents(t, ctx, conn, 1)
 	if e, ok := events[0].(realtimeproto.Error); !ok || e.Code != realtimeproto.CodeUnsupportedFeature {
 		t.Errorf("没有 Smart Turn 模型时应拒绝 semantic_vad：%v", events)
+	} else if !strings.Contains(e.Message, "TURN_MODEL_SETTING") {
+		t.Errorf("说明里应写上要设哪个配置项：%q", e.Message)
 	}
 	if _, _, err := conn.Read(ctx); websocket.CloseStatus(err) != websocket.StatusPolicyViolation {
 		t.Errorf("拒绝之后应断开：%v", err)

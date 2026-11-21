@@ -38,7 +38,24 @@ type Dependencies struct {
 	NewKeywordSpotter KeywordSpotterFactory // 为 nil 时不支持唤醒词（haro.wake_word）
 	Speakers          *SpeakerCheck         // 为 nil 或没有登记声纹时不比对
 	Timing            Timing                // 时长与门槛；零值 = DefaultTiming
+	Settings          CapabilitySettings    // 打开各项能力要设的配置项（拒绝时写进说明）；可以为空
 	Logger            *slog.Logger
+}
+
+// CapabilitySettings 是打开每项能力要设的配置项：没有这项能力而被拒时写进说明，告诉对方该设什么。
+// haro-asr 按它的配置项名字填（名字只在 config 里定义一处）；为空时说明里就不提。
+type CapabilitySettings struct {
+	VoiceDetector  string // 流式转写要的 VAD 模型
+	TurnDetector   string // semantic_vad 要的说完判断模型
+	KeywordSpotter string // 唤醒词要的模型和关键词文件
+}
+
+// missing 说明缺了哪项能力；知道由哪个配置项打开时一并写上。
+func missing(capability, setting string) string {
+	if setting == "" {
+		return "没有" + capability
+	}
+	return "没有" + capability + "（要设 " + setting + "）"
 }
 
 // NewHandler 返回挂好路由的 HTTP handler。

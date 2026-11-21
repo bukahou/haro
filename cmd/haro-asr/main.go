@@ -21,6 +21,8 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"reflect"
+	"strings"
 	"syscall"
 	"time"
 
@@ -143,7 +145,7 @@ func run(settings config.ASRSettings, logger *slog.Logger) error {
 
 	handler := asrserver.NewHandler(asrserver.Dependencies{Transcriber: recognizer,
 		NewVoiceDetector: newDetector, TurnDetector: turnDetector, NewKeywordSpotter: newKeywordSpotter,
-		Speakers: speakers, Logger: logger})
+		Speakers: speakers, Settings: capabilitySettings(), Logger: logger})
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	listener, err := net.Listen("tcp", settings.Listen)
@@ -157,6 +159,23 @@ func run(settings config.ASRSettings, logger *slog.Logger) error {
 		logger.Info("释放模型后退出")
 	}
 	return err
+}
+
+// capabilitySettings 是打开各项能力要设的环境变量（转写会话因为缺这项能力被拒时写进说明）。
+func capabilitySettings() asrserver.CapabilitySettings {
+	return asrserver.CapabilitySettings{VoiceDetector: settingName("VADModel"), TurnDetector: settingName("TurnModel"),
+		KeywordSpotter: settingName("KWSModelDir") + "、" + settingName("WakeWordsFile")}
+}
+
+// settingName 是 config.ASRSettings 里这个字段对应的环境变量名，取自字段的 env 标签：名字只在 config 里写一处。
+// 没有这个字段时为空（测试会发现）。
+func settingName(field string) string {
+	definition, ok := reflect.TypeFor[config.ASRSettings]().FieldByName(field)
+	if !ok {
+		return ""
+	}
+	name, _, _ := strings.Cut(definition.Tag.Get("env"), ",")
+	return name
 }
 
 // modelReleases 是要在退出时释放的模型（按加载的逆序释放）。
