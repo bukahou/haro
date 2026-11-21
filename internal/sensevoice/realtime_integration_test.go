@@ -30,7 +30,7 @@ func TestRealtimeLive(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer recognizer.Close()
-	factory, err := NewSileroDetectorFactory(os.Getenv("HARO_VAD_MODEL"), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	factory, err := NewSileroDetectorFactory(os.Getenv("HARO_VAD_MODEL"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +102,7 @@ func TestWakeRealtimeLive(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer recognizer.Close()
-	vad, err := NewSileroDetectorFactory(os.Getenv("HARO_VAD_MODEL"), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	vad, err := NewSileroDetectorFactory(os.Getenv("HARO_VAD_MODEL"))
 	if err != nil {
 		t.Fatal(err)
 	}
