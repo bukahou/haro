@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"fmt"
+	"iter"
 	"sync"
 	"testing"
 
@@ -78,6 +79,40 @@ func TestRequestTelemetryFollowsGenAIConventions(t *testing.T) {
 	}
 	if !names["gen_ai.client.operation.duration"] || !names["gen_ai.client.token.usage"] {
 		t.Errorf("应记标准指标：%v", names)
+	}
+}
+
+// 用量只写知道的：服务端不报用量时不写 token 数；没正常结束时只写输入（输出不知道）——出错那一段带的用量照样记。
+func TestRequestTelemetryRecordsOnlyKnownUsage(t *testing.T) {
+	spans, _, before := telemetryRecorders(t)
+	unreported := WithRequestTelemetry(&scriptedModel{deltas: []brain.ReplyDelta{{Text: "好的"},
+		{Usage: &brain.ReplyUsage{TokensUnknown: true}, Stop: brain.StopCompleted}}}, ProviderOpenAICompatible, "m")
+	collect(t, unreported.StreamReply(context.Background(), brain.ChatRequest{}))
+	cut := WithRequestTelemetry(&cutModel{usage: &brain.ReplyUsage{PromptTokens: 900, Incomplete: true}}, ProviderAnthropic, "m")
+	collect(t, cut.StreamReply(context.Background(), brain.ChatRequest{}))
+
+	ended := spans.Ended()[before:]
+	if len(ended) != 2 {
+		t.Fatalf("应有 2 个 span：%d", len(ended))
+	}
+	if attrs := spanAttributes(ended[0]); attrs["gen_ai.usage.input_tokens"].Type() != attribute.INVALID ||
+		attrs["gen_ai.usage.output_tokens"].Type() != attribute.INVALID {
+		t.Errorf("服务端不报用量时不该写 token 数：%v", attrs)
+	}
+	if attrs := spanAttributes(ended[1]); attrs["gen_ai.usage.input_tokens"].Emit() != "900" ||
+		attrs["gen_ai.usage.output_tokens"].Type() != attribute.INVALID {
+		t.Errorf("没正常结束时只写输入：%v", attrs)
+	}
+}
+
+// cutModel 说到一半出错，出错那一段带着知道的用量（像 Claude 流中途断开时那样）。
+type cutModel struct{ usage *brain.ReplyUsage }
+
+func (m *cutModel) StreamReply(context.Context, brain.ChatRequest) iter.Seq2[brain.ReplyDelta, error] {
+	return func(yield func(brain.ReplyDelta, error) bool) {
+		if yield(brain.ReplyDelta{Text: "从前"}, nil) {
+			yield(brain.ReplyDelta{Usage: m.usage}, fmt.Errorf("%w: 断了", brain.ErrModelUnavailable))
+		}
 	}
 }
 

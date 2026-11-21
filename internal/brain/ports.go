@@ -258,16 +258,22 @@ type ReplyUsage struct {
 	ThinkingChars    int // 思考内容的字数（只统计，不朗读）；用来查「看不见的输出」
 	Requests         int // 这次回答请求了模型几次（调工具时不止一次；add 累加时计数）
 	// Incomplete：请求被打断或出错，用量只知道一部分：OutputTokens 不知道（为 0，不编）；
-	// 知道多少输入取决于厂商（Claude 在流的开头就报了输入）。TokensUnknown：连输入也不知道（还没开始就失败了）
+	// 知道多少输入取决于厂商（Claude 在流的开头就报了输入）。TokensUnknown：连输入也不知道（还没开始就失败了，
+	// 或服务端不报用量）。累加时有一次不知道，合计就不知道
 	Incomplete    bool
 	TokensUnknown bool
 }
 
+// InputKnown 是知不知道输入的 token 数（含缓存读写）；OutputKnown 是知不知道输出的 token 数（请求完整结束才知道）。
+// 不知道的不往外报（回答结束的事件、观测里都不写），不编成 0。
+func (u *ReplyUsage) InputKnown() bool  { return u != nil && !u.TokensUnknown }
+func (u *ReplyUsage) OutputKnown() bool { return u.InputKnown() && !u.Incomplete }
+
 // add 把一次模型请求的用量累加进来：调工具时一次回答要请求模型好几次，每次都要计费，
-// 只记最后一次会让日志里的用量比账单少。
+// 只记最后一次会让日志里的用量比账单少。哪一次不知道（不完整），合计就不知道（不完整）。
 func (u *ReplyUsage) add(request *ReplyUsage) *ReplyUsage {
-	if request == nil {
-		return u
+	if request == nil { // 这次请求没交出用量：不知道
+		request = &ReplyUsage{TokensUnknown: true}
 	}
 	total := ReplyUsage{}
 	if u != nil {
@@ -280,6 +286,7 @@ func (u *ReplyUsage) add(request *ReplyUsage) *ReplyUsage {
 	total.ThinkingChars += request.ThinkingChars
 	total.Requests++
 	total.Incomplete = total.Incomplete || request.Incomplete
+	total.TokensUnknown = total.TokensUnknown || request.TokensUnknown
 	return &total
 }
 

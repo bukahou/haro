@@ -155,7 +155,7 @@ func (s *Session) finishAnswer(ctx context.Context, record *turnRecord, answer s
 		ending, done = turnTruncated, realtimeproto.ResponseDone{Status: realtimeproto.StatusIncomplete, Reason: realtimeproto.ReasonMaxOutputTokens}
 	}
 	s.closeTurn(record, ending)
-	if usage != nil {
+	if usage.InputKnown() && usage.OutputKnown() { // 用量不知道时不发（不编成 0）
 		done.Usage = &realtimeproto.Usage{InputTokens: usage.PromptTokens, OutputTokens: usage.OutputTokens}
 	}
 	return done
@@ -348,7 +348,7 @@ func (s *Session) generateSentences(ctx context.Context, history []ChatMessage, 
 			stop = delta.Stop
 		}
 		usage = usage.add(roundUsage)
-		if roundUsage != nil {
+		if roundUsage.InputKnown() { // 不知道时不算（「上下文太长就提前压缩」对不报用量的服务不起作用，见下面的用量日志）
 			record.contextTokens = max(record.contextTokens, roundUsage.PromptTokens)
 		}
 		if stop == StopUnknown { // 流结束了却没说为什么停：不当成说完，按出错收尾（说出口的照样记进历史）
@@ -477,21 +477,33 @@ func (s *Session) generateSentences(ctx context.Context, history []ChatMessage, 
 	if err := flushText(); err != nil {
 		return usage, err
 	}
-	if usage != nil {
-		// 这一轮所有请求加起来的用量（每次请求各自的 span「chat <模型>」在 llm 包里记）
-		span.SetAttributes(
-			semconv.GenAIUsageInputTokens(usage.PromptTokens),
-			semconv.GenAIUsageOutputTokens(usage.OutputTokens),
-			semconv.GenAIUsageCacheReadInputTokens(usage.CacheReadTokens),
-			semconv.GenAIUsageCacheCreationInputTokens(usage.CacheWriteTokens),
-			attribute.Int("haro.llm.requests", usage.Requests),
-			attribute.Int("haro.llm.thinking_chars", usage.ThinkingChars))
-		s.logger.Info("模型用量", "agent", agent.Name, "requests", usage.Requests, "prompt_tokens", usage.PromptTokens, "output_tokens", usage.OutputTokens,
-			"cache_read_tokens", usage.CacheReadTokens, "cache_write_tokens", usage.CacheWriteTokens,
-			"visible_chars", utf8.RuneCountInString(answer.String()), "thinking_chars", usage.ThinkingChars)
-	}
+	s.recordTurnUsage(span, agent.Name, usage, utf8.RuneCountInString(answer.String()))
 	s.logger.Info("阶段耗时", "stage", "brain.llm.stream", "elapsed", since(started))
 	return usage, nil
+}
+
+// recordTurnUsage 把这一轮所有请求加起来的用量记进 span 和日志（每次请求各自的 span「chat <模型>」在 llm 包里记）。
+// 不知道的 token 数不写（不编成 0）：模型服务不报用量时，「上下文太长就提前压缩」看不到上下文多大、不起作用，
+// 历史只按轮数截断，日志里写明。
+func (s *Session) recordTurnUsage(span trace.Span, agent string, usage *ReplyUsage, visibleChars int) {
+	if usage == nil {
+		return
+	}
+	span.SetAttributes(attribute.Int("haro.llm.requests", usage.Requests), attribute.Int("haro.llm.thinking_chars", usage.ThinkingChars))
+	if !usage.InputKnown() {
+		s.logger.Info("模型用量：模型服务没报 token 数，不能按上下文大小提前压缩（历史只按轮数截断）", "agent", agent,
+			"requests", usage.Requests, "visible_chars", visibleChars, "thinking_chars", usage.ThinkingChars)
+		return
+	}
+	span.SetAttributes(semconv.GenAIUsageInputTokens(usage.PromptTokens), semconv.GenAIUsageCacheReadInputTokens(usage.CacheReadTokens),
+		semconv.GenAIUsageCacheCreationInputTokens(usage.CacheWriteTokens))
+	if usage.OutputKnown() {
+		span.SetAttributes(semconv.GenAIUsageOutputTokens(usage.OutputTokens))
+	}
+	s.logger.Info("模型用量", "agent", agent, "requests", usage.Requests, "prompt_tokens", usage.PromptTokens,
+		"output_tokens", usage.OutputTokens, "output_known", usage.OutputKnown(),
+		"cache_read_tokens", usage.CacheReadTokens, "cache_write_tokens", usage.CacheWriteTokens,
+		"visible_chars", visibleChars, "thinking_chars", usage.ThinkingChars)
 }
 
 // speakUtterance 合成一句并边合成边发给终端：先发这句的文字，再逐段发音频。round 是这句属于这一轮回答的第几段。
