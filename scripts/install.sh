@@ -13,6 +13,9 @@ launchd_label=com.github.bukahou.haro
 plist_file=$HOME/Library/LaunchAgents/$launchd_label.plist
 log_file=$HOME/Library/Logs/haro.log
 marker='由 haro 安装脚本生成' # 服务文件里有这句才是本脚本装的：才会改动或删除
+# 装上的程序的 sha256 记在这里：卸载时只删和它一致的那份（被换成别的文件就不动），不看程序打印的文字
+state_dir=${XDG_STATE_HOME:-$HOME/.local/state}/haro
+installed_record=$state_dir/installed-binary.sha256
 
 say() { printf '%s\n' "$*"; }
 warn() { printf '⚠️  %s\n' "$*" >&2; }
@@ -50,7 +53,8 @@ haro 终端的安装脚本（装在自己的用户目录里，不需要 root）�
 做的事：下载这台机器对应的终端程序（Linux x86_64 / arm64、macOS Apple 芯片）→ 按 SHA256SUMS 校验 →
   装到 ~/.local/bin/haro → 第一次装时写配置 ~/.config/haro/haro.env →
   装成开机自启并（重新）启动：Linux 是 systemd 用户服务 haro.service（跟着桌面会话启停），macOS 是 LaunchAgent。
-不是这个脚本装的服务文件（例如开发时 make install-terminal-service 装的）不会被改动或删除。
+不是这个脚本装的服务文件（例如开发时 make install-terminal-service 装的）不会被改动或删除；
+卸载时程序也只删这个脚本装的那一份（按安装时记下的 sha256 认，记在 ~/.local/state/haro/）。
 环境变量 HARO_RELEASE_BASE_URL：换掉下载地址（测试用，可以是 file://；指向放着压缩包和 SHA256SUMS 的目录）。
 EOF
 }
@@ -93,6 +97,15 @@ esac
 # owned FILE：这个服务文件是本脚本装的（文件里有标记）
 owned() { [ -f "$1" ] && grep -q "$marker" "$1"; }
 
+if command -v sha256sum >/dev/null 2>&1; then
+	sha256_of() { sha256sum "$1" | cut -d' ' -f1; }
+else
+	sha256_of() { shasum -a 256 "$1" | cut -d' ' -f1; }
+fi
+
+# installed_by_script：程序还是本脚本装的那一份（和安装记录里的 sha256 一致）
+installed_by_script() { [ -f "$installed_record" ] && [ "$(sha256_of "$binary")" = "$(cat "$installed_record")" ]; }
+
 # systemd 用户会话能用吗（SSH 登录、没有桌面会话时常常不能）
 user_systemd_ready() { command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; }
 
@@ -117,11 +130,11 @@ uninstall() {
 		fi
 	fi
 	if [ -e "$binary" ]; then
-		if "$binary" -version 2>/dev/null | grep -q '^haro '; then
-			rm -f "$binary"
+		if installed_by_script; then
+			rm -f "$binary" "$installed_record"
 			say "已删除程序：$binary"
 		else
-			warn "$binary 看起来不是 haro 终端，没有删"
+			warn "$binary 不是安装脚本装的那一份（没有安装记录，或者之后被换过），没有删；要删请自己删"
 		fi
 	fi
 	[ ! -e "$env_file" ] || say "配置文件留着：${env_file}（不要了就自己删）"
@@ -163,11 +176,6 @@ if [ -n "$server_url" ]; then
 fi
 
 command -v curl >/dev/null 2>&1 || die "需要 curl（先装上 curl 再运行）"
-if command -v sha256sum >/dev/null 2>&1; then
-	sha256_of() { sha256sum "$1" | cut -d' ' -f1; }
-else
-	sha256_of() { shasum -a 256 "$1" | cut -d' ' -f1; }
-fi
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
@@ -190,6 +198,8 @@ tar -xzf "$work/$asset" -C "$work/unpacked"
 chmod 0755 "$work/unpacked/haro"
 installed=$("$work/unpacked/haro" -version 2>/dev/null) || die "下载的程序在这台机器上跑不起来（平台不对？）"
 mv -f "$work/unpacked/haro" "$binary" # 原子替换：正在运行的旧程序不受影响，重启服务后换成新的
+mkdir -p "$state_dir"
+sha256_of "$binary" >"$installed_record" # 卸载时凭它认出是本脚本装的
 say "已安装 $installed → $binary"
 
 # ---- 配置文件：只在第一次安装时写；之后不改（手动改过的内容不会被覆盖）----

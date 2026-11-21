@@ -246,6 +246,7 @@ make version          # 这次构建的版本号
 
 - **版本号** = `v` + 仓库根目录的 `VERSION` + 提交号前 7 位，例如 `v0.5.0-1a2b3c4`。GitHub Release 的标签、
   服务端镜像的标签、程序里的版本（`haro -version`、启动日志）是同一个字符串。`VERSION` 只在阶段性的大改时调。
+  给机器读的用 `-version -json`（一行 JSON：program、version、os、arch、go），CI、安装脚本的测试按它比对。
 - **终端和服务端握手时互报版本**（HTTP 头 `X-Haro-Version`）：版本不同时两边的日志都会提醒升级终端。
 - **合并前的检查**（`.github/workflows/ci.yml`；日常开发在 `dev`，推 `dev` 和开 PR 时跑）：每一步做什么写在 `ci.yml` 开头的说明里
   （终端编哪几个平台只在它的 `platforms` 一处）。
@@ -258,7 +259,7 @@ make version          # 这次构建的版本号
   镜像构建时还会打上 Debian 的安全补丁。
 - **安装终端**：`curl -fsSL https://github.com/bukahou/haro/releases/latest/download/install.sh | sh -s -- --server-url http://服务端地址:59130`
   （装到 `~/.local/bin/haro`，配置在 `~/.config/haro/haro.env`，Linux 装成 systemd 用户服务、macOS 装成 LaunchAgent；
-  再跑一次就是升级；`--uninstall` 卸载）。冒烟测试：`scripts/test-install.sh`。
+  再跑一次就是升级；`--uninstall` 卸载，只删安装脚本装的那一份：按安装时记下的 sha256 认）。冒烟测试：`scripts/test-install.sh`。
 
 ## 安全说明
 

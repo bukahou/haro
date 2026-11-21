@@ -10,7 +10,9 @@
 package buildinfo
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
 	"runtime"
 )
 
@@ -26,9 +28,33 @@ const Header = "X-Haro-Version"
 // UserAgent 是终端连服务端时用的 User-Agent，例如 haro/v0.5.0-1a2b3c4。
 func UserAgent() string { return "haro/" + Version }
 
-// Describe 是 -version 打印的一行，例如 haro v0.5.0-1a2b3c4 (linux/arm64, go1.27.1)。
+// Info 是一个程序的版本信息。-version -json 把它输出成一行 JSON，给机器读（安装脚本、CI 按字段判断，不解析给人看的那一行）。
+type Info struct {
+	Program string `json:"program"`
+	Version string `json:"version"`
+	OS      string `json:"os"`
+	Arch    string `json:"arch"`
+	Go      string `json:"go"`
+}
+
+// Report 是这个程序（program 是程序名，例如 haro）的版本信息。
+func Report(program string) Info {
+	return Info{Program: program, Version: Version, OS: runtime.GOOS, Arch: runtime.GOARCH, Go: runtime.Version()}
+}
+
+// Describe 是 -version 打印的一行（给人看），例如 haro v0.5.0-1a2b3c4 (linux/arm64, go1.27.1)。
 func Describe(program string) string {
-	return fmt.Sprintf("%s %s (%s/%s, %s)", program, Version, runtime.GOOS, runtime.GOARCH, runtime.Version())
+	info := Report(program)
+	return fmt.Sprintf("%s %s (%s/%s, %s)", info.Program, info.Version, info.OS, info.Arch, info.Go)
+}
+
+// WriteVersion 写出 -version 的输出：asJSON 时是一行 JSON（Info），否则是给人看的那一行（Describe）。
+func WriteVersion(w io.Writer, program string, asJSON bool) error {
+	if !asJSON {
+		_, err := fmt.Fprintln(w, Describe(program))
+		return err
+	}
+	return json.NewEncoder(w).Encode(Report(program))
 }
 
 // Mismatch 判断两边的版本是否不同（值得在日志里提醒升级）。

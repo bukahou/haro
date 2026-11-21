@@ -42,9 +42,13 @@ import (
 
 func main() {
 	showVersion := flag.Bool("version", false, "打印版本号后退出")
+	versionJSON := flag.Bool("json", false, "和 -version 一起用：输出一行 JSON（program、version、os、arch、go），给 CI 读")
 	flag.Parse()
 	if *showVersion {
-		fmt.Println(buildinfo.Describe("haro-server"))
+		if err := buildinfo.WriteVersion(os.Stdout, "haro-server", *versionJSON); err != nil {
+			fmt.Fprintln(os.Stderr, "打印版本号：", err)
+			os.Exit(1)
+		}
 		return
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil)).With("service", telemetry.ServiceServer)

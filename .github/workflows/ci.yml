@@ -119,7 +119,9 @@ jobs:
           mkdir -p dist/pkg
           go build -trimpath -ldflags "-s -w -X github.com/bukahou/haro/internal/buildinfo.Version=${TAG}" -o dist/pkg/haro ./cmd/haro
           ./dist/pkg/haro -version
-          ./dist/pkg/haro -version | grep -F "haro ${TAG} " >/dev/null
+          # 版本号按给机器读的 -version -json 比对（不在给人看的那一行里找字）
+          built=$(./dist/pkg/haro -version -json | jq -r .version)
+          [ "$built" = "$TAG" ] || { echo "::error::编出来的程序报的版本是 ${built}，应为 ${TAG}"; exit 1; }
           cp LICENSE dist/pkg/
           tar -czf "dist/${ASSET}" -C dist/pkg haro LICENSE
       - name: 安装脚本：装、升、卸 + 阳性对照

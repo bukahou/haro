@@ -36,9 +36,13 @@ func main() {
 	enrollAppend := flag.Bool("append", false, "和 -enroll 一起用：补录（换了麦克风、换了位置时），加进原来的声纹")
 	enrollSeconds := flag.Duration("seconds", 5*time.Second, "和 -enroll 一起用：每句录多久")
 	showVersion := flag.Bool("version", false, "打印版本号后退出")
+	versionJSON := flag.Bool("json", false, "和 -version 一起用：输出一行 JSON（program、version、os、arch、go），给安装脚本、CI 读")
 	flag.Parse()
 	if *showVersion {
-		fmt.Println(buildinfo.Describe("haro"))
+		if err := buildinfo.WriteVersion(os.Stdout, "haro", *versionJSON); err != nil {
+			fmt.Fprintln(os.Stderr, "打印版本号：", err)
+			os.Exit(1)
+		}
 		return
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
