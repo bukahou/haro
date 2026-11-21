@@ -60,6 +60,8 @@ func TestServerEventsRoundTrip(t *testing.T) {
 		InputAudioTranscriptionCompleted{ItemID: "item_1", Transcript: "讲个冷笑话"},
 		InputAudioTranscriptionCompleted{ItemID: "item_2", Transcript: "你是谁", Speaker: "主人", SpeakerChecked: true},
 		InputAudioTranscriptionCompleted{ItemID: "item_3", Transcript: "别理我", SpeakerChecked: true},
+		InputAudioTranscriptionCompleted{ItemID: "item_4", Transcript: "哈罗哈罗，在吗", SpeakerChecked: true, SpeakerTentative: "主人",
+			Language: "zh", Wake: true, BargeIn: true, AudioMs: 1500},
 		InputAudioTranscriptionFailed{ItemID: "item_4", Code: CodeTranscriptionFailed, Message: "识别失败"},
 		HaroWakeWordDetected{Keyword: "哈罗哈罗", AudioMs: 900, Score: 0.62, Level: 0.03},
 		HaroNotice{Kind: NoticeResearchDone},

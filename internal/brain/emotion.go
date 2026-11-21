@@ -3,58 +3,126 @@ package brain
 import (
 	"regexp"
 	"strings"
-	"unicode"
+	"unicode/utf8"
 )
 
-// 情绪标记：模型在句首写「[调侃]」这样的标记，标记管到下一个标记为止（同一次回答之内）。
+// 情绪标记：模型在句首写「[调侃]」这样的标记，管到下一个标记为止（同一次回答之内）。
+// 这是固定的语法：半角或全角方括号里是下面清单里的一个名字（括号内允许空白），按语法认，不在话里找词。
 // 标记只用来选语气，不送去合成、不显示给终端；对话历史里保留模型的原话（含标记），让模型看到自己一直在这么写。
+// 清单只在这里定义：认标记的规则、提示词里列出的标记都由它生成。
 
-var emotionTags = map[string]Emotion{
-	"平常": EmotionDefault,
-	"调侃": EmotionTease,
-	"笑":  EmotionLaugh,
-	"激动": EmotionExcited,
-	"温柔": EmotionGentle,
-	"轻声": EmotionWhisper,
-	"撩":  EmotionFlirt,
+// emotionTag 是一个情绪标记。
+type emotionTag struct {
+	Label   string
+	Emotion Emotion
 }
 
-// emotionTagPattern 匹配半角或全角方括号里的情绪名（括号内允许空白）。
-var emotionTagPattern = regexp.MustCompile(`[\[【]\s*(平常|调侃|笑|激动|温柔|轻声|撩)\s*[\]】]`)
+// emotionTags 是全部情绪标记（提示词里按这个顺序列出）。
+var emotionTags = []emotionTag{
+	{"调侃", EmotionTease}, {"笑", EmotionLaugh}, {"激动", EmotionExcited}, {"温柔", EmotionGentle},
+	{"轻声", EmotionWhisper}, {"平常", EmotionDefault}, {"撩", EmotionFlirt},
+}
 
-// takeEmotion 去掉一句话里的情绪标记，返回干净的文字和这句的情绪。
-// 一句里有多个标记时以最后一个为准；没有标记就沿用 current（上一句的情绪）。
-func takeEmotion(sentence string, current Emotion) (string, Emotion) {
-	matches := emotionTagPattern.FindAllStringSubmatch(sentence, -1)
-	if len(matches) == 0 {
-		return sentence, current
+// emotionTagPattern 匹配一个情绪标记。
+var emotionTagPattern = func() *regexp.Regexp {
+	labels := make([]string, len(emotionTags))
+	for i, tag := range emotionTags {
+		labels[i] = regexp.QuoteMeta(tag.Label)
 	}
-	emotion := emotionTags[matches[len(matches)-1][1]]
-	return strings.TrimSpace(emotionTagPattern.ReplaceAllString(sentence, "")), emotion
+	return regexp.MustCompile(`[\[【]\s*(` + strings.Join(labels, "|") + `)\s*[\]】]`)
+}()
+
+// emotionTagList 是提示词里列出的标记，例如「[调侃] [笑] …」。
+func emotionTagList() string {
+	tags := make([]string, len(emotionTags))
+	for i, tag := range emotionTags {
+		tags[i] = "[" + tag.Label + "]"
+	}
+	return strings.Join(tags, " ")
 }
 
-// stripEmotionTags 去掉文字里所有情绪标记（固定回答、确认问句等不经过切句的文字用）。
+func emotionOf(label string) Emotion {
+	for _, tag := range emotionTags {
+		if tag.Label == label {
+			return tag.Emotion
+		}
+	}
+	return EmotionDefault
+}
+
+// emotionLabel 返回情绪的名字（日志用）。
+func emotionLabel(emotion Emotion) string {
+	for _, tag := range emotionTags {
+		if tag.Emotion == emotion {
+			return tag.Label
+		}
+	}
+	return string(emotion)
+}
+
+// stripEmotionTags 去掉文字里所有情绪标记（不经过切句、直接念的固定回答用）。
 func stripEmotionTags(text string) string {
 	return strings.TrimSpace(emotionTagPattern.ReplaceAllString(text, ""))
 }
 
-// detectLanguage 按文字判断语言：含平假名或片假名 ⇒ 日语，否则中文。
-// 只看假名：日语句子几乎都有假名，中文句子不会有；汉字两边都有，判断不了。
-func detectLanguage(text string) Language {
-	for _, r := range text {
-		if unicode.In(r, unicode.Hiragana, unicode.Katakana) && r != 'ー' && r != '・' {
-			return LanguageJapanese
-		}
-	}
-	return LanguageChinese
+// emotionStream 从模型的流式文字里认出情绪标记，在文字进切句器之前：标记处先把前面的文字收尾成句，
+// 之后的句子换成新的语气（切句器只看到纯文字，标记不会被分句规则切开）。
+type emotionStream struct{ pending string }
+
+// emotionPiece 是认出来的一片：文字，或者一个标记。
+type emotionPiece struct {
+	text    string
+	tag     bool    // 这一片是标记
+	emotion Emotion // 标记：从这里起换成的语气
 }
 
-// emotionLabel 返回情绪的中文名（日志用）。
-func emotionLabel(emotion Emotion) string {
-	for label, value := range emotionTags {
-		if value == emotion {
-			return label
+// Push 喂入新文字，返回按顺序认出来的片段。末尾可能是还没写完的标记（「[」「[笑」）：先留着，等后面的字。
+func (e *emotionStream) Push(text string) []emotionPiece {
+	e.pending += text
+	var pieces []emotionPiece
+	for {
+		loc := emotionTagPattern.FindStringSubmatchIndex(e.pending)
+		if loc == nil {
+			break
+		}
+		if loc[0] > 0 {
+			pieces = append(pieces, emotionPiece{text: e.pending[:loc[0]]})
+		}
+		pieces = append(pieces, emotionPiece{tag: true, emotion: emotionOf(e.pending[loc[2]:loc[3]])})
+		e.pending = e.pending[loc[1]:]
+	}
+	if keep := unfinishedTagStart(e.pending); keep > 0 {
+		pieces = append(pieces, emotionPiece{text: e.pending[:keep]})
+		e.pending = e.pending[keep:]
+	}
+	return pieces
+}
+
+// Flush 交出剩下的文字（没写完的标记就当普通文字）。
+func (e *emotionStream) Flush() []emotionPiece {
+	rest := e.pending
+	e.pending = ""
+	if rest == "" {
+		return nil
+	}
+	return []emotionPiece{{text: rest}}
+}
+
+// maxTagRunes 是一个标记最多几个字（括号、名字、括号里的空白）：超过就不可能是没写完的标记。
+const maxTagRunes = 8
+
+// unfinishedTagStart 返回末尾可能是没写完的标记的起点；没有时返回 len(text)（全部可以交出去）。
+func unfinishedTagStart(text string) int {
+	open := max(strings.LastIndex(text, "["), strings.LastIndex(text, "【"))
+	if open < 0 || utf8.RuneCountInString(text[open:]) > maxTagRunes || strings.ContainsAny(text[open:], "]】") {
+		return len(text)
+	}
+	_, size := utf8.DecodeRuneInString(text[open:])
+	inside := strings.TrimSpace(text[open+size:])
+	for _, tag := range emotionTags {
+		if strings.HasPrefix(tag.Label, inside) || strings.HasPrefix(inside, tag.Label) {
+			return open
 		}
 	}
-	return string(emotion)
+	return len(text)
 }

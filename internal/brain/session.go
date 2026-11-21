@@ -37,6 +37,8 @@ type Options struct {
 	StreamReopen ReopenTiming // 识别流断开后重开的节奏；零值 = DefaultReopenTiming
 	// ConfirmationTimeout：会破坏的操作问了主人之后，多久没确认就作废；零值 = DefaultConfirmationTimeout
 	ConfirmationTimeout time.Duration
+	// Phrases：不经模型、直接念的固定的话（每种语言一份）；零值 = 程序里带的那份
+	Phrases Phrases
 
 	// Instructions 是基础提示词（身份、能力、底线），只由服务端持有：客户端不能经 session.update 替换。
 	Instructions string
@@ -70,10 +72,11 @@ type Session struct {
 	cancelResponse context.CancelFunc // 非 nil 表示有进行中的回答
 	autoRespond    bool               // 判定说完时自己开始回答（turn_detection 的 create_response，默认是）
 
-	stream       RecognizerStream             // 识别流：音频转发给它，由它判断说完；nil = 还没打开或断开了正在重开
-	streamConfig *StreamConfig                // 打开识别流用的设置；nil = 还没打开过（断开后按它重开）
-	pendingJobs  map[string]*transcriptionJob // 已判定说完、等待识别结果的语音段（按 item_id）
-	wakePending  bool                         // 刚听到唤醒词：接下来这句如果是空的，就回「我在。」
+	stream          RecognizerStream             // 识别流：音频转发给它，由它判断说完；nil = 还没打开或断开了正在重开
+	streamConfig    *StreamConfig                // 打开识别流用的设置；nil = 还没打开过（断开后按它重开）
+	pendingJobs     map[string]*transcriptionJob // 已判定说完、等待识别结果的语音段（按 item_id）
+	lastWakeKeyword string                       // 最近一次听到的唤醒词（配置里的原文，告诉模型开头可能带着它）
+	language        string                       // 主人最近一句话识别出的语种（固定的话按它选语言）
 	// 醒着 / 正在播放只在这里存一份，识别流是它的跟随者：断开重开后按这两个状态重新告诉新的流
 	awake        bool // 唤醒门开着（听到唤醒词、或终端手动唤醒之后，直到终端说休眠）
 	playing      bool // 终端正在播放回答（只听唤醒词；打断自己的唤醒在仲裁里最优先）
@@ -98,6 +101,9 @@ var errNoStream = realtimeproto.ProtocolErrorf(realtimeproto.CodeNoTranscription
 // NewSession 创建会话。
 // parts.Conversations 为 nil 时这条会话自己建一个只在内存里的对话簿（断开就没了）。
 func NewSession(parts Components, opts Options, logger *slog.Logger) *Session {
+	if opts.Phrases.Languages == nil {
+		opts.Phrases = builtinPhrasesOrPanic()
+	}
 	if parts.Conversations == nil {
 		parts.Conversations = NewConversationBook(nil, opts, logger)
 	}

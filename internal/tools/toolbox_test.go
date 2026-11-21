@@ -107,8 +107,10 @@ func TestDuplicateToolNamesFailAtStartup(t *testing.T) {
 // spoken 是能直接念给主人的错误。
 type spoken struct{}
 
-func (spoken) Error() string         { return "额度用完了" }
-func (spoken) SpokenMessage() string { return "这个月的额度用完了。" }
+func (spoken) Error() string { return "额度用完了" }
+func (spoken) Phrase() (string, map[string]string) {
+	return brain.PhraseOverMonthlyBudget, map[string]string{"spent": "3100", "limit": "3000"}
+}
 
 // collected 收下工具登记的「主人听完才算数」的事。
 type collected struct {
@@ -151,8 +153,11 @@ func TestBuiltinToolsGetSpeakerDeliveriesAndSpokenErrors(t *testing.T) {
 	}
 	_, err = box.Call(ctx, brain.ToolCall{Name: "over_budget"})
 	var spokenErr brain.SpokenError
-	if !errors.As(err, &spokenErr) || spokenErr.SpokenMessage() != "这个月的额度用完了。" {
-		t.Errorf("能念给主人的错误要原样还原：%v", err)
+	if !errors.As(err, &spokenErr) {
+		t.Fatalf("能念给主人的错误要原样还原：%v", err)
+	}
+	if key, values := spokenErr.Phrase(); key != brain.PhraseOverMonthlyBudget || values["spent"] != "3100" || values["limit"] != "3000" {
+		t.Errorf("那句话的键和数要原样带过来：%s %v", key, values)
 	}
 }
 

@@ -22,7 +22,7 @@ type Builtin func(server *mcp.Server)
 const (
 	metaSpeaker = "haro/speaker"
 	metaCall    = "haro/call"
-	metaSpoken  = "haro/spoken" // 结果里：这个错误可以直接念给主人（brain.SpokenError），值是要念的话
+	metaSpoken  = "haro/spoken" // 结果里：这个错误可以直接念给主人（brain.SpokenError），值是那句话的键和要填的值
 )
 
 // AddTool 注册一个内置工具：参数 In、结果 Out 都是结构体，工具定义由它们生成，调用前按定义校验参数
@@ -57,11 +57,18 @@ func AddTextTool[In any](server *mcp.Server, tool *mcp.Tool, run func(context.Co
 func failedResult(err error) (*mcp.CallToolResult, error) {
 	var spoken brain.SpokenError
 	if errors.As(err, &spoken) {
-		result := &mcp.CallToolResult{Meta: mcp.Meta{metaSpoken: spoken.SpokenMessage()}}
+		key, values := spoken.Phrase()
+		result := &mcp.CallToolResult{Meta: mcp.Meta{metaSpoken: spokenMeta{Phrase: key, Values: values}}}
 		result.SetError(err)
 		return result, nil
 	}
 	return nil, err
+}
+
+// spokenMeta 是结果元数据里「能念给主人的错误」：那句话的键和要填的值。
+type spokenMeta struct {
+	Phrase string            `json:"phrase"`
+	Values map[string]string `json:"values,omitempty"`
 }
 
 // registeredNames 记下每个进程内服务上注册过的工具名：同一个服务上同名的工具会被悄悄覆盖，要在启动时报出来。

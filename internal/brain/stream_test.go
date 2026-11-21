@@ -213,7 +213,8 @@ func TestServerVADRejectedWithoutStreaming(t *testing.T) {
 	}
 }
 
-func TestSessionWakeWordAcknowledgement(t *testing.T) {
+// 唤醒门控制转发给转写会话；只有标点的识别结果不回答（叫没叫唤醒词都一样）。
+func TestSessionWakeGateAndEmptyTranscript(t *testing.T) {
 	voice := braintest.NewVoice()
 	model := &fakeModel{tokens: []string{"不应该调用模型。"}}
 	session := newStreamSession(t, voice, model, nil)
@@ -223,25 +224,18 @@ func TestSessionWakeWordAcknowledgement(t *testing.T) {
 	if !voice.Config().WakeWord {
 		t.Error("转写会话应启用唤醒门")
 	}
-	// 唤醒门控制转发给转写会话
 	_ = session.Send(ctx, realtimeproto.HaroWakeWordSleep{})
 	_ = session.Send(ctx, realtimeproto.HaroWakeWordWake{})
 	if got := stream.AwakeCalls(); !slices.Equal(got, []bool{false, true}) {
 		t.Errorf("SetAwake 调用 %v，应为 [false true]", got)
 	}
-
-	// 只叫了唤醒词：识别结果只有标点 → 回「我在。」，不调用大模型
-	events := braintest.Ask(t, session, stream, braintest.Utterance{Wake: true, Text: "。"})
-	if done := braintest.Done(t, events); done.Status != realtimeproto.StatusCompleted || braintest.Spoken(events) != "我在。" {
-		t.Errorf("应回「我在。」：播出 %q，done %+v", braintest.Spoken(events), done)
+	for _, u := range []braintest.Utterance{{Wake: true, Text: "。"}, {}} {
+		if done := braintest.Done(t, braintest.Ask(t, session, stream, u)); done.Status != realtimeproto.StatusIncomplete {
+			t.Errorf("只有标点的识别结果不回答：%+v", done)
+		}
 	}
 	if model.lastInput.Text != "" {
-		t.Error("只叫唤醒词时不应调用大模型")
-	}
-
-	// 之后没叫唤醒词的空识别：照常是 incomplete
-	if done := braintest.Done(t, braintest.Ask(t, session, stream, braintest.Utterance{})); done.Status != realtimeproto.StatusIncomplete {
-		t.Errorf("未唤醒的空识别应为 incomplete：%+v", done)
+		t.Error("没有字的识别结果不应调用大模型")
 	}
 }
 

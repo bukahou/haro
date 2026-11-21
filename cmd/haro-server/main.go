@@ -548,10 +548,14 @@ func buildSynthesizer(settings config.Settings, httpClient *http.Client, logger 
 
 // buildBrainOptions 读取性格档案；没设 HARO_PERSONAS_DIR 时不分性格。
 func buildBrainOptions(settings config.Settings) (brain.Options, error) {
+	phrases, err := brain.LoadPhrases(settings.PhrasesFile) // 不经模型、直接念的固定的话；没配就用程序里带的
+	if err != nil {
+		return brain.Options{}, err
+	}
 	// 基础提示词：内置的永远生效，HARO_SYSTEM_PROMPT 只能追加
 	options := brain.Options{MaxHistoryTurn: settings.MaxHistoryTurn, Instructions: brain.ComposeInstructions(settings.ExtraSystemPrompt),
-		ConfirmationTimeout: settings.ConfirmationTimeout,
-		Escalation:          settings.StrongLLMFor(config.StrongForCorrection)} // 和 routeToStrong 配「重答」那条路的条件一致
+		ConfirmationTimeout: settings.ConfirmationTimeout, Phrases: phrases,
+		Escalation: settings.StrongLLMFor(config.StrongForCorrection)} // 和 routeToStrong 配「重答」那条路的条件一致
 	if settings.PersonasDir == "" {
 		return options, nil
 	}

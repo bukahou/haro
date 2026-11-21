@@ -34,6 +34,10 @@ type turnRecord struct {
 	final strings.Builder
 	// askedConfirmation：这一轮存下了待确认的操作、要问主人（问话没说完就被打断时撤掉）
 	askedConfirmation bool
+	// restricted：声纹没确认的叫醒短句，受限回答：不给工具，这一轮不记进历史
+	restricted bool
+	// extraNotes：这一轮情况说明里额外的附注（例如叫醒后的第一句）
+	extraNotes []string
 	// delivered：要「主人听完这一轮才算告诉了」的事——附上的情况的确认（任务板、额度提醒）和工具登记的（OnDelivered）；
 	// 只在说完、播放没被打断时调用
 	delivered []func()
@@ -127,6 +131,9 @@ func (r *turnRecord) messages(ending turnEnding, answer string) []ChatMessage {
 // closeTurn 收尾：按这一轮怎么结束整理出最后的回答，连同工具往来一起写进历史。
 // 什么都没发生（没做任何工具、终端没报播到哪、也没说出一句）的被打断 / 出错的一轮不记。返回记没记。
 func (s *Session) closeTurn(record *turnRecord, ending turnEnding) bool {
+	if record.restricted { // 声纹没确认：不记进任何人的历史
+		return false
+	}
 	s.mu.Lock()
 	var answer string
 	switch ending {

@@ -74,6 +74,8 @@ type Settings struct {
 	MaxHistoryTurn int    `env:"HARO_MAX_HISTORY_TURN" envDefault:"6"`
 	// 会破坏的操作（删记事等）问了主人之后，多久没确认就作废
 	ConfirmationTimeout time.Duration `env:"HARO_CONFIRMATION_TIMEOUT" envDefault:"60s"`
+	// 不经模型、直接念的固定的话（每种语言一份，JSON）；空 = 用程序里带的那份
+	PhrasesFile string `env:"HARO_PHRASES_FILE"`
 	// 滚动摘要：掉出最近 N 轮的对话压成摘要放进提示词；false = 直接丢掉（旧行为）
 	ConversationSummary bool `env:"HARO_CONVERSATION_SUMMARY" envDefault:"true"`
 

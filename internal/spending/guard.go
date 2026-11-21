@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"sync"
 	"time"
 
@@ -71,28 +72,34 @@ type Limits struct {
 // ErrOverBudget 表示额度用完了（errors.Is 判断）。
 var ErrOverBudget = errors.New("额度用完了")
 
-// budgetError 是额度用完的具体说明：Is(ErrOverBudget)；SpokenMessage 让服务端直接念给主人，而不是报「出错了」。
-type budgetError struct{ message string }
+// budgetError 是额度用完的具体说明：Is(ErrOverBudget)；Phrase 让服务端按主人的语言念出原因，而不是报「出错了」。
+type budgetError struct {
+	message string            // 日志、交给模型的工具结果里用
+	phrase  string            // 念给主人的那句（brain.Phrase*）
+	values  map[string]string // 填进那句话里的数
+}
 
-func (e *budgetError) Error() string         { return e.message }
-func (e *budgetError) Is(target error) bool  { return target == ErrOverBudget }
-func (e *budgetError) SpokenMessage() string { return e.message }
+func (e *budgetError) Error() string                       { return e.message }
+func (e *budgetError) Is(target error) bool                { return target == ErrOverBudget }
+func (e *budgetError) Phrase() (string, map[string]string) { return e.phrase, e.values }
 
-func overBudget(format string, args ...any) error {
-	return &budgetError{message: fmt.Sprintf(format, args...)}
+// overBudget 用花了多少、上限多少两个数造一个额度用完的错误：spentName 是那句话里「花了多少」的名字。
+func overBudget(phrase, spentName string, spent, limit string, format string, args ...any) error {
+	return &budgetError{message: fmt.Sprintf(format, args...), phrase: phrase,
+		values: map[string]string{spentName: spent, "limit": limit}}
 }
 
 // ErrLedgerUnavailable 表示读不出用量账本（errors.Is 判断）：不知道花了多少，就不放行要花钱的调用。
 var ErrLedgerUnavailable = errors.New("读不出用量账本")
 
-// ledgerUnavailable 是读不出账本的具体错误：Is(ErrLedgerUnavailable)；SpokenMessage 念给主人听，让他知道为什么不回答。
+// ledgerUnavailable 是读不出账本的具体错误：Is(ErrLedgerUnavailable)；Phrase 念给主人听，让他知道为什么不回答。
 type ledgerUnavailable struct{ err error }
 
 func (e *ledgerUnavailable) Error() string        { return "读不出用量账本: " + e.err.Error() }
 func (e *ledgerUnavailable) Unwrap() error        { return e.err }
 func (e *ledgerUnavailable) Is(target error) bool { return target == ErrLedgerUnavailable }
-func (e *ledgerUnavailable) SpokenMessage() string {
-	return "我现在读不出费用账本，不知道这个月花了多少，为了不超出上限，先不回答了。"
+func (e *ledgerUnavailable) Phrase() (string, map[string]string) {
+	return brain.PhraseLedgerUnavailable, nil
 }
 
 // Guard 按账本决定还能不能花。时间按本地时区算「今天」「这个月」。
@@ -135,7 +142,8 @@ func (g *Guard) AllowResearch(ctx context.Context) error {
 		return err
 	}
 	if spent.Yen >= g.limits.ResearchDailyYen {
-		return overBudget("今天的调查已经花了约 %.0f 日元（上限 %.0f 日元），明天再查吧。", spent.Yen, g.limits.ResearchDailyYen)
+		return overBudget(brain.PhraseOverResearchDaily, "spent", yen(spent.Yen), yen(g.limits.ResearchDailyYen),
+			"今天的调查已经花了约 %.0f 日元（上限 %.0f 日元），明天再查吧。", spent.Yen, g.limits.ResearchDailyYen)
 	}
 	return nil
 }
@@ -150,7 +158,8 @@ func (g *Guard) AllowSearch(ctx context.Context, credits int) error {
 		return err
 	}
 	if used.Credits+credits > g.limits.SearchDailyCredits {
-		return overBudget("今天的搜索已经用了 %d 次（上限 %d 次），明天再搜吧。", used.Credits, g.limits.SearchDailyCredits)
+		return overBudget(brain.PhraseOverSearchDaily, "used", strconv.Itoa(used.Credits), strconv.Itoa(g.limits.SearchDailyCredits),
+			"今天的搜索已经用了 %d 次（上限 %d 次），明天再搜吧。", used.Credits, g.limits.SearchDailyCredits)
 	}
 	return nil
 }
@@ -170,7 +179,8 @@ func (g *Guard) allowMonthly(ctx context.Context) error {
 		return &ledgerUnavailable{err: err}
 	}
 	if spent.Yen >= g.limits.MonthlyYen {
-		return overBudget("这个月的费用（大模型和搜索）已经约 %.0f 日元，到上限 %.0f 日元了，这个月先不回答了。", spent.Yen, g.limits.MonthlyYen)
+		return overBudget(brain.PhraseOverMonthlyBudget, "spent", yen(spent.Yen), yen(g.limits.MonthlyYen),
+			"这个月的费用（大模型和搜索）已经约 %.0f 日元，到上限 %.0f 日元了，这个月先不回答了。", spent.Yen, g.limits.MonthlyYen)
 	}
 	if g.limits.WarnRatio > 0 && spent.Yen >= g.limits.MonthlyYen*g.limits.WarnRatio {
 		month := g.startOfMonth().Format("2006-01")
@@ -232,3 +242,6 @@ func (m *SearchMeter) AllowSearch(ctx context.Context, credits int) error {
 func (m *SearchMeter) RecordSearch(ctx context.Context, credits int) error {
 	return m.ledger.Record(ctx, Charge{Purpose: m.purpose, Item: m.item, Credits: credits, Yen: m.pricing.SearchYen(credits)})
 }
+
+// yen 是念给主人的日元数（取整）。
+func yen(amount float64) string { return strconv.FormatFloat(amount, 'f', 0, 64) }

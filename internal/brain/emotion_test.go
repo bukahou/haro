@@ -1,44 +1,77 @@
 package brain
 
-import "testing"
+import (
+	"fmt"
+	"slices"
+	"strings"
+	"testing"
+)
 
-func TestTakeEmotion(t *testing.T) {
+// 情绪标记是固定语法：认出来的变成「换语气」，文字里不留标记；没写完的标记先留着等后面的字；不认识的方括号原样保留。
+// 同一段文字不管怎么分块喂进来，认出来的都一样。
+func TestEmotionStream(t *testing.T) {
 	cases := []struct {
-		sentence string
-		current  Emotion
-		text     string
-		emotion  Emotion
+		name, input string
+		want        []emotionPiece
 	}{
-		{"[调侃]你问我冰箱里有什么？", EmotionDefault, "你问我冰箱里有什么？", EmotionTease},
-		{"我又不是冰箱。", EmotionTease, "我又不是冰箱。", EmotionTease},            // 没有标记：沿用上一句
-		{"【笑】哈哈哈，好问题。", EmotionDefault, "哈哈哈，好问题。", EmotionLaugh},     // 全角括号
-		{"[ 轻声 ]嘘——小声点。", EmotionDefault, "嘘——小声点。", EmotionWhisper},  // 括号里有空白
-		{"[平常]现在三点。", EmotionTease, "现在三点。", EmotionDefault},          // 显式回到平常
-		{"[激动]什么？[温柔]没事的。", EmotionDefault, "什么？没事的。", EmotionGentle}, // 多个标记：最后一个为准
-		{"[撩]今天这身打扮不错嘛。", EmotionDefault, "今天这身打扮不错嘛。", EmotionFlirt},
-		{"[笑]", EmotionDefault, "", EmotionLaugh},                      // 只有标记：文字为空，情绪留给下一句
-		{"车停在 [B2] 层。", EmotionDefault, "车停在 [B2] 层。", EmotionDefault}, // 不认识的方括号原样保留
+		{"句首标记", "[调侃]你问我冰箱里有什么？", []emotionPiece{{tag: true, emotion: EmotionTease}, {text: "你问我冰箱里有什么？"}}},
+		{"全角括号、括号里有空白", "【笑】哈哈。[ 轻声 ]嘘——",
+			[]emotionPiece{{tag: true, emotion: EmotionLaugh}, {text: "哈哈。"}, {tag: true, emotion: EmotionWhisper}, {text: "嘘——"}}},
+		{"显式回到平常", "[平常]现在三点。", []emotionPiece{{tag: true, emotion: EmotionDefault}, {text: "现在三点。"}}},
+		{"句号后面紧跟标记", "什么？[温柔]没事的。",
+			[]emotionPiece{{text: "什么？"}, {tag: true, emotion: EmotionGentle}, {text: "没事的。"}}},
+		{"不认识的方括号原样保留", "车停在 [B2] 层。", []emotionPiece{{text: "车停在 [B2] 层。"}}},
+		{"没写完的标记收尾时当文字", "好的[笑", []emotionPiece{{text: "好的[笑"}}},
 	}
 	for _, c := range cases {
-		text, emotion := takeEmotion(c.sentence, c.current)
-		if text != c.text || emotion != c.emotion {
-			t.Errorf("takeEmotion(%q, %q) = %q, %q；应为 %q, %q", c.sentence, c.current, text, emotion, c.text, c.emotion)
+		for _, size := range []int{0, 1, 2} { // 0 = 整段
+			t.Run(fmt.Sprintf("%s/%d", c.name, size), func(t *testing.T) {
+				stream := &emotionStream{}
+				var got []emotionPiece
+				for _, piece := range chunked(c.input, size) {
+					got = append(got, stream.Push(piece)...)
+				}
+				got = mergeText(append(got, stream.Flush()...))
+				if !slices.Equal(got, c.want) {
+					t.Errorf("got %+v, want %+v", got, c.want)
+				}
+			})
 		}
 	}
 }
 
-func TestDetectLanguage(t *testing.T) {
-	cases := map[string]Language{
-		"现在是下午三点。":            LanguageChinese,
-		"你的 iPhone 电量只剩 15%。": LanguageChinese,
-		"えっ、また寝坊したの？":         LanguageJapanese,
-		"コーヒーを飲む。":            LanguageJapanese, // 只有片假名和汉字
-		"東京タワー":               LanguageJapanese,
-		"好的・明白":               LanguageChinese, // 中点不算假名
+// chunked 按 size 个字分块（0 = 整段）。
+func chunked(text string, size int) []string {
+	if size == 0 {
+		return []string{text}
 	}
-	for text, want := range cases {
-		if got := detectLanguage(text); got != want {
-			t.Errorf("detectLanguage(%q) = %q，应为 %q", text, got, want)
+	runes := []rune(text)
+	var chunks []string
+	for start := 0; start < len(runes); start += size {
+		chunks = append(chunks, string(runes[start:min(start+size, len(runes))]))
+	}
+	return chunks
+}
+
+// mergeText 把相邻的文字片段并起来（分块喂入时文字会分成几片，内容一样）。
+func mergeText(pieces []emotionPiece) []emotionPiece {
+	var merged []emotionPiece
+	for _, piece := range pieces {
+		if n := len(merged); n > 0 && !piece.tag && !merged[n-1].tag {
+			merged[n-1].text += piece.text
+			continue
+		}
+		merged = append(merged, piece)
+	}
+	return merged
+}
+
+// 提示词里列出的标记来自同一份清单。
+func TestEmotionTagListComesFromTheTags(t *testing.T) {
+	list := emotionTagList()
+	for _, tag := range emotionTags {
+		if !strings.Contains(list, "["+tag.Label+"]") || !strings.Contains(DefaultInstructions, "["+tag.Label+"]") {
+			t.Errorf("标记 %s 应出现在清单和提示词里：%s", tag.Label, list)
 		}
 	}
 }

@@ -92,8 +92,11 @@ func TestGuardLimits(t *testing.T) {
 	_ = ledger.Record(ctx, Charge{Purpose: PurposeResearch, Item: "llm:x", Credits: 28, Yen: 100})
 	err := guard.AllowResearch(ctx)
 	var spoken brain.SpokenError
-	if !errors.Is(err, ErrOverBudget) || !errors.As(err, &spoken) || !strings.Contains(spoken.SpokenMessage(), "100 日元") {
-		t.Errorf("今天调查花满 100 日元应拒绝，并能念给主人：%v", err)
+	if !errors.Is(err, ErrOverBudget) || !errors.As(err, &spoken) {
+		t.Fatalf("今天调查花满 100 日元应拒绝，并能念给主人：%v", err)
+	}
+	if key, values := spoken.Phrase(); key != brain.PhraseOverResearchDaily || values["spent"] != "100" || values["limit"] != "100" {
+		t.Errorf("念给主人的那句和数：%s %v", key, values)
 	}
 	if err := guard.AllowSearch(ctx, 2); err != nil {
 		t.Errorf("28+2 = 30 次，没超：%v", err)
@@ -245,8 +248,11 @@ func TestMeteredAndBudgetedModels(t *testing.T) {
 	noFallback := NewBudgetedChatModel(cloud, nil, guard, quietLogger)
 	_, err := collectText(t, noFallback)
 	var spoken brain.SpokenError
-	if !errors.As(err, &spoken) || !strings.Contains(spoken.SpokenMessage(), "上限") {
-		t.Errorf("没有本地退路时应返回能念给主人的错误：%v", err)
+	if !errors.As(err, &spoken) {
+		t.Fatalf("没有本地退路时应返回能念给主人的错误：%v", err)
+	}
+	if key, values := spoken.Phrase(); key != brain.PhraseOverMonthlyBudget || values["limit"] == "" {
+		t.Errorf("念给主人的那句和数：%s %v", key, values)
 	}
 }
 
@@ -300,8 +306,11 @@ func TestBudgetedRefusesWhenLedgerUnreadable(t *testing.T) {
 	model := NewBudgetedChatModel(cloud, nil, guard, quietLogger)
 	_, err := collectText(t, model)
 	var spoken brain.SpokenError
-	if !errors.Is(err, ErrLedgerUnavailable) || !errors.As(err, &spoken) || spoken.SpokenMessage() == "" {
-		t.Errorf("应拒绝并给出念给主人的原因：%v", err)
+	if !errors.Is(err, ErrLedgerUnavailable) || !errors.As(err, &spoken) {
+		t.Fatalf("应拒绝并给出念给主人的原因：%v", err)
+	}
+	if key, _ := spoken.Phrase(); key != brain.PhraseLedgerUnavailable {
+		t.Errorf("念给主人的那句：%s", key)
 	}
 	if cloud.calls != 0 {
 		t.Errorf("读不出账本时不应调用要花钱的模型：调用了 %d 次", cloud.calls)

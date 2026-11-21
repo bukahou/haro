@@ -263,8 +263,10 @@ func decodeSpeechStopped(data []byte) (ServerEvent, error) {
 
 func (e InputAudioTranscriptionCompleted) toWire() (any, error) {
 	wire := wireTranscriptionCompleted{Type: typeTranscriptionCompleted, ItemID: e.ItemID, Transcript: e.Transcript}
-	if e.SpeakerChecked {
-		wire.Haro = &wireTranscriptSpeaker{Speaker: e.Speaker, Checked: true}
+	extra := wireTranscriptExtra{Speaker: e.Speaker, Checked: e.SpeakerChecked, Tentative: e.SpeakerTentative,
+		Language: e.Language, Wake: e.Wake, BargeIn: e.BargeIn, AudioMs: e.AudioMs}
+	if extra != (wireTranscriptExtra{}) {
+		wire.Haro = &extra
 	}
 	return wire, nil
 }
@@ -273,8 +275,9 @@ func decodeTranscriptionCompleted(data []byte) (ServerEvent, error) {
 	var wire wireTranscriptionCompleted
 	err := json.Unmarshal(data, &wire)
 	completed := InputAudioTranscriptionCompleted{ItemID: wire.ItemID, Transcript: wire.Transcript}
-	if wire.Haro != nil {
-		completed.Speaker, completed.SpeakerChecked = wire.Haro.Speaker, wire.Haro.Checked
+	if extra := wire.Haro; extra != nil {
+		completed.Speaker, completed.SpeakerChecked, completed.SpeakerTentative = extra.Speaker, extra.Checked, extra.Tentative
+		completed.Language, completed.Wake, completed.BargeIn, completed.AudioMs = extra.Language, extra.Wake, extra.BargeIn, extra.AudioMs
 	}
 	return completed, err
 }

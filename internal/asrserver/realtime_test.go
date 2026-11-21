@@ -362,16 +362,17 @@ func sendKeyword(t *testing.T, ctx context.Context, conn *websocket.Conn) {
 // fixedTranscriber 返回固定文字，并记录送来的音频时长。
 type fixedTranscriber struct {
 	text      string
+	language  string
 	lastAudio atomic.Int64
 }
 
 func (f *fixedTranscriber) Transcribe(_ context.Context, audio realtimeproto.PCMAudio) (Transcript, error) {
 	f.lastAudio.Store(int64(audio.Duration()))
-	return Transcript{Text: f.text}, nil
+	return Transcript{Text: f.text, Language: f.language}, nil
 }
 
 func TestWakeGateIgnoresSpeechUntilKeyword(t *testing.T) {
-	transcriber := &fixedTranscriber{text: "哈罗哈罗，我旁边有什么？"}
+	transcriber := &fixedTranscriber{text: "哈罗哈罗，我旁边有什么？", language: "zh"}
 	spotter := &fakeSpotter{}
 	conn, ctx := dialWakeSession(t, transcriber, spotter)
 
@@ -393,8 +394,9 @@ func TestWakeGateIgnoresSpeechUntilKeyword(t *testing.T) {
 		t.Fatalf("事件顺序 %v", events)
 	}
 	completed, ok := events[3].(realtimeproto.InputAudioTranscriptionCompleted)
-	if !ok || completed.Transcript != "我旁边有什么？" {
-		t.Fatalf("应整句识别后去掉唤醒词：%v", events)
+	if !ok || completed.Transcript != "哈罗哈罗，我旁边有什么？" || !completed.Wake || completed.BargeIn || completed.Language != "zh" ||
+		completed.AudioMs < 690 {
+		t.Fatalf("整句原样交出（唤醒词由模型自己分），标上叫醒后的第一句、语种和长度：%+v", completed)
 	}
 	// 识别的音频包含唤醒词（0.2s）和后面的话（0.5s），不包含休眠时那句话
 	if got := time.Duration(transcriber.lastAudio.Load()); got < 690*time.Millisecond || got > 1600*time.Millisecond {
@@ -415,15 +417,16 @@ func TestWakeGateIgnoresSpeechUntilKeyword(t *testing.T) {
 	}
 }
 
-func TestWakeWordOnlyProducesEmptyUtterance(t *testing.T) {
+// 只叫了唤醒词：照样原样交出、标上叫醒后的第一句（是不是只叫了它，由模型判断）。
+func TestWakeWordOnlyIsPassedThrough(t *testing.T) {
 	transcriber := &fixedTranscriber{text: "哈罗哈罗。"}
 	conn, ctx := dialWakeSession(t, transcriber, &fakeSpotter{})
 	sendPattern(t, ctx, conn, [2]int{200, 0})
 	sendKeyword(t, ctx, conn)
 	sendPattern(t, ctx, conn, [2]int{500, 0}) // 叫完唤醒词就不说了
 	events := readEvents(t, ctx, conn, 4)
-	if completed, ok := events[3].(realtimeproto.InputAudioTranscriptionCompleted); !ok || completed.Transcript != "" {
-		t.Fatalf("只叫了唤醒词时识别结果应为空：%v", events)
+	if completed, ok := events[3].(realtimeproto.InputAudioTranscriptionCompleted); !ok || completed.Transcript != "哈罗哈罗。" || !completed.Wake {
+		t.Fatalf("只叫了唤醒词也原样交出：%v", events)
 	}
 }
 
@@ -437,8 +440,8 @@ func TestWakeWordRequiresSpotter(t *testing.T) {
 	}
 }
 
-// 打断（v3 I-1）：播放回答期间只听唤醒词——回声（说话声）不上报；听到唤醒词 ⇒ 唤醒，这句话标为打断，
-// 识别后去掉唤醒词连同前面的回声；播完（没被打断）⇒ 恢复播放前的状态。
+// 打断：播放回答期间只听唤醒词——回声（说话声）不上报；听到唤醒词 ⇒ 唤醒，这句话原样交出、标为打断
+// （前面混着的回声由模型自己分）；播完（没被打断）⇒ 恢复播放前的状态。
 func TestBargeInDuringPlayback(t *testing.T) {
 	transcriber := &fixedTranscriber{text: "我觉得你应该早点睡哈罗哈罗，换个话题吧。"}
 	spotter := &fakeSpotter{}
@@ -460,8 +463,8 @@ func TestBargeInDuringPlayback(t *testing.T) {
 		t.Fatalf("播放时的回声不应上报，第一个事件应是唤醒：%v", events)
 	}
 	completed, ok := events[3].(realtimeproto.InputAudioTranscriptionCompleted)
-	if !ok || completed.Transcript != "换个话题吧。" {
-		t.Fatalf("打断句应去掉唤醒词连同前面的回声：%v", events)
+	if !ok || completed.Transcript != "我觉得你应该早点睡哈罗哈罗，换个话题吧。" || !completed.BargeIn || !completed.Wake {
+		t.Fatalf("打断句原样交出、标上打断：%+v", completed)
 	}
 
 	// 再播一次、正常播完：恢复收听（播放前是醒着的 ⇒ 播完说话照常上报）
@@ -509,20 +512,6 @@ func TestEchoTailAfterPlaybackIsClipped(t *testing.T) {
 	}
 	if got := time.Duration(transcriber.lastAudio.Load()); got < 500*time.Millisecond || got > 700*time.Millisecond {
 		t.Errorf("应只识别播完之后的约 600 ms，实际 %v", got)
-	}
-}
-
-func TestStripThroughWakePhrase(t *testing.T) {
-	cases := map[string]string{
-		"我觉得你应该早点睡哈罗哈罗，换个话题吧。":          "换个话题吧。",
-		"今天天气不错，适合出门走走 hello hello 停一下": "停一下",
-		"哈罗哈罗。":   "",
-		"没有唤醒词的话": "没有唤醒词的话",
-	}
-	for in, want := range cases {
-		if got := StripThroughWakePhrase(in); got != want {
-			t.Errorf("StripThroughWakePhrase(%q) = %q，应为 %q", in, got, want)
-		}
 	}
 }
 
@@ -600,10 +589,10 @@ func TestWeakWakeRechecksTheSentence(t *testing.T) {
 		Voiceprints: []voiceprint.Voiceprint{{Name: "主人", Embeddings: [][]float32{owner}}}}
 
 	cases := []struct {
-		name, text, wantSpeaker string
+		name, text string
 	}{
-		{"一口气说完：整句再比对，不到 0.5 不认", "哈罗哈罗，帮我删掉所有记事", ""},
-		{"只叫了唤醒词：沿用唤醒时的人，回「我在」", "哈罗哈罗", "主人"},
+		{"一口气说完：整句再比对，不到 0.5 不认", "哈罗哈罗，帮我删掉所有记事"},
+		{"只叫了唤醒词：同样不算认出来", "哈罗哈罗"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -619,8 +608,8 @@ func TestWeakWakeRechecksTheSentence(t *testing.T) {
 				t.Errorf("唤醒事件应带上声纹分数和音量：%+v", wake)
 			}
 			completed, ok := events[3].(realtimeproto.InputAudioTranscriptionCompleted)
-			if !ok || completed.Speaker != c.wantSpeaker || !completed.SpeakerChecked {
-				t.Errorf("说话人应为 %q：%v", c.wantSpeaker, events)
+			if !ok || completed.Speaker != "" || !completed.SpeakerChecked || completed.SpeakerTentative != "主人" {
+				t.Errorf("只过了唤醒门槛：不算认出来，告诉服务端像是谁（由它按长短决定怎么回）：%+v", completed)
 			}
 		})
 	}

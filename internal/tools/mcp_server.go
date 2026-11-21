@@ -82,11 +82,12 @@ func (e *ToolError) Error() string { return e.Text }
 // SpokenToolError 是工具报的、可以直接念给主人的错误（例如额度用完）：实现 brain.SpokenError。
 type SpokenToolError struct {
 	ToolError
-	Message string // 念给主人的话
+	Key    string            // 念给主人的那句话的键（brain.Phrase*）
+	Values map[string]string // 填进那句话里的值
 }
 
-// SpokenMessage 实现 brain.SpokenError。
-func (e *SpokenToolError) SpokenMessage() string { return e.Message }
+// Phrase 实现 brain.SpokenError。
+func (e *SpokenToolError) Phrase() (string, map[string]string) { return e.Key, e.Values }
 
 // Call 调用一个工具，返回文字结果；工具报错时返回 *ToolError（可以念给主人的是 *SpokenToolError），连接出问题时返回其他错误。
 func (s *MCPServer) Call(ctx context.Context, name string, arguments map[string]any) (string, error) {
@@ -107,8 +108,8 @@ func (s *MCPServer) callWithMeta(ctx context.Context, name string, arguments map
 	}
 	if result.IsError {
 		toolErr := ToolError{Tool: name, Text: contentText(result)}
-		if message, ok := result.Meta[metaSpoken].(string); ok {
-			return "", &SpokenToolError{ToolError: toolErr, Message: message}
+		if spoken, ok := spokenIn(result.Meta); ok {
+			return "", &SpokenToolError{ToolError: toolErr, Key: spoken.Phrase, Values: spoken.Values}
 		}
 		return "", &toolErr
 	}
@@ -152,6 +153,20 @@ func declaredProperties(schema any) map[string]bool {
 
 // Close 断开（本地子进程会被结束）。
 func (s *MCPServer) Close() error { return s.session.Close() }
+
+// spokenIn 从结果元数据里取出「能念给主人的错误」（元数据是 JSON 解出来的，按 JSON 再解一次）。
+func spokenIn(meta mcp.Meta) (spokenMeta, bool) {
+	value, ok := meta[metaSpoken]
+	if !ok {
+		return spokenMeta{}, false
+	}
+	data, err := json.Marshal(value)
+	var spoken spokenMeta
+	if err != nil || json.Unmarshal(data, &spoken) != nil || spoken.Phrase == "" {
+		return spokenMeta{}, false
+	}
+	return spoken, true
+}
 
 // resultText 优先用结构化结果（JSON），没有就拼接文本内容。
 func resultText(result *mcp.CallToolResult) string {

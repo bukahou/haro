@@ -360,7 +360,7 @@ func (s *transcriptionSession) wakeUp(ctx context.Context, keyword string, speak
 	if err := s.beginUtterance(ctx, s.totalSamples); err != nil {
 		return err
 	}
-	// 往前多取一段，确保整个唤醒词都在识别范围内（识别后在文字上去掉，见 StripWakePhrase）；
+	// 往前多取一段，确保整个唤醒词都在识别范围内（整句交给服务端，唤醒词由模型自己分）；
 	// 但不越过唤醒词所在这段连续语音的开头——休眠时更早的话不能被带进来。
 	// 打断时这段「连续语音」其实是 haro 自己的回声，开头没有意义，只按窗口往前取。
 	s.current.startSample = max(s.totalSamples-wakeKeywordWindowMs*samplesPerMs, s.speechStart, s.echoUntil, 0)
@@ -493,27 +493,22 @@ func (s *transcriptionSession) finishUtterance(ctx context.Context) error {
 	}
 	s.deps.Logger.Info("一句话的范围", "item", current.itemID, "start_ms", current.startSample/samplesPerMs,
 		"end_ms", current.endSample/samplesPerMs, "after_wake_ms", s.sinceWakeMs(current.startSample), "wake", current.wake)
-	if current.wake {
-		raw := transcript.Text
-		transcript.Text = StripWakePhrase(raw)
-		if current.bargeIn {
-			transcript.Text = StripThroughWakePhrase(raw)
-		}
-		s.deps.Logger.Info("去掉唤醒词", "item", current.itemID, "raw", raw, "text", transcript.Text)
-	}
+	// 唤醒词、打断时混进的回声都不在这里去掉：整句交给服务端，标上「叫醒后的第一句」「打断」，由模型自己分
 	s.deps.Logger.Info("识别完成", "item", current.itemID, "audio", audio.Duration().Round(time.Millisecond),
-		"elapsed", time.Since(started).Round(time.Millisecond), "text", transcript.Text)
+		"elapsed", time.Since(started).Round(time.Millisecond), "text", transcript.Text, "language", transcript.Language,
+		"wake", current.wake, "barge_in", current.bargeIn)
 	speaker, checked := s.identifySpeaker(current.itemID, audio.Data)
+	tentative := ""
 	switch {
 	case current.wakeSpeaker != "": // 唤醒时已经认出来了：这句沿用，不让很短的唤醒句重新比对推翻它
 		speaker, checked = current.wakeSpeaker, true
-	case current.wakeGuess != "" && speaker == "" && transcript.Text == "":
-		// 唤醒时只过了唤醒门槛，又只叫了唤醒词：放行，让 haro 回「我在」（不带信息、不做事）
-		s.deps.Logger.Info("只叫了唤醒词：沿用唤醒时的声纹，回「我在」", "item", current.itemID, "speaker", current.wakeGuess)
-		speaker, checked = current.wakeGuess, true
+	case current.wakeGuess != "" && speaker == "":
+		// 唤醒时只过了唤醒门槛：不算认出来，告诉服务端像是谁，由它按这句话的长短决定怎么回（短句受限回答）
+		tentative = current.wakeGuess
 	}
 	return writeEvent(ctx, s.conn, realtimeproto.InputAudioTranscriptionCompleted{ItemID: current.itemID,
-		Transcript: transcript.Text, Speaker: speaker, SpeakerChecked: checked})
+		Transcript: transcript.Text, Speaker: speaker, SpeakerChecked: checked, SpeakerTentative: tentative,
+		Language: transcript.Language, Wake: current.wake, BargeIn: current.bargeIn, AudioMs: audio.Duration().Milliseconds()})
 }
 
 // minAfterEchoMs：剪掉回声后剩下不到这么长，就当整段都是回声。

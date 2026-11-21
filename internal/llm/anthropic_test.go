@@ -208,8 +208,10 @@ func TestAnthropicRefusalIsAnErrorWithUsage(t *testing.T) {
 		t.Fatalf("拒答没报出来：%+v", refusal)
 	}
 	var spoken brain.SpokenError
-	if !errors.As(error(refusal), &spoken) || spoken.SpokenMessage() == "" {
+	if !errors.As(error(refusal), &spoken) {
 		t.Error("拒答应能念给主人")
+	} else if key, _ := spoken.Phrase(); key != brain.PhraseRefused {
+		t.Errorf("拒答念的那句：%s", key)
 	}
 	if usage == nil || usage.PromptTokens != 50 || usage.OutputTokens != 3 {
 		t.Errorf("拒答也要带出用量记账：%+v", usage)

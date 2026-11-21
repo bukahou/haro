@@ -159,6 +159,7 @@ func (s *Session) briefing(person string, record *turnRecord) string {
 	if person != "" && person != SharedPerson {
 		lines = append(lines, "现在说话的是："+person+"（按声纹认出）。")
 	}
+	lines = append(lines, record.extraNotes...)
 	for _, briefer := range s.parts.Briefers {
 		briefing := briefer.Brief(person)
 		lines = append(lines, briefing.Lines...)
@@ -169,8 +170,13 @@ func (s *Session) briefing(person string, record *turnRecord) string {
 	if len(lines) == 0 {
 		return ""
 	}
-	return "【现在的情况（系统附注，不是主人说的话）】\n" + strings.Join(lines, "\n")
+	return situationHeading + joinLines(lines)
 }
+
+// situationHeading 是情况说明的开头。
+const situationHeading = "【现在的情况（系统附注，不是主人说的话）】\n"
+
+func joinLines(lines []string) string { return strings.Join(lines, "\n") }
 
 // composeSystemPrompt 的顺序：内置规矩（+ 外部追加）→ 主人资料 → 性格。
 // 规矩在最前面优先级最高；这几段都很少变，每轮的即时情况不在这里（见 userTurn）。

@@ -49,11 +49,12 @@ type FrameReport struct {
 	Details string // 看到的细节、判断依据、查到的资料（不念给主人）
 }
 
-// SpokenError 是可以直接念给主人的错误（例如「这个月的额度用完了」）：模型或工具返回它时，
-// 服务端把 SpokenMessage 说出来，而不是只报「出错了」。用 errors.As 判断。
+// SpokenError 是可以直接念给主人的错误（例如「这个月的额度用完了」）：模型返回它时，服务端按 Phrase
+// 取固定的话念出来（每种语言一份，见 Phrases），而不是只报「出错了」。用 errors.As 判断。
 type SpokenError interface {
 	error
-	SpokenMessage() string
+	// Phrase 是要念的那句话的键（Phrase* 常量）和要填进去的值。
+	Phrase() (key string, values map[string]string)
 }
 
 // ProfileSource 给出主人资料：全家共用的 + 说话人自己的事实与偏好，外部注入（不在公开代码里）。
@@ -117,12 +118,11 @@ type SpeechSynthesizer interface {
 	Synthesize(ctx context.Context, utterance Utterance) iter.Seq2[realtimeproto.PCMAudio, error]
 }
 
-// Utterance 是要合成的一句话：文字（情绪标记已取出）+ 情绪 + 语言。
+// Utterance 是要合成的一句话：文字（情绪标记已取出）+ 情绪。用什么语言念由语音合成自己从文字判断。
 // 情绪怎么体现由各语音合成实现决定（GPT-SoVITS 选参考录音；不支持情绪的实现忽略它）。
 type Utterance struct {
-	Text     string
-	Emotion  Emotion
-	Language Language
+	Text    string
+	Emotion Emotion
 }
 
 // Emotion 是一句话的情绪（与语音合成引擎无关的一层）。空值 = 平常。
@@ -136,14 +136,6 @@ const (
 	EmotionGentle  Emotion = "gentle"  // 温柔
 	EmotionWhisper Emotion = "whisper" // 轻声
 	EmotionFlirt   Emotion = "flirt"   // 俏皮暧昧的语气（给需要的性格用）
-)
-
-// Language 是一句话的语言（语音合成需要）。
-type Language string
-
-const (
-	LanguageChinese  Language = "zh" // 中文（可夹英文）
-	LanguageJapanese Language = "ja" // 日语（可夹英文）
 )
 
 // TextSegmenter 把流式文字切成适合逐句合成的句子。每次回答用一个新实例（有内部状态）。
