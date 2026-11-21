@@ -8,6 +8,7 @@ package research
 import (
 	"context"
 	"database/sql"
+	"embed"
 	"errors"
 	"fmt"
 	"os"
@@ -16,6 +17,8 @@ import (
 	"time"
 
 	_ "modernc.org/sqlite" // 纯 Go 的 SQLite 驱动
+
+	"github.com/bukahou/haro/internal/sqliteschema"
 )
 
 // Status 是任务状态。
@@ -112,27 +115,17 @@ func OpenTaskStore(ctx context.Context, path string) (TaskStore, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	if _, err := db.ExecContext(ctx, taskSchema); err != nil {
+	if err := sqliteschema.Migrate(ctx, db, migrationFiles); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("初始化调查任务账本: %w", err)
+		return nil, fmt.Errorf("升级调查任务账本的表结构: %w", err)
 	}
 	return &sqliteTaskStore{db: db}, nil
 }
 
-const taskSchema = `
-CREATE TABLE IF NOT EXISTS research_tasks (
-	id          INTEGER PRIMARY KEY AUTOINCREMENT,
-	person      TEXT    NOT NULL,
-	question    TEXT    NOT NULL,
-	status      TEXT    NOT NULL,
-	conclusion  TEXT    NOT NULL DEFAULT '',
-	sources     TEXT    NOT NULL DEFAULT '', -- 换行分隔
-	stop_reason TEXT    NOT NULL DEFAULT '',
-	created_at  INTEGER NOT NULL,
-	finished_at INTEGER NOT NULL DEFAULT 0,
-	reported    INTEGER NOT NULL DEFAULT 0
-);
-CREATE INDEX IF NOT EXISTS research_tasks_person ON research_tasks (person, id);`
+// 任务账本的表结构由迁移文件管理（sqliteschema）。
+//
+//go:embed migrations/*.sql
+var migrationFiles embed.FS
 
 type sqliteTaskStore struct {
 	db *sql.DB

@@ -11,15 +11,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"time"
 
-	"github.com/pressly/goose/v3"
 	_ "modernc.org/sqlite" // database/sql 的 sqlite 驱动
 
 	"github.com/bukahou/haro/internal/brain"
+	"github.com/bukahou/haro/internal/sqliteschema"
 )
 
 //go:embed migrations/*.sql
@@ -51,14 +50,7 @@ func OpenSQLite(ctx context.Context, path string) (*SQLiteStore, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1) // 单写者
-	files, err := fs.Sub(migrationFiles, "migrations")
-	if err == nil {
-		var provider *goose.Provider
-		if provider, err = goose.NewProvider(goose.DialectSQLite3, db, files, goose.WithDisableGlobalRegistry(true)); err == nil {
-			_, err = provider.Up(ctx)
-		}
-	}
-	if err != nil {
+	if err := sqliteschema.Migrate(ctx, db, migrationFiles); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("升级对话库的表结构: %w", err)
 	}

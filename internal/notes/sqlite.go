@@ -3,6 +3,7 @@ package notes
 import (
 	"context"
 	"database/sql"
+	"embed"
 	"errors"
 	"fmt"
 	"os"
@@ -11,6 +12,8 @@ import (
 	"time"
 
 	_ "modernc.org/sqlite" // 纯 Go 的 SQLite 驱动：编译进程序，不用装任何软件、不用起数据库服务
+
+	"github.com/bukahou/haro/internal/sqliteschema"
 )
 
 // SQLiteStore 是 Repository 的 SQLite 实现。
@@ -20,16 +23,12 @@ type SQLiteStore struct {
 
 var _ Repository = (*SQLiteStore)(nil)
 
-const sqliteSchema = `
-CREATE TABLE IF NOT EXISTS notes (
-	id         INTEGER PRIMARY KEY AUTOINCREMENT,
-	content    TEXT    NOT NULL,
-	created_at TEXT    NOT NULL,
-	deleted_at TEXT
-);
-CREATE INDEX IF NOT EXISTS notes_created_at ON notes (created_at);`
+// 记事库的表结构由迁移文件管理（sqliteschema）。
+//
+//go:embed migrations/*.sql
+var migrationFiles embed.FS
 
-// OpenSQLite 打开（必要时创建目录、文件与表）SQLite 数据库。
+// OpenSQLite 打开（必要时创建目录和文件）SQLite 数据库，并把表结构升到最新。
 func OpenSQLite(ctx context.Context, path string) (*SQLiteStore, error) {
 	if dir := filepath.Dir(path); dir != "." {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -41,9 +40,9 @@ func OpenSQLite(ctx context.Context, path string) (*SQLiteStore, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1) // SQLite 单写者；记事本的并发量用不着更多
-	if _, err := db.ExecContext(ctx, sqliteSchema); err != nil {
+	if err := sqliteschema.Migrate(ctx, db, migrationFiles); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("初始化记事本数据库 %s: %w", path, err)
+		return nil, fmt.Errorf("升级记事本数据库 %s 的表结构: %w", path, err)
 	}
 	return &SQLiteStore{db: db}, nil
 }

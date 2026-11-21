@@ -4,30 +4,21 @@ import (
 	"context"
 	"database/sql"
 	"embed"
-	"io/fs"
 
 	"github.com/pressly/goose/v3"
+
+	"github.com/bukahou/haro/internal/sqliteschema"
 )
 
-// 账本的表结构由 goose 的迁移管理：每一步只跑一次，版本记在库里（goose_db_version 表）。
+// 账本的表结构由迁移文件管理（sqliteschema）；迁移 2 要先查有没有那两列，用 Go 写。
 //
 //go:embed migrations/*.sql
 var migrationFiles embed.FS
 
 // migrateLedger 把账本的表结构升到最新。
 func migrateLedger(ctx context.Context, db *sql.DB) error {
-	files, err := fs.Sub(migrationFiles, "migrations")
-	if err != nil {
-		return err
-	}
-	provider, err := goose.NewProvider(goose.DialectSQLite3, db, files,
-		goose.WithDisableGlobalRegistry(true),
+	return sqliteschema.Migrate(ctx, db, migrationFiles,
 		goose.WithGoMigrations(goose.NewGoMigration(2, &goose.GoFunc{RunTx: addCacheColumns}, nil)))
-	if err != nil {
-		return err
-	}
-	_, err = provider.Up(ctx)
-	return err
 }
 
 // addCacheColumns（迁移 2）：给加缓存记账之前建的账本补上缓存读写两列（旧记录按 0）。
