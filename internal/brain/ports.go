@@ -77,7 +77,9 @@ type FrameExpert interface {
 type FrameQuestion struct {
 	Frame   []byte // 摄像头当前画面（JPEG）
 	Request string // 主人这一轮的原话
-	Style   string // 说给主人听的那句用的口吻（当前性格的说明）；空 = 不限
+	// Question 是前台整理的要看清什么（主人的话接着上文时，指代已经说清楚）；空 = 只看主人的原话
+	Question string
+	Style    string // 说给主人听的那句用的口吻（当前性格的说明）；空 = 不限
 }
 
 // FrameReport 是专家看完画面的结论，分两段交出：Spoken 直接念给主人，Details 留在这一轮的工具结果里供主人追问。

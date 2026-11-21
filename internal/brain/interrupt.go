@@ -41,38 +41,46 @@ func (s *Session) extendSpoken(durationMs int64) {
 // truncate 处理 conversation.item.truncate：回答还在进行就记下截断点（收尾时用），否则直接改历史。
 func (s *Session) truncate(audioEndMs int64) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.truncateAtMs = audioEndMs
+	changed := false
 	if s.cancelResponse == nil { // 回答已经结束（声音还在终端播）
-		s.playbackCutLocked()
+		changed = s.playbackCutLocked()
+	}
+	conversation := s.conversation
+	s.mu.Unlock()
+	if changed { // 放开会话锁再写盘：写盘可能要等别的保存，期间音频照常转发
+		conversation.persist()
 	}
 }
 
 // playbackCutLocked：已经说完的这次回答在终端播放中被打断了。附上的情况没听完，不算告诉了（之后再附上）；
-// 历史里的回答改成听到的部分。没有截断时什么也不做。调用方持有 s.mu。
-func (s *Session) playbackCutLocked() {
+// 历史里的回答改成听到的部分。没有截断时什么也不做。调用方持有 s.mu；返回 true 时调用方放开锁后要写盘（persist）。
+func (s *Session) playbackCutLocked() bool {
 	if s.truncateAtMs < 0 {
-		return
+		return false
 	}
 	if s.pendingDelivered != nil {
 		s.pendingDelivered = nil
 		s.logger.Info("播放中被打断：这一轮附上的情况没听完，之后再附上", "item", s.responseItem, "played_ms", s.truncateAtMs)
 	}
-	s.truncateLastAnswerLocked()
+	return s.truncateLastAnswerLocked()
 }
 
-// truncateLastAnswerLocked 把这次回答记进历史的最后一条（回答文字）改成用户听到的部分；已经是这样就不动。调用方持有 s.mu。
-func (s *Session) truncateLastAnswerLocked() {
+// truncateLastAnswerLocked 把这次回答记进历史的最后一条（回答文字）改成用户听到的部分；已经是这样就不动。
+// 调用方持有 s.mu；返回改没改（改了要在放开锁后写盘）。
+func (s *Session) truncateLastAnswerLocked() bool {
 	if !s.answeredInResponse || s.truncateAtMs < 0 {
-		return
+		return false
 	}
 	heard := heardText(s.spoken, s.truncateAtMs, s.answerRound)
 	if heard == "" {
 		heard = interruptedBeforeSpeaking
 	}
-	if s.conversation.replaceLastAnswer(heard) {
-		s.logger.Info("被打断：历史改为只记听到的部分", "item", s.responseItem, "played_ms", s.truncateAtMs, "heard", heard)
+	if !s.conversation.replaceLastAnswer(heard) {
+		return false
 	}
+	s.logger.Info("被打断：历史改为只记听到的部分", "item", s.responseItem, "played_ms", s.truncateAtMs, "heard", heard)
+	return true
 }
 
 // interruptedBeforeSpeaking 是还没说出一个字就被打断时，历史里这一轮的回答。

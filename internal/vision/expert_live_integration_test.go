@@ -35,7 +35,11 @@ func TestLiveExpert(t *testing.T) {
 	}
 	ctx := context.Background()
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	model := llm.NewAnthropicChatModel(llm.AnthropicOptions{API: llm.NewClaudeAPI(key, "", nil), Model: "claude-sonnet-5-5",
+	api, err := llm.NewClaudeAPI(key, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := llm.NewAnthropicChatModel(llm.AnthropicOptions{API: api, Model: "claude-sonnet-5-5",
 		MaxTokens: 800, Effort: "low", Thinking: llm.ThinkingBetweenTools})
 	var search Search
 	if tavilyKey := os.Getenv("HARO_TAVILY_API_KEY"); tavilyKey != "" {

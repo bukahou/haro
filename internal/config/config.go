@@ -14,7 +14,7 @@ import (
 	"github.com/caarlos0/env/v11"
 )
 
-// 服务端的来源。
+// 前台的模型从哪来（HARO_LLM_PROVIDER）。
 const (
 	LLMLocal = "local" // 本机 ollama
 	LLMCloud = "cloud" // 云端（接口格式见 HARO_CLOUD_LLM_API）
@@ -22,7 +22,7 @@ const (
 
 // 云端模型的接口格式。
 const (
-	CloudAPIOpenAI    = "openai"    // OpenAI 兼容的 /chat/completions（Bedrock、OpenRouter、vLLM……）
+	CloudAPIOpenAI    = "openai"    // OpenAI 兼容的 /chat/completions
 	CloudAPIAnthropic = "anthropic" // Claude API 的 Messages 接口（官方 Go SDK）
 )
 
@@ -68,6 +68,9 @@ type ServerSettings struct {
 	// 模型
 	OllamaURL string `env:"HARO_OLLAMA_URL" envDefault:"http://127.0.0.1:11434"`
 	Model     string `env:"HARO_MODEL" envDefault:"qwen3-vl:8b-instruct"` // 本地（ollama）模型；4b 是思考变体，每轮多等 1.5–3 秒
+	// 等本地模型开始回答的上限：ollama 卸掉模型后的第一句要先从磁盘载入（冷启动十几秒），不能按等云端的几秒算，
+	// 否则会被当成连不上、触发熔断
+	LocalLLMTimeout time.Duration `env:"HARO_LOCAL_LLM_TIMEOUT" envDefault:"30s"`
 	// 追加在前台的基础规则后面（前台的定义见 internal/agents/builtin/front.md）
 	ExtraSystemPrompt string `env:"HARO_SYSTEM_PROMPT"`
 	// 代理定义的覆盖目录：里面同名的 *.md 替换程序里带的那份（internal/agents/builtin/）；空 = 用程序里带的
@@ -81,6 +84,8 @@ type ServerSettings struct {
 	CompactContextTokens int `env:"HARO_CONTEXT_COMPACT_TOKENS" envDefault:"24000"`
 	// 会破坏的操作（删记事等）问了主人之后，多久没确认就作废
 	ConfirmationTimeout time.Duration `env:"HARO_CONFIRMATION_TIMEOUT" envDefault:"60s"`
+	// 单次工具执行最多多久（所有工具共用，包括远程 MCP）；天气这类工具在这个期限里自己分配主力和备用的时间
+	ToolTimeout time.Duration `env:"HARO_TOOL_TIMEOUT" envDefault:"10s"`
 	// 不经模型、直接念的固定的话（每种语言一份，JSON）；空 = 用程序里带的那份
 	PhrasesFile string `env:"HARO_PHRASES_FILE"`
 	// 滚动摘要：掉出最近 N 轮的对话压成摘要放进提示词；false = 直接丢掉（旧行为）
@@ -95,10 +100,10 @@ type ServerSettings struct {
 	CloudLLMAPIKey string `env:"HARO_CLOUD_LLM_API_KEY"` // openai 的凭证：无默认值，只来自环境变量
 	// openai：服务端要求的工具调用编号格式（opaque / kimi / mistral；空 = 不挑格式）。按服务显式写，不按模型名猜
 	CloudLLMToolCallIDs string `env:"HARO_CLOUD_LLM_TOOL_CALL_IDS"`
-	// anthropic 的凭证：开发机放 key；集群里留空，由 SDK 走 Workload Identity Federation（ANTHROPIC_FEDERATION_* 等），
+	// anthropic 的凭证：开发机放 key；集群里留空，用 Workload Identity Federation（ANTHROPIC_FEDERATION_* 等，取值和检查在 llm 包），
 	// 不放长期密钥。⚠️ 不用 ANTHROPIC_API_KEY 这个名字：Claude Code 也读它
 	AnthropicAPIKey string `env:"HARO_ANTHROPIC_API_KEY"`
-	// anthropic 的回答力度（思考是关掉的，只能 low / medium / high）：聊天和摘要求快，调查多花点力气
+	// anthropic 的回答力度（low / medium / high；思考写法是 adaptive 时还可以 xhigh / max）：聊天和摘要求快，调查多花点力气
 	CloudLLMEffort  string        `env:"HARO_CLOUD_LLM_EFFORT" envDefault:"low"`
 	ResearchEffort  string        `env:"HARO_RESEARCH_EFFORT" envDefault:"medium"`
 	CloudLLMTimeout time.Duration `env:"HARO_CLOUD_LLM_TIMEOUT" envDefault:"4s"`     // 等云端开始响应的上限，超过就当连不上（正常 2 s 内开始响应）
@@ -127,7 +132,7 @@ type ServerSettings struct {
 	ModelPricesProvider string  `env:"HARO_MODEL_PRICES_PROVIDER" envDefault:"anthropic"`
 	ModelPricesCache    string  `env:"HARO_MODEL_PRICES_CACHE"`
 	ResearchDailyYen    float64 `env:"HARO_RESEARCH_DAILY_YEN" envDefault:"100"` // 后台调查每天上限；0 = 不限
-	MonthlyYen          float64 `env:"HARO_MONTHLY_YEN"`                         // 每月总费用上限（大模型 + 搜索）；0 = 不限（未定）
+	MonthlyYen          float64 `env:"HARO_MONTHLY_YEN"`                         // 每月总费用上限（大模型 + 搜索）；0 = 不限
 	// 月度上限到了以后：主人口头确认一次提高多少（0 = 不能口头提高，到上限就停到下个月）；
 	// 判断主人要不要提高的那次小调用每天最多几次（它不受额度管，靠这个封顶）
 	MonthlyRaiseYen      float64 `env:"HARO_MONTHLY_RAISE_YEN" envDefault:"500"`
@@ -186,6 +191,7 @@ type ServerSettings struct {
 	WakeArbitration  time.Duration `env:"HARO_WAKE_ARBITRATION" envDefault:"300ms"` // 多台终端同时听到唤醒词时等多久再选一台；0 = 不仲裁
 
 	// 切句
+	// 切句的长短按会念出来的词数算（中文一个汉字算一个词，英文一个单词算一个）；变量名沿用以前按字数算时的
 	FirstSegmentMinRunes int `env:"HARO_FIRST_SEGMENT_MIN_RUNES" envDefault:"4"` // 0 = 第一句不在逗号处提前切
 	MaxSegmentRunes      int `env:"HARO_MAX_SEGMENT_RUNES" envDefault:"40"`
 
@@ -235,11 +241,11 @@ type TerminalSettings struct {
 // parseSettings 从环境变量读出一种配置，并记下环境里还写着、但已经删掉的配置项。
 func parseSettings[T interface {
 	*ServerSettings | *TerminalSettings
-}](settings T, common *Common) error {
+}](settings T, common *Common, side settingSide) error {
 	if err := env.Parse(settings); err != nil {
 		return err
 	}
-	notes, err := checkRemovedSettings(os.LookupEnv)
+	notes, err := checkRemovedSettings(os.LookupEnv, side)
 	common.RemovedSettingNotes = notes
 	return err
 }
@@ -247,7 +253,7 @@ func parseSettings[T interface {
 // LoadBrainSettings 读取并校验服务端（haro-server）的配置。
 func LoadBrainSettings() (ServerSettings, error) {
 	var settings ServerSettings
-	if err := parseSettings(&settings, &settings.Common); err != nil {
+	if err := parseSettings(&settings, &settings.Common, serverSide); err != nil {
 		return settings, err
 	}
 	return settings, settings.validateBrain()
@@ -256,7 +262,7 @@ func LoadBrainSettings() (ServerSettings, error) {
 // LoadTerminalSettings 读取并校验终端（haro）的配置。
 func LoadTerminalSettings() (TerminalSettings, error) {
 	var settings TerminalSettings
-	if err := parseSettings(&settings, &settings.Common); err != nil {
+	if err := parseSettings(&settings, &settings.Common, terminalSide); err != nil {
 		return settings, err
 	}
 	return settings, settings.validateTerminal()
@@ -280,6 +286,17 @@ func (settings TerminalSettings) validateTerminal() error {
 
 // validateBrain 校验服务端的配置。判断说完、唤醒词要用到的模型由服务端（haro-asr）加载，所以也在这里看。
 func (settings ServerSettings) validateBrain() error {
+	for _, validate := range []func() error{settings.validateSpeech, settings.validateModels, settings.validateWeather,
+		settings.validateStorage, settings.validateLimits, settings.validateListen} {
+		if err := validate(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateSpeech 检查语音合成和语音识别服务。
+func (settings ServerSettings) validateSpeech() error {
 	if err := requireHTTPURL("HARO_TTS_URL", settings.TTSURL, "语音合成服务的地址；Piper 也要自己先运行起来，例如 python -m piper.http_server"); err != nil {
 		return err
 	}
@@ -295,6 +312,14 @@ func (settings ServerSettings) validateBrain() error {
 	default:
 		return fmt.Errorf("HARO_TTS 只能是 %s 或 %s，现在是 %q", TTSPiper, TTSGPTSoVITS, settings.TTS)
 	}
+	if err := requireHTTPURL("HARO_ASR_URL", settings.ASRURL, "语音识别服务 haro-asr 的地址；haro-asr 单独运行，见 ASRSettings"); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateModels 检查用哪种模型、云端模型和更强的模型配齐了没有、费用怎么折算。
+func (settings ServerSettings) validateModels() error {
 	switch settings.LLMProvider {
 	case LLMLocal:
 	case LLMCloud:
@@ -303,12 +328,6 @@ func (settings ServerSettings) validateBrain() error {
 		}
 	default:
 		return fmt.Errorf("HARO_LLM_PROVIDER 只能是 %s 或 %s，现在是 %q", LLMLocal, LLMCloud, settings.LLMProvider)
-	}
-	if err := requireHTTPURL("HARO_ASR_URL", settings.ASRURL, "语音识别服务 haro-asr 的地址；haro-asr 单独运行，见 ASRSettings"); err != nil {
-		return err
-	}
-	if err := settings.validateWeather(); err != nil {
-		return err
 	}
 	if settings.ResearchesWithCloud() {
 		if err := settings.cloudLLMReady(); err != nil {
@@ -321,22 +340,40 @@ func (settings ServerSettings) validateBrain() error {
 	if err := settings.validateStrongLLM(); err != nil {
 		return err
 	}
+	return nil
+}
+
+// validateStorage 检查对话库、记事库。
+func (settings ServerSettings) validateStorage() error {
 	if settings.ConversationsDir != "" && settings.ConversationsDB == "" {
 		return fmt.Errorf("设了 HARO_CONVERSATIONS_DIR（旧的对话文件，只用来导入）就要设 HARO_CONVERSATIONS_DB（对话库）")
 	}
 	if settings.Tools && settings.NotesDB == "" {
 		return fmt.Errorf("HARO_TOOLS=true 时必须设 HARO_NOTES_DB（或设 HARO_TOOLS=false）")
 	}
+	if settings.Tools && settings.NotesListLimit <= 0 {
+		return fmt.Errorf("HARO_NOTES_LIST_LIMIT 要大于 0（找记事时交给模型挑的最多条数），现在是 %d", settings.NotesListLimit)
+	}
+	return nil
+}
+
+// validateLimits 检查各种上限、时长不能是负数或零。
+func (settings ServerSettings) validateLimits() error {
 	if settings.MonthlyRaiseYen < 0 || settings.OverBudgetDailyCalls < 0 || settings.CompactContextTokens < 0 {
 		return fmt.Errorf("HARO_MONTHLY_RAISE_YEN、HARO_OVER_BUDGET_DAILY_CALLS、HARO_CONTEXT_COMPACT_TOKENS 不能是负数（现在是 %v、%d、%d）",
 			settings.MonthlyRaiseYen, settings.OverBudgetDailyCalls, settings.CompactContextTokens)
 	}
+	if settings.ToolTimeout <= 0 {
+		return fmt.Errorf("HARO_TOOL_TIMEOUT 要大于 0（单次工具执行最多多久），现在是 %v", settings.ToolTimeout)
+	}
 	if settings.ConfirmationTimeout <= 0 {
 		return fmt.Errorf("HARO_CONFIRMATION_TIMEOUT 要大于 0（会破坏的操作多久没确认就作废），现在是 %v", settings.ConfirmationTimeout)
 	}
-	if settings.Tools && settings.NotesListLimit <= 0 {
-		return fmt.Errorf("HARO_NOTES_LIST_LIMIT 要大于 0（找记事时交给模型挑的最多条数），现在是 %d", settings.NotesListLimit)
-	}
+	return nil
+}
+
+// validateListen 检查服务端的监听地址。
+func (settings ServerSettings) validateListen() error {
 	if settings.ServerListen == "" {
 		return fmt.Errorf("必须设 HARO_SERVER_LISTEN（haro-server 的监听地址）")
 	}
@@ -369,24 +406,10 @@ func (s ServerSettings) cloudLLMReady() error {
 		if s.CloudLLMModel == "" {
 			return fmt.Errorf("必须设 HARO_CLOUD_LLM_MODEL（例如 claude-haiku-5-5）")
 		}
-		if s.AnthropicAPIKey == "" && !anthropicAmbientCredentials() {
-			return fmt.Errorf("必须有 Claude 的凭证：开发机填 HARO_ANTHROPIC_API_KEY；集群里配 Workload Identity Federation（ANTHROPIC_FEDERATION_RULE_ID 等）")
-		}
 	default:
 		return fmt.Errorf("HARO_CLOUD_LLM_API 只能是 %s 或 %s，现在是 %q", CloudAPIOpenAI, CloudAPIAnthropic, s.CloudLLMAPI)
 	}
 	return nil
-}
-
-// anthropicAmbientCredentials 判断不填 HARO_ANTHROPIC_API_KEY 时，SDK 能不能自己找到凭证：
-// Workload Identity Federation（集群里），或 SDK 的标准变量 / 登录档案。
-func anthropicAmbientCredentials() bool {
-	for _, name := range []string{"ANTHROPIC_FEDERATION_RULE_ID", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_PROFILE"} {
-		if os.Getenv(name) != "" {
-			return true
-		}
-	}
-	return false
 }
 
 // UsesCloudLLM 判断会不会调用云端模型（主用云端，或开着后台调查）。

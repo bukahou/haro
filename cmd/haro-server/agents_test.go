@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bukahou/haro/internal/agents"
 	"github.com/bukahou/haro/internal/config"
@@ -101,7 +102,7 @@ func TestBuildAgentsForVisionModes(t *testing.T) {
 func TestBuildAgentsRejectsBadToolLists(t *testing.T) {
 	settings := cloudSettings([]string{config.StrongForCorrection}, config.VisionByExpert)
 	front := "---\ntitle: 前台\nmode: primary\nmodel: base\npurpose: chat\nmax_steps: 8\ntools: [%s]\n---\n基础规则。{{.EmotionTags}}\n"
-	summary := "---\ntitle: 摘要\nmode: subtask\nmodel: base\npurpose: summary\nmax_steps: 1\ntools: [%s]\n---\n写摘要。\n"
+	summary := "---\ntitle: 摘要\nmode: subtask\nmodel: base\npurpose: summary\nmax_steps: 1\ntimeout: 30s\ntools: [%s]\n---\n写摘要。\n"
 	cases := map[string]struct {
 		name, text string
 		ok         bool
@@ -122,7 +123,10 @@ func TestBuildAgentsRejectsBadToolLists(t *testing.T) {
 
 // Claude 特有的取值（回答力度、思考写法）在启动时检查，报错写明是哪个环境变量；用别的接口时不查。
 func TestCheckClaudeSettings(t *testing.T) {
-	base := config.ServerSettings{CloudLLMAPI: config.CloudAPIAnthropic, CloudLLMEffort: "low", ResearchEffort: "medium",
+	for _, name := range []string{"ANTHROPIC_FEDERATION_RULE_ID", "ANTHROPIC_ORGANIZATION_ID", "ANTHROPIC_IDENTITY_TOKEN_FILE", "ANTHROPIC_IDENTITY_TOKEN"} {
+		t.Setenv(name, "") // 不受跑测试那台机器的环境影响
+	}
+	base := config.ServerSettings{CloudLLMAPI: config.CloudAPIAnthropic, AnthropicAPIKey: "k", CloudLLMEffort: "low", ResearchEffort: "medium",
 		StrongLLMEffort: "low", CloudLLMThinking: "disabled", StrongLLMThinking: "between_tools"}
 	if err := checkClaudeSettings(base); err != nil {
 		t.Fatalf("取值都对应通过：%v", err)
@@ -133,6 +137,7 @@ func TestCheckClaudeSettings(t *testing.T) {
 		"HARO_STRONG_LLM_EFFORT":   func(s *config.ServerSettings) { s.StrongLLMEffort = "max" },
 		"HARO_CLOUD_LLM_THINKING":  func(s *config.ServerSettings) { s.CloudLLMThinking = "off" },
 		"HARO_STRONG_LLM_THINKING": func(s *config.ServerSettings) { s.StrongLLMThinking = "enabled" },
+		"HARO_ANTHROPIC_API_KEY":   func(s *config.ServerSettings) { s.AnthropicAPIKey = "" }, // 也没配 WIF：没有凭证
 	} {
 		settings := base
 		change(&settings)
@@ -140,9 +145,27 @@ func TestCheckClaudeSettings(t *testing.T) {
 			t.Errorf("%s 写错：应起不来并写明变量名：%v", name, err)
 		}
 	}
+	// xhigh、max 要开着思考：更强的模型设成 adaptive 时可以用；调查的力度两种思考写法都要合得上
+	adaptive := base
+	adaptive.StrongLLMThinking, adaptive.StrongLLMEffort = "adaptive", "max"
+	if err := checkClaudeSettings(adaptive); err != nil {
+		t.Errorf("思考是 adaptive 时力度可以是 max：%v", err)
+	}
+	adaptive.ResearchEffort = "xhigh" // 调查也用云端模型（思考关着）：合不上
+	if err := checkClaudeSettings(adaptive); err == nil || !strings.Contains(err.Error(), "HARO_RESEARCH_EFFORT") {
+		t.Errorf("调查的力度要和两种思考写法都合得上：%v", err)
+	}
 	openai := base
 	openai.CloudLLMAPI, openai.CloudLLMThinking = config.CloudAPIOpenAI, "off"
 	if err := checkClaudeSettings(openai); err != nil {
 		t.Errorf("用 OpenAI 兼容接口时不查 Claude 的取值：%v", err)
+	}
+}
+
+// 本地模型等开始回答按本地的上限（冷启动要先载入模型），不按等云端的几秒：否则冷启动会被当成连不上、触发熔断。
+func TestLocalModelUsesItsOwnFirstTokenTimeout(t *testing.T) {
+	settings := config.ServerSettings{CloudLLMTimeout: 4 * time.Second, LocalLLMTimeout: 30 * time.Second, RequestTimeout: time.Minute}
+	if got := localModelOptions(settings, nil).FirstTokenTimeout; got != settings.LocalLLMTimeout {
+		t.Errorf("本地模型的首字期限应是 HARO_LOCAL_LLM_TIMEOUT：%v", got)
 	}
 }

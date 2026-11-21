@@ -60,6 +60,19 @@ func emotionLabel(emotion Emotion) string {
 	return string(emotion)
 }
 
+// leadingTagPattern 匹配句首一个标记语法的片段（方括号里几个字）。清单里的标记已经被 emotionStream 取走，
+// 句首还剩的就是清单外的：只记日志、照原样念，先看实际出现多少再定怎么处理。
+var leadingTagPattern = regexp.MustCompile(`^\s*([\[【]\s*[^\]】\s]{1,6}\s*[\]】])`)
+
+// leadingUnknownTag 返回句首清单外的标记（例如「[无奈]」）；没有时 ok 为 false。
+func leadingUnknownTag(text string) (tag string, ok bool) {
+	match := leadingTagPattern.FindStringSubmatch(text)
+	if match == nil {
+		return "", false
+	}
+	return match[1], true
+}
+
 // stripEmotionTags 去掉文字里所有情绪标记（不经过切句、直接念的固定回答用）。
 func stripEmotionTags(text string) string {
 	return strings.TrimSpace(emotionTagPattern.ReplaceAllString(text, ""))

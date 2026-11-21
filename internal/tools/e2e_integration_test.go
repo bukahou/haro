@@ -107,7 +107,11 @@ func testChatModel(t *testing.T) brain.ChatModel {
 		model = "claude-haiku-5-5"
 	}
 	t.Logf("模型：%s", model)
-	return llm.NewAnthropicChatModel(llm.AnthropicOptions{API: llm.NewClaudeAPI(key, "", nil), Model: model, MaxTokens: 800})
+	api, err := llm.NewClaudeAPI(key, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return llm.NewAnthropicChatModel(llm.AnthropicOptions{API: api, Model: model, MaxTokens: 800})
 }
 
 // builtinFront 是按程序里带的定义组的前台（真模型）。

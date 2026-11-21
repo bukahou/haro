@@ -7,12 +7,19 @@ var (
 	EscalatedNote             = escalatedNote
 	AlreadyEscalatedNote      = alreadyEscalatedNote
 	FrameRecalledNote         = frameRecalledNote
+	DirectViewNote            = directViewNote
 	ToolNotRunInterrupted     = toolNotRunInterrupted
 	FailedBeforeSpeaking      = failedBeforeSpeaking
 	InterruptedBeforeSpeaking = interruptedBeforeSpeaking
 	ExpertReport              = expertReport
+	ExpertDetailsHeading      = expertDetailsHeading
 	EscalatedRecord           = escalatedRecord
 	CaptureFailedNote         = captureFailedNote
+	WakeNote                  = wakeNote
+	RestrictedNote            = restrictedNote
+	ToolFailedPrefix          = toolFailedPrefix
+	AnswerTruncated           = answerTruncated
+	ToolOverview              = toolOverview
 )
 
 // SetTranscriptionWaitTimeoutForTest 临时改「等识别结果」的期限，返回改回去的函数。

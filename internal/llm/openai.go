@@ -42,9 +42,9 @@ type OpenAIOptions struct {
 	HTTPClient *http.Client
 	// ToolCallIDs 是服务端要求的工具调用编号格式；空 = 不挑格式（ToolCallIDsOpaque）
 	ToolCallIDs ToolCallIDStyle
-	// MaxRetries 是 SDK 在 429 / 5xx / 断线时自己重试几次。当主模型时用 0：等不到就交给退路
+	// MaxRetries 是 SDK 在 429 / 5xx / 断线时自己重试几次。0 = 不重试：等不到就按连不上报错，由熔断决定之后怎么办
 	MaxRetries int
-	// FirstTokenTimeout 是等模型开始回答（第一个流式事件）最多多久，超时就取消、交给退路；0 = 不限
+	// FirstTokenTimeout 是等模型开始回答（第一个流式事件）最多多久，超时就取消、按连不上报错；0 = 不限
 	FirstTokenTimeout time.Duration
 	// RequestTimeout 是一次请求从发出到流结束最多多久；0 = 只受调用方的 context 管
 	RequestTimeout time.Duration

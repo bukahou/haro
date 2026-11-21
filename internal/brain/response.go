@@ -51,8 +51,12 @@ func (s *Session) runResponse(ctx context.Context, job *transcriptionJob) {
 		s.cancelResponse()
 		s.cancelResponse = nil
 		// 回答已经记进历史之后才收到截断（打断发生在生成刚结束的一瞬间）：回头改
-		s.playbackCutLocked()
+		changed := s.playbackCutLocked()
+		conversation := s.conversation
 		s.mu.Unlock()
+		if changed {
+			conversation.persist()
+		}
 	}()
 	done := s.respond(ctx, job)
 	s.emit(done)
@@ -226,6 +230,9 @@ func (s *Session) speakAnswer(ctx context.Context, history []ChatMessage, input 
 			if !hasSpokenText(next.text) { // 只剩标点：不念
 				continue
 			}
+			if tag, ok := leadingUnknownTag(next.text); ok {
+				s.logger.Warn("模型写了清单外的情绪标记：照原样念出", "tag", tag)
+			}
 			if err := s.speakUtterance(groupCtx, index, next.round, Utterance{Text: next.text, Emotion: s.voiceEmotion(next.emotion)}); err != nil {
 				return err
 			}
@@ -239,7 +246,7 @@ func (s *Session) speakAnswer(ctx context.Context, history []ChatMessage, input 
 
 // generateSentences 拉取模型的流式输出，切好的句子（带段号）写进 sentences。
 // 模型要求调用工具时：先把调用前说的话说出去 → 执行 → 把结果交回模型 → 再生成（步数和死循环见 tool_steps.go）；
-// 需要确认的工具不执行，改为问用户「确定要删掉吗」，等下一轮回答。
+// 会破坏的工具先不执行：核对声音、存下参数（确认闸，见 confirmation.go），由模型用自己的话问主人，主人同意后再执行。
 // 工具往来和最后一段话随时记进 record（每个工具一做完就记，之后被打断、出错也不丢）。
 func (s *Session) generateSentences(ctx context.Context, history []ChatMessage, input ChatMessage, view cameraView,
 	sentences chan<- sentence, answer *strings.Builder, record *turnRecord) (*ReplyUsage, error) {
@@ -403,7 +410,11 @@ func (s *Session) generateSentences(ctx context.Context, history []ChatMessage, 
 			case cancelActionTool:
 				result = s.cancelAction(call)
 			case lookAtCameraTool:
-				look := s.lookAtCamera(ctx, view)
+				in, err := DecodeArguments[lookAtCameraInput](call.Arguments)
+				if err != nil { // 参数不对也照样看：问题只是帮专家看准，主人的原话照样交过去
+					s.logger.Warn("看画面的参数不对：只按主人的原话看", "err", err)
+				}
+				look := s.lookAtCamera(ctx, view, in.Question)
 				direct := look.speakDirectly(calls)
 				if direct {
 					directAnswer = look.report.Spoken

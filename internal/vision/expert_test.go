@@ -114,6 +114,23 @@ func TestExpertSearchesThenReports(t *testing.T) {
 	}
 }
 
+// 前台整理了要看清的问题：和主人的原话一起交给专家；画面那条消息的开头和前台用的一样。
+func TestExpertGetsTheQuestion(t *testing.T) {
+	model := &scriptedModel{replies: []brain.ReplyDelta{reportCall("是同一个牌子。", "盒子上的字一样。")}}
+	asked := question
+	asked.Question = "主人手里这个和刚才那个耳机盒是不是同一个牌子"
+	if _, err := newExpert(t, model, nil).ExamineFrame(context.Background(), asked); err != nil {
+		t.Fatal(err)
+	}
+	first := model.requests[0]
+	if !slices.ContainsFunc(first, func(m brain.ChatMessage) bool { return strings.HasSuffix(m.Text, asked.Question) }) {
+		t.Errorf("专家应拿到前台整理的问题：%+v", first)
+	}
+	if last := first[len(first)-1]; last.Text != brain.CameraFrameCaption || string(last.Image) != "jpeg" {
+		t.Errorf("最后一条应是画面：%+v", last)
+	}
+}
+
 // 专家直接用文字回答、没交结论：提醒一次，它再交。
 func TestExpertRemindsOnceToReport(t *testing.T) {
 	model := &scriptedModel{replies: []brain.ReplyDelta{{Text: "看着像硬盘盒。"}, reportCall("看着像硬盘盒。", "蓝色盒子。")}}
@@ -143,10 +160,11 @@ func TestExpertSearchLimit(t *testing.T) {
 	if err != nil || report.Details != "看着像硬盘盒。" {
 		t.Fatalf("搜到上限后应停下：%+v %v", report, err)
 	}
-	if len(searches.queries) != maxSearches || len(model.requests) != builtinRules(t).MaxSteps {
-		t.Errorf("最多搜 %d 次、最多请求 %d 次：搜了 %v，请求了 %d 次", maxSearches, builtinRules(t).MaxSteps, searches.queries, len(model.requests))
+	rules := builtinRules(t)
+	if len(searches.queries) != rules.MaxSearches || len(model.requests) != rules.MaxSteps {
+		t.Errorf("最多搜 %d 次、最多请求 %d 次：搜了 %v，请求了 %d 次", rules.MaxSearches, rules.MaxSteps, searches.queries, len(model.requests))
 	}
-	for _, specs := range model.specs[maxSearches:] {
+	for _, specs := range model.specs[rules.MaxSearches:] {
 		if slices.Contains(toolNames(specs), searchTool) {
 			t.Errorf("搜到上限后不应再给搜索工具：%v", toolNames(specs))
 		}
@@ -313,6 +331,7 @@ func TestExpertRulesAreChecked(t *testing.T) {
 		"不能交结论":   func(r *Rules) { r.Tools = []string{searchTool} },
 		"步数为零":    func(r *Rules) { r.MaxSteps = 0 },
 		"没有系统提示词": func(r *Rules) { r.Prompt = "" },
+		"没有期限":    func(r *Rules) { r.Timeout = 0 },
 	} {
 		broken := rules
 		change(&broken)

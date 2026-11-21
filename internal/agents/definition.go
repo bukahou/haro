@@ -19,6 +19,7 @@ import (
 	"slices"
 	"strings"
 	"text/template"
+	"time"
 
 	"go.yaml.in/yaml/v3"
 )
@@ -52,6 +53,12 @@ const (
 // known 是程序认识的代理，以及每个该用的调用方式（程序按这个方式调用它）。
 var known = map[string]Mode{Front: ModePrimary, Strong: ModeHandoff, Vision: ModeSubtask, Summary: ModeSubtask}
 
+// agentFields 是只有部分代理认的配置项：值为 true 表示这个代理必须写。写在不认的代理上不会生效，起不来比悄悄不生效好。
+var agentFields = map[string]map[string]bool{
+	Vision:  {"timeout": true, "max_searches": true},
+	Summary: {"timeout": true},
+}
+
 // Definition 是一个代理的定义。
 type Definition struct {
 	Name    string   `yaml:"-"`       // 文件名（不含 .md）
@@ -67,6 +74,11 @@ type Definition struct {
 	RepeatWindow int `yaml:"repeat_window"`
 	// MaxOutputTokens 是每次最多输出多少 token；0 = 用配置里的 HARO_CLOUD_LLM_MAX_TOKENS
 	MaxOutputTokens int `yaml:"max_output_tokens"`
+	// TimeoutText 是调用一次最多等多久（例如 25s），解析后放在 Timeout；MaxSearches 是一次最多联网查几次。
+	// 这两项只有认它们的代理能写（见 agentFields）
+	TimeoutText string        `yaml:"timeout"`
+	Timeout     time.Duration `yaml:"-"`
+	MaxSearches int           `yaml:"max_searches"`
 
 	Prompt string `yaml:"-"` // 正文：系统提示词的模板
 	Source string `yaml:"-"` // 从哪读的（日志用）
@@ -190,6 +202,9 @@ func parse(name, source string, data []byte) (Definition, error) {
 		return Definition{}, fmt.Errorf("%s 的配置: %w", source, err)
 	}
 	definition.Name, definition.Source, definition.Prompt = name, source, strings.TrimSpace(string(body))
+	if definition.TimeoutText != "" { // 写错了由 validate 报出来
+		definition.Timeout, _ = time.ParseDuration(definition.TimeoutText)
+	}
 	if err := definition.validate(); err != nil {
 		return Definition{}, fmt.Errorf("%s：%w", source, err)
 	}
@@ -242,6 +257,21 @@ func (d Definition) validate() error {
 	}
 	if d.RepeatLimit > 0 && d.RepeatWindow < d.RepeatLimit {
 		problems = append(problems, fmt.Sprintf("repeat_window（%d）要不小于 repeat_limit（%d），否则永远判不出死循环", d.RepeatWindow, d.RepeatLimit))
+	}
+	for field, set := range map[string]bool{"timeout": d.TimeoutText != "", "max_searches": d.MaxSearches != 0} {
+		required, allowed := agentFields[d.Name][field]
+		switch {
+		case set && !allowed:
+			problems = append(problems, fmt.Sprintf("这个代理不认 %s（写了也不会生效）", field))
+		case !set && required:
+			problems = append(problems, fmt.Sprintf("要写 %s", field))
+		}
+	}
+	if d.TimeoutText != "" && d.Timeout <= 0 {
+		problems = append(problems, fmt.Sprintf("timeout 要写成正的时长（例如 25s），现在是 %q", d.TimeoutText))
+	}
+	if d.MaxSearches < 0 {
+		problems = append(problems, fmt.Sprintf("max_searches 不能是负数，现在是 %d", d.MaxSearches))
 	}
 	seen := map[string]bool{}
 	for _, tool := range d.Tools {

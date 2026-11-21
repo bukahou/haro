@@ -40,8 +40,12 @@ func TestSentenceSegmenter(t *testing.T) {
 			[]string{"今日はいい天気ですね。", "明日は雨かもしれません。"}},
 		{"英语：句点后跟下一句才切，小数点不切", 4, "Sure. It is about 3.5 meters, I think. Bye!",
 			[]string{"Sure.", "It is about 3.5 meters, I think.", "Bye!"}},
-		{"撇号、千分位逗号不是停顿处", 4, "I don't know, it costs 1,000 yen.",
-			[]string{"I don't know,", "it costs 1,000 yen."}},
+		{"撇号、千分位逗号不是停顿处", 4, "Well I don't know, it costs 1,000 yen.",
+			[]string{"Well I don't know,", "it costs 1,000 yen."}},
+		{"英文按词数提前切（不按字母数）", 4, "Well, I think so, yes.",
+			[]string{"Well, I think so,", "yes."}},
+		{"英文过长时按词数在最后一个逗号处切", 4, "Okay. Then " + englishWords(29) + ", " + englishWords(15) + ".",
+			[]string{"Okay.", "Then " + englishWords(29) + ",", englishWords(15) + "."}},
 		{"省略号后面不急着切，攒够了在停顿处切", 4, "嗯……让我想想，好的。",
 			[]string{"嗯……让我想想，", "好的。"}},
 		{"分号不是句子边界，只是停顿处", 0, "第一点是价格；第二点是质量。",
@@ -91,4 +95,13 @@ func TestSentenceSegmenterEmitsCertainEndsRightAway(t *testing.T) {
 	if got := append(segmenter.Push("5 meters long."), segmenter.Flush()...); !slices.Equal(got, []string{"It is about 3.5 meters long."}) {
 		t.Errorf("小数不能切开：%q", got)
 	}
+}
+
+// englishWords 是 n 个英文单词（用空格隔开）。
+func englishWords(n int) string {
+	words := make([]string, n)
+	for i := range words {
+		words[i] = "word"
+	}
+	return strings.Join(words, " ")
 }

@@ -15,23 +15,26 @@ import (
 //     确定就马上交出去（调用工具前说的「我查一下」不用等工具调用写完）；
 //     代价是紧跟在句号后面的引号、括号会分到下一句（不念出来，不影响念的内容）；
 //   - 第一句碰到可以停顿的地方（单独成词的标点，例如逗号、顿号、冒号；「1,000」「don't」里的不算），
-//     且已攒够 firstMinRunes 个字，就提前切，让第一个字更早出来；
-//   - 之后超过 maxRunes 个字还没有句子边界，就在最后一个可以停顿的地方切（没有就硬切）；
+//     且已攒够 firstMinWords 个词，就提前切，让第一个字更早出来；
+//   - 之后超过 maxWords 个词还没有句子边界，就在最后一个可以停顿的地方切（没有就硬切）；
+//
+// 长短按会念出来的词数算（UAX #29 分词，含字母或数字的才算）：中文一个汉字是一个词，英文一个单词是一个词，
+// 同样的阈值在两种语言里念出来的长短差不多（按字数算的话，英文每个字母都算一个，切得过碎）。
 //   - 有效字不到 2 个的片段并到下一句；绝不输出空句（Piper 对空文本返回 500）。
 //
 // 三种切点按文字的先后取最早的那个：同一段文字不管怎么分块喂进来，念出来的都一样。
 type SentenceSegmenter struct {
-	firstMinRunes int // 0 = 不提前切
-	maxRunes      int
+	firstMinWords int // 0 = 不提前切
+	maxWords      int
 	pending       string
 	emitted       int
 }
 
 const minSegmentRunes = 2
 
-// NewSentenceSegmenter 创建切句器。
-func NewSentenceSegmenter(firstMinRunes, maxRunes int) *SentenceSegmenter {
-	return &SentenceSegmenter{firstMinRunes: firstMinRunes, maxRunes: maxRunes}
+// NewSentenceSegmenter 创建切句器：第一句攒够 firstMinWords 个词就在停顿处提前切，之后超过 maxWords 个词还没断开就切。
+func NewSentenceSegmenter(firstMinWords, maxWords int) *SentenceSegmenter {
+	return &SentenceSegmenter{firstMinWords: firstMinWords, maxWords: maxWords}
 }
 
 // Push 喂入新文字，返回已经完整的句子。
@@ -104,33 +107,35 @@ func certainEnd(sentence string, state int) bool {
 	return true
 }
 
-// earlyCut 是第一句提前切的位置：第一个前面已经攒够 firstMinRunes 个字的停顿处。只对第一句。
+// earlyCut 是第一句提前切的位置：第一个前面已经攒够 firstMinWords 个词的停顿处。只对第一句。
 func (s *SentenceSegmenter) earlyCut() int {
-	if s.emitted > 0 || s.firstMinRunes <= 0 {
+	if s.emitted > 0 || s.firstMinWords <= 0 {
 		return -1
 	}
 	for _, at := range pausePoints(s.pending) {
-		if countSpokenRunes(s.pending[:at]) >= s.firstMinRunes {
+		if countSpokenWords(s.pending[:at]) >= s.firstMinWords {
 			return at
 		}
 	}
 	return -1
 }
 
-// longCut 是超过 maxRunes 个字还没断开时的切点：超出的那一刻之前最后一个停顿处，没有就在那一刻硬切。
+// longCut 是超过 maxWords 个词还没断开时的切点：超出的那个词之前最后一个停顿处，没有就在那个词后面硬切。
 func (s *SentenceSegmenter) longCut() int {
-	if s.maxRunes <= 0 {
+	if s.maxWords <= 0 {
 		return -1
 	}
-	spoken := 0
-	for at, r := range s.pending {
-		if !isSpoken(r) {
+	spoken, end, rest, state := 0, 0, s.pending, -1
+	for rest != "" {
+		word, next, newState := uniseg.FirstWordInString(rest, state)
+		end += len(word)
+		rest, state = next, newState
+		if !isSpokenWord(word) {
 			continue
 		}
-		if spoken++; spoken > s.maxRunes {
-			exceeded := at + utf8.RuneLen(r)
-			cut := exceeded
-			for _, pause := range pausePoints(s.pending[:exceeded]) {
+		if spoken++; spoken > s.maxWords {
+			cut := end
+			for _, pause := range pausePoints(s.pending[:end]) {
 				cut = pause
 			}
 			return cut
@@ -163,6 +168,22 @@ func isPunctuationWord(word string) bool {
 
 // isSpoken 判断一个字会不会被读出来（字母、汉字、数字）。
 func isSpoken(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) }
+
+// isSpokenWord 判断一个分词结果会不会被读出来（含字母或数字）。
+func isSpokenWord(word string) bool { return strings.IndexFunc(word, isSpoken) >= 0 }
+
+// countSpokenWords 统计会被读出来的词（UAX #29 分词）。
+func countSpokenWords(text string) int {
+	count, rest, state := 0, text, -1
+	for rest != "" {
+		var word string
+		word, rest, state = uniseg.FirstWordInString(rest, state)
+		if isSpokenWord(word) {
+			count++
+		}
+	}
+	return count
+}
 
 // countSpokenRunes 统计会被读出来的字。
 func countSpokenRunes(text string) int {

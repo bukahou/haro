@@ -136,7 +136,7 @@ func replyText(t *testing.T, model brain.ChatModel) (string, error) {
 func TestClaudeAPISharedByModelsExchangesIdentityTokenOnce(t *testing.T) {
 	useWorkloadIdentity(t)
 	server := newWorkloadIdentityServer(t)
-	shared := NewClaudeAPI("", server.URL, server.Client())
+	shared := claudeAPIForTest("", server.URL, server.Client())
 	// 不同用途的设置不同（主对话快速失败、调查重试），但共用同一个客户端
 	chat := NewAnthropicChatModel(AnthropicOptions{API: shared, Model: "claude-haiku-5-5", MaxTokens: 100, FirstTokenTimeout: 5 * time.Second})
 	summary := NewAnthropicChatModel(AnthropicOptions{API: shared, Model: "claude-haiku-5-5", MaxTokens: 300})
@@ -151,7 +151,7 @@ func TestClaudeAPISharedByModelsExchangesIdentityTokenOnce(t *testing.T) {
 	}
 
 	// 阳性对照：各建各的客户端（修之前的做法）⇒ 第二个客户端拿同一张身份令牌去换，被拒
-	separate := NewAnthropicChatModel(AnthropicOptions{API: NewClaudeAPI("", server.URL, server.Client()),
+	separate := NewAnthropicChatModel(AnthropicOptions{API: claudeAPIForTest("", server.URL, server.Client()),
 		Model: "claude-haiku-5-5", MaxTokens: 100})
 	if _, err := replyText(t, separate); err == nil || server.rejectedCount() != 1 {
 		t.Errorf("另建的客户端拿同一张身份令牌去换应被拒（被拒 %d 次）并报错，实际 %v", server.rejectedCount(), err)
@@ -169,7 +169,7 @@ func TestAnthropicFirstTokenTimeoutHandsOverToFallback(t *testing.T) {
 	}))
 	defer slow.Close()
 	defer close(release)
-	model := NewAnthropicChatModel(AnthropicOptions{API: NewClaudeAPI("test-key", slow.URL, slow.Client()),
+	model := NewAnthropicChatModel(AnthropicOptions{API: claudeAPIForTest("test-key", slow.URL, slow.Client()),
 		Model: "claude-haiku-5-5", MaxTokens: 100, FirstTokenTimeout: 100 * time.Millisecond})
 
 	started := time.Now()
@@ -190,7 +190,7 @@ func TestAnthropicFirstTokenTimeoutHandsOverToFallback(t *testing.T) {
 
 // 缓存断点 ② 打在「上一轮结束处」：这一轮主人的话（附着每轮都变的「现在的情况」）和这一轮的工具往来都在断点之后。
 func TestAnthropicMarksPreviousTurnForCache(t *testing.T) {
-	model := NewAnthropicChatModel(AnthropicOptions{API: NewClaudeAPI("test-key", "", nil), Model: "claude-haiku-5-5", MaxTokens: 100})
+	model := NewAnthropicChatModel(AnthropicOptions{API: claudeAPIForTest("test-key", "", nil), Model: "claude-haiku-5-5", MaxTokens: 100})
 	system := brain.ChatMessage{Role: brain.RoleSystem, Text: "你是 haro。"}
 	cases := []struct {
 		name     string
@@ -258,7 +258,7 @@ func TestClaudeCheckCredentials(t *testing.T) {
 		_, _ = io.WriteString(w, `{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}`)
 	}))
 	defer server.Close()
-	api := NewClaudeAPI("test-key", server.URL, server.Client())
+	api := claudeAPIForTest("test-key", server.URL, server.Client())
 
 	if err := api.CheckCredentials(context.Background(), "claude-haiku-5-5"); err != nil {
 		t.Fatalf("数 token 成功应算正常：%v", err)
@@ -291,7 +291,7 @@ func TestClaudeReportsPartialUsageWhenCancelled(t *testing.T) {
 		<-r.Context().Done() // 还在生成
 	}))
 	defer server.Close()
-	model := NewAnthropicChatModel(AnthropicOptions{API: NewClaudeAPI("test-key", server.URL, server.Client()), Model: "claude-haiku-5-5", MaxTokens: 100})
+	model := NewAnthropicChatModel(AnthropicOptions{API: claudeAPIForTest("test-key", server.URL, server.Client()), Model: "claude-haiku-5-5", MaxTokens: 100})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	var usage *brain.ReplyUsage
@@ -309,5 +309,43 @@ func TestClaudeReportsPartialUsageWhenCancelled(t *testing.T) {
 	}
 	if usage == nil || !usage.Incomplete || usage.TokensUnknown || usage.PromptTokens != 2000 || usage.CacheReadTokens != 800 || usage.OutputTokens != 0 {
 		t.Errorf("被取消时应交出开头报的输入（含缓存读）、输出不编、标不完整：%+v", usage)
+	}
+}
+
+// 凭证：填了 haro 自己的 key 就用它；没填时只认配齐的 Workload Identity Federation，缺什么写明。
+func TestClaudeCredentialChoice(t *testing.T) {
+	env := func(values map[string]string) func(string) string {
+		return func(name string) string { return values[name] }
+	}
+	wif := map[string]string{"ANTHROPIC_FEDERATION_RULE_ID": "fdrl_test", "ANTHROPIC_ORGANIZATION_ID": "00000000-0000-0000-0000-000000000000",
+		"ANTHROPIC_IDENTITY_TOKEN_FILE": "/var/run/secrets/token"}
+	if _, err := claudeCredential("haro-key", env(nil)); err != nil {
+		t.Errorf("填了 key 应直接用：%v", err)
+	}
+	if _, err := claudeCredential("", env(wif)); err != nil {
+		t.Errorf("没填 key、WIF 配齐了应通过：%v", err)
+	}
+	if _, err := claudeCredential("", env(map[string]string{"ANTHROPIC_API_KEY": "claude-code-key"})); err == nil ||
+		!strings.Contains(err.Error(), "HARO_ANTHROPIC_API_KEY") {
+		t.Errorf("没填 key 时不能用环境里别的 key（开发机上是 Claude Code 的）：%v", err)
+	}
+	partial := map[string]string{"ANTHROPIC_FEDERATION_RULE_ID": "fdrl_test"}
+	if _, err := claudeCredential("", env(partial)); err == nil || !strings.Contains(err.Error(), "ANTHROPIC_ORGANIZATION_ID") {
+		t.Errorf("WIF 没配齐要写明缺什么：%v", err)
+	}
+	noToken := map[string]string{"ANTHROPIC_FEDERATION_RULE_ID": "fdrl_test", "ANTHROPIC_ORGANIZATION_ID": "00000000-0000-0000-0000-000000000000"}
+	if _, err := claudeCredential("", env(noToken)); err == nil || !strings.Contains(err.Error(), "ANTHROPIC_IDENTITY_TOKEN_FILE") {
+		t.Errorf("没有身份令牌也算没配齐：%v", err)
+	}
+}
+
+// 建客户端时同样只认 key 或配齐的 WIF：环境里只有 ANTHROPIC_API_KEY 时建不起来，不悄悄拿它去花钱。
+func TestClaudeAPIIgnoresAmbientKey(t *testing.T) {
+	for _, name := range []string{"ANTHROPIC_FEDERATION_RULE_ID", "ANTHROPIC_ORGANIZATION_ID", "ANTHROPIC_IDENTITY_TOKEN_FILE", "ANTHROPIC_IDENTITY_TOKEN"} {
+		t.Setenv(name, "")
+	}
+	t.Setenv("ANTHROPIC_API_KEY", "claude-code-key")
+	if api, err := NewClaudeAPI("", "", nil); err == nil {
+		t.Errorf("环境里只有 ANTHROPIC_API_KEY 时不该建得起来：%v", api)
 	}
 }

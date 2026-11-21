@@ -144,17 +144,24 @@ func checkClaudeSettings(settings config.ServerSettings) error {
 	if settings.CloudLLMAPI != config.CloudAPIAnthropic {
 		return nil
 	}
-	for _, check := range []struct {
-		name, value string
-		validate    func(string) error
-	}{
-		{"HARO_CLOUD_LLM_EFFORT", settings.CloudLLMEffort, llm.ValidateClaudeEffort},
-		{"HARO_RESEARCH_EFFORT", settings.ResearchEffort, llm.ValidateClaudeEffort},
-		{"HARO_STRONG_LLM_EFFORT", settings.StrongLLMEffort, llm.ValidateClaudeEffort},
-		{"HARO_CLOUD_LLM_THINKING", settings.CloudLLMThinking, llm.ValidateClaudeThinking},
-		{"HARO_STRONG_LLM_THINKING", settings.StrongLLMThinking, llm.ValidateClaudeThinking},
+	if err := llm.CheckClaudeCredentials(settings.AnthropicAPIKey); err != nil {
+		return err
+	}
+	for _, check := range []struct{ name, value string }{
+		{"HARO_CLOUD_LLM_THINKING", settings.CloudLLMThinking}, {"HARO_STRONG_LLM_THINKING", settings.StrongLLMThinking},
 	} {
-		if err := check.validate(check.value); err != nil {
+		if err := llm.ValidateClaudeThinking(check.value); err != nil {
+			return fmt.Errorf("%s %w", check.name, err)
+		}
+	}
+	// 力度和它实际搭配的思考写法一起查：调查的力度两种都会用到（调查用云端模型的、写结论用更强的模型的）
+	for _, check := range []struct{ name, effort, thinking string }{
+		{"HARO_CLOUD_LLM_EFFORT", settings.CloudLLMEffort, settings.CloudLLMThinking},
+		{"HARO_STRONG_LLM_EFFORT", settings.StrongLLMEffort, settings.StrongLLMThinking},
+		{"HARO_RESEARCH_EFFORT", settings.ResearchEffort, settings.CloudLLMThinking},
+		{"HARO_RESEARCH_EFFORT", settings.ResearchEffort, settings.StrongLLMThinking},
+	} {
+		if err := llm.ValidateClaudeEffort(check.effort, check.thinking); err != nil {
 			return fmt.Errorf("%s %w", check.name, err)
 		}
 	}
@@ -162,9 +169,9 @@ func checkClaudeSettings(settings config.ServerSettings) error {
 }
 
 // newClaudeAPI 创建全进程共用的 Claude 客户端（HARO_CLOUD_LLM_API=anthropic 时）；其余情况为 nil。
-func newClaudeAPI(settings config.ServerSettings, httpClient *http.Client) *llm.ClaudeAPI {
+func newClaudeAPI(settings config.ServerSettings, httpClient *http.Client) (*llm.ClaudeAPI, error) {
 	if settings.CloudLLMAPI != config.CloudAPIAnthropic {
-		return nil
+		return nil, nil
 	}
 	return llm.NewClaudeAPI(settings.AnthropicAPIKey, settings.CloudLLMURL, httpClient)
 }
@@ -301,8 +308,8 @@ func connectWebSearch(settings config.ServerSettings, httpClient *http.Client, l
 }
 
 // startResearch 开启后台调查：任务账本、调查用的模型、上限，并在后台开始处理队列。
-func startResearch(ctx context.Context, settings config.ServerSettings, claude *llm.ClaudeAPI, client *http.Client, pricing spending.Pricing, searcher tools.WebSearcher,
-	ledger spending.Ledger, guard *spending.Guard, logger *slog.Logger) (*research.Runner, func(), error) {
+func startResearch(ctx context.Context, settings config.ServerSettings, deps services, searcher tools.WebSearcher,
+	logger *slog.Logger) (*research.Runner, func(), error) {
 	store, err := research.OpenTaskStore(ctx, settings.ResearchDB)
 	if err != nil {
 		return nil, nil, err
@@ -311,19 +318,18 @@ func startResearch(ctx context.Context, settings config.ServerSettings, claude *
 		logger.Warn("没设 HARO_RESEARCH_DB：调查任务只记在内存里，服务端重启后就忘了")
 	}
 	// 调查在后台、不急：限流 / 服务端一时出错时让 SDK 重试两次；每次请求不另设期限，受调查自己的总时限管
-	model := spending.NewMeteredChatModel(newCloudChatModel(settings, claude, cloudModelSpec{model: settings.CloudLLMModel,
-		maxTokens: researchMaxTokens, effort: settings.ResearchEffort, thinking: settings.CloudLLMThinking, retries: 2}, client),
-		settings.CloudLLMModel, spending.PurposeResearch, pricing, ledger, logger)
+	model := deps.meteredCloudModel(settings, cloudModelSpec{model: settings.CloudLLMModel, maxTokens: researchMaxTokens,
+		effort: settings.ResearchEffort, thinking: settings.CloudLLMThinking, retries: 2}, spending.PurposeResearch, logger)
 	limits := research.DefaultLimits
 	limits.Timeout, limits.MaxRounds = settings.ResearchTimeout, settings.ResearchMaxRounds
 	limits.MaxSearches, limits.MaxTokens = settings.ResearchMaxSearches, settings.ResearchMaxTokens
-	meter := spending.NewSearchMeter(guard, ledger, pricing, spending.PurposeResearch, "tavily")
-	runner := research.NewRunner(store, model, searcher, meter, guard, limits, logger)
+	meter := spending.NewSearchMeter(deps.guard, deps.ledger, deps.pricing, spending.PurposeResearch, "tavily")
+	runner := research.NewRunner(store, model, searcher, meter, deps.guard, limits, logger)
 	writer := "（调查模型自己写）"
 	if settings.StrongLLMFor(config.StrongForResearch) { // 搜索和读网页用便宜的模型，结论交给更强的模型写
-		runner.WriteConclusionsWith(spending.NewMeteredChatModel(newCloudChatModel(settings, claude, cloudModelSpec{model: settings.StrongLLMModel,
-			maxTokens: researchMaxTokens, effort: settings.ResearchEffort, thinking: settings.StrongLLMThinking, retries: 2}, client),
-			settings.StrongLLMModel, spending.PurposeResearch, pricing, ledger, logger))
+		runner.WriteConclusionsWith(deps.meteredCloudModel(settings, cloudModelSpec{model: settings.StrongLLMModel,
+			maxTokens: researchMaxTokens, effort: settings.ResearchEffort, thinking: settings.StrongLLMThinking, retries: 2},
+			spending.PurposeResearch, logger))
 		writer = settings.StrongLLMModel
 	}
 	running := make(chan struct{})
@@ -373,7 +379,8 @@ func buildBrainOptions(settings config.ServerSettings) (brain.Options, error) {
 		return brain.Options{}, err
 	}
 	options := brain.Options{MaxHistoryTurn: settings.MaxHistoryTurn, CompactContextTokens: settings.CompactContextTokens,
-		ConfirmationTimeout: settings.ConfirmationTimeout, Phrases: phrases, MonthlyRaiseYen: settings.MonthlyRaiseYen}
+		ConfirmationTimeout: settings.ConfirmationTimeout, ToolTimeout: settings.ToolTimeout, Phrases: phrases,
+		MonthlyRaiseYen: settings.MonthlyRaiseYen}
 	if settings.PersonasDir == "" {
 		return options, nil
 	}

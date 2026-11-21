@@ -6,7 +6,7 @@
 //
 // 样本不放在这个仓库（家里拍的照片）：HARO_EVAL_DIR 指向样本目录，里面有
 //   - samples.tsv：每行「编号 <Tab> 正确答案」，# 开头的行跳过（旧格式第三列的关键词不再使用，有也忽略）
-//   - 每个编号两张画面：<编号>-1280.jpg（宽 1280）、<编号>-640.jpg（宽 640，和终端送给模型的一样）
+//   - 每个编号两张画面：<编号>-1280.jpg（宽 1280，和终端默认送给模型的一样）、<编号>-640.jpg（宽 640）
 //
 // 对错由评审模型（默认 Sonnet，HARO_EVAL_JUDGE_MODEL 可改）对照正确答案判断，经工具交出结构化的结论；最后仍以人看为准。
 // 结果写到样本目录的 results-<时间>.md。跑一次要花钱：先用 HARO_EVAL_DRY_RUN=1 看会发多少请求、大概多少钱。
@@ -93,7 +93,7 @@ func TestVisionEval(t *testing.T) {
 			len(samples)*len(evalConfigs), estimate)
 		return
 	}
-	api := NewClaudeAPI(key, "", nil)
+	api := claudeAPIForTest(key, "", nil)
 	judgeModel := os.Getenv("HARO_EVAL_JUDGE_MODEL")
 	if judgeModel == "" {
 		judgeModel = "claude-sonnet-5-5"

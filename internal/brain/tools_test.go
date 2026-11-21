@@ -153,7 +153,7 @@ func TestTruncatedAnswerIsReportedAsIncomplete(t *testing.T) {
 	k.say("然后呢")
 	history := withoutSynthetic(model.LastRequest().Messages)
 	answer := history[len(history)-2]
-	if answer.Role != brain.RoleAssistant || !strings.Contains(answer.Text, "从前有座山，山里有座庙。") || !strings.Contains(answer.Text, "输出上限") {
+	if answer.Role != brain.RoleAssistant || !strings.Contains(answer.Text, "从前有座山，山里有座庙。") || !strings.Contains(answer.Text, brain.AnswerTruncated) {
 		t.Errorf("历史里应记下说了的部分和被截断的说明：%+v", answer)
 	}
 }
@@ -192,8 +192,8 @@ func TestLookAtCameraCapturesOnDemand(t *testing.T) {
 	if spoken := braintest.Spoken(k.ask("我手里拿着什么？")); spoken != "你拿着手机。" {
 		t.Fatalf("播出 %q", spoken)
 	}
-	if last := model.Requests()[1].Last(); last.Role != brain.RoleUser || string(last.Image) != "手机" {
-		t.Fatalf("调用 look_at_camera 后，下一次请求应带上画面：%+v", last)
+	if last := model.Requests()[1].Last(); last.Role != brain.RoleUser || string(last.Image) != "手机" || last.Text != brain.DirectViewNote {
+		t.Fatalf("调用 look_at_camera 后，下一次请求应带上画面和看图的规矩：%+v", last)
 	}
 
 	k.ask("讲个笑话吧")
@@ -209,6 +209,18 @@ func TestLookAtCameraCapturesOnDemand(t *testing.T) {
 	// 历史里应留下「当时看了画面」的替身，而不是图片
 	if !slices.ContainsFunc(last, func(msg brain.ChatMessage) bool { return msg.Text == brain.FrameRecalledNote }) {
 		t.Error("历史里应留下「当时看了摄像头画面」")
+	}
+}
+
+// 前台填了要看清的问题（主人的话接着上文时把指代说清楚）：和主人的原话一起交给专家。
+func TestLookAtCameraPassesQuestionToExpert(t *testing.T) {
+	const question = "主人手里这个和刚才那个耳机盒是不是同一个牌子"
+	model := braintest.NewModel(t, braintest.Call("look_at_camera", map[string]any{"question": question}), braintest.Say("好的。"))
+	expert := &fakeExpert{report: brain.FrameReport{Spoken: "是同一个牌子。", Details: "盒子上的字一样。"}}
+	k := newCameraTalker(t, model, braintest.NewCamera([]byte("耳机盒")), expert)
+	k.ask("那这个呢？")
+	if len(expert.questions) != 1 || expert.questions[0].Question != question || expert.questions[0].Request != "那这个呢？" {
+		t.Fatalf("专家应拿到前台整理的问题和主人的原话：%+v", expert.questions)
 	}
 }
 
@@ -263,9 +275,12 @@ func TestLookAtCameraSpeaksExpertSentence(t *testing.T) {
 		}
 	}
 	if !slices.ContainsFunc(history, func(msg brain.ChatMessage) bool {
-		return msg.Role == brain.RoleTool && msg.Text == brain.ExpertReport(conclusion, true)
+		return msg.Role == brain.RoleTool && msg.Text == brain.ExpertHistoryRecord(conclusion, true)
 	}) {
 		t.Errorf("历史里应有专家的结论（已经说了什么 + 细节）：%+v", history)
+	}
+	if slices.ContainsFunc(history, func(msg brain.ChatMessage) bool { return strings.Contains(msg.Text, brain.ExpertDetailsHeading) }) {
+		t.Errorf("「这次不要再另外去搜」只对看画面那一轮有效，不该留在历史里：%+v", history)
 	}
 	if !slices.ContainsFunc(history, func(msg brain.ChatMessage) bool {
 		return msg.Role == brain.RoleAssistant && strings.HasSuffix(msg.Text, conclusion.Spoken)
@@ -473,5 +488,36 @@ func TestRepeatedToolCallIsStopped(t *testing.T) {
 	}
 	if result := requests[4].Last(); result.Role != brain.RoleTool || !strings.Contains(result.Text, "stopped") {
 		t.Errorf("要告诉模型为什么停：%+v", result)
+	}
+}
+
+// deadlineToolbox 记下工具被调用时离期限还有多久。
+type deadlineToolbox struct {
+	mu   sync.Mutex
+	left time.Duration
+}
+
+func (d *deadlineToolbox) Specs() []brain.ToolSpec {
+	return []brain.ToolSpec{{Name: "search_notes", Parameters: json.RawMessage(`{}`)}}
+}
+func (d *deadlineToolbox) Call(ctx context.Context, _ brain.ToolCall) (string, error) {
+	deadline, _ := ctx.Deadline()
+	d.mu.Lock()
+	d.left = time.Until(deadline)
+	d.mu.Unlock()
+	return "没有记过", nil
+}
+
+// 单次工具执行的期限按配置（Options.ToolTimeout），不是写死的值。
+func TestToolTimeoutComesFromOptions(t *testing.T) {
+	tools := &deadlineToolbox{}
+	model := braintest.NewModel(t, braintest.Call("search_notes", nil), braintest.Say("没有记过。"))
+	k := newTalker(t, brain.Components{Front: brain.Agent{Model: model}, Synthesizer: fakeSynthesizer{}, Tools: tools},
+		brain.Options{MaxHistoryTurn: 6, ToolTimeout: 3 * time.Second})
+	k.say("我记过车停在哪吗？")
+	tools.mu.Lock()
+	defer tools.mu.Unlock()
+	if tools.left <= 0 || tools.left > 3*time.Second {
+		t.Errorf("工具的期限应是配置的 3 秒以内，实际还剩 %v", tools.left)
 	}
 }

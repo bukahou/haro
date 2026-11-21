@@ -53,6 +53,10 @@ func TestRenderPromptNeedsEveryValue(t *testing.T) {
 	if _, err := front.RenderPrompt(nil); err == nil {
 		t.Error("没给 EmotionTags 时应报错")
 	}
+	summary, _ := catalog.Get(agents.Summary)
+	if prompt, err := summary.RenderPrompt(map[string]any{"SummaryChars": 12345}); err != nil || !strings.Contains(prompt, "12345 字") {
+		t.Errorf("摘要的字数上限应由代码给：%v\n%s", err, prompt)
+	}
 }
 
 func writeAgent(t *testing.T, dir, name, text string) {
@@ -62,7 +66,7 @@ func writeAgent(t *testing.T, dir, name, text string) {
 	}
 }
 
-const summaryOverride = "---\ntitle: 我的摘要\nmode: subtask\nmodel: base\npurpose: summary\nmax_steps: 1\n---\n只写一句话的摘要。\n"
+const summaryOverride = "---\ntitle: 我的摘要\nmode: subtask\nmodel: base\npurpose: summary\nmax_steps: 1\ntimeout: 30s\n---\n只写一句话的摘要。\n"
 
 // 覆盖目录里同名的文件替换程序里带的那份；其余照旧。
 func TestOverrideDirectoryReplacesSameName(t *testing.T) {
@@ -94,6 +98,9 @@ func TestInvalidDefinitionsFailToLoad(t *testing.T) {
 		"接手的代理有正文":  {agents.Strong, "---\ntitle: 强\nmode: handoff\nmodel: strong\npurpose: strong\nmax_steps: 8\n---\n多余的正文\n", "正文要留空"},
 		"重复的工具":     {agents.Summary, strings.Replace(summaryOverride, "max_steps: 1", "max_steps: 1\ntools: [a, a]", 1), "重复"},
 		"没有配置":      {agents.Summary, "只有正文\n", "---"},
+		"写了不认的配置项":  {agents.Summary, strings.Replace(summaryOverride, "max_steps: 1", "max_steps: 1\nmax_searches: 2", 1), "不认 max_searches"},
+		"该写的没写":     {agents.Summary, strings.Replace(summaryOverride, "timeout: 30s\n", "", 1), "要写 timeout"},
+		"时长写错":      {agents.Summary, strings.Replace(summaryOverride, "timeout: 30s", "timeout: 30秒", 1), "timeout"},
 		"配置没结束":     {agents.Summary, "---\ntitle: 摘要\n", "---"},
 		"正文模板写错":    {agents.Summary, strings.Replace(summaryOverride, "只写一句话的摘要。", "{{.Broken", 1), "正文"},
 		"程序不认识的代理":  {"fornt", summaryOverride, "不认识叫 fornt 的代理"},

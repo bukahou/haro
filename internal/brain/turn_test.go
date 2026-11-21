@@ -128,7 +128,7 @@ func TestInterruptedDuringToolsLeavesNoDanglingCall(t *testing.T) {
 			results = append(results, msg.Text)
 		}
 	}
-	if len(results) != 2 || !strings.Contains(results[0], "工具执行失败") || results[1] != brain.ToolNotRunInterrupted {
+	if len(results) != 2 || !strings.HasPrefix(results[0], brain.ToolFailedPrefix) || results[1] != brain.ToolNotRunInterrupted {
 		t.Errorf("两个调用都应有结果（执行中的照实记、没执行的补说明）：%q", results)
 	}
 }

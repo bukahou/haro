@@ -15,8 +15,9 @@ import (
 // 已经开始说了才失败的不切换（否则会说两遍），直接报错。现在只用在「更强的模型出错时由原来那套云端模型接手」：
 // 云端不再自动换本地模型（第 7 段）。
 //
-// 熔断：主模型失败后的 Cooldown 内直接用备用模型、不再试主模型；过了 Cooldown 再试一次，成功就切回去。
-// 否则一句话里每轮推理（用工具时有两三轮）都要先等主模型超时（2026-11-15 实测断网时等了 17 s）。
+// 熔断：主模型连不上（brain.ErrModelUnavailable）后的 Cooldown 内直接用备用模型、不再试主模型；过了 Cooldown 再试一次，
+// 成功就切回去。否则一句话里每轮推理（用工具时有两三轮）都要先等主模型超时（2026-11-15 实测断网时等了 17 s）。
+// 别的失败（拒答、请求被拒）只针对这一次请求：这一次改用备用模型，下一次照常先试主模型。
 type FallbackChatModel struct {
 	Primary, Secondary         brain.ChatModel
 	PrimaryName, SecondaryName string // 用于日志，例如 "strong" / "cloud"
@@ -65,9 +66,12 @@ func (f *FallbackChatModel) StreamReply(ctx context.Context, request brain.ChatR
 					yield(brain.ReplyDelta{}, err)
 					return
 				}
-				f.markPrimaryFailed()
-				f.Logger.Warn("主模型失败，改用备用模型", "primary", f.PrimaryName, "secondary", f.SecondaryName,
-					"cooldown", f.Cooldown, "err", err)
+				unavailable := errors.Is(err, brain.ErrModelUnavailable)
+				if unavailable { // 连不上会持续一阵：冷却期内不再先等主模型超时
+					f.markPrimaryFailed()
+				}
+				f.Logger.Warn("主模型失败，这一次改用备用模型", "primary", f.PrimaryName, "secondary", f.SecondaryName,
+					"unavailable", unavailable, "cooldown", f.Cooldown, "err", err)
 				for delta, err := range f.Secondary.StreamReply(ctx, request) {
 					if !yield(delta, err) || err != nil {
 						return

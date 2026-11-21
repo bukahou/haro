@@ -2,9 +2,9 @@ package brain
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"strings"
-	"time"
 	"unicode/utf8"
 )
 
@@ -13,10 +13,21 @@ import (
 // 还没压进摘要的那几轮照常带着（不会出现「刚掉出去、摘要还没写」的空档）。怎么写摘要在它的定义里（系统提示词）。
 
 const (
-	summaryBatch    = 3                // 掉出窗口的对话攒够几轮压一次
-	summaryMaxRunes = 600              // 摘要最多多少字（超过就截，免得越滚越长）
-	summaryTimeout  = 60 * time.Second // 一次压缩最多等多久
+	summaryBatch = 3 // 掉出窗口的对话攒够几轮压一次
+	// summaryChars 是摘要的字数上限：经 SummaryPromptValues 写进代理「摘要」的提示词（{{.SummaryChars}}）。
+	// 写到它的 summaryHardFactor 倍以上时不截断（会截在句子中间），请它压短一次；还超就不用，留着旧摘要下次再压，免得越滚越长
+	summaryChars      = 300
+	summaryHardFactor = 2
 )
+
+// 交给代理「摘要」的对话里，主人和助手说的话前面的标签。
+const (
+	summaryOwnerLabel     = "主人："
+	summaryAssistantLabel = "助手："
+)
+
+// SummaryPromptValues 是代理「摘要」的提示词里引用的值。
+func SummaryPromptValues() map[string]any { return map[string]any{"SummaryChars": summaryChars} }
 
 // SummarizeWith 开启滚动摘要：交给 agent 压缩（它的模型已按自己的用途记账）。不调用 = 掉出窗口的对话直接丢掉（旧行为）。
 func (b *ConversationBook) SummarizeWith(agent Agent) {
@@ -47,7 +58,10 @@ func (b *ConversationBook) maybeSummarize(c *Conversation) {
 	c.mu.Unlock()
 
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), summaryTimeout)
+		ctx, cancel := context.WithCancel(context.Background())
+		if agent.Timeout > 0 { // 一次压缩最多等多久（定义里的 timeout）
+			ctx, cancel = context.WithTimeout(context.Background(), agent.Timeout)
+		}
 		defer cancel()
 		summary, err := summarizeTurns(ctx, b.logger, *agent, previous, batch)
 		c.mu.Lock()
@@ -78,9 +92,9 @@ func summarizeTurns(ctx context.Context, logger *slog.Logger, agent Agent, previ
 		for _, message := range turn.Messages {
 			switch {
 			case message.Role == RoleUser && message.Text != "" && !message.Synthetic:
-				transcript.WriteString("主人：" + message.Text + "\n")
+				transcript.WriteString(summaryOwnerLabel + message.Text + "\n")
 			case message.Role == RoleAssistant && message.Text != "":
-				transcript.WriteString("助手：" + message.Text + "\n")
+				transcript.WriteString(summaryAssistantLabel + message.Text + "\n")
 			}
 		}
 	}
@@ -96,8 +110,17 @@ func summarizeTurns(ctx context.Context, logger *slog.Logger, agent Agent, previ
 		return "", err
 	}
 	text := strings.TrimSpace(reply.Text)
-	if utf8.RuneCountInString(text) > summaryMaxRunes {
-		text = string([]rune(text)[:summaryMaxRunes])
+	if utf8.RuneCountInString(text) <= summaryChars*summaryHardFactor {
+		return text, nil
+	}
+	messages = append(messages, ChatMessage{Role: RoleAssistant, Text: text},
+		ChatMessage{Role: RoleUser, Text: fmt.Sprintf("太长了：压到 %d 字以内，只输出摘要本身。", summaryChars)})
+	if reply, err = CollectReply(ctx, agent.Model, ChatRequest{Messages: messages}); err != nil {
+		return "", err
+	}
+	text = strings.TrimSpace(reply.Text)
+	if n := utf8.RuneCountInString(text); n > summaryChars*summaryHardFactor {
+		return "", fmt.Errorf("摘要压短后还有 %d 字，超过上限 %d 字的 %d 倍", n, summaryChars, summaryHardFactor)
 	}
 	return text, nil
 }

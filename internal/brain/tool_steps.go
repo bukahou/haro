@@ -40,7 +40,7 @@ func executable(agent Agent, offered []ToolSpec, restricted bool, tool string) b
 	if slices.ContainsFunc(offered, func(spec ToolSpec) bool { return spec.Name == tool }) {
 		return true
 	}
-	return !restricted && agent.allows(tool) && (tool == confirmActionTool || tool == cancelActionTool)
+	return !restricted && agent.allows(tool) && isGateTool(tool)
 }
 
 // toolSteps 记一句话里每一步的调用，判断死循环。
