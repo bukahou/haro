@@ -159,6 +159,16 @@ func TestRemovedSettings(t *testing.T) {
 	if notes, err = checkRemovedSettings(lookup(prices)); err != nil || len(notes) != 8 {
 		t.Errorf("手写的八个单价只提醒：notes=%v err=%v", notes, err)
 	}
+	// 自动换本地模型删了：退路的两项写什么都只提醒（本机终端的环境里还写着 true，不能让终端起不来）；
+	// 调查只用云端：写 cloud 只提醒，写 local 要求已删除的行为，启动失败
+	notes, err = checkRemovedSettings(lookup(map[string]string{"HARO_LLM_FALLBACK": "true", "HARO_LLM_FALLBACK_COOLDOWN": "30s",
+		"HARO_RESEARCH_LLM": "cloud"}))
+	if err != nil || len(notes) != 3 {
+		t.Errorf("退路和调查的配置项：notes=%v err=%v", notes, err)
+	}
+	if _, err := checkRemovedSettings(lookup(map[string]string{"HARO_RESEARCH_LLM": "local"})); err == nil {
+		t.Error("HARO_RESEARCH_LLM=local 要求已删除的行为，应启动失败")
+	}
 	if notes, err := checkRemovedSettings(lookup(nil)); err != nil || len(notes) != 0 {
 		t.Errorf("没写时什么都不说：notes=%v err=%v", notes, err)
 	}

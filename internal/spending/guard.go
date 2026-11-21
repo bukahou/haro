@@ -208,7 +208,7 @@ func (g *Guard) allowMonthly(ctx context.Context) error {
 		g.mu.Lock()
 		if g.warnedFor != month {
 			g.warnedFor = month
-			g.pendingMsg = fmt.Sprintf("这个月的费用（大模型和搜索）已经用到约 %.0f 日元（上限 %.0f 日元，%.0f%%）。超过上限后改用本地模型或暂停回答。",
+			g.pendingMsg = fmt.Sprintf("这个月的费用（大模型和搜索）已经用到约 %.0f 日元（上限 %.0f 日元，%.0f%%）。超过上限后暂停回答（主人可以口头临时提高上限）。",
 				spent.Yen, g.limits.MonthlyYen, spent.Yen/g.limits.MonthlyYen*100)
 			g.logger.Warn("💴 "+g.pendingMsg, "spent_yen", spent.Yen, "limit_yen", g.limits.MonthlyYen)
 		}

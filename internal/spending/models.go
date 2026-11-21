@@ -79,17 +79,17 @@ func (m *MeteredChatModel) record(usage *brain.ReplyUsage) {
 // Warmup 转发给里面的模型（它需要预热的话）。
 func (m *MeteredChatModel) Warmup(ctx context.Context) error { return brain.WarmUp(ctx, m.inner) }
 
-// BudgetedChatModel 按月度额度选模型（R5 c）：额度内用 paid（可能花钱的那套组合）；
-// 超过上限改用 free（本地模型）；没有 free 时回答「额度用完了」。
+// BudgetedChatModel 按月度额度放行（R5）：额度内照常调用；超过上限就不调用，交出能念给主人的错误（额度用完了）。
+// 不再改用本地模型顶替（第 7 段）。
 type BudgetedChatModel struct {
-	paid, free brain.ChatModel
-	guard      *Guard
-	logger     *slog.Logger
+	paid   brain.ChatModel
+	guard  *Guard
+	logger *slog.Logger
 }
 
-// NewBudgetedChatModel 创建按额度选模型的组合；free 可以为 nil。
-func NewBudgetedChatModel(paid, free brain.ChatModel, guard *Guard, logger *slog.Logger) *BudgetedChatModel {
-	return &BudgetedChatModel{paid: paid, free: free, guard: guard, logger: logger}
+// NewBudgetedChatModel 创建按额度放行的模型。
+func NewBudgetedChatModel(paid brain.ChatModel, guard *Guard, logger *slog.Logger) *BudgetedChatModel {
+	return &BudgetedChatModel{paid: paid, guard: guard, logger: logger}
 }
 
 // StreamReply 每次请求前查一次额度。
@@ -98,11 +98,8 @@ func (b *BudgetedChatModel) StreamReply(ctx context.Context, request brain.ChatR
 	switch {
 	case err == nil:
 		return b.paid.StreamReply(ctx, request)
-	case errors.Is(err, ErrOverBudget) && b.free != nil:
-		b.logger.Warn("💴 月度额度已用完：这一轮用本地模型", "why", err)
-		return b.free.StreamReply(ctx, request)
 	case errors.Is(err, ErrOverBudget):
-		b.logger.Warn("💴 月度额度已用完，又没有本地模型可退：不回答", "why", err)
+		b.logger.Warn("💴 月度额度已用完：不回答", "why", err)
 		return func(yield func(brain.ReplyDelta, error) bool) { yield(brain.ReplyDelta{}, err) }
 	default: // 账本读不出来（ErrLedgerUnavailable）：拿不到依据就不放行，告诉主人原因（否则账本一坏，花费就没有上限）
 		b.logger.Error("💴 读不出用量账本：这一轮不调用要花钱的模型", "err", err)

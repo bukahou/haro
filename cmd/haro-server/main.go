@@ -298,9 +298,7 @@ func readinessChecks(settings config.Settings, claude *llm.ClaudeAPI, ledger spe
 	return checks, nil
 }
 
-// buildChatModel 按 HARO_LLM_PROVIDER 组装服务端用的模型，HARO_LLM_FALLBACK 时另一个当退路：
-//   - cloud：云端为主、本地 ollama 退路
-//   - local：本地 ollama 为主、云端退路（本地模型那台机器离线时自动改用云端）
+// buildChatModel 按 HARO_LLM_PROVIDER 组装服务端用的模型（cloud = 云端，local = 本地 ollama；不互相顶替）。
 //
 // purpose 是记账用途：主对话（chat）与滚动摘要（summary，R4）各建一套，费用分开记。
 func buildChatModel(settings config.Settings, claude *llm.ClaudeAPI, client *http.Client, pricing spending.Pricing, ledger spending.Ledger, guard *spending.Guard,
@@ -329,28 +327,19 @@ func buildChatModel(settings config.Settings, claude *llm.ClaudeAPI, client *htt
 			firstTokenTimeout: firstTokenTimeout(quick), requestTimeout: settings.RequestTimeout}, client),
 			settings.CloudLLMModel, purpose, pricing, ledger, logger)
 	}
-	var paid, free brain.ChatModel // paid：平时用的那套（可能花钱）；free：月度额度用完后退回的本地模型
-	switch {
-	case settings.LLMProvider != config.LLMCloud && !settings.LLMFallback:
+	// 本地、云端二选一，不自动互相顶替（第 7 段）：连不上时只保留最低能力，额度用完时不回答
+	var paid brain.ChatModel
+	if settings.LLMProvider == config.LLMLocal {
 		logger.Info("服务端：本地模型", "model", settings.Model)
-		paid = newLocal(false)
-		free = paid
-	case settings.LLMProvider != config.LLMCloud:
-		logger.Info("服务端：本地模型，失败退回云端", "model", settings.Model, "fallback", settings.CloudLLMModel)
-		paid = llm.NewFallbackChatModel(newLocal(true), "local", newCloud(false), "cloud", settings.LLMCooldown, logger)
-		free = newLocal(false)
-	case !settings.LLMFallback:
-		logger.Info("服务端：云端模型（月度额度用完后不回答：没有本地退路）", "model", settings.CloudLLMModel)
+		paid = newLocal(true)
+	} else {
+		logger.Info("服务端：云端模型", "model", settings.CloudLLMModel)
 		paid = newCloud(true)
-	default:
-		logger.Info("服务端：云端模型，失败退回本地", "model", settings.CloudLLMModel, "fallback", settings.Model)
-		paid = llm.NewFallbackChatModel(newCloud(true), "cloud", newLocal(false), "local", settings.LLMCooldown, logger)
-		free = newLocal(false)
 	}
 	if purpose == spending.PurposeChat {
 		paid = routeToStrong(settings, claude, client, paid, maxTokens, pricing, ledger, logger)
 	}
-	return spending.NewBudgetedChatModel(paid, free, guard, logger)
+	return spending.NewBudgetedChatModel(paid, guard, logger)
 }
 
 // routeToStrong 按规则把看画面（takeover 时）、前台请它重答的请求交给更强的模型（HARO_STRONG_LLM_*），其余照旧；
@@ -365,7 +354,7 @@ func routeToStrong(settings config.Settings, claude *llm.ClaudeAPI, client *http
 		maxTokens: maxTokens, effort: settings.StrongLLMEffort, thinking: settings.StrongLLMThinking,
 		firstTokenTimeout: settings.StrongLLMTimeout, requestTimeout: settings.RequestTimeout}, client),
 		settings.StrongLLMModel, spending.PurposeChat, pricing, ledger, logger)
-	strongOrBase := llm.NewFallbackChatModel(strong, "strong", base, "cloud", settings.LLMCooldown, logger)
+	strongOrBase := llm.NewFallbackChatModel(strong, "strong", base, "cloud", strongCooldown, logger)
 	options := llm.RouterOptions{Default: base, Logger: logger}
 	if vision {
 		options.Vision, options.VisionName = strongOrBase, settings.StrongLLMModel
@@ -387,7 +376,7 @@ func newVisionExpert(settings config.Settings, claude *llm.ClaudeAPI, client *ht
 		firstTokenTimeout: settings.StrongLLMTimeout, requestTimeout: settings.RequestTimeout}, client),
 		settings.StrongLLMModel, spending.PurposeVision, pricing, ledger, logger)
 	logger.Info("看画面：交给幕后专家，判断由前台转述", "model", settings.StrongLLMModel, "search", search != nil)
-	return vision.NewExpert(spending.NewBudgetedChatModel(model, nil, guard, logger), settings.StrongLLMModel, search, logger)
+	return vision.NewExpert(spending.NewBudgetedChatModel(model, guard, logger), settings.StrongLLMModel, search, logger)
 }
 
 // newClaudeAPI 创建全进程共用的 Claude 客户端（HARO_CLOUD_LLM_API=anthropic 时）；其余情况为 nil。
@@ -537,16 +526,10 @@ func startResearch(ctx context.Context, settings config.Settings, claude *llm.Cl
 	if settings.ResearchDB == "" {
 		logger.Warn("没设 HARO_RESEARCH_DB：调查任务只记在内存里，服务端重启后就忘了")
 	}
-	var model brain.ChatModel
-	if settings.ResearchLLM == config.LLMCloud {
-		// 调查在后台、不急：限流 / 服务端一时出错时让 SDK 重试两次；每次请求不另设期限，受调查自己的总时限管
-		model = spending.NewMeteredChatModel(newCloudChatModel(settings, claude, cloudModelSpec{model: settings.CloudLLMModel,
-			maxTokens: researchMaxTokens, effort: settings.ResearchEffort, thinking: settings.CloudLLMThinking, retries: 2}, client),
-			settings.CloudLLMModel, spending.PurposeResearch, pricing, ledger, logger)
-	} else {
-		model = spending.NewMeteredChatModel(llm.NewOllamaChatModel(settings.OllamaURL, settings.Model, researchMaxTokens,
-			llm.OpenAIOptions{HTTPClient: client}), settings.Model, spending.PurposeResearch, pricing, ledger, logger)
-	}
+	// 调查在后台、不急：限流 / 服务端一时出错时让 SDK 重试两次；每次请求不另设期限，受调查自己的总时限管
+	model := spending.NewMeteredChatModel(newCloudChatModel(settings, claude, cloudModelSpec{model: settings.CloudLLMModel,
+		maxTokens: researchMaxTokens, effort: settings.ResearchEffort, thinking: settings.CloudLLMThinking, retries: 2}, client),
+		settings.CloudLLMModel, spending.PurposeResearch, pricing, ledger, logger)
 	limits := research.DefaultLimits
 	limits.Timeout, limits.MaxRounds = settings.ResearchTimeout, settings.ResearchMaxRounds
 	limits.MaxSearches, limits.MaxTokens = settings.ResearchMaxSearches, settings.ResearchMaxTokens
@@ -564,7 +547,7 @@ func startResearch(ctx context.Context, settings config.Settings, claude *llm.Cl
 		defer close(running)
 		runner.Run(ctx) // ctx 随退出信号结束：手上的调查停下（下次启动标成被中断）
 	}()
-	logger.Info("后台调查已开启", "model", settings.ResearchLLM, "conclusion_writer", writer, "timeout", limits.Timeout,
+	logger.Info("后台调查已开启", "model", settings.CloudLLMModel, "conclusion_writer", writer, "timeout", limits.Timeout,
 		"max_rounds", limits.MaxRounds, "max_searches", limits.MaxSearches, "max_tokens", limits.MaxTokens)
 	stop := func() { // 先等调查的循环退出，再关任务账本：不然它最后一次写任务时库已经关了
 		select {
@@ -623,16 +606,13 @@ func buildBrainOptions(settings config.Settings) (brain.Options, error) {
 	return options, nil
 }
 
-// activeModel 返回实际在用的模型名（日志用）：云端且有本地退路时两个都写。
+// activeModel 返回实际在用的模型名（日志用）。
 func activeModel(settings config.Settings) string {
-	if settings.LLMProvider != config.LLMCloud {
-		if settings.LLMFallback {
-			return settings.Model + "（退路 " + settings.CloudLLMModel + "）"
-		}
+	if settings.LLMProvider == config.LLMLocal {
 		return settings.Model
-	}
-	if settings.LLMFallback {
-		return settings.CloudLLMModel + "（退路 " + settings.Model + "）"
 	}
 	return settings.CloudLLMModel
 }
+
+// strongCooldown：更强的模型出错或等太久之后，这么久内直接用原来那套（沿用原来云端↔本地退路的冷却时间）。
+const strongCooldown = 30 * time.Second

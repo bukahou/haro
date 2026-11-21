@@ -77,7 +77,7 @@ type Settings struct {
 	// 滚动摘要：掉出最近 N 轮的对话压成摘要放进提示词；false = 直接丢掉（旧行为）
 	ConversationSummary bool `env:"HARO_CONVERSATION_SUMMARY" envDefault:"true"`
 
-	// 服务端：local（ollama）/ cloud（云端，失败时这一轮退回 ollama）
+	// 服务端用哪个模型：local（ollama）/ cloud（云端）。两者不自动互相顶替：云端连不上时只保留最低能力（念「连不上」和现在的时间）
 	LLMProvider string `env:"HARO_LLM_PROVIDER" envDefault:"cloud"`
 	// 云端的接口格式：openai（OpenAI 兼容）/ anthropic（Claude API）
 	CloudLLMAPI    string `env:"HARO_CLOUD_LLM_API" envDefault:"anthropic"`
@@ -92,10 +92,8 @@ type Settings struct {
 	// anthropic 的回答力度（思考是关掉的，只能 low / medium / high）：聊天和摘要求快，调查多花点力气
 	CloudLLMEffort  string        `env:"HARO_CLOUD_LLM_EFFORT" envDefault:"low"`
 	ResearchEffort  string        `env:"HARO_RESEARCH_EFFORT" envDefault:"medium"`
-	CloudLLMTimeout time.Duration `env:"HARO_CLOUD_LLM_TIMEOUT" envDefault:"4s"`      // 等云端开始响应的上限，超过就退回本地（正常 2 s 内开始响应）
-	CloudMaxTokens  int           `env:"HARO_CLOUD_LLM_MAX_TOKENS" envDefault:"800"`  // 每次最多输出多少 token：要能装下约 300 字的详细回答
-	LLMFallback     bool          `env:"HARO_LLM_FALLBACK" envDefault:"true"`         // cloud 失败时退回本地 ollama
-	LLMCooldown     time.Duration `env:"HARO_LLM_FALLBACK_COOLDOWN" envDefault:"30s"` // cloud 失败后这么久内直接用本地（熔断）
+	CloudLLMTimeout time.Duration `env:"HARO_CLOUD_LLM_TIMEOUT" envDefault:"4s"`     // 等云端开始响应的上限，超过就当连不上（正常 2 s 内开始响应）
+	CloudMaxTokens  int           `env:"HARO_CLOUD_LLM_MAX_TOKENS" envDefault:"800"` // 每次最多输出多少 token：要能装下约 300 字的详细回答
 	// anthropic 的思考：disabled（关掉）/ between_tools（Sonnet 5.5 关掉思考的写法，它不接受 disabled）/ adaptive（思考关不掉的模型）
 	CloudLLMThinking string `env:"HARO_CLOUD_LLM_THINKING" envDefault:"disabled"`
 
@@ -149,9 +147,8 @@ type Settings struct {
 	// 联网搜索：Tavily 官方远程 MCP。密钥不设 = 不提供联网搜索（凭证：无默认值，只来自环境变量）
 	TavilyAPIKey string `env:"HARO_TAVILY_API_KEY"`
 	TavilyMCPURL string `env:"HARO_TAVILY_MCP_URL" envDefault:"https://mcp.tavily.com/mcp/"`
-	// 后台调查（有搜索时才有）：任务账本、用哪个模型、每个任务的上限
+	// 后台调查（有搜索时才有，只用云端模型）：任务账本、每个任务的上限
 	ResearchDB          string        `env:"HARO_RESEARCH_DB"`                            // 任务账本（SQLite）；空 = 只在内存里
-	ResearchLLM         string        `env:"HARO_RESEARCH_LLM" envDefault:"cloud"`        // cloud / local：调查用哪个模型（默认云端：本地小模型调工具不可靠）
 	ResearchTimeout     time.Duration `env:"HARO_RESEARCH_TIMEOUT" envDefault:"3m"`       // 搜索阶段最多多久
 	ResearchMaxRounds   int           `env:"HARO_RESEARCH_MAX_ROUNDS" envDefault:"10"`    // 最多请求模型几轮（搜一次、读一次各占一轮；6 轮实测不够，2026-11-17 改 10）
 	ResearchMaxSearches int           `env:"HARO_RESEARCH_MAX_SEARCHES" envDefault:"5"`   // 最多搜几次
@@ -297,12 +294,9 @@ func (settings Settings) validateBrain() error {
 	if err := settings.validateWeather(); err != nil {
 		return err
 	}
-	if settings.ResearchLLM != LLMLocal && settings.ResearchLLM != LLMCloud {
-		return fmt.Errorf("HARO_RESEARCH_LLM 只能是 %s 或 %s，现在是 %q", LLMLocal, LLMCloud, settings.ResearchLLM)
-	}
 	if settings.ResearchesWithCloud() {
 		if err := settings.cloudLLMReady(); err != nil {
-			return fmt.Errorf("后台调查用云端模型（HARO_RESEARCH_LLM=cloud）时%w（或改成 local）", err)
+			return fmt.Errorf("开着后台调查（设了搜索的密钥）时%w", err)
 		}
 	}
 	if settings.UsesCloudLLM() && (settings.USDToYen <= 0 || settings.ModelPricesURL == "" || settings.ModelPricesProvider == "") {
@@ -379,14 +373,14 @@ func anthropicAmbientCredentials() bool {
 	return false
 }
 
-// UsesCloudLLM 判断会不会调用云端模型（主用云端，或本地为主、失败退回云端，或后台调查用云端）。
+// UsesCloudLLM 判断会不会调用云端模型（主用云端，或开着后台调查）。
 func (s Settings) UsesCloudLLM() bool {
-	return s.LLMProvider == LLMCloud || s.LLMFallback || s.ResearchesWithCloud()
+	return s.LLMProvider == LLMCloud || s.ResearchesWithCloud()
 }
 
-// ResearchesWithCloud 判断后台调查会不会用云端模型（有联网搜索才有后台调查）。
+// ResearchesWithCloud 判断开没开后台调查（有联网搜索才有；调查只用云端模型）。
 func (s Settings) ResearchesWithCloud() bool {
-	return s.Tools && s.TavilyAPIKey != "" && s.ResearchLLM == LLMCloud
+	return s.Tools && s.TavilyAPIKey != ""
 }
 
 // WeatherHomePlace 解析 HARO_WEATHER_HOME（「纬度,经度」）；没设时 Set=false。

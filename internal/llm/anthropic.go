@@ -99,7 +99,7 @@ type AnthropicOptions struct {
 	MaxTokens int        // 每次最多输出多少 token
 	Effort    string     // low / medium / high（思考关掉时只能用这三档）；空 = 模型默认
 	Thinking  string     // 见 ThinkingDisabled 等；空 = disabled
-	// MaxRetries 是 SDK 在 429 / 5xx / 断线时自己重试几次。当主模型时用 0：等不到就退回本地，
+	// MaxRetries 是 SDK 在 429 / 5xx / 断线时自己重试几次。当主模型时用 0：等不到就早点告诉主人连不上，
 	// 不要在这里多等；后台调查不急，可以重试。
 	MaxRetries int
 	// FirstTokenTimeout 是等 Claude 开始回答（第一个流式事件）最多多久，超时就取消这次请求、交给退路；0 = 不限。

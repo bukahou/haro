@@ -231,25 +231,23 @@ func TestMeteredAndBudgetedModels(t *testing.T) {
 	ledger := openTestLedger(t)
 	pricing := Pricing{USDToYen: 100, Models: map[string]TokenPrice{"cloud": {InputUSDPerMillion: 1}, "local": {Free: true}}}
 	guard := NewGuard(ledger, Limits{MonthlyYen: 150}, quietLogger)
-	cloud, local := &replyModel{text: "云端"}, &replyModel{text: "本地"}
-	model := NewBudgetedChatModel(
-		NewMeteredChatModel(cloud, "cloud", PurposeChat, pricing, ledger, quietLogger), // 每次 100 万 token = 1 美元 = 100 日元
-		NewMeteredChatModel(local, "local", PurposeChat, pricing, ledger, quietLogger), guard, quietLogger)
+	cloud := &replyModel{text: "云端"}
+	// 每次 100 万 token = 1 美元 = 100 日元
+	model := NewBudgetedChatModel(NewMeteredChatModel(cloud, "cloud", PurposeChat, pricing, ledger, quietLogger), guard, quietLogger)
 
-	for i, want := range []string{"云端", "云端", "本地"} { // 0 → 100 → 200 日元：第三次超过 150，改用本地
-		if got, err := collectText(t, model); err != nil || got != want {
-			t.Errorf("第 %d 次：%q %v，应为 %q", i+1, got, err, want)
+	for i := range 2 { // 0 → 100 → 200 日元
+		if got, err := collectText(t, model); err != nil || got != "云端" {
+			t.Errorf("第 %d 次：%q %v", i+1, got, err)
 		}
 	}
 	if spent, _ := ledger.Total(ctx, time.Now().Add(-time.Minute)); spent.Yen != 200 {
-		t.Errorf("账本合计 = %v，应为 200（本地模型按 0 记）", spent.Yen)
+		t.Errorf("账本合计 = %v，应为 200", spent.Yen)
 	}
-
-	noFallback := NewBudgetedChatModel(cloud, nil, guard, quietLogger)
-	_, err := collectText(t, noFallback)
+	// 第三次：已经超过 150 —— 不调用模型（不再改用本地顶替），交出能念给主人的错误
+	_, err := collectText(t, model)
 	var spoken brain.SpokenError
-	if !errors.As(err, &spoken) {
-		t.Fatalf("没有本地退路时应返回能念给主人的错误：%v", err)
+	if !errors.As(err, &spoken) || cloud.calls != 2 {
+		t.Fatalf("超过上限应不调用、返回能念给主人的错误：%v（调用了 %d 次）", err, cloud.calls)
 	}
 	if key, values := spoken.Phrase(); key != brain.PhraseOverMonthlyBudget || values["limit"] == "" {
 		t.Errorf("念给主人的那句和数：%s %v", key, values)
@@ -303,7 +301,7 @@ func TestBudgetedRefusesWhenLedgerUnreadable(t *testing.T) {
 	ledger := openTestLedger(t)
 	guard := NewGuard(brokenLedger{ledger}, Limits{MonthlyYen: 3000}, quietLogger)
 	cloud := &replyModel{text: "云端"}
-	model := NewBudgetedChatModel(cloud, nil, guard, quietLogger)
+	model := NewBudgetedChatModel(cloud, guard, quietLogger)
 	_, err := collectText(t, model)
 	var spoken brain.SpokenError
 	if !errors.Is(err, ErrLedgerUnavailable) || !errors.As(err, &spoken) {
