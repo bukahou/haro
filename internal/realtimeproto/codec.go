@@ -75,7 +75,7 @@ func EncodeServerEvent(event ServerEvent) ([]byte, error) {
 // DecodeClientEvent 把客户端发来的 JSON 解成事件。input 是会话里声明的输入格式（input_audio_buffer.append 用它）。
 // 出错时返回带错误码的 *ProtocolError：解不开 → invalid_event，不认识或不支持的事件 → unsupported_event。
 func DecodeClientEvent(data []byte, input AudioFormat) (ClientEvent, error) {
-	name, err := eventName(data)
+	name, err := EventType(data)
 	if err != nil {
 		return nil, err
 	}
@@ -93,7 +93,7 @@ func DecodeClientEvent(data []byte, input AudioFormat) (ClientEvent, error) {
 // DecodeServerEvent 把服务端发来的 JSON 解成事件。不认识的事件返回 nil, nil：
 // 对端比自己新时多出来的事件忽略即可（Realtime 的约定）。
 func DecodeServerEvent(data []byte) (ServerEvent, error) {
-	name, err := eventName(data)
+	name, err := EventType(data)
 	if err != nil {
 		return nil, err
 	}
@@ -108,7 +108,9 @@ func DecodeServerEvent(data []byte) (ServerEvent, error) {
 	return event, nil
 }
 
-func eventName(data []byte) (string, error) {
+// EventType 是一条消息的事件名（type 字段）；不是 JSON 对象时返回带 invalid_event 码的错误，没有 type 时为空。
+// 解码和日志（解不开的事件按名字计数）共用。
+func EventType(data []byte) (string, error) {
 	var head wireTypeOnly
 	if err := json.Unmarshal(data, &head); err != nil {
 		return "", ProtocolErrorf(CodeInvalidEvent, "解析事件: %v", err)

@@ -1,8 +1,11 @@
 package speech
 
 import (
+	"cmp"
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 
 	"github.com/coder/websocket"
@@ -16,10 +19,15 @@ import (
 // semantic_vad 由 session.update 里的 turn_detection 指定，唤醒门、播放这些 haro 扩展事件也走这条连接）。
 // 服务端可以是 haro-asr，也可以是其他实现了同一子集的服务（事件定义见 realtimeproto）。
 // 连着的时候按 Heartbeat 定时 ping：对端卡住（进程还在、不回应）时断开连接，由会话按断开重开。
+// 连接为什么断了、哪些事件解不开，记在 Logger 里（会话那边只知道流结束了）。
 type RealtimeTranscriptionClient struct {
 	BaseURL   string           // http(s)://host:port，连接时换成 ws(s)://
 	Heartbeat heartbeat.Timing // 零值 = heartbeat.Default（和终端那条连接一样）
+	Logger    *slog.Logger     // nil = slog.Default()
 }
+
+// errHeartbeatLost：转写服务在心跳的期限内没有回应（进程还在、卡住了），客户端断开了连接。
+var errHeartbeatLost = errors.New("转写服务没有回应心跳")
 
 // NewRealtimeTranscriptionClient 创建客户端。
 func NewRealtimeTranscriptionClient(baseURL string) *RealtimeTranscriptionClient {
@@ -42,7 +50,8 @@ func (c *RealtimeTranscriptionClient) OpenStream(ctx context.Context, config bra
 		return nil, fmt.Errorf("连接转写服务 %s: %w", address, err)
 	}
 	conn.SetReadLimit(realtimeproto.MaxMessageBytes)
-	stream := &realtimeTranscriptionStream{conn: conn, events: make(chan realtimeproto.ServerEvent, 32)}
+	stream := &realtimeTranscriptionStream{conn: conn, events: make(chan realtimeproto.ServerEvent, 32),
+		logger: cmp.Or(c.Logger, slog.Default()).With("transcription", address)}
 	turn := config.TurnDetection
 	if err := stream.send(ctx, realtimeproto.SessionUpdate{Kind: realtimeproto.SessionTranscription, TurnDetection: &turn,
 		WakeWord: config.WakeWord, InputFormat: realtimeproto.TranscriptionFormat}); err != nil {
@@ -92,6 +101,7 @@ func (s *realtimeTranscriptionStream) awaitSessionUpdated(ctx context.Context) e
 // ping 的回应由读循环处理，所以和 readEvents 一起运行。
 func (s *realtimeTranscriptionStream) keepAlive(ctx context.Context, timing heartbeat.Timing) {
 	if err := heartbeat.Keep(ctx, s.conn, timing); err != nil {
+		s.ended(fmt.Errorf("%w: %w", errHeartbeatLost, err))
 		_ = s.conn.CloseNow()
 	}
 }
@@ -101,6 +111,15 @@ type realtimeTranscriptionStream struct {
 	cancel  context.CancelFunc
 	events  chan realtimeproto.ServerEvent
 	writeMu sync.Mutex
+	logger  *slog.Logger
+
+	endOnce   sync.Once
+	endReason error // 流为什么结束（只记第一个原因：心跳断开后读循环接着报的读错误不算）
+}
+
+// ended 记下流结束的原因（只记第一个）。
+func (s *realtimeTranscriptionStream) ended(reason error) {
+	s.endOnce.Do(func() { s.endReason = reason })
 }
 
 // send 把一个事件编码后发给转写服务（写入串行）。
@@ -139,15 +158,37 @@ func (s *realtimeTranscriptionStream) Close() error {
 	return s.conn.Close(websocket.StatusNormalClosure, "")
 }
 
+// readEvents 把转写服务的事件交给会话，直到连接断开（或 Close）。
+// 解不开的事件跳过，按事件名计数：每种第一次解不开时记一条警告，流结束时再报每种一共几条（不每条刷一行）；
+// 不认识的事件按 Realtime 的约定忽略。连接不是由 Close 关掉的，结束时记一条警告写明原因。
 func (s *realtimeTranscriptionStream) readEvents(ctx context.Context) {
-	defer close(s.events)
+	undecodable := map[string]int{}
+	defer func() {
+		for eventType, count := range undecodable {
+			if count > 1 {
+				s.logger.Warn("这条识别流里有事件解不开，都跳过了", "event", eventType, "count", count)
+			}
+		}
+		close(s.events)
+	}()
 	for {
 		_, data, err := s.conn.Read(ctx)
 		if err != nil {
+			s.ended(err)
+			if ctx.Err() == nil { // 不是 Close 关的：转写服务断开、心跳超时、消息超过读上限……
+				s.logger.Warn("和转写服务的连接断了", "reason", s.endReason, "close_status", websocket.CloseStatus(s.endReason))
+			}
 			return
 		}
 		event, err := realtimeproto.DecodeServerEvent(data)
-		if err != nil || event == nil { // 解析失败或不认识的事件：跳过
+		if err != nil {
+			eventType, _ := realtimeproto.EventType(data) // 连事件名都解不开时为空
+			if undecodable[eventType]++; undecodable[eventType] == 1 {
+				s.logger.Warn("转写服务发来的事件解不开，跳过", "event", eventType, "err", err)
+			}
+			continue
+		}
+		if event == nil { // 不认识的事件（对端比自己新）
 			continue
 		}
 		select {

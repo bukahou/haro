@@ -3,8 +3,10 @@ package speech
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -79,7 +81,7 @@ func TestTranscriptionStreamDropsUnresponsiveServer(t *testing.T) {
 				}
 				readUntilClosed(ctx, conn)
 			})
-			client := &RealtimeTranscriptionClient{BaseURL: server.URL,
+			client := &RealtimeTranscriptionClient{BaseURL: server.URL, Logger: slog.New(slog.DiscardHandler),
 				Heartbeat: heartbeat.Timing{Interval: 20 * time.Millisecond, Timeout: 30 * time.Millisecond}}
 			stream, err := client.OpenStream(context.Background(), serverVAD)
 			if err != nil {
@@ -147,6 +149,135 @@ func TestOpenStreamWaitsForSessionUpdated(t *testing.T) {
 	}
 	if elapsed := time.Since(started); elapsed > 2*time.Second {
 		t.Errorf("一直不确认时应在 ctx 的期限上失败：等了 %v", elapsed)
+	}
+}
+
+// logRecords 记下所有日志（测试按级别和属性核对，不看日志的文字）。
+type logRecords struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func (l *logRecords) Enabled(context.Context, slog.Level) bool { return true }
+func (l *logRecords) Handle(_ context.Context, record slog.Record) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.records = append(l.records, record.Clone())
+	return nil
+}
+func (l *logRecords) WithAttrs([]slog.Attr) slog.Handler { return l }
+func (l *logRecords) WithGroup(string) slog.Handler      { return l }
+
+// warnings 是带 key 属性的警告级日志，每条给出全部属性。
+func (l *logRecords) warnings(key string) []map[string]slog.Value {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var found []map[string]slog.Value
+	for _, record := range l.records {
+		attrs := map[string]slog.Value{}
+		record.Attrs(func(attr slog.Attr) bool {
+			attrs[attr.Key] = attr.Value
+			return true
+		})
+		if _, ok := attrs[key]; ok && record.Level == slog.LevelWarn {
+			found = append(found, attrs)
+		}
+	}
+	return found
+}
+
+// drain 读完识别流的事件，直到事件通道关闭。
+func drain(t *testing.T, stream brain.RecognizerStream) []realtimeproto.ServerEvent {
+	t.Helper()
+	var events []realtimeproto.ServerEvent
+	timeout := time.After(5 * time.Second)
+	for {
+		select {
+		case event, open := <-stream.Events():
+			if !open {
+				return events
+			}
+			events = append(events, event)
+		case <-timeout:
+			t.Fatalf("事件通道一直没关：已收到 %v", events)
+			return nil
+		}
+	}
+}
+
+// 转写服务发来解不开的事件：跳过，同一种只在第一次记一条警告（不每条刷一行），流结束时报这一种一共几条；
+// 解得开的照常交给会话。连接被对端断开时记一条警告写明原因。
+func TestTranscriptionStreamLogsUndecodableEvents(t *testing.T) {
+	const speechStarted = "input_audio_buffer.speech_started"
+	server := fakeTranscriptionServer(t, accepted, func(ctx context.Context, conn *websocket.Conn) {
+		for range 3 {
+			_ = conn.Write(ctx, websocket.MessageText, []byte(`{"type":"`+speechStarted+`","audio_start_ms":"不是数"}`))
+		}
+		valid, _ := realtimeproto.EncodeServerEvent(realtimeproto.InputAudioBufferSpeechStarted{ItemID: "item_1"})
+		_ = conn.Write(ctx, websocket.MessageText, valid)
+		conn.Close(websocket.StatusNormalClosure, "")
+	})
+	logs := &logRecords{}
+	client := &RealtimeTranscriptionClient{BaseURL: server.URL, Logger: slog.New(logs)}
+	stream, err := client.OpenStream(context.Background(), serverVAD)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	if events := drain(t, stream); len(events) != 1 {
+		t.Errorf("解得开的那一个应照常交给会话：%v", events)
+	}
+	var first, summaries int
+	for _, attrs := range logs.warnings("event") {
+		if attrs["event"].String() != speechStarted {
+			t.Errorf("警告里的事件名不对：%v", attrs)
+		}
+		if _, ok := attrs["err"]; ok {
+			first++
+		}
+		if count, ok := attrs["count"]; ok && count.Int64() == 3 {
+			summaries++
+		}
+	}
+	if first != 1 || summaries != 1 {
+		t.Errorf("同一种解不开的事件应只在第一次警告一条（%d 条）、结束时报一共 3 条（%d 条）", first, summaries)
+	}
+	if len(logs.warnings("reason")) != 1 {
+		t.Errorf("对端断开连接时应记一条写明原因的警告：%v", logs.warnings("reason"))
+	}
+}
+
+// 连接为什么结束：心跳等不到回应时，警告里的原因是心跳断开；由 Close 关掉的不是断开，不警告。
+func TestTranscriptionStreamEndReason(t *testing.T) {
+	stuck := fakeTranscriptionServer(t, accepted, func(ctx context.Context, _ *websocket.Conn) { <-ctx.Done() })
+	logs := &logRecords{}
+	client := &RealtimeTranscriptionClient{BaseURL: stuck.URL, Logger: slog.New(logs),
+		Heartbeat: heartbeat.Timing{Interval: 20 * time.Millisecond, Timeout: 30 * time.Millisecond}}
+	stream, err := client.OpenStream(context.Background(), serverVAD)
+	if err != nil {
+		t.Fatal(err)
+	}
+	drain(t, stream)
+	stream.Close()
+	reasons := logs.warnings("reason")
+	if len(reasons) != 1 {
+		t.Fatalf("心跳断开应记一条写明原因的警告：%v", reasons)
+	}
+	if reason, ok := reasons[0]["reason"].Any().(error); !ok || !errors.Is(reason, errHeartbeatLost) {
+		t.Errorf("原因应是心跳断开：%v", reasons[0]["reason"])
+	}
+
+	normal := fakeTranscriptionServer(t, accepted, readUntilClosed)
+	logs = &logRecords{}
+	client = &RealtimeTranscriptionClient{BaseURL: normal.URL, Logger: slog.New(logs)}
+	stream, err = client.OpenStream(context.Background(), serverVAD)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream.Close()
+	drain(t, stream)
+	if reasons := logs.warnings("reason"); len(reasons) != 0 {
+		t.Errorf("由 Close 关掉的不是断开，不应警告：%v", reasons)
 	}
 }
 
