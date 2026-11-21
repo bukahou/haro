@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/bukahou/haro/internal/brain"
+	"github.com/bukahou/haro/internal/tools"
 )
 
 var quietLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -129,6 +130,7 @@ func (m *scriptedModel) messagesOfLastRequest() []brain.ChatMessage {
 }
 
 // fakeSearcher 是假的搜索服务：记下搜了几次、读了哪些网址；searchErr 不为 nil 时搜索失败。
+// 每次调用算发出一次请求，用 record 记一笔（失败的标不完整）。
 type fakeSearcher struct {
 	mu         sync.Mutex
 	searches   int
@@ -138,21 +140,27 @@ type fakeSearcher struct {
 	searchErr  error
 }
 
-func (f *fakeSearcher) Search(context.Context, string, int) (string, error) {
+func (f *fakeSearcher) Search(ctx context.Context, _ string, _ int, record tools.SearchRecorder) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.searches++
+	if err := record.RecordSearch(ctx, 1, f.searchErr != nil); err != nil {
+		return "", err
+	}
 	if f.searchErr != nil {
 		return "", f.searchErr
 	}
 	return "Title: A 的价格\nURL: https://example.com/a\nContent: A 100 円", nil
 }
 
-func (f *fakeSearcher) ReadPages(_ context.Context, urls []string, _ int, _ string) (string, error) {
+func (f *fakeSearcher) ReadPages(ctx context.Context, urls []string, _ int, _ string, record tools.SearchRecorder) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.reads++
 	f.readURLs = append(f.readURLs, urls...)
+	if err := record.RecordSearch(ctx, 1, false); err != nil {
+		return "", err
+	}
 	return "A 的详细价格 100 円", nil
 }
 
@@ -173,9 +181,10 @@ func (f *fakeSearcher) counts() (searches, reads int) {
 }
 
 type fakeBudget struct {
-	mu      sync.Mutex
-	refuse  error
-	credits int
+	mu         sync.Mutex
+	refuse     error
+	credits    int
+	incomplete int // 记成不完整的笔数（请求发出去了、没拿到结果）
 }
 
 func (b *fakeBudget) refuseWith(err error) {
@@ -192,11 +201,20 @@ func (b *fakeBudget) AllowResearch(context.Context) error {
 func (b *fakeBudget) AllowSearch(context.Context, int) error {
 	return b.AllowResearch(context.Background())
 }
-func (b *fakeBudget) RecordSearch(_ context.Context, credits int) error {
+func (b *fakeBudget) RecordSearch(_ context.Context, credits int, incomplete bool) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.credits += credits
+	if incomplete {
+		b.incomplete++
+	}
 	return nil
+}
+
+func (b *fakeBudget) incompleteCharges() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.incomplete
 }
 
 func (b *fakeBudget) recorded() int {
@@ -539,6 +557,10 @@ func TestResearchAtLimitsWithoutMaterialWritesNothing(t *testing.T) {
 	done := rig.research(t, "要查的事")
 	if done.Status != StatusFailed || done.Conclusion != "" || !strings.Contains(done.StopReason, "搜索服务挂了") {
 		t.Errorf("一份资料都没有：不写结论，原因带上没搜成的说明：%+v", done)
+	}
+	if searches, _ := rig.searcher.counts(); rig.budget.recorded() != searches || rig.budget.incompleteCharges() != searches {
+		t.Errorf("发出去没搜成的请求也记账（标不完整）：搜了 %d 次，记了 %d 积分、%d 笔不完整", searches,
+			rig.budget.recorded(), rig.budget.incompleteCharges())
 	}
 	model.mu.Lock()
 	defer model.mu.Unlock()

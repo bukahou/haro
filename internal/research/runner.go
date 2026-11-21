@@ -523,8 +523,8 @@ func (r *Runner) runTool(ctx context.Context, call brain.ToolCall, question stri
 		if err != nil || strings.TrimSpace(in.Query) == "" {
 			return failureText(errors.Join(errors.New("query 不能为空"), err))
 		}
-		text, err := r.metered(ctx, r.searcher.SearchCredits(), func() (string, error) {
-			return r.searcher.Search(ctx, in.Query, searchResults)
+		text, err := r.withinBudget(ctx, r.searcher.SearchCredits(), func() (string, error) {
+			return r.searcher.Search(ctx, in.Query, searchResults, r.meter)
 		})
 		report.searches++
 		r.logger.Info("调查：搜索", "query", in.Query, "err", err)
@@ -538,8 +538,8 @@ func (r *Runner) runTool(ctx context.Context, call brain.ToolCall, question stri
 		if len(urls) > maxPagesPerRead {
 			urls, skipped = urls[:maxPagesPerRead], urls[maxPagesPerRead:]
 		}
-		text, err := r.metered(ctx, r.searcher.ReadCredits(len(urls)), func() (string, error) {
-			return r.searcher.ReadPages(ctx, urls, r.limits.PageRunes, question)
+		text, err := r.withinBudget(ctx, r.searcher.ReadCredits(len(urls)), func() (string, error) {
+			return r.searcher.ReadPages(ctx, urls, r.limits.PageRunes, question, r.meter)
 		})
 		report.reads++
 		r.logger.Info("调查：读网页", "urls", len(urls), "skipped", len(skipped), "err", err)
@@ -564,20 +564,12 @@ func (report *investigationReport) lookupResult(text string, err error) string {
 	return text
 }
 
-// metered 先查额度、执行、成功后记账。
-func (r *Runner) metered(ctx context.Context, credits int, run func() (string, error)) (string, error) {
+// withinBudget 先查额度再执行。记账在搜索那一层：发出去的每次请求不管成没成功都记（run 里把 r.meter 交给它，见 tools.WebSearcher）。
+func (r *Runner) withinBudget(ctx context.Context, credits int, run func() (string, error)) (string, error) {
 	if err := r.meter.AllowSearch(ctx, credits); err != nil {
 		return "", err
 	}
-	text, err := run()
-	if err != nil {
-		return "", err
-	}
-	// 写不进时由计量那边留着补写，补写成功之前不放行有上限的调查和搜索（spending.WithBookkeeping）
-	if err := r.meter.RecordSearch(context.WithoutCancel(ctx), credits); err != nil {
-		r.logger.Warn("调查的搜索用量没写进账本", "err", err, "credits", credits)
-	}
-	return text, nil
+	return run()
 }
 
 func failureText(err error) string {

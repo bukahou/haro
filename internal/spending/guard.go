@@ -320,9 +320,13 @@ func (m *SearchMeter) AllowSearch(ctx context.Context, credits int) error {
 	return m.guard.AllowSearch(ctx, credits)
 }
 
-// RecordSearch 记一笔搜索。
-func (m *SearchMeter) RecordSearch(ctx context.Context, credits int) error {
-	return m.ledger.Record(ctx, Charge{Purpose: m.purpose, Item: m.item, Credits: credits, Yen: m.pricing.SearchYen(credits)})
+// RecordSearch 记一笔发出去的搜索请求（实现 tools.SearchRecorder）：没拿到结果的标不完整，积分照记（服务商可能已经扣了）。
+// 不跟着调用方取消：请求被打断时，已经发出去的照样要记；期限另算（recordTimeout）。
+func (m *SearchMeter) RecordSearch(ctx context.Context, credits int, incomplete bool) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
+	defer cancel()
+	return m.ledger.Record(ctx, Charge{Purpose: m.purpose, Item: m.item, Credits: credits, Yen: m.pricing.SearchYen(credits),
+		Incomplete: incomplete})
 }
 
 // yen 是念给主人的日元数（取整）。

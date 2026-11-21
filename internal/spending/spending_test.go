@@ -312,3 +312,41 @@ func TestBudgetedRefusesWhenLedgerUnreadable(t *testing.T) {
 		t.Errorf("读不出账本时不应调用要花钱的模型：调用了 %d 次", cloud.calls)
 	}
 }
+
+// 搜索记账：发出去、没拿到结果的请求照样记积分，标不完整；请求被打断（调用方的 ctx 已经取消）也照样记上。
+func TestSearchMeterRecordsEveryRequest(t *testing.T) {
+	ledger := openTestLedger(t)
+	meter := NewSearchMeter(NewGuard(ledger, Limits{}, quietLogger), ledger, Pricing{USDToYen: 150, SearchCreditUSD: 0.01},
+		PurposeSearch, "tavily")
+	interrupted, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := meter.RecordSearch(interrupted, 1, true); err != nil {
+		t.Fatalf("被打断的请求也要记上：%v", err)
+	}
+	if err := meter.RecordSearch(context.Background(), 2, false); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := ledger.(*sqliteLedger).db.Query(`SELECT credits, incomplete FROM charges ORDER BY id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	type charge struct {
+		credits    int
+		incomplete bool
+	}
+	var got []charge
+	for rows.Next() {
+		var c charge
+		if err := rows.Scan(&c.credits, &c.incomplete); err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, c)
+	}
+	if want := []charge{{1, true}, {2, false}}; len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("每次请求一笔、没拿到结果的标不完整：%+v", got)
+	}
+	if totals, err := ledger.Total(context.Background(), time.Time{}); err != nil || totals.Credits != 3 || totals.Yen != 4.5 {
+		t.Errorf("不完整的那笔照样算进额度：%+v %v", totals, err)
+	}
+}
