@@ -105,7 +105,7 @@ func run(settings config.ASRSettings, logger *slog.Logger) error {
 	models.add(func() { recognizer.Close() })
 	logger.Info("模型已加载", "elapsed", time.Since(loadStarted).Round(time.Millisecond), "threads", settings.Threads)
 
-	newDetector, err := sensevoice.NewSileroDetectorFactory(settings.VADModel)
+	newDetector, err := sensevoice.NewSileroDetectorFactory(settings.VADModel, logger)
 	if err != nil {
 		return err
 	}
