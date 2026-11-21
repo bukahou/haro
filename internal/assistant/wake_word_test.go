@@ -6,18 +6,20 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	"slices"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/bukahou/haro/internal/assistant"
-	"github.com/bukahou/haro/internal/brain"
 	"github.com/bukahou/haro/internal/realtimeproto"
-	"github.com/bukahou/haro/internal/speech"
 )
 
-// 唤醒词整轮：休眠 → 听到唤醒词 → 一口气说完的问题被回答 → 对话窗口超时 → 通知休眠。
+// 唤醒词整轮（终端这一侧，对端是替身服务端）：休眠 → 听到唤醒词 → 一口气说完的问题被回答 → 对话窗口超时 → 通知休眠。
+// 终端接真实的服务端会话的整条路径在 internal/e2e。
+
+func pcm(data string) realtimeproto.PCMAudio {
+	return realtimeproto.PCMAudio{Format: realtimeproto.AudioFormat{SampleRate: 16000, Channels: 1}, Data: []byte(data)}
+}
 
 // loudMicrophone 每 2ms 产出一块非静音的 20ms 音频。
 type loudMicrophone struct{}
@@ -60,150 +62,110 @@ func (b blockingManual) WaitForToggle(ctx context.Context) error {
 	}
 }
 
-// wakeStream 是替身转写会话：收到第 10 块音频时报告「唤醒 + 一句话」；记录 SetAwake，以及之后收到的全零音频块（半双工静音）。
-// failSleeps 是前几次休眠要失败（模拟通知休眠失败）。
-type wakeStream struct {
+// wakeServer 是替身服务端，只按协议收发事件：收到第 10 块音频时发「唤醒 + 一句话」和这一轮的回答（两句的声音）；
+// 记下会话设置、休眠通知，以及之后收到的全零音频块（半双工静音）。failSleeps 是前几次休眠通知要失败。
+type wakeServer struct {
 	mu          sync.Mutex
+	update      realtimeproto.SessionUpdate
 	chunks      int
 	silentAfter int
-	awakeCalls  []bool
+	sleeps      int
 	failSleeps  int
 	events      chan realtimeproto.ServerEvent
-	closeOnce   sync.Once
 }
 
-func (w *wakeStream) SendAudio(_ context.Context, pcm []byte) error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	w.chunks++
-	if w.chunks > 10 && bytes.Count(pcm, []byte{0}) == len(pcm) {
-		w.silentAfter++
-	}
-	if w.chunks == 10 {
-		w.events <- realtimeproto.HaroWakeWordDetected{Keyword: "哈罗哈罗", AudioMs: 100}
-		w.events <- realtimeproto.InputAudioBufferSpeechStarted{AudioStartMs: 100, ItemID: "item_1"}
-		w.events <- realtimeproto.InputAudioBufferSpeechStopped{AudioEndMs: 200, ItemID: "item_1"}
-		w.events <- realtimeproto.InputAudioTranscriptionCompleted{ItemID: "item_1", Transcript: "我旁边有什么"}
+func (s *wakeServer) Send(_ context.Context, event realtimeproto.ClientEvent) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch e := event.(type) {
+	case realtimeproto.SessionUpdate:
+		s.update = e
+	case realtimeproto.InputAudioBufferAppend:
+		s.chunks++
+		if s.chunks > 10 && bytes.Count(e.Audio.Data, []byte{0}) == len(e.Audio.Data) {
+			s.silentAfter++
+		}
+		if s.chunks == 10 {
+			for _, reply := range []realtimeproto.ServerEvent{
+				realtimeproto.HaroWakeWordDetected{Keyword: "哈罗哈罗", AudioMs: 100},
+				realtimeproto.InputAudioBufferSpeechStarted{AudioStartMs: 100, ItemID: "item_1"},
+				realtimeproto.InputAudioBufferSpeechStopped{AudioEndMs: 200, ItemID: "item_1"},
+				realtimeproto.InputAudioTranscriptionCompleted{ItemID: "item_1", Transcript: "我旁边有什么"},
+				realtimeproto.ResponseOutputAudioDelta{Audio: pcm("你旁边有一个杯子。")},
+				realtimeproto.ResponseOutputAudioDelta{Audio: pcm("还有键盘。")},
+				realtimeproto.ResponseDone{Status: realtimeproto.StatusCompleted},
+			} {
+				s.events <- reply
+			}
+		}
+	case realtimeproto.HaroWakeWordSleep:
+		s.sleeps++
+		if s.failSleeps > 0 {
+			s.failSleeps--
+			return errors.New("通知休眠失败")
+		}
 	}
 	return nil
 }
-func (w *wakeStream) SetPlayback(context.Context, bool) error { return nil }
-func (w *wakeStream) SetAwake(_ context.Context, awake bool) error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	w.awakeCalls = append(w.awakeCalls, awake)
-	if !awake && w.failSleeps > 0 {
-		w.failSleeps--
-		return errors.New("通知休眠失败")
+func (s *wakeServer) Events() <-chan realtimeproto.ServerEvent { return s.events }
+func (s *wakeServer) snapshot() (update realtimeproto.SessionUpdate, silentChunks, sleeps int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.update, s.silentAfter, s.sleeps
+}
+
+func waitForPlayed(t *testing.T, speaker *recordingSpeaker, want string, deadline time.Time, what string) {
+	t.Helper()
+	for _, audio, _ := speaker.snapshot(); audio != want; _, audio, _ = speaker.snapshot() {
+		if time.Now().After(deadline) {
+			t.Fatalf("%s：播出 %q，应为 %q", what, audio, want)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	return nil
-}
-func (w *wakeStream) Events() <-chan realtimeproto.ServerEvent { return w.events }
-func (w *wakeStream) Close() error {
-	w.closeOnce.Do(func() { close(w.events) })
-	return nil
-}
-func (w *wakeStream) silentChunks() int {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.silentAfter
-}
-
-func (w *wakeStream) sleepRequested() bool {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return len(w.awakeCalls) > 0 && !w.awakeCalls[len(w.awakeCalls)-1]
-}
-
-func (w *wakeStream) sleepCalls() int {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return len(w.awakeCalls) - len(slices.DeleteFunc(slices.Clone(w.awakeCalls), func(awake bool) bool { return !awake }))
-}
-
-type wakeStreaming struct {
-	stream    *wakeStream
-	gotConfig brain.StreamConfig
-}
-
-func (w *wakeStreaming) OpenStream(_ context.Context, config brain.StreamConfig) (brain.RecognizerStream, error) {
-	w.gotConfig = config
-	return w.stream, nil
 }
 
 func TestWakeWordConversation(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	// 第一次通知休眠失败：过一个对话窗口再试（不能停在「醒着且永不到期」）
-	streaming := &wakeStreaming{stream: &wakeStream{events: make(chan realtimeproto.ServerEvent, 8), failSleeps: 1}}
-	notices := brain.NewNoticeHub()
-	session := brain.NewSession(brain.Components{
-		Streaming: streaming, Front: brain.Agent{Model: stubModel{}}, Synthesizer: echoSynthesizer{}, Notices: notices,
-		NewSegmenter: func() brain.TextSegmenter { return speech.NewSentenceSegmenter(4, 40) },
-	}, brain.Options{MaxHistoryTurn: 6}, logger)
-	defer session.Close()
-
+	server := &wakeServer{events: make(chan realtimeproto.ServerEvent, 16), failSleeps: 1}
 	manual := blockingManual{done: make(chan struct{})}
 	speaker := &recordingSpeaker{}
 	turn := realtimeproto.TurnDetection{Type: "server_vad"}
 	haro := assistant.NewAssistant(assistant.Components{
-		Manual: manual, Microphone: loudMicrophone{}, Speaker: speaker, Brain: session,
+		Manual: manual, Microphone: loudMicrophone{}, Speaker: speaker, Brain: server,
 	}, assistant.Options{TurnDetection: turn, EchoGuard: 10 * time.Millisecond,
-		NoticeTone: realtimeproto.PCMAudio{Format: realtimeproto.AudioFormat{SampleRate: 16000, Channels: 1}, Data: []byte("[叮咚]")},
-		NoticeTones: map[string]realtimeproto.PCMAudio{realtimeproto.NoticeTranscriptionLost: {
-			Format: realtimeproto.AudioFormat{SampleRate: 16000, Channels: 1}, Data: []byte("[断开]")}},
+		NoticeTone:  pcm("[叮咚]"),
+		NoticeTones: map[string]realtimeproto.PCMAudio{realtimeproto.NoticeTranscriptionLost: pcm("[断开]")},
 		WakeWord: assistant.WakeWordOptions{Phrase: "哈罗哈罗", IdleTimeout: 150 * time.Millisecond,
-			SleepTone: realtimeproto.PCMAudio{Format: realtimeproto.AudioFormat{SampleRate: 16000, Channels: 1}, Data: []byte("[我去睡觉了]")}}}, logger)
+			SleepTone: pcm("[我去睡觉了]")}}, logger)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	runErr := make(chan error, 1)
 	go func() { runErr <- haro.Run(ctx) }()
 
-	// 唤醒后一口气说完的问题被回答；回答播完 150ms 后应通知休眠
+	// 唤醒后一口气说完的问题被回答；回答播完、对话窗口结束：先通知休眠，再说一声「我去睡觉了」
 	deadline := time.Now().Add(3 * time.Second)
-	for !streaming.stream.sleepRequested() {
-		if time.Now().After(deadline) {
-			t.Fatal("对话窗口结束后没有通知休眠")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if !streaming.gotConfig.WakeWord {
-		t.Error("应以唤醒门模式打开转写会话")
-	}
-	// 回答播完、对话窗口结束：先通知休眠，再说一声「我去睡觉了」
 	want := "你旁边有一个杯子。还有键盘。[我去睡觉了]"
-	for _, audio, _ := speaker.snapshot(); audio != want; _, audio, _ = speaker.snapshot() {
-		if time.Now().After(deadline) {
-			t.Fatalf("唤醒后的问题应被回答、休眠时说一声：播出 %q", audio)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	waitForPlayed(t, speaker, want, deadline, "唤醒后的问题应被回答、休眠时说一声")
 
-	if calls := streaming.stream.sleepCalls(); calls != 2 {
-		t.Errorf("第一次通知休眠失败后应再试一次：通知了 %d 次", calls)
+	update, silentChunks, sleeps := server.snapshot()
+	if !update.WakeWord || update.TurnDetection == nil || *update.TurnDetection != turn {
+		t.Errorf("开会话时应要求唤醒门、带上说完的判断方式：%+v", update)
 	}
-
+	if sleeps != 2 {
+		t.Errorf("第一次通知休眠失败后应再试一次：通知了 %d 次", sleeps)
+	}
 	// 不能打断时（半双工）：从请求回答到播完后的 EchoGuard 期间都应上传静音
-	if streaming.stream.silentChunks() == 0 {
+	if silentChunks == 0 {
 		t.Error("回答期间应上传静音（半双工），但一块静音都没收到")
 	}
 
-	// 睡着时服务端发来提示（后台调查查完了）：响一声
-	notices.Notify(brain.SharedPerson, realtimeproto.HaroNotice{Kind: realtimeproto.NoticeResearchDone})
-	for _, audio, _ := speaker.snapshot(); audio != want+"[叮咚]"; _, audio, _ = speaker.snapshot() {
-		if time.Now().After(deadline) {
-			t.Fatalf("收到提示应响一声：播出 %q", audio)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	// 有专门提示音的种类（服务端听不见了）：播那一声
-	notices.Notify(brain.SharedPerson, realtimeproto.HaroNotice{Kind: realtimeproto.NoticeTranscriptionLost})
-	for _, audio, _ := speaker.snapshot(); audio != want+"[叮咚][断开]"; _, audio, _ = speaker.snapshot() {
-		if time.Now().After(deadline) {
-			t.Fatalf("服务端听不见了应播断开的提示音：播出 %q", audio)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	// 睡着时服务端发来提示（后台调查查完了）：响一声；有专门提示音的种类（服务端听不见了）播那一声
+	server.events <- realtimeproto.HaroNotice{Kind: realtimeproto.NoticeResearchDone}
+	waitForPlayed(t, speaker, want+"[叮咚]", deadline, "收到提示应响一声")
+	server.events <- realtimeproto.HaroNotice{Kind: realtimeproto.NoticeTranscriptionLost}
+	waitForPlayed(t, speaker, want+"[叮咚][断开]", deadline, "服务端听不见了应播断开的提示音")
 
 	// 键盘输入结束（作为服务运行时 stdin 是空的）：不退出，照常靠唤醒词运行
 	close(manual.done)
