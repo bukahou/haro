@@ -54,7 +54,7 @@ func TestSwitchPersona(t *testing.T) {
 	k := newPersonaTalker(t, model, state, &seen)
 
 	k.say("你好")
-	if got := model.LastRequest().System(); got != "基础规则。\n\n风格：毒舌。" {
+	if got := model.LastRequest().System(); got != "基础规则。\n\n你手边的工具：switch_persona。\n\n风格：毒舌。" {
 		t.Fatalf("默认性格的系统提示词 = %q", got)
 	}
 	if len(seen) != 1 || seen[0].Emotion != brain.EmotionTease {

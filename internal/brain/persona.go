@@ -131,7 +131,7 @@ func (s *Session) systemPrompt() string {
 	if s.parts.Profiles != nil {
 		profile = s.parts.Profiles.Profile(conversation.Person())
 	}
-	prompt := composeSystemPrompt(instructions, profile, conversation.currentPersona())
+	prompt := composeSystemPrompt(instructions, toolOverview(s.offeredTools()), profile, conversation.currentPersona())
 	if note := summaryNote(conversation.currentSummary()); note != "" {
 		prompt += "\n\n" + note
 	}
@@ -181,9 +181,9 @@ func joinLines(lines []string) string { return strings.Join(lines, "\n") }
 // composeSystemPrompt 的顺序：内置规矩（+ 外部追加）→ 主人资料 → 性格。
 // 规矩在最前面优先级最高；这几段都很少变，每轮的即时情况不在这里（见 userTurn）。
 // 有没有摄像头不在这里：看画面的说明随 look_at_camera 工具一起出现或消失，系统提示词不变。
-func composeSystemPrompt(instructions, profile string, persona *Persona) string {
-	parts := make([]string, 0, 3)
-	for _, part := range []string{instructions, profile, personaPrompt(persona)} {
+func composeSystemPrompt(instructions, tools, profile string, persona *Persona) string {
+	parts := make([]string, 0, 4)
+	for _, part := range []string{instructions, tools, profile, personaPrompt(persona)} {
 		if part != "" {
 			parts = append(parts, part)
 		}

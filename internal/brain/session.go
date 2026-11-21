@@ -45,6 +45,10 @@ type Options struct {
 	Phrases Phrases
 	// MonthlyRaiseYen：口头提高月度上限时每次加多少（念给主人听的数，和额度那一层用同一个配置）
 	MonthlyRaiseYen float64
+	// 一句话里调用工具的步数与死循环（见 tool_steps.go）；零值 = Default*
+	MaxToolSteps     int
+	ToolRepeatLimit  int
+	ToolRepeatWindow int
 
 	// Instructions 是基础提示词（身份、能力、底线），只由服务端持有：客户端不能经 session.update 替换。
 	Instructions string

@@ -181,7 +181,7 @@ func TestBriefingGoesBeforeTheUserTurn(t *testing.T) {
 	if model.history[0].Text != firstSystem {
 		t.Errorf("系统提示词每轮应保持不变")
 	}
-	if history := withoutSynthetic(model.history); len(history) < 3 || history[1].Text != "你好" {
+	if history := withoutSynthetic(model.history); len(history) < 2 || history[0].Text != "你好" {
 		t.Errorf("历史里只存原话：%+v", model.history)
 	}
 }

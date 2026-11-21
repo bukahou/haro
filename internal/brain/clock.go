@@ -11,7 +11,10 @@ type ClockBriefer struct {
 	Now func() time.Time // 测试用；nil = time.Now
 }
 
-var clockWeekdays = []string{"星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"}
+var weekdayNames = []string{"星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"}
+
+// WeekdayName 是 t 那天是星期几（中文，例如「星期三」）：星期的写法只在这里定义一次。
+func WeekdayName(t time.Time) string { return weekdayNames[t.Weekday()] }
 
 // Brief 实现 Briefer。
 func (c ClockBriefer) Brief(string) Briefing {
@@ -19,5 +22,5 @@ func (c ClockBriefer) Brief(string) Briefing {
 	if c.Now != nil {
 		now = c.Now()
 	}
-	return Briefing{Lines: []string{fmt.Sprintf("现在是 %s（%s）%s。", now.Format("2006年1月2日"), clockWeekdays[now.Weekday()], now.Format("15:04"))}}
+	return Briefing{Lines: []string{fmt.Sprintf("现在是 %s（%s）%s。", now.Format("2006年1月2日"), WeekdayName(now), now.Format("15:04"))}}
 }

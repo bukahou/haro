@@ -237,7 +237,7 @@ func (s *Session) speakAnswer(ctx context.Context, history []ChatMessage, input 
 }
 
 // generateSentences 拉取模型的流式输出，切好的句子（带段号）写进 sentences。
-// 模型要求调用工具时：先把调用前说的话说出去 → 执行 → 把结果交回模型 → 再生成（最多 maxToolRounds 轮）；
+// 模型要求调用工具时：先把调用前说的话说出去 → 执行 → 把结果交回模型 → 再生成（步数和死循环见 tool_steps.go）；
 // 需要确认的工具不执行，改为问用户「确定要删掉吗」，等下一轮回答。
 // 工具往来和最后一段话随时记进 record（每个工具一做完就记，之后被打断、出错也不丢）。
 func (s *Session) generateSentences(ctx context.Context, history []ChatMessage, input ChatMessage, view cameraView,
@@ -302,10 +302,11 @@ func (s *Session) generateSentences(ctx context.Context, history []ChatMessage, 
 	if record.restricted { // 声纹没确认的叫醒短句：不给工具
 		specs = nil
 	}
+	steps, forceFinal := newToolSteps(s.opts), false
 	for round := 0; ; round++ {
 		segment = baseRound + round
-		// 最后一轮工具定义照给（提示词缓存不失效）、但不许调用，逼模型直接回答
-		request := ChatRequest{Messages: messages, Tools: specs, ForbidToolCalls: round >= maxToolRounds}
+		// 最后一步（或刚停下一个死循环）：工具定义照给（提示词缓存不失效）、但不许调用，逼模型直接回答
+		request := ChatRequest{Messages: messages, Tools: specs, ForbidToolCalls: round >= s.maxToolSteps()-1 || forceFinal}
 		var calls []ToolCall
 		var roundText strings.Builder
 		var roundUsage *ReplyUsage
@@ -358,7 +359,16 @@ func (s *Session) generateSentences(ctx context.Context, history []ChatMessage, 
 		var frameMessages []ChatMessage // 看画面：图片只能放在用户消息里，排在所有工具结果之后
 		var directAnswer string         // 专家那句直接当这一轮的回答（不再请求前台模型）
 		switched := false
+		steps.begin()
 		for _, call := range calls {
+			if count, loop := steps.repeated(call); loop { // 死循环：不执行，告诉模型为什么停，下一步不许再调用
+				s.logger.Warn("同一个调用反复出现：不再执行", "tool", call.Name, "times", count)
+				result := loopStoppedResult(count)
+				record.recordResult(toolRoundIndex, call, result)
+				exchange = append(exchange, ChatMessage{Role: RoleTool, ToolName: call.Name, ToolCallID: call.ID, Text: result})
+				forceFinal = true
+				continue
+			}
 			if ctx.Err() != nil { // 被打断：后面的调用不再执行（收尾时记成「没有执行」）
 				break
 			}

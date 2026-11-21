@@ -68,7 +68,7 @@ func TestToolboxWithRemoteServer(t *testing.T) {
 			t.Errorf("%s 的参数定义不是合法 JSON", spec.Name)
 		}
 	}
-	want := map[string]bool{"get_current_time": false, "read_echo": false, "add_echo": false, "wipe_echo": true}
+	want := map[string]bool{"read_echo": false, "add_echo": false, "wipe_echo": true}
 	if got := confirmations(box); len(got) != len(want) {
 		t.Errorf("工具清单：%v", got)
 	} else {
@@ -89,16 +89,20 @@ func TestToolboxWithRemoteServer(t *testing.T) {
 // 工具重名（内置之间、内置和远程之间）：启动就报错，不让模型看到两个同名工具。
 func TestDuplicateToolNamesFailAtStartup(t *testing.T) {
 	ctx := context.Background()
-	twice := func(server *mcp.Server) { timeTools(server) }
-	if _, err := NewToolbox(ctx, nil, quietLogger, twice); err == nil || !strings.Contains(err.Error(), "get_current_time") {
+	greet := func(server *mcp.Server) {
+		AddTool(server, &mcp.Tool{Name: "say_hi", Annotations: ReadOnly}, func(context.Context, struct{}) (struct{}, error) {
+			return struct{}{}, nil
+		})
+	}
+	if _, err := NewToolbox(ctx, nil, quietLogger, greet, greet); err == nil || !strings.Contains(err.Error(), "say_hi") {
 		t.Errorf("内置工具重名应启动失败：%v", err)
 	}
 	remote := remoteServer(t, func(server *mcp.Server) {
-		mcp.AddTool(server, &mcp.Tool{Name: "get_current_time"}, func(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, any, error) {
+		mcp.AddTool(server, &mcp.Tool{Name: "say_hi"}, func(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, any, error) {
 			return nil, nil, nil
 		})
 	})
-	if _, err := NewToolbox(ctx, []ServerSpec{{Name: "fake", URL: remote.URL}}, quietLogger); err == nil || !strings.Contains(err.Error(), "get_current_time") {
+	if _, err := NewToolbox(ctx, []ServerSpec{{Name: "fake", URL: remote.URL}}, quietLogger, greet); err == nil || !strings.Contains(err.Error(), "say_hi") {
 		t.Errorf("远程工具和内置的重名应启动失败：%v", err)
 	}
 }
@@ -186,7 +190,7 @@ func TestNoteTools(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer box.Close()
-	want := map[string]bool{"get_current_time": false, "save_note": false, "search_notes": false, "delete_note": true,
+	want := map[string]bool{"save_note": false, "search_notes": false, "delete_note": true,
 		"list_deleted_notes": false, "restore_note": false}
 	if got := confirmations(box); len(got) != len(want) {
 		t.Fatalf("工具清单：%v", got)
@@ -237,8 +241,5 @@ func TestNoteTools(t *testing.T) {
 	}
 	if _, err := box.Call(ctx, brain.ToolCall{Name: "save_note", Arguments: map[string]any{"content": 3}}); err == nil {
 		t.Error("参数类型不对应报错")
-	}
-	if now, err := box.Call(ctx, brain.ToolCall{Name: "get_current_time"}); err != nil || !strings.Contains(now, "星期") {
-		t.Errorf("get_current_time：%s %v", now, err)
 	}
 }

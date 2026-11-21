@@ -475,10 +475,8 @@ var researchToolSpecs = []brain.ToolSpec{
 
 func researchPrompt(limits Limits, now time.Time) string {
 	// 告诉模型今天的日期（2026-11-17 实测：不说的话搜索词里写的是两年前的年份，搜回来的都是旧资料）
-	today := fmt.Sprintf("今天是 %s（%s）。要查「现在」「最近」的事时按这个日期来，不要用别的年份。\n", now.Format("2006年1月2日"), weekdayNames[now.Weekday()])
+	today := fmt.Sprintf("今天是 %s（%s）。要查「现在」「最近」的事时按这个日期来，不要用别的年份。\n", now.Format("2006年1月2日"), brain.WeekdayName(now))
 	return today + fmt.Sprintf(`你是调查助手，在后台替主人查资料。用 search_web 搜索、必要时用 read_pages 读正文，查清楚后直接给出结论。
 限制：最多搜索 %d 次、最多 %d 轮；够用就停，不要为了凑数多查。搜索词按资料最可能使用的语言写（日本的事用日语搜，其他按情况用英语或中文）。
 查清楚后调用 submit_conclusion 交出结论和来源。`, limits.MaxSearches, limits.MaxRounds)
 }
-
-var weekdayNames = []string{"星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"}
