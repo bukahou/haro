@@ -68,6 +68,13 @@ type services struct {
 	pricing    spending.Pricing
 }
 
+// meteredCloudModel 是按 spec 接好的云端模型，按 purpose 记账（模型 ID 只在 spec 里写一次）。不查额度、不熔断。
+func (deps services) meteredCloudModel(settings config.ServerSettings, spec cloudModelSpec, purpose spending.Purpose,
+	logger *slog.Logger) brain.ChatModel {
+	return spending.NewMeteredChatModel(newCloudChatModel(settings, deps.claude, spec, deps.modelHTTP), spec.model, purpose,
+		deps.pricing, deps.ledger, logger)
+}
+
 // connectServices 准备外部服务（语音合成、识别、模型的客户端）和费用的刹车：先有刹车，再接搜索、后台调查。
 func connectServices(ctx context.Context, settings config.ServerSettings, logger *slog.Logger, shutdown *shutdownSteps) (services, error) {
 	deps := services{httpClient: &http.Client{Timeout: settings.RequestTimeout},
@@ -76,11 +83,13 @@ func connectServices(ctx context.Context, settings config.ServerSettings, logger
 		modelHTTP: &http.Client{}}
 	// Claude 的客户端全进程只建一个，所有用途共用（见 llm.ClaudeAPI：多一个客户端 / HTTP 客户端就多一份令牌缓存，
 	// 集群令牌只能换一次 ⇒ 互相把令牌用掉）。不用 Claude 时为 nil
-	deps.claude = newClaudeAPI(settings, deps.modelHTTP)
+	var err error
+	if deps.claude, err = newClaudeAPI(settings, deps.modelHTTP); err != nil {
+		return deps, err
+	}
 	if _, err := llm.ParseToolCallIDStyle(settings.CloudLLMToolCallIDs); err != nil {
 		return deps, fmt.Errorf("HARO_CLOUD_LLM_TOOL_CALL_IDS: %w", err)
 	}
-	var err error
 	if deps.synthesis, err = buildSynthesizer(settings, deps.httpClient, logger); err != nil {
 		return deps, err
 	}
@@ -91,13 +100,13 @@ func connectServices(ctx context.Context, settings config.ServerSettings, logger
 	if err != nil {
 		return deps, err
 	}
-	deps.ledger = spending.WithChargeLog(ledger, logger)
+	deps.ledger = spending.WithBookkeeping(ledger, logger)
 	shutdown.add(func() { deps.ledger.Close() })
 	if settings.UsageDB == "" {
 		logger.Warn("没设 HARO_USAGE_DB：用量只记在内存里，服务端重启后额度重新计算")
 	}
 	deps.guard = spending.NewGuard(deps.ledger, spending.Limits{ResearchDailyYen: settings.ResearchDailyYen,
-		MonthlyYen: settings.MonthlyYen, SearchDailyCredits: settings.SearchDailyCredits, WarnRatio: 0.8,
+		MonthlyYen: settings.MonthlyYen, SearchDailyCredits: settings.SearchDailyCredits, WarnRatio: spending.DefaultWarnRatio,
 		MonthlyRaiseYen: settings.MonthlyRaiseYen}, logger)
 	logger.Info("费用上限", "research_daily_yen", settings.ResearchDailyYen, "monthly_yen", settings.MonthlyYen,
 		"search_daily_credits", settings.SearchDailyCredits)
@@ -128,7 +137,7 @@ func buildTooling(ctx context.Context, settings config.ServerSettings, deps serv
 	if settings.Weather { // 天气：Open-Meteo 为主，日本气象厅备用；都不用密钥
 		weatherHTTP := weather.NewHTTPClient() // 连接等得短：连不上就早点交给备用
 		home := weatherHome(ctx, settings, weatherHTTP, logger)
-		openMeteo := weather.NewClient(settings.WeatherForecastURL, settings.WeatherGeocodingURL, weatherHTTP)
+		openMeteo := weather.NewOpenMeteoClient(settings.WeatherForecastURL, settings.WeatherGeocodingURL, weatherHTTP)
 		forecaster := weatherForecaster(ctx, settings, openMeteo, home, weatherHTTP, logger)
 		builtins = append(builtins, tools.WeatherTools(openMeteo, forecaster, home, settings.WeatherGeocodingLanguage, logger))
 		if home != nil {
@@ -137,12 +146,12 @@ func buildTooling(ctx context.Context, settings config.ServerSettings, deps serv
 	}
 	if searcher := connectWebSearch(settings, deps.httpClient, logger); searcher != nil {
 		shutdown.add(func() { searcher.Close() })
-		meter := spending.NewSearchMeter(deps.guard, deps.ledger, deps.pricing, spending.PurposeSearch, "tavily")
+		meter := spending.NewSearchMeter(deps.guard, deps.ledger, deps.pricing, spending.PurposeSearch, tools.TavilyName)
 		builtins = append(builtins, tools.WebSearchTools(searcher, meter, logger))
 		kit.expertSearch = func(ctx context.Context, query string) (string, error) {
 			return tools.QuickSearch(ctx, searcher, meter, query, logger)
 		}
-		runner, closeRunner, err := startResearch(ctx, settings, deps.claude, deps.modelHTTP, deps.pricing, searcher, deps.ledger, deps.guard, logger)
+		runner, closeRunner, err := startResearch(ctx, settings, deps, searcher, logger)
 		if err != nil {
 			return kit, err
 		}
@@ -154,7 +163,7 @@ func buildTooling(ctx context.Context, settings config.ServerSettings, deps serv
 			logger.Info("调查结束：通知终端", "id", task.ID, "status", task.Status, "terminals", delivered)
 		})
 	}
-	box, err := tools.NewToolbox(ctx, nil, logger, builtins...)
+	box, err := tools.NewToolbox(ctx, logger, builtins...)
 	if err != nil {
 		return kit, err
 	}
@@ -190,10 +199,10 @@ func assembleBrain(ctx context.Context, settings config.ServerSettings, catalog 
 	if settings.MonthlyYen > 0 && settings.MonthlyRaiseYen > 0 && settings.LLMProvider == config.LLMCloud {
 		// 月度上限到了以后，主人可以口头临时提高：判断用的小调用不受额度管（否则上限到了就没法判断），按天限次数、照样记账
 		components.MonthlyCap = deps.guard
-		components.OverBudgetModel = spending.NewDailyCallLimit(spending.NewMeteredChatModel(newCloudChatModel(settings, deps.claude,
-			cloudModelSpec{model: settings.CloudLLMModel, maxTokens: overBudgetMaxTokens, effort: settings.CloudLLMEffort,
-				thinking: settings.CloudLLMThinking, firstTokenTimeout: settings.CloudLLMTimeout, requestTimeout: settings.RequestTimeout},
-			deps.modelHTTP), settings.CloudLLMModel, spending.PurposeChat, deps.pricing, deps.ledger, logger), settings.OverBudgetDailyCalls)
+		components.OverBudgetModel = spending.NewDailyCallLimit(deps.meteredCloudModel(settings, cloudModelSpec{model: settings.CloudLLMModel,
+			maxTokens: overBudgetMaxTokens, effort: settings.CloudLLMEffort, thinking: settings.CloudLLMThinking,
+			firstTokenTimeout: settings.CloudLLMTimeout, requestTimeout: settings.RequestTimeout}, spending.PurposeChat, logger),
+			settings.OverBudgetDailyCalls)
 		logger.Info("月度上限到了以后可以口头临时提高", "raise_yen", settings.MonthlyRaiseYen, "daily_checks", settings.OverBudgetDailyCalls)
 	}
 	store, err := openConversationStore(ctx, settings, logger, shutdown)

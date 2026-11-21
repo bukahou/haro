@@ -46,7 +46,7 @@ func (m *summaryModel) count() int {
 }
 
 func TestRollingSummary(t *testing.T) {
-	book := NewConversationBook(nil, Options{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	book := NewConversationBook(nil, Options{MaxHistoryTurn: 2}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	model := &summaryModel{reply: "主人的车停在 B2。"}
 	book.SummarizeWith(Agent{Name: "摘要", Model: model, Instructions: "写摘要。"})
 	conversation := book.Conversation("主人")
@@ -55,7 +55,7 @@ func TestRollingSummary(t *testing.T) {
 			{Role: RoleTool, Text: "工具结果不进摘要"}}}
 	}
 	for _, text := range []string{"车停在 B2", "第二句", "第三句", "第四句"} {
-		conversation.appendTurn(turn(text), 2, 0) // 窗口 2 轮：第 3、4 轮时掉出 2 轮，还不够一批
+		conversation.appendTurn(turn(text), 0) // 窗口 2 轮：第 3、4 轮时掉出 2 轮，还不够一批
 	}
 	if model.count() != 0 {
 		t.Fatal("没攒够一批不该压缩")
@@ -63,7 +63,7 @@ func TestRollingSummary(t *testing.T) {
 	if messages := conversation.messages(); len(messages) != 4*4 { // 每轮：时间标记 + 三条
 		t.Errorf("还没压进摘要的照常带着：%d 条", len(messages))
 	}
-	conversation.appendTurn(turn("第五句"), 2, 0) // 掉出第 3 轮：够 3 轮了
+	conversation.appendTurn(turn("第五句"), 0) // 掉出第 3 轮：够 3 轮了
 	deadline := time.Now().Add(2 * time.Second)
 	for conversation.currentSummary() == "" && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
@@ -72,7 +72,7 @@ func TestRollingSummary(t *testing.T) {
 		t.Fatalf("摘要：%q", got)
 	}
 	request := model.requests[0]
-	if !strings.Contains(request, "主人：车停在 B2") || strings.Contains(request, "工具结果") {
+	if !strings.Contains(request, summaryOwnerLabel+"车停在 B2") || strings.Contains(request, "工具结果") {
 		t.Errorf("压缩的输入：%s", request)
 	}
 	if model.systems[0] != "写摘要。" || !slices.Equal(model.chains[0], []string{"摘要"}) {
@@ -90,10 +90,10 @@ func TestRollingSummary(t *testing.T) {
 }
 
 func TestNoSummaryKeepsOldBehaviour(t *testing.T) {
-	book := NewConversationBook(nil, Options{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	book := NewConversationBook(nil, Options{MaxHistoryTurn: 2}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	conversation := book.Conversation("主人")
 	for i := 0; i < 5; i++ {
-		conversation.appendTurn(ConversationTurn{Messages: []ChatMessage{{Role: RoleUser, Text: "x"}, {Role: RoleAssistant, Text: "y"}}}, 2, 0)
+		conversation.appendTurn(ConversationTurn{Messages: []ChatMessage{{Role: RoleUser, Text: "x"}, {Role: RoleAssistant, Text: "y"}}}, 0)
 	}
 	if len(conversation.messages()) != 2*3 || conversation.currentSummary() != "" {
 		t.Error("没开摘要：掉出窗口的直接丢")
@@ -102,13 +102,13 @@ func TestNoSummaryKeepsOldBehaviour(t *testing.T) {
 
 // 摘要写到一半到了输出上限：半份摘要不用，旧摘要（这里是没有）和没压进去的对话照旧带着。
 func TestTruncatedSummaryIsNotUsed(t *testing.T) {
-	book := NewConversationBook(nil, Options{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	book := NewConversationBook(nil, Options{MaxHistoryTurn: 2}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	model := &summaryModel{reply: "主人的车停在", truncated: true}
 	book.SummarizeWith(Agent{Name: "摘要", Model: model, Instructions: "写摘要。"})
 	conversation := book.Conversation("主人")
 	for _, text := range []string{"车停在 B2", "第二句", "第三句", "第四句", "第五句"} {
 		conversation.appendTurn(ConversationTurn{Messages: []ChatMessage{{Role: RoleUser, Text: text},
-			{Role: RoleAssistant, Text: "好的。"}}}, 2, 0)
+			{Role: RoleAssistant, Text: "好的。"}}}, 0)
 	}
 	deadline := time.Now().Add(2 * time.Second)
 	for model.count() == 0 && time.Now().Before(deadline) {
@@ -135,9 +135,9 @@ func TestCompactionSummarizesRightAway(t *testing.T) {
 	turn := func(text string) ConversationTurn {
 		return ConversationTurn{Messages: []ChatMessage{{Role: RoleUser, Text: text}, {Role: RoleAssistant, Text: "好。"}}}
 	}
-	conversation.appendTurn(turn("第一句"), 6, 100)
-	conversation.appendTurn(turn("第二句"), 6, 100)
-	conversation.appendTurn(turn("第三句"), 6, 1000) // 到了门槛：移出 1 轮（不到一批 3 轮）
+	conversation.appendTurn(turn("第一句"), 100)
+	conversation.appendTurn(turn("第二句"), 100)
+	conversation.appendTurn(turn("第三句"), 1000) // 到了门槛：移出 1 轮（不到一批 3 轮）
 	deadline := time.Now().Add(2 * time.Second)
 	for conversation.currentSummary() == "" && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
@@ -147,5 +147,33 @@ func TestCompactionSummarizesRightAway(t *testing.T) {
 	}
 	if messages := conversation.messages(); len(messages) != 2*3 { // 每轮：时间标记 + 两条
 		t.Errorf("压完只带最近两轮：%d 条", len(messages))
+	}
+}
+
+// sequenceModel 依次回 replies 里的话（每次请求一条），记下每次请求的最后一条消息。
+type sequenceModel struct {
+	replies []string
+	asked   []string
+}
+
+func (m *sequenceModel) StreamReply(_ context.Context, request ChatRequest) iter.Seq2[ReplyDelta, error] {
+	m.asked = append(m.asked, request.Messages[len(request.Messages)-1].Text)
+	reply := m.replies[min(len(m.asked), len(m.replies))-1]
+	return func(yield func(ReplyDelta, error) bool) { yield(ReplyDelta{Text: reply}, nil) }
+}
+
+// 摘要写得太长：不截断（会截在句子中间），请它压短一次，用压短后的那份；压短后还太长就不用（留着旧摘要下次再压）。
+func TestOverlongSummaryIsShortenedNotCut(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	turns := []ConversationTurn{{Messages: []ChatMessage{{Role: RoleUser, Text: "车停在 B2"}, {Role: RoleAssistant, Text: "好的。"}}}}
+	long := strings.Repeat("长", summaryChars*summaryHardFactor+1)
+	model := &sequenceModel{replies: []string{long, "主人的车停在 B2。"}}
+	got, err := summarizeTurns(context.Background(), logger, Agent{Name: "摘要", Model: model, Instructions: "写摘要。"}, "", turns)
+	if err != nil || got != "主人的车停在 B2。" || len(model.asked) != 2 {
+		t.Errorf("应请它压短一次并用压短后的：%q err=%v 请求 %d 次", got, err, len(model.asked))
+	}
+	model = &sequenceModel{replies: []string{long, long}}
+	if got, err := summarizeTurns(context.Background(), logger, Agent{Name: "摘要", Model: model, Instructions: "写摘要。"}, "", turns); err == nil {
+		t.Errorf("压短后还太长不该用：%d 字", len([]rune(got)))
 	}
 }

@@ -54,7 +54,7 @@ func TestSwitchPersona(t *testing.T) {
 	k := newPersonaTalker(t, model, state, &seen)
 
 	k.say("你好")
-	if got := model.LastRequest().System(); got != "基础规则。\n\n你手边的工具：switch_persona。\n\n风格：毒舌。" {
+	if got, want := model.LastRequest().System(), "基础规则。\n\n"+brain.ToolOverview([]brain.ToolSpec{{Name: "switch_persona"}})+"\n\n风格：毒舌。"; got != want {
 		t.Fatalf("默认性格的系统提示词 = %q", got)
 	}
 	if len(seen) != 1 || seen[0].Emotion != brain.EmotionTease {
@@ -106,7 +106,6 @@ func (m *specRecorder) StreamReply(_ context.Context, request brain.ChatRequest)
 	}
 	return func(yield func(brain.ReplyDelta, error) bool) { yield(brain.ReplyDelta{Text: "好的。"}, nil) }
 }
-func (m *specRecorder) Warmup(context.Context) error { return nil }
 
 // promptRecorder 记下最近一次收到的工具名和系统提示词。
 type promptRecorder struct {
@@ -124,4 +123,3 @@ func (m *promptRecorder) StreamReply(_ context.Context, request brain.ChatReques
 	m.system = braintest.Request{Messages: messages}.System()
 	return func(yield func(brain.ReplyDelta, error) bool) { yield(brain.ReplyDelta{Text: "好的。"}, nil) }
 }
-func (m *promptRecorder) Warmup(context.Context) error { return nil }

@@ -6,15 +6,10 @@ import (
 )
 
 // loggingLedger 给账本套一层：每记一笔都打一行日志。花的钱在日志里就看得见（包括被打断、出错的那几笔），
-// 核对时不用进账本查。没记上的不打，由调用方说明。
+// 核对时不用进账本查。没记上的不打，由外面那层（pendingChargesLedger）和调用方说明。由 WithBookkeeping 套上。
 type loggingLedger struct {
 	Ledger
 	logger *slog.Logger
-}
-
-// WithChargeLog 返回每记一笔都打日志的账本。
-func WithChargeLog(ledger Ledger, logger *slog.Logger) Ledger {
-	return &loggingLedger{Ledger: ledger, logger: logger}
 }
 
 // Record 记一笔，记上了就打一行：用途、花在什么上、日元，加上 token 或积分；不知道的数不写（不编成 0）。

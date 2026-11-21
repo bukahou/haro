@@ -80,6 +80,39 @@ func TestProfileLengthLimit(t *testing.T) {
 	}
 }
 
+// 列表里冒号结尾、下面有填了的缩进子项的是小标题：保留（子项才有归属）；没有子项的空项照样不发。
+func TestProfileKeepsHeadingsWithSubItems(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "owner.md", "---\nperson: 主人\n---\n- 称呼：\n- 兴趣：\n  - 登山\n  - 摄影\n- 工作：工程师\n- 小时候：\n  - \n")
+	got := store(t, dir).Profile("主人")
+	if !strings.Contains(got, "- 兴趣：\n  - 登山\n  - 摄影") {
+		t.Errorf("带子项的小标题应保留：%q", got)
+	}
+	if strings.Contains(got, "称呼") || strings.Contains(got, "小时候") {
+		t.Errorf("没填的项（包括子项都没填的）不该发：%q", got)
+	}
+}
+
+// 超长时截在完整的一行末尾，不切断半句。
+func TestProfileCutsAtLineEnd(t *testing.T) {
+	dir := t.TempDir()
+	line := strings.Repeat("长", 100) + "。"
+	write(t, dir, "owner.md", "---\nperson: 主人\n---\n"+strings.Repeat(line+"\n", 15))
+	got := store(t, dir).Profile("主人")
+	lines := 0
+	for _, l := range strings.Split(got, "\n") {
+		if strings.Contains(l, "长") {
+			lines++
+			if l != line {
+				t.Fatalf("截在了半句：%q", l)
+			}
+		}
+	}
+	if want := personAdviseRunes * hardLimitFactor / len([]rune(line+"\n")); lines != want {
+		t.Errorf("应保留 %d 行完整的，得到 %d 行", want, lines)
+	}
+}
+
 func store(t *testing.T, dir string) *Store {
 	t.Helper()
 	return OpenDir(dir, quietLogger)

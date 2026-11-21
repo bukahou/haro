@@ -5,13 +5,13 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/caarlos0/env/v11"
 )
 
-// v7：云端用 Claude 时的配置检查（接口格式、模型、凭证、回答力度）。
+// v7：云端用 Claude 时的配置检查（接口格式、模型）。凭证配没配齐由 llm 包查（服务端启动时）。
 func TestCloudLLMReadyForAnthropic(t *testing.T) {
-	for _, name := range []string{"ANTHROPIC_FEDERATION_RULE_ID", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_PROFILE"} {
-		t.Setenv(name, "") // 不受跑测试那台机器的环境影响
-	}
 	base := ServerSettings{CloudLLMAPI: CloudAPIAnthropic, CloudLLMModel: "claude-haiku-5-5", AnthropicAPIKey: "k",
 		CloudLLMEffort: "low", ResearchEffort: "medium"}
 	if err := base.cloudLLMReady(); err != nil {
@@ -24,7 +24,6 @@ func TestCloudLLMReadyForAnthropic(t *testing.T) {
 		want   string
 	}{
 		{"没设模型", func(s *ServerSettings) { s.CloudLLMModel = "" }, "HARO_CLOUD_LLM_MODEL"},
-		{"没有凭证", func(s *ServerSettings) { s.AnthropicAPIKey = "" }, "HARO_ANTHROPIC_API_KEY"},
 		{"不认识的接口格式", func(s *ServerSettings) { s.CloudLLMAPI = "gemini" }, "HARO_CLOUD_LLM_API"},
 	}
 	for _, c := range cases {
@@ -35,13 +34,6 @@ func TestCloudLLMReadyForAnthropic(t *testing.T) {
 		}
 	}
 
-	// 集群里：不填 key，靠 Workload Identity Federation（SDK 读 ANTHROPIC_FEDERATION_* 等变量）
-	t.Setenv("ANTHROPIC_FEDERATION_RULE_ID", "fdrl_test")
-	wif := base
-	wif.AnthropicAPIKey = ""
-	if err := wif.cloudLLMReady(); err != nil {
-		t.Errorf("配了 WIF 时不填 key 也应通过：%v", err)
-	}
 }
 
 // 天气的备用来源只认 jma / none；家的位置写错照样报错。
@@ -74,9 +66,6 @@ func TestCloudLLMReadyForOpenAI(t *testing.T) {
 
 // 更强的模型：不设就不检查；设了要有单价、用途合法、和云端模型同一个接口能用。
 func TestValidateStrongLLM(t *testing.T) {
-	for _, name := range []string{"ANTHROPIC_FEDERATION_RULE_ID", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_PROFILE"} {
-		t.Setenv(name, "")
-	}
 	base := ServerSettings{CloudLLMAPI: CloudAPIAnthropic, CloudLLMModel: "claude-haiku-5-5", AnthropicAPIKey: "k",
 		CloudLLMEffort: "low", ResearchEffort: "medium", CloudLLMThinking: "disabled", StrongLLMThinking: "between_tools",
 		StrongLLMVisionMode: VisionByExpert}
@@ -107,7 +96,7 @@ func TestValidateStrongLLM(t *testing.T) {
 	}{
 		{"没设汇率", func(s *ServerSettings) { s.USDToYen = 0 }, "HARO_USD_JPY"},
 		{"不认识的用途", func(s *ServerSettings) { s.StrongLLMUse = []string{"vision", "chat"} }, "HARO_STRONG_LLM_USE"},
-		{"云端接口没配好", func(s *ServerSettings) { s.AnthropicAPIKey = "" }, "HARO_STRONG_LLM_MODEL"},
+		{"云端接口没配好", func(s *ServerSettings) { s.CloudLLMModel = "" }, "HARO_STRONG_LLM_MODEL"},
 		{"看画面的方式不对", func(s *ServerSettings) { s.StrongLLMVisionMode = "both" }, "HARO_STRONG_LLM_VISION_MODE"},
 	}
 	for _, c := range cases {
@@ -125,27 +114,27 @@ func TestRemovedSettings(t *testing.T) {
 		return func(name string) (string, bool) { value, ok := env[name]; return value, ok }
 	}
 	notes, err := checkRemovedSettings(lookup(map[string]string{"HARO_TURN_MODE": "hands-free", "HARO_WAKE_WORD": "true",
-		"HARO_MIN_SPEECH": "700ms", "HARO_CAMERA_MODE": "on-demand", "HARO_CAMERA_FPS": "2", "HARO_FRAME_MAX_AGE": "3s"}))
+		"HARO_MIN_SPEECH": "700ms", "HARO_CAMERA_MODE": "on-demand", "HARO_CAMERA_FPS": "2", "HARO_FRAME_MAX_AGE": "3s"}), terminalSide)
 	if err != nil || len(notes) != 6 {
 		t.Errorf("和现在一致的写法只提醒：notes=%v err=%v", notes, err)
 	}
 	for _, env := range []map[string]string{{"HARO_TURN_MODE": "push-to-talk"}, {"HARO_WAKE_WORD": "false"},
 		{"HARO_CAMERA_MODE": "continuous"}} {
-		if _, err := checkRemovedSettings(lookup(env)); err == nil {
+		if _, err := checkRemovedSettings(lookup(env), terminalSide); err == nil {
 			t.Errorf("%v 要求已删除的行为，应启动失败", env)
 		}
 	}
 	// 服务端不再拉起子进程：这些项写着什么值都只是多余（服务端按 HARO_ASR_URL、HARO_TTS_URL 连）
 	notes, err = checkRemovedSettings(lookup(map[string]string{"HARO_ASR": "local", "HARO_ASR_BIN": "bin/haro-asr",
-		"HARO_ASR_PORT": "59126", "HARO_PIPER_PYTHON": "python3", "HARO_PIPER_MODEL": "zh.onnx", "HARO_PIPER_PORT": "59125"}))
+		"HARO_ASR_PORT": "59126", "HARO_PIPER_PYTHON": "python3", "HARO_PIPER_MODEL": "zh.onnx", "HARO_PIPER_PORT": "59125"}), serverSide)
 	if err != nil || len(notes) != 6 {
 		t.Errorf("拉起子进程用的配置项只提醒：notes=%v err=%v", notes, err)
 	}
-	notes, err = checkRemovedSettings(lookup(map[string]string{"HARO_NETDIAG_DNS_NAME": "www.cloudflare.com", "HARO_NETDIAG_INTERNET_TARGET": "1.1.1.1:443"}))
+	notes, err = checkRemovedSettings(lookup(map[string]string{"HARO_NETDIAG_DNS_NAME": "www.cloudflare.com", "HARO_NETDIAG_INTERNET_TARGET": "1.1.1.1:443"}), serverSide)
 	if err != nil || len(notes) != 2 {
 		t.Errorf("网络诊断的配置项只提醒：notes=%v err=%v", notes, err)
 	}
-	notes, err = checkRemovedSettings(lookup(map[string]string{"HARO_CONTEXT_SIZE": "4096", "HARO_MODEL_KEEP_ALIVE": "30m"}))
+	notes, err = checkRemovedSettings(lookup(map[string]string{"HARO_CONTEXT_SIZE": "4096", "HARO_MODEL_KEEP_ALIVE": "30m"}), serverSide)
 	if err != nil || len(notes) != 2 {
 		t.Errorf("Ollama 那边配的两项只提醒：notes=%v err=%v", notes, err)
 	}
@@ -155,20 +144,20 @@ func TestRemovedSettings(t *testing.T) {
 			prices["HARO_"+side+"_LLM_PRICE_"+kind] = "1"
 		}
 	}
-	if notes, err = checkRemovedSettings(lookup(prices)); err != nil || len(notes) != 8 {
+	if notes, err = checkRemovedSettings(lookup(prices), serverSide); err != nil || len(notes) != 8 {
 		t.Errorf("手写的八个单价只提醒：notes=%v err=%v", notes, err)
 	}
 	// 自动换本地模型删了：退路的两项写什么都只提醒（本机终端的环境里还写着 true，不能让终端起不来）；
 	// 调查只用云端：写 cloud 只提醒，写 local 要求已删除的行为，启动失败
 	notes, err = checkRemovedSettings(lookup(map[string]string{"HARO_LLM_FALLBACK": "true", "HARO_LLM_FALLBACK_COOLDOWN": "30s",
-		"HARO_RESEARCH_LLM": "cloud"}))
+		"HARO_RESEARCH_LLM": "cloud"}), serverSide)
 	if err != nil || len(notes) != 3 {
 		t.Errorf("退路和调查的配置项：notes=%v err=%v", notes, err)
 	}
-	if _, err := checkRemovedSettings(lookup(map[string]string{"HARO_RESEARCH_LLM": "local"})); err == nil {
+	if _, err := checkRemovedSettings(lookup(map[string]string{"HARO_RESEARCH_LLM": "local"}), serverSide); err == nil {
 		t.Error("HARO_RESEARCH_LLM=local 要求已删除的行为，应启动失败")
 	}
-	if notes, err := checkRemovedSettings(lookup(nil)); err != nil || len(notes) != 0 {
+	if notes, err := checkRemovedSettings(lookup(nil), serverSide); err != nil || len(notes) != 0 {
 		t.Errorf("没写时什么都不说：notes=%v err=%v", notes, err)
 	}
 }
@@ -188,7 +177,7 @@ func TestFrameSizeParsing(t *testing.T) {
 
 // 拍照底层只认三个值；写错时启动失败。
 func TestCameraBackendIsValidated(t *testing.T) {
-	settings := TerminalSettings{TurnDetection: "server_vad", ServerURL: "http://127.0.0.1:59130"}
+	settings := TerminalSettings{TurnDetection: "server_vad", ServerURL: "http://127.0.0.1:59130", WakeIdle: time.Minute}
 	for _, backend := range []string{CameraBackendAuto, CameraBackendMediaDevices, CameraBackendFFmpeg} {
 		settings.CameraBackend = backend
 		if err := settings.validateTerminal(); err != nil {
@@ -253,5 +242,69 @@ func TestServerAndTerminalSettingsDoNotOverlap(t *testing.T) {
 	}
 	if !server["HARO_ASR_URL"] || !terminal["HARO_SERVER_URL"] || server["HARO_TURN_DETECTION"] {
 		t.Error("服务端连识别服务、终端连服务端；说完判断是终端交给识别流的设置")
+	}
+}
+
+// 已删除配置项只查自己那边的：终端和服务端常共用一份 env，服务端的旧配置不能让终端起不来，反过来也一样。
+func TestRemovedSettingsAreCheckedPerSide(t *testing.T) {
+	lookup := func(env map[string]string) func(string) (string, bool) {
+		return func(name string) (string, bool) { value, ok := env[name]; return value, ok }
+	}
+	env := lookup(map[string]string{"HARO_RESEARCH_LLM": "local", "HARO_CAMERA_MODE": "continuous"})
+	if _, err := checkRemovedSettings(env, serverSide); err == nil || !strings.Contains(err.Error(), "HARO_RESEARCH_LLM") {
+		t.Errorf("服务端的旧配置要求已删除的行为：服务端应起不来：%v", err)
+	}
+	if _, err := checkRemovedSettings(env, terminalSide); err == nil || !strings.Contains(err.Error(), "HARO_CAMERA_MODE") {
+		t.Errorf("终端的旧配置要求已删除的行为：终端应起不来：%v", err)
+	}
+	if notes, err := checkRemovedSettings(lookup(map[string]string{"HARO_RESEARCH_LLM": "local", "HARO_LLM_FALLBACK": "true"}), terminalSide); err != nil || len(notes) != 0 {
+		t.Errorf("服务端的配置项不该影响终端：notes=%v err=%v", notes, err)
+	}
+}
+
+// serverSettingsFrom 按 values 解析服务端配置（没写的用默认值），不读跑测试那台机器的环境变量。
+func serverSettingsFrom(t *testing.T, values map[string]string) ServerSettings {
+	t.Helper()
+	var settings ServerSettings
+	if err := env.ParseWithOptions(&settings, env.Options{Environment: values}); err != nil {
+		t.Fatal(err)
+	}
+	return settings
+}
+
+// 服务端的配置校验按领域逐项查：基线（本地模型、Piper、不开工具）通过；每改坏一项都起不来，报错写明是哪个变量。
+func TestValidateBrainTable(t *testing.T) {
+	base := serverSettingsFrom(t, map[string]string{"HARO_TTS": TTSPiper, "HARO_TTS_URL": "http://127.0.0.1:5000",
+		"HARO_ASR_URL": "http://127.0.0.1:59126", "HARO_LLM_PROVIDER": LLMLocal, "HARO_TOOLS": "false"})
+	if err := base.validateBrain(); err != nil {
+		t.Fatalf("基线应通过：%v", err)
+	}
+	cases := []struct {
+		name   string
+		change func(*ServerSettings)
+		want   string
+	}{
+		{"语音合成没有地址", func(s *ServerSettings) { s.TTSURL = "" }, "HARO_TTS_URL"},
+		{"GPT-SoVITS 缺参考录音", func(s *ServerSettings) { s.TTS = TTSGPTSoVITS }, "HARO_TTS_REF_DIR"},
+		{"语音识别没有地址", func(s *ServerSettings) { s.ASRURL = "" }, "HARO_ASR_URL"},
+		{"不认识的模型来源", func(s *ServerSettings) { s.LLMProvider = "remote" }, "HARO_LLM_PROVIDER"},
+		{"用云端却没设模型", func(s *ServerSettings) { s.LLMProvider, s.CloudLLMModel = LLMCloud, "" }, "HARO_CLOUD_LLM_MODEL"},
+		{"用云端却没设汇率", func(s *ServerSettings) {
+			s.LLMProvider, s.CloudLLMModel, s.AnthropicAPIKey, s.USDToYen = LLMCloud, "claude-haiku-5-5", "k", 0
+		}, "HARO_USD_JPY"},
+		{"导入旧对话却没有对话库", func(s *ServerSettings) { s.ConversationsDir, s.ConversationsDB = "/tmp/old", "" }, "HARO_CONVERSATIONS_DB"},
+		{"开着工具却没有记事库", func(s *ServerSettings) { s.Tools, s.NotesDB = true, "" }, "HARO_NOTES_DB"},
+		{"记事候选上限为零", func(s *ServerSettings) { s.Tools, s.NotesDB, s.NotesListLimit = true, "/tmp/notes.db", 0 }, "HARO_NOTES_LIST_LIMIT"},
+		{"压缩门槛是负数", func(s *ServerSettings) { s.CompactContextTokens = -1 }, "HARO_CONTEXT_COMPACT_TOKENS"},
+		{"工具时限为零", func(s *ServerSettings) { s.ToolTimeout = 0 }, "HARO_TOOL_TIMEOUT"},
+		{"确认时效为零", func(s *ServerSettings) { s.ConfirmationTimeout = 0 }, "HARO_CONFIRMATION_TIMEOUT"},
+		{"没有监听地址", func(s *ServerSettings) { s.ServerListen = "" }, "HARO_SERVER_LISTEN"},
+	}
+	for _, c := range cases {
+		settings := base
+		c.change(&settings)
+		if err := settings.validateBrain(); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s：应起不来并写明 %s，实际 %v", c.name, c.want, err)
+		}
 	}
 }

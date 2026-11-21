@@ -62,12 +62,16 @@ func handleEnrollment(w http.ResponseWriter, r *http.Request, speakers *SpeakerC
 	}
 }
 
-// badEnrollment 是请求本身的问题（名字不对、没登记过就补录、模型不一致）。
+// badEnrollment 是请求本身的问题（名字不对、句子算不出声纹、没登记过就补录、模型不一致）：回 400。
+// 其他错误（存盘、读盘失败）是服务端的问题：回 500。
 type badEnrollment struct{ error }
 
 // enroll 算向量、存盘、重新加载所有声纹（立刻生效）。
 func (c *SpeakerCheck) enroll(name string, clips [][]float32, appendMode bool) (realtimeproto.VoiceprintEnrollmentResult, error) {
 	result := realtimeproto.VoiceprintEnrollmentResult{Name: name}
+	if err := voiceprint.CheckName(name); err != nil {
+		return result, badEnrollment{err}
+	}
 	embeddings := make([][]float32, 0, len(clips))
 	for i, clip := range clips {
 		embedding, err := c.Embedder.Embed(clip)
@@ -82,6 +86,9 @@ func (c *SpeakerCheck) enroll(name string, clips [][]float32, appendMode bool) (
 				Score: voiceprint.Cosine(embeddings[i], embeddings[j])})
 		}
 	}
+	// 存盘一次一个：补录要读出原来的声纹、加上新的再存回去，两次登记同时做会互相覆盖；存完重新加载也按同样的先后
+	c.enrollMu.Lock()
+	defer c.enrollMu.Unlock()
 	if appendMode {
 		existing, err := voiceprint.Load(c.Dir, name)
 		if errors.Is(err, fs.ErrNotExist) {
@@ -103,7 +110,7 @@ func (c *SpeakerCheck) enroll(name string, clips [][]float32, appendMode bool) (
 	}
 	if _, err := voiceprint.Save(c.Dir, voiceprint.Voiceprint{Name: name, Model: c.Model, Embeddings: embeddings,
 		EnrolledAt: time.Now()}); err != nil {
-		return result, badEnrollment{err}
+		return result, fmt.Errorf("保存声纹: %w", err)
 	}
 	result.Sentences = len(embeddings)
 	all, err := voiceprint.LoadAll(c.Dir, c.Model)

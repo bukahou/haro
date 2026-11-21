@@ -49,6 +49,8 @@ type Options struct {
 	StreamReopen ReopenTiming // 识别流断开后重开的节奏；零值 = DefaultReopenTiming
 	// ConfirmationTimeout：会破坏的操作问了主人之后，多久没确认就作废；零值 = DefaultConfirmationTimeout
 	ConfirmationTimeout time.Duration
+	// ToolTimeout：单次工具执行最多多久（所有工具共用，包括远程 MCP）；零值 = DefaultToolTimeout
+	ToolTimeout time.Duration
 	// Phrases：不经模型、直接念的固定的话（每种语言一份）；零值 = 程序里带的那份
 	Phrases Phrases
 	// MonthlyRaiseYen：口头提高月度上限时每次加多少（念给主人听的数，和额度那一层用同一个配置）
@@ -131,11 +133,6 @@ func NewSession(parts Components, opts Options, logger *slog.Logger) *Session {
 		parts.Notices.join(session)
 	}
 	return session
-}
-
-// Warmup 预热前台的模型。只在部署侧调用（不是 Realtime 事件）。
-func (s *Session) Warmup(ctx context.Context) error {
-	return WarmUp(ctx, s.parts.Front.Model)
 }
 
 // Events 返回服务端事件流（会话期间不关闭）。
@@ -343,7 +340,7 @@ func (s *Session) rememberTurn(at time.Time, messages []ChatMessage, contextToke
 	s.answeredInResponse = true
 	conversation := s.conversation
 	s.mu.Unlock()
-	conversation.appendTurn(ConversationTurn{At: at, Messages: messages}, s.opts.MaxHistoryTurn, contextTokens)
+	conversation.appendTurn(ConversationTurn{At: at, Messages: messages}, contextTokens)
 }
 
 // deviceLabel 是日志里的设备名：没有时写「没有」。

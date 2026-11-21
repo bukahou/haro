@@ -23,32 +23,30 @@ import (
 	"github.com/bukahou/haro/internal/brain"
 )
 
-const (
-	maxSearches    = 2                // 专家一次最多联网查几次
-	examineTimeout = 25 * time.Second // 看一次（含联网查）最多多久；前台在等，超时就退回把画面交给前台
-)
-
 // Rules 是专家这个代理的规则：从「看画面」的定义得来（RulesFrom）。
 type Rules struct {
-	Name     string   // 日志、代理链里的名字
-	Prompt   string   // 系统提示词（已填好值）
-	Tools    []string // 能用的工具（search_web、report_frame 里的，要有 report_frame）；nil = 都能用
-	MaxSteps int      // 一次看画面最多请求模型几次
+	Name        string        // 日志、代理链里的名字
+	Prompt      string        // 系统提示词（已填好值）
+	Tools       []string      // 能用的工具（search_web、report_frame 里的，要有 report_frame）；nil = 都能用
+	MaxSteps    int           // 一次看画面最多请求模型几次
+	MaxSearches int           // 一次看画面最多联网查几次
+	Timeout     time.Duration // 看一次（含联网查）最多多久；前台在等，超时就退回把画面交给前台
 }
 
-// PromptValues 是「看画面」的定义正文里可以引用的值（工具名、搜索次数、字数上限只在代码里定义一处）。
-func PromptValues() map[string]any {
+// PromptValues 是「看画面」的定义正文里可以引用的值：工具名、字数上限只在代码里定义一处，搜索次数来自定义的 max_searches。
+func PromptValues(maxSearches int) map[string]any {
 	return map[string]any{"SearchTool": searchTool, "ReportTool": reportTool, "MaxSearches": maxSearches,
 		"AnswerChars": brain.CameraAnswerChars}
 }
 
 // RulesFrom 由「看画面」的定义得到专家的规则。
 func RulesFrom(definition agents.Definition) (Rules, error) {
-	prompt, err := definition.RenderPrompt(PromptValues())
+	prompt, err := definition.RenderPrompt(PromptValues(definition.MaxSearches))
 	if err != nil {
 		return Rules{}, err
 	}
-	return Rules{Name: definition.Title, Prompt: prompt, Tools: definition.Tools, MaxSteps: definition.MaxSteps}, nil
+	return Rules{Name: definition.Title, Prompt: prompt, Tools: definition.Tools, MaxSteps: definition.MaxSteps,
+		MaxSearches: definition.MaxSearches, Timeout: definition.Timeout}, nil
 }
 
 // check 检查规则：只能用专家认识的工具，要能交结论，至少请求一次。
@@ -63,6 +61,9 @@ func (r Rules) check() error {
 	}
 	if r.MaxSteps < 1 || strings.TrimSpace(r.Prompt) == "" {
 		return fmt.Errorf("看画面的代理要有系统提示词、步数至少 1（现在 %d）", r.MaxSteps)
+	}
+	if r.Timeout <= 0 || r.MaxSearches < 0 { // 前台在等它：没有期限就可能一直等下去
+		return fmt.Errorf("看画面的代理要有正的 timeout、max_searches 不能是负数（现在 %s、%d）", r.Timeout, r.MaxSearches)
 	}
 	return nil
 }
@@ -147,12 +148,12 @@ func shortenRequest(chars int) string {
 	return fmt.Sprintf("spoken 有 %d 个字，超过了 %d 个字。意思不变，压短后再调用 %s 交一次。", chars, brain.CameraAnswerChars, reportTool)
 }
 
-// ExamineFrame 看一帧画面，回答主人这一轮的话；需要时联网查（最多 maxSearches 次）。最多请求 rules.MaxSteps 次，
+// ExamineFrame 看一帧画面，回答主人这一轮的话；需要时联网查（最多 rules.MaxSearches 次）。最多请求 rules.MaxSteps 次，
 // 到上限还没交结论，就把它说的话当细节交给前台。
 // 结论经 report_frame 分两段交出；spoken 超过字数上限时让它压短一次，还超就照用（不截断）。
 // 专家没按要求交时，它说的话放进 Details，由前台自己压短。
 func (e *Expert) ExamineFrame(ctx context.Context, question brain.FrameQuestion) (brain.FrameReport, error) {
-	ctx, cancel := context.WithTimeout(ctx, examineTimeout)
+	ctx, cancel := context.WithTimeout(ctx, e.rules.Timeout)
 	defer cancel()
 	started := time.Now()
 	maxRounds := e.rules.MaxSteps
@@ -160,9 +161,11 @@ func (e *Expert) ExamineFrame(ctx context.Context, question brain.FrameQuestion)
 	if question.Style != "" {
 		messages = append(messages, brain.ChatMessage{Role: brain.RoleUser, Text: "助手的性格（spoken 用这个口吻）：\n" + question.Style})
 	}
-	messages = append(messages,
-		brain.ChatMessage{Role: brain.RoleUser, Text: "主人说：「" + question.Request + "」"},
-		brain.ChatMessage{Role: brain.RoleUser, Text: "这是摄像头当前画面。", Image: question.Frame})
+	messages = append(messages, brain.ChatMessage{Role: brain.RoleUser, Text: "主人说：「" + question.Request + "」"})
+	if question.Question != "" {
+		messages = append(messages, brain.ChatMessage{Role: brain.RoleUser, Text: "助手要你看清的：" + question.Question})
+	}
+	messages = append(messages, brain.ChatMessage{Role: brain.RoleUser, Text: brain.CameraFrameCaption, Image: question.Frame})
 	searches, promptTokens, outputTokens := 0, 0, 0
 	reminded := false
 	var tooLong *brain.FrameReport // 超了字数、已经请它压短的那份
@@ -174,7 +177,7 @@ func (e *Expert) ExamineFrame(ctx context.Context, question brain.FrameQuestion)
 	}
 	for round := 1; ; round++ {
 		specs := []brain.ToolSpec{reportSpec}
-		if e.search != nil && searches < maxSearches && round < maxRounds {
+		if e.search != nil && searches < e.rules.MaxSearches && round < maxRounds {
 			specs = append(specs, searchSpec)
 		}
 		text, calls, usage, err := complete(ctx, e.model, messages, specs)
@@ -264,8 +267,8 @@ func (e *Expert) runTool(ctx context.Context, call brain.ToolCall, searches *int
 	if call.Name != searchTool || e.search == nil { // 没给它搜索时照着名字调用：不执行
 		return "没有叫 " + call.Name + " 的工具"
 	}
-	if *searches >= maxSearches {
-		return fmt.Sprintf("搜索次数已经用完（上限 %d 次）。根据画面和已有资料回答。", maxSearches)
+	if *searches >= e.rules.MaxSearches {
+		return fmt.Sprintf("搜索次数已经用完（上限 %d 次）。根据画面和已有资料回答。", e.rules.MaxSearches)
 	}
 	var args searchArgs
 	if data, err := json.Marshal(call.Arguments); err == nil {

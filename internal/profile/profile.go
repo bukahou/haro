@@ -146,7 +146,7 @@ func (s *Store) refresh() {
 	}
 }
 
-// limit 超过建议字数时警告，超过两倍时截断（每轮都发给模型：太长每轮都多花钱）。
+// limit 超过建议字数时警告，超过两倍时截断（每轮都发给模型：太长每轮都多花钱）。截断落在行尾，不切断半句。
 func (s *Store) limit(file, body string, advise int) string {
 	runes := utf8.RuneCountInString(body)
 	if runes <= advise {
@@ -155,10 +155,23 @@ func (s *Store) limit(file, body string, advise int) string {
 	hard := advise * hardLimitFactor
 	if runes > hard {
 		s.logger.Warn("资料太长，超出的部分不发给模型", "file", file, "runes", runes, "limit", hard)
-		return string([]rune(body)[:hard])
+		return cutAtLineEnd(body, hard)
 	}
 	s.logger.Warn("资料比建议的长（每轮都发给模型，越长越贵）", "file", file, "runes", runes, "advise", advise)
 	return body
+}
+
+// cutAtLineEnd 取 body 的前 maxRunes 个字，退回到最后一个完整行的末尾；第一行就放不下时只能按字数截。
+func cutAtLineEnd(body string, maxRunes int) string {
+	runes := []rune(body)
+	if len(runes) <= maxRunes || runes[maxRunes] == '\n' {
+		return string(runes[:min(len(runes), maxRunes)])
+	}
+	cut := string(runes[:maxRunes])
+	if i := strings.LastIndex(cut, "\n"); i > 0 {
+		return strings.TrimRight(cut[:i], "\n")
+	}
+	return cut
 }
 
 var htmlComment = regexp.MustCompile(`(?s)<!--.*?-->`)
@@ -193,7 +206,8 @@ func parse(content string) (names []string, body string) {
 	content = htmlComment.ReplaceAllString(content, "")
 	var lines []string
 	blank := false
-	for _, line := range strings.Split(content, "\n") {
+	raw := strings.Split(content, "\n")
+	for i, line := range raw {
 		line = strings.TrimRight(line, " \t\r")
 		if line == "" {
 			if !blank && len(lines) > 0 {
@@ -202,8 +216,8 @@ func parse(content string) (names []string, body string) {
 			blank = true
 			continue
 		}
-		if emptyItem(line) {
-			continue // 「- 称呼：」这类空着没填的项：不发给模型
+		if emptyItem(line) && !hasFilledSubItems(raw, i) {
+			continue // 「- 称呼：」这类空着没填的项：不发给模型（下面有填了的缩进子项时是小标题，保留）
 		}
 		blank = false
 		lines = append(lines, line)
@@ -224,6 +238,26 @@ func hasContent(body string) bool {
 	}
 	return false
 }
+
+// hasFilledSubItems 判断第 i 行下面紧跟着的、缩进更深的那几行（它的子项）里有没有填了内容的。
+func hasFilledSubItems(lines []string, i int) bool {
+	indent := indentWidth(lines[i])
+	for _, next := range lines[i+1:] {
+		if strings.TrimSpace(next) == "" {
+			continue
+		}
+		if indentWidth(next) <= indent {
+			return false
+		}
+		if !emptyItem(next) {
+			return true
+		}
+	}
+	return false
+}
+
+// indentWidth 是行首空白的宽度（空格、制表符各算一个）。
+func indentWidth(line string) int { return len(line) - len(strings.TrimLeft(line, " \t")) }
 
 // emptyItem 判断是不是空着没填的项：「-」「- 称呼：」「* 喜欢的东西:」。
 func emptyItem(line string) bool {

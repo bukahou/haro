@@ -1,6 +1,7 @@
 package brain_test
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -31,8 +32,7 @@ func TestWakeUtteranceGoesToTheModelWithANote(t *testing.T) {
 		t.Errorf("只叫了唤醒词：由模型应一声：%q", spoken)
 	}
 	first := model.Requests()[0]
-	if first.Input().Text != "哈罗哈罗。" || !strings.Contains(situationOf(first), "叫醒你之后说的第一句") ||
-		!strings.Contains(situationOf(first), "「唤醒词」") {
+	if first.Input().Text != "哈罗哈罗。" || !strings.Contains(situationOf(first), fmt.Sprintf(brain.WakeNote, "唤醒词")) {
 		t.Errorf("整句原样交给模型，附上叫醒后的说明和唤醒词原文：%q / %q", first.Input().Text, situationOf(first))
 	}
 	k.owner2(braintest.Utterance{Wake: true, BargeIn: true, Text: "我觉得你应该哈罗哈罗，停一下"})
@@ -58,7 +58,7 @@ func TestUnverifiedWakeShortUtteranceGetsARestrictedReply(t *testing.T) {
 		t.Fatalf("叫醒的短句应受限回答：%+v", done)
 	}
 	restricted := model.Requests()[1]
-	if len(restricted.Tools) != 0 || strings.Contains(restricted.System(), "主人资料") || !strings.Contains(situationOf(restricted), "声纹没认出是谁") {
+	if len(restricted.Tools) != 0 || strings.Contains(restricted.System(), "主人资料") || !strings.Contains(situationOf(restricted), brain.RestrictedNote) {
 		t.Errorf("受限回答：不给工具、不带个人资料，并说明声纹没认出：工具 %v / %q / %q", restricted.ToolNames(), restricted.System(), situationOf(restricted))
 	}
 

@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"iter"
 	"log/slog"
@@ -64,7 +65,7 @@ func TestFallbackSwitchesOnlyBeforeAnyOutput(t *testing.T) {
 func TestFallbackCircuitBreaker(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	input := brain.ChatRequest{Messages: []brain.ChatMessage{{Role: brain.RoleUser, Text: "hi"}}}
-	primary := &scriptedModel{err: errors.New("断网")}
+	primary := &scriptedModel{err: fmt.Errorf("断网：%w", brain.ErrModelUnavailable)}
 	secondary := &scriptedModel{deltas: []brain.ReplyDelta{{Text: "本地"}}}
 	model := NewFallbackChatModel(primary, "cloud", secondary, "local", 100*time.Millisecond, logger)
 
@@ -77,6 +78,23 @@ func TestFallbackCircuitBreaker(t *testing.T) {
 	primary.err, primary.deltas = nil, []brain.ReplyDelta{{Text: "云端"}}
 	if text, _, _, _ := collect(t, model.StreamReply(context.Background(), input)); text != "云端" || primary.calls != 2 {
 		t.Errorf("冷却期后应切回主模型：text=%q primary=%d", text, primary.calls)
+	}
+}
+
+// 主模型不是连不上、而是这一次失败了（拒答、请求被拒）：这一次改用备用模型，但不进冷却，下一次照常先试主模型。
+func TestFallbackCoolsDownOnlyWhenUnavailable(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	input := brain.ChatRequest{Messages: []brain.ChatMessage{{Role: brain.RoleUser, Text: "hi"}}}
+	primary := &scriptedModel{err: &RefusalError{Category: "cyber"}}
+	secondary := &scriptedModel{deltas: []brain.ReplyDelta{{Text: "前台"}}}
+	model := NewFallbackChatModel(primary, "strong", secondary, "cloud", time.Hour, logger)
+
+	if text, _, _, err := collect(t, model.StreamReply(context.Background(), input)); err != nil || text != "前台" {
+		t.Fatalf("这一次应改用备用模型：text=%q err=%v", text, err)
+	}
+	collect(t, model.StreamReply(context.Background(), input))
+	if primary.calls != 2 {
+		t.Errorf("拒答不该让主模型进冷却：主模型被试了 %d 次", primary.calls)
 	}
 }
 

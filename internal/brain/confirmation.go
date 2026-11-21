@@ -68,8 +68,8 @@ func (r confirmationResult) text() string {
 
 // requiresConfirmation 判断这个工具是不是要过确认闸。
 func (s *Session) requiresConfirmation(name string) bool {
-	if name == raiseMonthlyCapTool {
-		return raiseMonthlyCapSpec.RequiresConfirmation
+	if required, ok := s.sessionToolRequiresConfirmation(name); ok {
+		return required
 	}
 	if s.parts.Tools == nil {
 		return false
@@ -142,9 +142,4 @@ func (s *Session) cancelAction(call ToolCall) string {
 }
 
 // confirmationSpecs 是这一轮要不要多给 confirm_action、cancel_action：有没过期的待确认操作时才给。
-func (s *Session) confirmationSpecs() []ToolSpec {
-	if !s.currentConversation().hasPendingActions(time.Now()) {
-		return nil
-	}
-	return []ToolSpec{confirmActionSpec, cancelActionSpec}
-}
+func (s *Session) confirmationSpecs() []ToolSpec { return s.sessionToolSpecs(true) }

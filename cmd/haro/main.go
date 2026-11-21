@@ -10,7 +10,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -32,11 +31,8 @@ import (
 	"github.com/bukahou/haro/internal/trigger"
 )
 
-// microphoneFormat 是麦克风上传给服务端的格式（平台层固定为 16 kHz 单声道；声明在 session.update 里）。
-var microphoneFormat = realtimeproto.AudioFormat{SampleRate: 16000, Channels: 1}
-
 func main() {
-	enrollName := flag.String("enroll", "", "登记声纹：在这台终端上录 3 句话，发给服务端登记，例如 -enroll 主人")
+	enrollName := flag.String("enroll", "", "登记声纹：在这台终端上照着念几句话，发给服务端登记，例如 -enroll 主人")
 	enrollAppend := flag.Bool("append", false, "和 -enroll 一起用：补录（换了麦克风、换了位置时），加进原来的声纹")
 	enrollSeconds := flag.Duration("seconds", 5*time.Second, "和 -enroll 一起用：每句录多久")
 	showVersion := flag.Bool("version", false, "打印版本号后退出")
@@ -54,7 +50,7 @@ func main() {
 		}
 		return
 	}
-	if err := run(logger); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, io.EOF) {
+	if err := run(logger); err != nil && !errors.Is(err, context.Canceled) {
 		logger.Error("haro 退出", "err", err)
 		os.Exit(1)
 	}
@@ -96,23 +92,23 @@ func run(logger *slog.Logger) error {
 	}
 
 	// 看守：连服务端 → 等麦克风 → 运行；出什么错都退回去重来，只有关机信号才退出
-	supervisor := terminal.NewSupervisor(terminal.Parts{
+	supervisor := terminal.NewSupervisor(terminal.SupervisorDependencies{
 		Dial: func(ctx context.Context) (terminal.Connection, error) {
-			return brainclient.Dial(ctx, brainclient.DialOptions{BaseURL: settings.ServerURL, InputFormat: microphoneFormat}, logger)
+			return brainclient.Dial(ctx, brainclient.DialOptions{BaseURL: settings.ServerURL, InputFormat: local.MicrophoneFormat()}, logger)
 		},
 		Catalog:            local,
 		MicrophoneOverride: settings.AudioSource,
 		SpeakerOverride:    settings.AudioSink,
 		CameraName:         cameraName(camera),
 		Tools:              terminaltools.NewServer(camera, buildinfo.Version, logger),
-		NewSession: func(conn terminal.Connection, devices terminal.Devices) terminal.Session {
+		NewSession: func(conn terminal.Connection, devices terminal.SelectedDevices) terminal.Session {
 			logger.Info("🎤 麦克风", "device", devices.Microphone.Name, "id", devices.Microphone.ID, "why", devices.Microphone.Reason)
 			if devices.HasSpeaker {
 				logger.Info("🔊 音箱", "device", devices.Speaker.Name, "why", devices.Speaker.Reason)
 			} else {
 				logger.Warn("没有音箱：照常听，回答只写日志", "why", devices.WhyNoSpeaker)
 			}
-			return assistant.NewAssistant(assistant.Components{
+			return assistant.NewAssistant(assistant.Dependencies{
 				Manual:     keyboard,
 				Microphone: local.OpenMicrophone(devices.Microphone.ID),
 				Speaker:    local.OpenSpeaker(devices.Speaker.ID),
@@ -148,24 +144,19 @@ func enroll(logger *slog.Logger, name string, appendMode bool, seconds time.Dura
 		return err
 	}
 	fmt.Printf("🎤 麦克风：%s（%s）\n服务端：%s\n", microphone.Name, microphone.Reason, settings.ServerURL)
-	return enrollment.Run(ctx, enrollment.Options{ServerURL: settings.ServerURL, Name: name, Append: appendMode,
-		Seconds: seconds, Recorder: local.OpenRecorder(microphone.ID), In: os.Stdin, Out: os.Stdout,
+	return enrollment.Run(ctx, enrollment.Options{ServerURL: settings.ServerURL, Name: name, WakePhrase: settings.WakePhrase,
+		Append: appendMode, Seconds: seconds, Recorder: local.OpenRecorder(microphone.ID), In: os.Stdin, Out: os.Stdout,
 		Client: &http.Client{Timeout: 60 * time.Second}})
 }
 
 // assistantOptions 由配置组装对话选项（系统提示词由服务端持有，终端不发）。
 func assistantOptions(settings config.TerminalSettings, sounds tones.Tones) assistant.Options {
 	return assistant.Options{
-		TurnDetection: realtimeproto.TurnDetection{ // create_response 不填 = 服务端判定说完时自己开始回答
-			Type: settings.TurnDetection, Eagerness: settings.TurnEagerness,
-			Threshold:         settings.VADThreshold,
-			SilenceDurationMs: int(settings.VADSilence.Milliseconds()),
-			PrefixPaddingMs:   int(settings.VADPrefix.Milliseconds()),
-		},
-		EchoGuard:  settings.EchoGuard,
-		WakeWord:   assistant.WakeWordOptions{Phrase: settings.WakePhrase, IdleTimeout: settings.WakeIdle, SleepTone: sounds.Sleep},
-		BargeIn:    settings.BargeIn,
-		NoticeTone: sounds.Notice,
+		TurnDetection: settings.TurnDetectionSettings(), // create_response 不填 = 服务端判定说完时自己开始回答
+		EchoGuard:     settings.EchoGuard,
+		WakeWord:      assistant.WakeWordOptions{Phrase: settings.WakePhrase, IdleTimeout: settings.WakeIdle, SleepTone: sounds.Sleep},
+		BargeIn:       settings.BargeIn,
+		NoticeTone:    sounds.Notice,
 		NoticeTones: map[string]realtimeproto.PCMAudio{ // 服务端那边听不见了：和服务端断开时同样的两声
 			realtimeproto.NoticeTranscriptionLost:     sounds.Offline,
 			realtimeproto.NoticeTranscriptionRestored: sounds.Online,

@@ -37,7 +37,7 @@ const (
 	nearbyStationsRange = 40.0 // 公里
 )
 
-// jmaTables 是气象厅的地区表、预报地区表、观测站表：第一次用时下载，进程内缓存（很少变）。
+// jmaTables 是气象厅的地区表、预报地区表、观测站表：第一次用时下载，进程内缓存（很少变；见 JMA.tables）。
 type jmaTables struct {
 	area struct {
 		Offices  map[string]jmaNamed `json:"offices"`
@@ -96,7 +96,7 @@ func (j *JMA) Locate(ctx context.Context, place Place) (JMAArea, error) {
 	if ok {
 		return area, nil
 	}
-	tables, err := j.loadTables(ctx)
+	tables, err := j.tables.Get(ctx)
 	if err != nil {
 		return JMAArea{}, err
 	}
@@ -120,25 +120,6 @@ func (j *JMA) Locate(ctx context.Context, place Place) (JMAArea, error) {
 // inJapan 粗筛：日本的经纬度范围以外不用去问（问了也是空）。
 func inJapan(place Place) bool {
 	return place.Latitude >= 20 && place.Latitude <= 46 && place.Longitude >= 122 && place.Longitude <= 154
-}
-
-// loadTables 返回地区表：下载过就用缓存的；同时要的只下载一次。
-func (j *JMA) loadTables(ctx context.Context) (*jmaTables, error) {
-	j.mu.Lock()
-	tables := j.tables
-	j.mu.Unlock()
-	if tables != nil {
-		return tables, nil
-	}
-	return sharedRequest(ctx, &j.loading, "tables", func(ctx context.Context) (*jmaTables, error) {
-		tables, err := j.downloadTables(ctx)
-		if err == nil {
-			j.mu.Lock()
-			j.tables = tables
-			j.mu.Unlock()
-		}
-		return tables, err
-	})
 }
 
 // downloadTables 下载四张表（地区、预报区、周间预报区、观测站）并整理好。

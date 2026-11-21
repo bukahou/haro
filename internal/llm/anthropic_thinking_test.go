@@ -17,7 +17,7 @@ func TestAnthropicThinkingConfig(t *testing.T) {
 		ThinkingAdaptive:     `"thinking":{"type":"adaptive"}`,
 	}
 	for thinking, want := range cases {
-		model := NewAnthropicChatModel(AnthropicOptions{API: NewClaudeAPI("test-key", "", nil), Model: "m", MaxTokens: 100,
+		model := NewAnthropicChatModel(AnthropicOptions{API: claudeAPIForTest("test-key", "", nil), Model: "m", MaxTokens: 100,
 			Effort: "low", Thinking: thinking})
 		params, err := model.request(brain.ChatRequest{Messages: []brain.ChatMessage{{Role: brain.RoleUser, Text: "你好"}}})
 		if err != nil {

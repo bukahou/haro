@@ -9,10 +9,11 @@ import (
 	"testing"
 )
 
-// logRecords 收下打出来的日志（按字段核对，不比对文字）。
+// logRecords 收下打出来的日志（按字段和级别核对，不比对文字）。
 type logRecords struct {
 	mu      sync.Mutex
 	records []map[string]any
+	levels  []slog.Level // 和 records 一一对应
 }
 
 func (l *logRecords) Enabled(context.Context, slog.Level) bool { return true }
@@ -27,7 +28,23 @@ func (l *logRecords) Handle(_ context.Context, record slog.Record) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.records = append(l.records, fields)
+	l.levels = append(l.levels, record.Level)
 	return nil
+}
+
+// withField 返回带 key 这个字段的日志（和它们的级别）。
+func (l *logRecords) withField(key string) ([]map[string]any, []slog.Level) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var found []map[string]any
+	var levels []slog.Level
+	for i, fields := range l.records {
+		if _, ok := fields[key]; ok {
+			found = append(found, fields)
+			levels = append(levels, l.levels[i])
+		}
+	}
+	return found, levels
 }
 
 // failingLedger 什么都记不上。
@@ -45,7 +62,7 @@ func TestChargeLogWritesOneLinePerCharge(t *testing.T) {
 	}
 	defer inner.Close()
 	logs := &logRecords{}
-	ledger := WithChargeLog(inner, slog.New(logs))
+	ledger := &loggingLedger{Ledger: inner, logger: slog.New(logs)}
 
 	charges := []Charge{
 		{Purpose: PurposeChat, Item: "llm:haiku", InputTokens: 7000, OutputTokens: 98, CacheReadTokens: 6900, Yen: 1.2},
@@ -58,7 +75,7 @@ func TestChargeLogWritesOneLinePerCharge(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := WithChargeLog(failingLedger{}, slog.New(logs)).Record(ctx, charges[0]); err == nil {
+	if err := (&loggingLedger{Ledger: failingLedger{}, logger: slog.New(logs)}).Record(ctx, charges[0]); err == nil {
 		t.Fatal("没记上应把错误交给调用方")
 	}
 

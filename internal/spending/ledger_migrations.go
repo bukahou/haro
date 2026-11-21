@@ -6,8 +6,6 @@ import (
 	"embed"
 
 	"github.com/pressly/goose/v3"
-
-	"github.com/bukahou/haro/internal/sqliteschema"
 )
 
 // 账本的表结构由迁移文件管理（sqliteschema）；迁移 2 要先查有没有那两列，用 Go 写。
@@ -15,10 +13,9 @@ import (
 //go:embed migrations/*.sql
 var migrationFiles embed.FS
 
-// migrateLedger 把账本的表结构升到最新。
-func migrateLedger(ctx context.Context, db *sql.DB) error {
-	return sqliteschema.Migrate(ctx, db, migrationFiles,
-		goose.WithGoMigrations(goose.NewGoMigration(2, &goose.GoFunc{RunTx: addCacheColumns}, nil)))
+// ledgerMigrations 是账本的 SQL 迁移之外、用 Go 写的那几步（交给 sqliteschema.Open）。
+var ledgerMigrations = []goose.ProviderOption{
+	goose.WithGoMigrations(goose.NewGoMigration(2, &goose.GoFunc{RunTx: addCacheColumns}, nil)),
 }
 
 // addCacheColumns（迁移 2）：给加缓存记账之前建的账本补上缓存读写两列（旧记录按 0）。

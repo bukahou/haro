@@ -1,8 +1,10 @@
-// Package assistant 是 haro 对外唯一的入口：终端循环。
+// Package assistant 是终端的对话循环：一次对话运行（Assistant）用一条到服务端的连接和一组设备，
+// 由终端的看守（internal/terminal）创建、结束、重来。
 //
-// 终端只管输入输出硬件：麦克风常开上传 → 服务端判断说完 → 取帧 → 播放服务端返回的音频。
+// 终端只管输入输出硬件：麦克风常开上传 → 服务端判断说完、自己开始回答 → 播放服务端返回的音频；
+// 要看画面时由服务端经 MCP 来拍（internal/terminaltools），不在这个循环里。
 // 「听懂、思考、说什么」都在服务端（BrainSession）里；终端与服务端之间只传 realtimeproto 事件。
-// 服务端可以在同一进程（brain.Session，测试里这样用），也可以经 WebSocket 连接（brainclient），本包不区分。
+// 服务端可以经 WebSocket 连接（brainclient），也可以在同一进程（brain.Session，internal/e2e 的整条路径测试这样用），本包不区分。
 //
 // 本文件定义终端依赖的各段能力（Go interface，放在使用方一侧），由 cmd/haro 组装注入。
 package assistant
@@ -32,10 +34,10 @@ type AudioSink interface {
 
 // AudioStream 是一条进行中的播放流。
 type AudioStream interface {
-	Write(pcm []byte) error
-	Drain() error          // 等缓冲里的声音全部播完
-	Abort() error          // 立即停止并丢掉缓冲（打断用）
-	Played() time.Duration // 已经播出多长（按「用户实际听到的部分」截断历史用）
+	Write(pcm []byte) error // 排进播放队列就返回，不等播出（回答的音频在事件循环里直接写，不能卡住它）
+	Drain() error           // 等缓冲里的声音全部播完
+	Abort() error           // 立即停止并丢掉缓冲（打断用）
+	Played() time.Duration  // 已经播出多长（按「用户实际听到的部分」截断历史用）
 }
 
 // BrainSession 是终端看到的服务端。

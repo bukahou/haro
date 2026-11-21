@@ -2,7 +2,8 @@
 ## ci —— 推 dev、开往 main / dev 的 PR（含 Dependabot 的 PR）时运行；发版流程（release.yml）也先调用它：测试不过就不发版（v6）
 ## ============================================================
 ##   version  版本号 = v + VERSION 文件 + 提交号前 7 位（= Release 标签 = 镜像标签），例如 v0.5.0-1a2b3c4
-##   test     gofmt + go vet（含 integration、audiohw、eval 标签的测试：只编译检查，不跑）+ go test -short（跳过要网络的测试）+ check-darwin
+##   test     gofmt + go vet（含 integration、audiohw、eval 标签的测试：只编译检查，不跑）+ go test -short（跳过要网络的测试）
+##            + check-darwin / check-windows（Mac、Windows 版平台层的类型检查）
 ##   scripts  shellcheck（安装脚本、模型下载脚本等）
 ##   build    终端的各个平台（列表只在 version 的 platforms 一处；现在是 Linux x86_64 / arm64），各在原生机器上编译、跑一次 -version，
 ##            再用安装脚本装一遍、升一遍、卸一遍（含「校验和不对必须拒装」的阳性对照）。
@@ -69,7 +70,7 @@ jobs:
       - run: go vet ./...
       - run: go vet -tags integration,audiohw,eval ./... # 要真模型、真服务、真设备的测试不在这里跑，但至少要编译得过
       - run: go test -short ./...
-      - run: make check-darwin
+      - run: make check-darwin check-windows
 
   scripts:
     runs-on: ubuntu-24.04

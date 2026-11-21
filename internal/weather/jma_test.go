@@ -70,6 +70,7 @@ type fakeJMAServer struct {
 	geocodeGate    atomic.Pointer[chan struct{}] // 设了就等它关上才回地址反查
 	latestTime     atomic.Value                  // string
 	nearestMissing atomic.Bool                   // 最近的观测站缺测（气温为 null）
+	tablesDown     atomic.Bool                   // 地区表下载不了（回 404）
 }
 
 // 第二近的观测站（東京）的实况。
@@ -116,6 +117,10 @@ func newFakeJMAServer(t *testing.T) *fakeJMAServer {
 				server.areaTables.Add(1)
 				if gate := server.tableGate.Load(); gate != nil {
 					<-*gate
+				}
+				if server.tablesDown.Load() {
+					http.NotFound(w, r)
+					return
 				}
 			}
 			_, _ = w.Write([]byte(files[r.URL.Path]))
@@ -282,5 +287,31 @@ func TestJMALocateDoesNotHoldTheLockWhileFetching(t *testing.T) {
 	close(geocodeGate)
 	if err := <-results; err != nil {
 		t.Fatal(err)
+	}
+}
+
+// 地区表下载失败：一分钟内不再下载（备用来源直接报错，不让每次查天气都等它）；过了再试，下载好就一直用。
+func TestJMATablesCoolDownAfterFailure(t *testing.T) {
+	ctx := context.Background()
+	server := newFakeJMAServer(t)
+	server.tablesDown.Store(true)
+	jma := server.client()
+	clock := newFakeClock()
+	jma.tables.now = clock.Now
+
+	if _, err := jma.Locate(ctx, shinjuku); err == nil || server.areaTables.Load() != 1 {
+		t.Fatalf("地区表下载不了：应报错：%v（下载了 %d 次）", err, server.areaTables.Load())
+	}
+	if _, err := jma.Locate(ctx, sendai); err == nil || server.areaTables.Load() != 1 {
+		t.Errorf("冷却期内不再下载，直接报错：%v（下载了 %d 次）", err, server.areaTables.Load())
+	}
+	clock.Advance(lookupRetryAfter)
+	server.tablesDown.Store(false)
+	if area, err := jma.Locate(ctx, shinjuku); err != nil || area.Office != "130000" || server.areaTables.Load() != 2 {
+		t.Errorf("过了冷却期再试：%+v %v（下载了 %d 次）", area, err, server.areaTables.Load())
+	}
+	clock.Advance(365 * 24 * time.Hour)
+	if _, err := jma.Locate(ctx, sendai); err != nil || server.areaTables.Load() != 2 {
+		t.Errorf("下载好的地区表一直用：%v（下载了 %d 次）", err, server.areaTables.Load())
 	}
 }

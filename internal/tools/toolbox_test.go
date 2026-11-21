@@ -12,10 +12,12 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/bukahou/haro/internal/brain"
+	"github.com/bukahou/haro/internal/buildinfo"
 	"github.com/bukahou/haro/internal/notes"
 )
 
@@ -29,22 +31,14 @@ type echoOutput struct {
 	Echo string `json:"echo"`
 }
 
-// remoteServer 是一个第三方 MCP 服务（Streamable HTTP）：三个工具，标注各不相同。
-func remoteServer(t *testing.T, extra ...func(*mcp.Server)) *httptest.Server {
-	t.Helper()
-	server := mcp.NewServer(&mcp.Implementation{Name: "fake", Version: "0.0.1"}, nil)
+// echoTools 是三个标注各不相同的工具（只读、只新增、没有标注）。
+func echoTools(server *mcp.Server) {
 	echo := func(_ context.Context, _ *mcp.CallToolRequest, in echoInput) (*mcp.CallToolResult, echoOutput, error) {
 		return nil, echoOutput{Echo: in.Text}, nil
 	}
 	mcp.AddTool(server, &mcp.Tool{Name: "read_echo", Description: "只读", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true}}, echo)
 	mcp.AddTool(server, &mcp.Tool{Name: "add_echo", Description: "只新增", Annotations: &mcp.ToolAnnotations{DestructiveHint: new(false)}}, echo)
 	mcp.AddTool(server, &mcp.Tool{Name: "wipe_echo", Description: "没有标注：按规范视为有破坏性"}, echo)
-	for _, add := range extra {
-		add(server)
-	}
-	httpServer := httptest.NewServer(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, nil))
-	t.Cleanup(httpServer.Close)
-	return httpServer
 }
 
 func confirmations(box *Toolbox) map[string]bool {
@@ -55,10 +49,10 @@ func confirmations(box *Toolbox) map[string]bool {
 	return needs
 }
 
-// 远程的第三方服务和进程内的内置工具在同一份清单里：按 MCP 标注决定要不要口头确认，调用转给各自的服务。
-func TestToolboxWithRemoteServer(t *testing.T) {
+// 工具清单按 MCP 标注决定要不要口头确认（只读的不要；非只读时 destructiveHint 缺省按有破坏性），调用转给工具服务。
+func TestToolboxConfirmationFollowsAnnotations(t *testing.T) {
 	ctx := context.Background()
-	box, err := NewToolbox(ctx, []ServerSpec{{Name: "fake", URL: remoteServer(t).URL}}, quietLogger)
+	box, err := NewToolbox(ctx, quietLogger, echoTools)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,6 +80,46 @@ func TestToolboxWithRemoteServer(t *testing.T) {
 	}
 }
 
+// 和工具服务握手时报的版本是程序的版本号：进程内的内置服务、连远程服务的客户端都是。
+func TestToolboxReportsProgramVersion(t *testing.T) {
+	saved := buildinfo.Version
+	buildinfo.Version = "v0.0.0-test"
+	t.Cleanup(func() { buildinfo.Version = saved })
+	clientVersions := make(chan string, 1)
+	server := mcp.NewServer(&mcp.Implementation{Name: "fake", Version: "0.0.1"}, &mcp.ServerOptions{
+		InitializedHandler: func(_ context.Context, request *mcp.InitializedRequest) {
+			clientVersions <- request.Session.InitializeParams().ClientInfo.Version
+		}})
+	mcp.AddTool(server, &mcp.Tool{Name: "read_echo", Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true}},
+		func(_ context.Context, _ *mcp.CallToolRequest, in echoInput) (*mcp.CallToolResult, echoOutput, error) {
+			return nil, echoOutput{Echo: in.Text}, nil
+		})
+	remote := httptest.NewServer(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, nil))
+	defer remote.Close()
+
+	box, err := NewToolbox(context.Background(), quietLogger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer box.Close()
+	if got := box.servers[0].session.InitializeResult().ServerInfo.Version; got != buildinfo.Version {
+		t.Errorf("内置服务报的版本：%q", got)
+	}
+	client, err := ConnectMCPServer(context.Background(), ServerSpec{Name: "fake", URL: remote.URL}, quietLogger) // 联网搜索走这条路
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	select {
+	case got := <-clientVersions:
+		if got != buildinfo.Version {
+			t.Errorf("连远程服务时报的客户端版本：%q", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("远程服务没收到握手")
+	}
+}
+
 // 工具重名（内置之间、内置和远程之间）：启动就报错，不让模型看到两个同名工具。
 func TestDuplicateToolNamesFailAtStartup(t *testing.T) {
 	ctx := context.Background()
@@ -94,16 +128,8 @@ func TestDuplicateToolNamesFailAtStartup(t *testing.T) {
 			return struct{}{}, nil
 		})
 	}
-	if _, err := NewToolbox(ctx, nil, quietLogger, greet, greet); err == nil || !strings.Contains(err.Error(), "say_hi") {
+	if _, err := NewToolbox(ctx, quietLogger, greet, greet); err == nil || !strings.Contains(err.Error(), "say_hi") {
 		t.Errorf("内置工具重名应启动失败：%v", err)
-	}
-	remote := remoteServer(t, func(server *mcp.Server) {
-		mcp.AddTool(server, &mcp.Tool{Name: "say_hi"}, func(context.Context, *mcp.CallToolRequest, struct{}) (*mcp.CallToolResult, any, error) {
-			return nil, nil, nil
-		})
-	})
-	if _, err := NewToolbox(ctx, []ServerSpec{{Name: "fake", URL: remote.URL}}, quietLogger, greet); err == nil || !strings.Contains(err.Error(), "say_hi") {
-		t.Errorf("远程工具和内置的重名应启动失败：%v", err)
 	}
 }
 
@@ -139,7 +165,7 @@ func TestBuiltinToolsGetSpeakerDeliveriesAndSpokenErrors(t *testing.T) {
 			return echoOutput{}, spoken{}
 		})
 	}
-	box, err := NewToolbox(ctx, nil, quietLogger, probe)
+	box, err := NewToolbox(ctx, quietLogger, probe)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,7 +211,7 @@ func TestNoteTools(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	box, err := NewToolbox(ctx, nil, quietLogger, NoteTools(store, 2, quietLogger))
+	box, err := NewToolbox(ctx, quietLogger, NoteTools(store, 2, quietLogger))
 	if err != nil {
 		t.Fatal(err)
 	}

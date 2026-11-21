@@ -1,9 +1,11 @@
-# haro 终端（v3 第 4 步）：麦克风、音箱、摄像头，连本机的服务端。
+# haro 终端（v3 第 4 步）：麦克风、音箱、摄像头，连 HARO_SERVER_URL 指向的服务端（本机或集群里的）。
 # 依赖桌面会话里的 PipeWire（麦克风等设备的权限只发给登录中的桌面会话）⇒ 跟着桌面会话启停（4-1）。
 # 服务端重启、断线时终端不退出，自己重连（v4 D3 看守）；Restart 只作兜底。没有键盘（stdin 为空）时只用唤醒词。
+# 配置项见 deploy/systemd/terminal.env.example。
 [Unit]
 Description=haro 终端
 Documentation=file://%h/work/github/haro/docs/architecture.md
+# 服务端也装在这台机器上时先起服务端；没装时 systemd 忽略这两项
 Wants=haro-server.service
 After=haro-server.service graphical-session.target pipewire.service wireplumber.service
 PartOf=graphical-session.target

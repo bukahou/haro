@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"iter"
 	"net/http"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -21,9 +22,8 @@ import (
 
 // ClaudeAPI 是全进程共用的一个 Claude API 客户端（凭证、令牌缓存、HTTP 连接都在里面）。
 //
-// 认证（v7 D3）：配了 key 就用它；没配时交给 SDK 自己找凭证 —— 集群里是 Workload Identity Federation
-// （ANTHROPIC_FEDERATION_RULE_ID 等环境变量 + 投射的服务账号令牌，SDK 换成短期令牌并自动续期），不放任何长期密钥。
-// ⚠️ 开发机上别用 ANTHROPIC_API_KEY 这个变量名放 key：Claude Code 也读它，开发机的 *.env 会进每个终端。
+// 认证（v7 D3）：配了 key 就用它；没配时只认 Workload Identity Federation（集群里：ANTHROPIC_FEDERATION_RULE_ID 等环境变量
+// + 投射的服务账号令牌，SDK 换成短期令牌并自动续期），不放任何长期密钥。见 claudeCredential。
 //
 // ⛔ 全进程只能建一个，所有 Claude 模型共用，HTTP 客户端也只能是这一个（2026-11-18 集群实测）：
 // SDK 按「客户端 × HTTP 客户端」各建一份令牌缓存、各自去换令牌；集群令牌带 jti，同一张只能换一次 ⇒
@@ -46,20 +46,69 @@ func (a *ClaudeAPI) CheckCredentials(ctx context.Context, model string) error {
 	return err
 }
 
-// NewClaudeAPI 创建客户端（不发请求；凭证在第一次请求时才用到）。apiKey 为空 = 交给 SDK 的凭证链（集群里是 WIF）；
+// NewClaudeAPI 创建客户端（不发请求）。apiKey 为空 = 用环境里配的 Workload Identity Federation，没配齐时报错；
 // baseURL 为空 = https://api.anthropic.com；httpClient 全进程只用这一个（见类型说明），各用途的超时用请求自己的 context 控制。
-func NewClaudeAPI(apiKey, baseURL string, httpClient *http.Client) *ClaudeAPI {
-	var options []option.RequestOption
+func NewClaudeAPI(apiKey, baseURL string, httpClient *http.Client) (*ClaudeAPI, error) {
+	credential, err := claudeCredential(apiKey, os.Getenv)
+	if err != nil {
+		return nil, err
+	}
+	options := []option.RequestOption{option.WithoutEnvironmentDefaults(), credential}
 	if httpClient != nil {
 		options = append(options, option.WithHTTPClient(httpClient))
-	}
-	if apiKey != "" {
-		options = append(options, option.WithAPIKey(apiKey))
 	}
 	if baseURL != "" {
 		options = append(options, option.WithBaseURL(baseURL))
 	}
-	return &ClaudeAPI{client: anthropic.NewClient(options...)}
+	return &ClaudeAPI{client: anthropic.NewClient(options...)}, nil
+}
+
+// Workload Identity Federation 的环境变量（和 SDK 认的名字一样；这里显式读，见 claudeCredential）。
+const (
+	envFederationRuleID  = "ANTHROPIC_FEDERATION_RULE_ID"
+	envOrganizationID    = "ANTHROPIC_ORGANIZATION_ID"
+	envServiceAccountID  = "ANTHROPIC_SERVICE_ACCOUNT_ID"
+	envWorkspaceID       = "ANTHROPIC_WORKSPACE_ID"
+	envIdentityTokenFile = "ANTHROPIC_IDENTITY_TOKEN_FILE"
+	envIdentityToken     = "ANTHROPIC_IDENTITY_TOKEN"
+)
+
+// claudeCredential 选凭证：填了 haro 自己的 key（HARO_ANTHROPIC_API_KEY）就用它；没填时只认配齐的 Workload Identity
+// Federation（规则、组织、身份令牌文件或令牌）。不走 SDK 的默认凭证链：链里 ANTHROPIC_API_KEY、ANTHROPIC_AUTH_TOKEN、
+// 登录档案排在 WIF 前面，开发机上会捡到 Claude Code 的 key，花到别的账上。
+func claudeCredential(apiKey string, getenv func(string) string) (option.RequestOption, error) {
+	if apiKey != "" {
+		return option.WithAPIKey(apiKey), nil
+	}
+	var token option.IdentityTokenFunc
+	if path := getenv(envIdentityTokenFile); path != "" {
+		token = option.IdentityTokenFile(path)
+	} else if literal := getenv(envIdentityToken); literal != "" {
+		token = func(context.Context) (string, error) { return literal, nil }
+	}
+	rule, organization := getenv(envFederationRuleID), getenv(envOrganizationID)
+	var missing []string
+	if rule == "" {
+		missing = append(missing, envFederationRuleID)
+	}
+	if organization == "" {
+		missing = append(missing, envOrganizationID)
+	}
+	if token == nil {
+		missing = append(missing, envIdentityTokenFile+"（或 "+envIdentityToken+"）")
+	}
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("没有 Claude 的凭证：开发机填 HARO_ANTHROPIC_API_KEY；集群里配齐 Workload Identity Federation（缺 %s）",
+			strings.Join(missing, "、"))
+	}
+	return option.WithFederationTokenProvider(token, option.FederationOptions{FederationRuleID: rule, OrganizationID: organization,
+		ServiceAccountID: getenv(envServiceAccountID), WorkspaceID: getenv(envWorkspaceID)}), nil
+}
+
+// CheckClaudeCredentials 检查凭证配齐了没有（启动时查，见 claudeCredential）。
+func CheckClaudeCredentials(apiKey string) error {
+	_, err := claudeCredential(apiKey, os.Getenv)
+	return err
 }
 
 // AnthropicChatModel 调用 Claude API 的 Messages 接口（官方 Go SDK，流式；v7 D2）。不同用途（聊天 / 摘要 / 调查）各一个，
@@ -93,15 +142,24 @@ const (
 	ThinkingAdaptive = "adaptive"
 )
 
-// claudeEfforts 是思考关掉时 Claude 接受的回答力度（xhigh / max 要开着思考）；空 = 模型默认。
-var claudeEfforts = []string{"", "low", "medium", "high"}
+// Claude 接受的回答力度（空 = 模型默认）：claudeEfforts 哪种思考写法都行；claudeThinkingEfforts 要开着思考（adaptive），
+// 思考关掉时 API 只接受 high 及以下（400）。between_tools 是否接受更高的没有写明，按关掉思考处理。
+var (
+	claudeEfforts         = []string{"", "low", "medium", "high"}
+	claudeThinkingEfforts = []string{"xhigh", "max"}
+)
 
-// ValidateClaudeEffort 检查回答力度（启动时按配置检查，写错了起不来）。
-func ValidateClaudeEffort(effort string) error {
-	if !slices.Contains(claudeEfforts, effort) {
-		return fmt.Errorf("只能是 low、medium 或 high（思考是关掉的），现在是 %q", effort)
+// ValidateClaudeEffort 检查回答力度和它搭配的思考写法（启动时按配置检查，写错了起不来）。
+func ValidateClaudeEffort(effort, thinking string) error {
+	switch {
+	case slices.Contains(claudeEfforts, effort):
+		return nil
+	case slices.Contains(claudeThinkingEfforts, effort) && thinking == ThinkingAdaptive:
+		return nil
+	case slices.Contains(claudeThinkingEfforts, effort):
+		return fmt.Errorf("%s 要和思考写法 %s 一起用（思考写法是 %q 时只能 low、medium、high）", effort, ThinkingAdaptive, thinking)
 	}
-	return nil
+	return fmt.Errorf("只能是 low、medium、high，思考写法是 %s 时还可以是 xhigh、max；现在是 %q", ThinkingAdaptive, effort)
 }
 
 // ValidateClaudeThinking 检查思考的写法（ThinkingDisabled 等）。
@@ -122,7 +180,7 @@ type AnthropicOptions struct {
 	// MaxRetries 是 SDK 在 429 / 5xx / 断线时自己重试几次。当主模型时用 0：等不到就早点告诉主人连不上，
 	// 不要在这里多等；后台调查不急，可以重试。
 	MaxRetries int
-	// FirstTokenTimeout 是等 Claude 开始回答（第一个流式事件）最多多久，超时就取消这次请求、交给退路；0 = 不限。
+	// FirstTokenTimeout 是等 Claude 开始回答（第一个流式事件）最多多久，超时就取消这次请求、按连不上报错；0 = 不限。
 	// 不用单独的 HTTP 客户端做「响应头超时」：多一个 HTTP 客户端就多一份令牌缓存（见 ClaudeAPI）。
 	FirstTokenTimeout time.Duration
 	// RequestTimeout 是一次请求从发出到流结束最多多久；0 = 只受调用方的 context 管（例如后台调查有自己的总时限）。
@@ -150,7 +208,7 @@ func (m *AnthropicChatModel) thinkingConfig() anthropic.ThinkingConfigParamUnion
 }
 
 // RefusalError 是模型的安全审核拒绝回答（Claude：HTTP 200、stop_reason = refusal；OpenAI 兼容：finish_reason = content_filter）。
-// 当作云端失败处理：开着退路时这一轮改用退路；没有退路时念固定的话。
+// 当作这一次请求失败：有备用模型的（强模型接手时）这一次改用备用；没有的念固定的话。
 type RefusalError struct {
 	Category    string
 	Explanation string
@@ -205,7 +263,7 @@ func (m *AnthropicChatModel) StreamReply(ctx context.Context, request brain.Chat
 		usage := usageOf(message.Usage)
 		switch message.StopReason {
 		case anthropic.StopReasonRefusal:
-			// 带上用量：被拒的请求照样计费，记账的装饰器先记下这一笔，退路再接手
+			// 带上用量：被拒的请求照样计费，记账的装饰器先记下这一笔
 			yield(brain.ReplyDelta{Usage: usage}, &RefusalError{Category: string(message.StopDetails.Category),
 				Explanation: message.StopDetails.Explanation})
 			return

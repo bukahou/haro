@@ -161,8 +161,6 @@ func (m *replyModel) StreamReply(context.Context, brain.ChatRequest) iter.Seq2[b
 	}
 }
 
-func (m *replyModel) Warmup(context.Context) error { return nil }
-
 func collectText(t *testing.T, model brain.ChatModel) (string, error) {
 	t.Helper()
 	var text strings.Builder

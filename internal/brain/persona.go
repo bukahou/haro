@@ -10,7 +10,7 @@ import (
 
 // 性格档案。
 //
-// 系统提示词 = 终端传来的基础提示词（身份、能力、底线规则，所有性格共用）+ 当前性格的说话风格。
+// 系统提示词 = 前台代理定义里的基础提示词（身份、能力、底线规则，所有性格共用）+ 当前性格的说话风格。
 // 底线规则写在基础提示词里，性格档案只管风格，覆盖不了底线。
 // 切换由模型调用内置工具 switch_persona 完成（和 look_at_camera 一样，因为它改的是会话状态）。
 
@@ -211,9 +211,15 @@ func (s *Session) voiceEmotion(emotion Emotion) Emotion {
 
 // ParseEmotion 把配置文件里的情绪名（tease / gentle …，空 = 平常）转成 Emotion；不认识的报错。
 func ParseEmotion(name string) (Emotion, error) {
-	switch emotion := Emotion(name); emotion {
-	case EmotionDefault, EmotionTease, EmotionLaugh, EmotionExcited, EmotionGentle, EmotionWhisper, EmotionFlirt:
-		return emotion, nil
+	emotion := Emotion(name)
+	var names []string
+	for _, tag := range emotionTags { // 情绪清单只在 emotionTags 定义
+		if tag.Emotion == emotion {
+			return emotion, nil
+		}
+		if tag.Emotion != EmotionDefault {
+			names = append(names, string(tag.Emotion))
+		}
 	}
-	return "", fmt.Errorf("不认识的情绪 %q（只能是 tease / laugh / excited / gentle / whisper / flirt，或留空）", name)
+	return "", fmt.Errorf("不认识的情绪 %q（只能是 %s，或留空）", name, strings.Join(names, " / "))
 }

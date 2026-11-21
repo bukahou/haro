@@ -1,6 +1,7 @@
 package weather
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -11,8 +12,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"golang.org/x/sync/singleflight"
 )
 
 // JMA 是日本气象厅网站数据（bosai）的天气来源：只覆盖日本，按地区预报，不用密钥。
@@ -23,10 +22,11 @@ type JMA struct {
 	fetch, geocode       fetcher
 	now                  func() time.Time
 
-	loading singleflight.Group // 地区表：同时要的只下载一次，不在锁里下载（下载要好几秒，查已经缓存的地区不该等它）
-	mu      sync.Mutex
-	tables  *jmaTables
-	areas   map[string]JMAArea
+	// tables 是地区表：第一次用时下载，之后一直用（很少变）；同时要的只下载一次，不在锁里下载（下载要好几秒，
+	// 查已经缓存的地区不该等它）；下载失败后一分钟内不再下载（见 cachedLookup）
+	tables *cachedLookup[*jmaTables]
+	mu     sync.Mutex
+	areas  map[string]JMAArea
 }
 
 // jst 是气象厅数据用的时区（日本没有夏令时）。
@@ -34,10 +34,12 @@ var jst = time.FixedZone("JST", 9*60*60)
 
 // NewJMA 创建气象厅来源；baseURL 是 bosai 数据的根地址，geocoderURL 是国土地理院的地址反查（都来自配置）。
 func NewJMA(baseURL, geocoderURL string, httpClient *http.Client) *JMA {
-	return &JMA{baseURL: strings.TrimRight(baseURL, "/"), geocoderURL: geocoderURL,
+	jma := &JMA{baseURL: strings.TrimRight(baseURL, "/"), geocoderURL: geocoderURL,
 		fetch:   fetcher{http: httpClient, attemptTimeout: defaultAttemptTimeout, service: "气象厅"},
 		geocode: fetcher{http: httpClient, attemptTimeout: defaultAttemptTimeout, service: "地址反查（国土地理院）"},
 		now:     time.Now, areas: map[string]JMAArea{}}
+	jma.tables = newCachedLookup(jma.downloadTables, 0)
+	return jma
 }
 
 // ForecastFor 实现 Forecaster：短期预报（三天，天气是日语原文）+ 周间预报（到第 7 天）+ 最近观测站的实况。
@@ -113,7 +115,7 @@ func jmaDays(reports []jmaReport, area JMAArea, now time.Time, days int) []DayCa
 				case len(a.Pops) > 0 && len(a.WeatherCodes) == 0 && code == area.Class10: // 短期：每 6 小时的降水概率 → 当天最大
 					for i, define := range series.TimeDefines {
 						d, _, ok := day(define)
-						if value := number(a.Pops, i); ok && value != nil && (d.RainChancePercent == nil || *value > *d.RainChancePercent) {
+						if value := forecastCell(a.Pops, i); ok && value != nil && (d.RainChancePercent == nil || *value > *d.RainChancePercent) {
 							d.RainChancePercent = value
 						}
 					}
@@ -129,14 +131,14 @@ func jmaDays(reports []jmaReport, area JMAArea, now time.Time, days int) []DayCa
 							d.Weather = jmaWeatherName(a.WeatherCodes[i])
 						}
 						if d.RainChancePercent == nil {
-							d.RainChancePercent = number(a.Pops, i)
+							d.RainChancePercent = forecastCell(a.Pops, i)
 						}
 					}
 				case (len(a.TempsMin) > 0 || len(a.TempsMax) > 0) && code == area.WeekTempPoint: // 周间：气温
 					for i, define := range series.TimeDefines {
 						if d, _, ok := day(define); ok {
-							d.High = cmpOr(d.High, number(a.TempsMax, i))
-							d.Low = cmpOr(d.Low, number(a.TempsMin, i))
+							d.High = cmp.Or(d.High, forecastCell(a.TempsMax, i))
+							d.Low = cmp.Or(d.Low, forecastCell(a.TempsMin, i))
 						}
 					}
 				}
@@ -159,7 +161,7 @@ func shortTermTemperatures(defines, temps []string, day func(string) (*DayCast, 
 	lows, highs := map[*DayCast]*float64{}, map[*DayCast]*float64{}
 	for i, define := range defines {
 		d, at, ok := day(define)
-		value := number(temps, i)
+		value := forecastCell(temps, i)
 		if !ok || value == nil {
 			continue
 		}
@@ -170,13 +172,13 @@ func shortTermTemperatures(defines, temps []string, day func(string) (*DayCast, 
 		}
 	}
 	for d, high := range highs {
-		d.High = cmpOr(d.High, high)
+		d.High = cmp.Or(d.High, high)
 	}
 	for d, low := range lows {
 		if high := highs[d]; high != nil && *high == *low {
 			continue
 		}
-		d.Low = cmpOr(d.Low, low)
+		d.Low = cmp.Or(d.Low, low)
 	}
 }
 
@@ -237,7 +239,7 @@ func (j *JMA) observeStation(ctx context.Context, station JMAStation, at time.Ti
 	current := Current{Time: observedAt.Format("2006-01-02T15:04"), Station: station.Name + "观测站",
 		Temperature: observation.Temp.value(), Humidity: observation.Humidity.value(), RainLastHour: observation.Precipitation1h.value()}
 	if wind := observation.Wind.value(); wind != nil { // 观测是米 / 秒，和 Open-Meteo 一样报公里 / 小时
-		current.WindSpeed = ptr(math.Round(*wind*3.6*10) / 10)
+		current.WindSpeed = new(math.Round(*wind*3.6*10) / 10)
 	}
 	return current, nil
 }
@@ -261,16 +263,16 @@ func (v jmaValue) value() *float64 {
 
 // jmaWeatherName 把天气代码翻成文字（日语原文）；表里没有的照写代码。
 func jmaWeatherName(code string) string {
-	if number, err := strconv.Atoi(code); err == nil {
-		if name, ok := jmaWeatherNames[number]; ok {
+	if numeric, err := strconv.Atoi(code); err == nil {
+		if name, ok := jmaWeatherNames[numeric]; ok {
 			return name
 		}
 	}
 	return "天气代码 " + code
 }
 
-// number 取第 i 个数值；空字符串（这一格没有预报）为 nil。
-func number(values []string, i int) *float64 {
+// forecastCell 取预报表第 i 格的数值；空字符串（这一格没有预报）为 nil。
+func forecastCell(values []string, i int) *float64 {
 	if i >= len(values) {
 		return nil
 	}
@@ -279,14 +281,4 @@ func number(values []string, i int) *float64 {
 		return nil
 	}
 	return &value
-}
-
-// cmpOr 返回第一个不是 nil 的。
-func cmpOr(values ...*float64) *float64 {
-	for _, value := range values {
-		if value != nil {
-			return value
-		}
-	}
-	return nil
 }

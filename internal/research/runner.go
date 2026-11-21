@@ -17,9 +17,9 @@ import (
 type Limits struct {
 	Timeout     time.Duration // 搜索阶段最多多久（默认 3 分钟）
 	MaxRounds   int           // 最多请求模型几轮（默认 10）
-	MaxSearches int           // 最多搜几次（默认 5）
+	MaxSearches int           // 最多搜几次（默认 5；没搜成的也算一次）
 	MaxTokens   int           // 累计 token 上限（默认 8 万）
-	PageRunes   int           // 每个网页只读前多少字（默认 2,000）
+	PageRunes   int           // 每个网页最多给多少字（按调查的问题挑相关的段落；默认 2,000）
 	MaxPending  int           // 全家最多同时有几个任务（1 个在查 + 排队；默认 3）
 }
 
@@ -50,6 +50,9 @@ type Runner struct {
 
 	queue chan int64
 	ready chan struct{} // Run 做完启动清理（把上次没查完的标成被中断）后关闭；Start 等它，免得新任务被误标
+
+	// creating 让「数在查的任务」和「建新任务」连在一起做：并发派调查时不会都看到还没满、一起建出来超过 MaxPending
+	creating sync.Mutex
 
 	mu       sync.Mutex
 	cancels  map[int64]context.CancelFunc // 在查的任务 → 取消它
@@ -105,6 +108,8 @@ func (r *Runner) Start(ctx context.Context, person, question string) (Task, int,
 	if err := r.budget.AllowResearch(ctx); err != nil {
 		return Task{}, 0, err
 	}
+	r.creating.Lock()
+	defer r.creating.Unlock()
 	active, err := r.store.Active(ctx)
 	if err != nil {
 		return Task{}, 0, err
@@ -194,7 +199,7 @@ func (r *Runner) runTask(ctx context.Context, id int64) {
 		r.logger.Warn("标记在查失败", "id", id, "err", err)
 	}
 	started := time.Now()
-	outcome := r.investigate(taskCtx, task.Question)
+	report := r.investigate(taskCtx, task.Question)
 	if taskCtx.Err() != nil && ctx.Err() == nil { // 主人取消了：Cancel 已经记过
 		r.logger.Info("调查已取消", "id", id, "elapsed", time.Since(started).Round(time.Second))
 		return
@@ -202,7 +207,7 @@ func (r *Runner) runTask(ctx context.Context, id int64) {
 	if ctx.Err() != nil { // 服务端在关：下次启动时标成被中断
 		return
 	}
-	finished, err := r.store.Finish(context.WithoutCancel(ctx), id, outcome.status, outcome.conclusion, outcome.sources, outcome.reason)
+	finished, err := r.store.Finish(context.WithoutCancel(ctx), id, report.status, report.conclusion, report.sources, report.reason)
 	switch {
 	case err != nil:
 		r.logger.Warn("调查结果没存上", "id", id, "err", err)
@@ -210,8 +215,9 @@ func (r *Runner) runTask(ctx context.Context, id int64) {
 		r.logger.Info("调查已取消（结果作废）", "id", id)
 		return
 	}
-	r.logger.Info("调查结束", "id", id, "status", outcome.status, "reason", outcome.reason, "rounds", outcome.rounds,
-		"searches", outcome.searches, "tokens", outcome.tokens, "elapsed", time.Since(started).Round(time.Second))
+	r.logger.Info("调查结束", "id", id, "status", report.status, "reason", report.reason, "rounds", report.rounds,
+		"searches", report.searches, "reads", report.reads, "gathered", report.gathered, "tokens", report.tokens,
+		"elapsed", time.Since(started).Round(time.Second))
 	r.mu.Lock()
 	callback := r.finished
 	r.mu.Unlock()
@@ -222,34 +228,43 @@ func (r *Runner) runTask(ctx context.Context, id int64) {
 	}
 }
 
-// outcome 是一次调查的结果。
-type outcome struct {
+// investigationReport 是一次调查的经过和结果。
+type investigationReport struct {
 	status          Status
 	conclusion      string
 	sources         []string
 	reason          string
 	rounds          int
-	searches, reads int
+	searches, reads int    // 调用了几次（没成功的也算：搜索次数的上限按它算）
+	gathered        int    // 成功拿到的资料份数（搜索成功、读网页成功）：一份都没有就不交出结论
+	lookupFailure   string // 最近一次搜索、读网页为什么没成功（一份资料都没拿到时写进原因）
 	tokens          int
 }
 
+// noMaterialYet 是一份资料都没拿到就想交结论时退回给模型的话。
+const noMaterialYet = "还没有拿到任何资料（搜索、读网页都还没成功过）。这是调查任务，结论必须以查到的资料为准：先用 search_web 搜，再交结论。"
+
+// conclusionNotTaken 是同一步里既查资料又交结论时，给那次 submit_conclusion 的结果：先看查到的，再交。
+const conclusionNotTaken = "这一步同时在查资料，结论没收下：看完这一步查到的结果，再用 submit_conclusion 交结论。"
+
 // investigate 是调查的主循环：模型决定搜什么、读哪几页；到任何一个上限就不再给工具，逼它用已有材料写结论。
-func (r *Runner) investigate(ctx context.Context, question string) outcome {
+// 一份资料都没拿到时不交出结论（模型凭印象的话不能当成调查结果）。
+func (r *Runner) investigate(ctx context.Context, question string) investigationReport {
 	searchCtx, cancel := context.WithTimeout(ctx, r.limits.Timeout)
 	defer cancel()
 	messages := []brain.ChatMessage{
 		{Role: brain.RoleSystem, Text: researchPrompt(r.limits, time.Now())},
 		{Role: brain.RoleUser, Text: question},
 	}
-	var result outcome
+	var report investigationReport
 	stop := ""
-	nudged := false // 已经因为「没搜就交差」退回过一次
+	nudged := false // 已经因为「一份资料都没有就交结论」退回过一次
 	for {
 		switch {
-		case result.rounds >= r.limits.MaxRounds:
-			stop = fmt.Sprintf("已经查了 %d 轮（上限）", result.rounds)
-		case result.tokens >= r.limits.MaxTokens:
-			stop = fmt.Sprintf("用了约 %d token（上限 %d）", result.tokens, r.limits.MaxTokens)
+		case report.rounds >= r.limits.MaxRounds:
+			stop = fmt.Sprintf("已经查了 %d 轮（上限）", report.rounds)
+		case report.tokens >= r.limits.MaxTokens:
+			stop = fmt.Sprintf("用了约 %d token（上限 %d）", report.tokens, r.limits.MaxTokens)
 		case searchCtx.Err() != nil:
 			stop = fmt.Sprintf("查了 %s（时间上限）", r.limits.Timeout)
 		}
@@ -261,59 +276,90 @@ func (r *Runner) investigate(ctx context.Context, question string) outcome {
 		if stop != "" {
 			break
 		}
-		result.rounds++
-		text, calls, tokens, err := complete(searchCtx, r.model, messages, researchToolSpecs)
-		result.tokens += tokens
+		report.rounds++
+		text, calls, tokens, err := askModel(searchCtx, r.model, messages, researchToolSpecs)
+		report.tokens += tokens
 		if err != nil {
 			if ctx.Err() != nil {
-				return result
+				return report
 			}
 			if searchCtx.Err() != nil {
 				continue // 下一圈判成时间上限
 			}
-			result.status, result.reason = StatusFailed, "模型出错："+err.Error()
-			return result
-		}
-		draft, submitted := submittedConclusion(calls, r.logger)
-		if !submitted && len(calls) == 0 && result.searches == 0 && !nudged {
-			// 一次都没搜就想交差（2026-11-17 真机：云端模型凭印象 1 秒给了结论）：退回去，要求先搜
-			nudged = true
-			messages = append(messages, brain.ChatMessage{Role: brain.RoleAssistant, Text: text},
-				brain.ChatMessage{Role: brain.RoleUser, Text: "你还没有搜索。这是调查任务，结论必须以搜到的资料为准：先用 search_web 搜，再下结论。"})
-			continue
-		}
-		if submitted || len(calls) == 0 { // 模型认为查够了，交出了结论
-			result.status = StatusDone
-			if !submitted { // 没用 submit_conclusion、直接写了文字：整段当结论（没有单独的来源）
-				draft = conclusionDraft{Conclusion: strings.TrimSpace(text)}
-				r.logger.Warn("调查模型没用 submit_conclusion 交结论：整段文字当结论")
+			if report.gathered > 0 { // 已经查到资料：不丢掉，和到上限一样用它们写结论
+				stop = "调查模型出错：" + err.Error()
+				break
 			}
-			if r.writer != nil { // 交给写结论的模型重写（不带调查模型的草稿，免得被它带偏）；写不成就用草稿
-				instruction := brain.ChatMessage{Role: brain.RoleUser, Text: "资料已经查够了。不要再搜索，根据上面查到的资料写结论，用 submit_conclusion 交出来。"}
-				if written, err := r.writeConclusion(ctx, append(messages, instruction), &result, r.writer); err == nil {
-					draft = written
-				} else if ctx.Err() == nil {
-					r.logger.Warn("写结论的模型出错，用调查模型的草稿", "err", err)
-				}
-			}
-			result.conclusion, result.sources = draft.Conclusion, draft.Sources
-			if result.conclusion == "" {
-				result.status, result.reason = StatusFailed, "模型没有给出结论"
-			}
-			return result
+			report.status, report.reason = StatusFailed, "模型出错："+err.Error()
+			return report
 		}
 		for i := range calls {
 			if calls[i].ID == "" {
-				calls[i].ID = fmt.Sprintf("r%d-%d", result.rounds, i)
+				calls[i].ID = fmt.Sprintf("r%d-%d", report.rounds, i)
 			}
 		}
-		messages = append(messages, brain.ChatMessage{Role: brain.RoleAssistant, Text: text, ToolCalls: calls})
-		for _, call := range calls {
-			messages = append(messages, brain.ChatMessage{Role: brain.RoleTool, ToolName: call.Name, ToolCallID: call.ID,
-				Text: r.runTool(searchCtx, call, question, &result)})
+		if hasLookup(calls) { // 这一步在查资料：先执行；同一步交的结论不算（看到结果再交）
+			messages = append(messages, brain.ChatMessage{Role: brain.RoleAssistant, Text: text, ToolCalls: calls})
+			for _, call := range calls {
+				result := conclusionNotTaken
+				if call.Name != submitConclusionSpec.Name {
+					result = r.runTool(searchCtx, call, question, &report)
+				}
+				messages = append(messages, toolResult(call, result))
+			}
+			continue
 		}
+		draft, submitted, err := submittedConclusion(calls)
+		if err != nil { // submit_conclusion 的参数不对：说明哪里不对，让它重新交
+			r.logger.Warn("submit_conclusion 的参数不对", "err", err)
+			messages = append(messages, brain.ChatMessage{Role: brain.RoleAssistant, Text: text, ToolCalls: calls})
+			for _, call := range calls {
+				messages = append(messages, toolResult(call, failureText(err)))
+			}
+			continue
+		}
+		if report.gathered == 0 {
+			// 一份资料都没拿到就想交差（真机上见过：云端模型凭印象 1 秒就给了结论）：退回一次，要求先搜；
+			// 退回后还是没拿到资料，就按没查到资料收尾，不把凭印象的话当成调查结果
+			if nudged {
+				report.status, report.reason = StatusFailed, report.noMaterialReason()
+				return report
+			}
+			nudged = true
+			messages = append(messages, brain.ChatMessage{Role: brain.RoleAssistant, Text: text, ToolCalls: calls})
+			if len(calls) == 0 {
+				messages = append(messages, brain.ChatMessage{Role: brain.RoleUser, Text: noMaterialYet})
+			}
+			for _, call := range calls {
+				messages = append(messages, toolResult(call, noMaterialYet))
+			}
+			continue
+		}
+		// 模型认为查够了，交出了结论
+		report.status = StatusDone
+		if !submitted { // 没用 submit_conclusion、直接写了文字：整段当结论（没有单独的来源）
+			draft = conclusionDraft{Conclusion: strings.TrimSpace(text)}
+			r.logger.Warn("调查模型没用 submit_conclusion 交结论：整段文字当结论")
+		}
+		if r.writer != nil { // 交给写结论的模型重写（不带调查模型的草稿，免得被它带偏）；写不成就用草稿
+			instruction := brain.ChatMessage{Role: brain.RoleUser, Text: "资料已经查够了。不要再搜索，根据上面查到的资料写结论，用 submit_conclusion 交出来。"}
+			if written, err := r.writeConclusion(ctx, append(messages, instruction), &report, r.writer); err == nil {
+				draft = written
+			} else if ctx.Err() == nil {
+				r.logger.Warn("写结论的模型出错，用调查模型的草稿", "err", err)
+			}
+		}
+		report.conclusion, report.sources = draft.Conclusion, draft.Sources
+		if report.conclusion == "" {
+			report.status, report.reason = StatusFailed, "模型没有给出结论"
+		}
+		return report
 	}
 
+	if report.gathered == 0 { // 到上限（或模型出错）时一份资料都没有：没有可写的
+		report.status, report.reason = StatusFailed, stop+"；"+report.noMaterialReason()
+		return report
+	}
 	// 到上限：不再给工具，用已有材料写结论（写结论的时间单算；超出的这一点费用在额度上允许）
 	messages = append(messages, brain.ChatMessage{Role: brain.RoleUser,
 		Text: "调查到此为止（" + stop + "）。不要再搜索，根据上面已经查到的资料写结论，用 submit_conclusion 交出来；没查清的地方明确说没查完。"})
@@ -321,39 +367,66 @@ func (r *Runner) investigate(ctx context.Context, question string) outcome {
 	if r.writer != nil {
 		writers = []brain.ChatModel{r.writer, r.model} // 写结论的模型出错时由调查模型写
 	}
-	draft, err := r.writeConclusion(ctx, messages, &result, writers...)
-	result.reason = stop
+	draft, err := r.writeConclusion(ctx, messages, &report, writers...)
+	report.reason = stop
 	if err != nil {
 		if ctx.Err() != nil {
-			return result
+			return report
 		}
-		result.status = StatusFailed
-		result.reason = stop + "；写结论时出错：" + err.Error()
-		return result
+		report.status = StatusFailed
+		report.reason = stop + "；写结论时出错：" + err.Error()
+		return report
 	}
-	result.status = StatusPartial
-	result.conclusion, result.sources = draft.Conclusion, draft.Sources
-	return result
+	report.status = StatusPartial
+	report.conclusion, report.sources = draft.Conclusion, draft.Sources
+	return report
+}
+
+// noMaterialReason 是一份资料都没拿到时的原因：带上最近一次没查成的说明（例如今天的搜索额度用完了）。
+func (report *investigationReport) noMaterialReason() string {
+	if report.lookupFailure == "" {
+		return "没查到资料"
+	}
+	return "没查到资料：" + report.lookupFailure
+}
+
+// hasLookup 判断这一步有没有交结论以外的调用（搜索、读网页，或者叫错名字的工具：照样执行，把结果交给模型）。
+func hasLookup(calls []brain.ToolCall) bool {
+	for _, call := range calls {
+		if call.Name != submitConclusionSpec.Name {
+			return true
+		}
+	}
+	return false
+}
+
+func toolResult(call brain.ToolCall, text string) brain.ChatMessage {
+	return brain.ChatMessage{Role: brain.RoleTool, ToolName: call.Name, ToolCallID: call.ID, Text: text}
 }
 
 // writeConclusion 依次让 writers 根据 messages 里的资料写结论（只给 submit_conclusion），第一个写成的为准；
 // 每个模型各有 writeUpTimeout。没用工具、直接写了文字的，整段当结论。
-func (r *Runner) writeConclusion(ctx context.Context, messages []brain.ChatMessage, result *outcome, writers ...brain.ChatModel) (conclusionDraft, error) {
+func (r *Runner) writeConclusion(ctx context.Context, messages []brain.ChatMessage, report *investigationReport,
+	writers ...brain.ChatModel) (conclusionDraft, error) {
 	var lastErr error
 	for i, writer := range writers {
 		writeCtx, cancel := context.WithTimeout(ctx, writeUpTimeout)
-		text, calls, tokens, err := complete(writeCtx, writer, messages, []brain.ToolSpec{submitConclusionSpec})
+		text, calls, tokens, err := askModel(writeCtx, writer, messages, []brain.ToolSpec{submitConclusionSpec})
 		cancel()
-		result.tokens += tokens
+		report.tokens += tokens
 		if err == nil {
-			if draft, ok := submittedConclusion(calls, r.logger); ok && draft.Conclusion != "" {
+			draft, submitted, decodeErr := submittedConclusion(calls)
+			if decodeErr != nil {
+				r.logger.Warn("写结论的模型给的 submit_conclusion 参数不对", "err", decodeErr)
+			}
+			if submitted && draft.Conclusion != "" {
 				return draft, nil
 			}
 			if text = strings.TrimSpace(text); text != "" {
 				r.logger.Warn("写结论的模型没用 submit_conclusion：整段文字当结论")
 				return conclusionDraft{Conclusion: text}, nil
 			}
-			err = errors.New("没写出结论")
+			err = errors.Join(errors.New("没写出结论"), decodeErr)
 		}
 		if ctx.Err() != nil {
 			return conclusionDraft{}, ctx.Err()
@@ -368,62 +441,78 @@ func (r *Runner) writeConclusion(ctx context.Context, messages []brain.ChatMessa
 
 // conclusionDraft 是模型用 submit_conclusion 交出的结论：结论会被念出来，来源只存档。
 type conclusionDraft struct {
-	Conclusion string   `json:"conclusion" jsonschema:"3 到 6 句中文口语的结论（会被念出来：不要列表、表格、网址、Markdown）；有不确定或没查到的地方直接说"`
+	Conclusion string   `json:"conclusion" jsonschema:"3 到 6 句口语的结论，用和问题相同的语言写（会被念出来：不要列表、表格、网址、Markdown）；有不确定或没查到的地方直接说"`
 	Sources    []string `json:"sources,omitempty" jsonschema:"1 到 3 个最主要的来源网址"`
 }
 
-// submittedConclusion 找出这一轮里的 submit_conclusion 调用并解出参数；没有、或者参数不对时 ok = false。
-func submittedConclusion(calls []brain.ToolCall, logger *slog.Logger) (conclusionDraft, bool) {
+// submittedConclusion 找出这一步里的 submit_conclusion 调用并解出参数：没有这个调用时 submitted = false；
+// 参数不对时返回错误（说明哪里不对）。
+func submittedConclusion(calls []brain.ToolCall) (draft conclusionDraft, submitted bool, err error) {
 	for _, call := range calls {
 		if call.Name != submitConclusionSpec.Name {
 			continue
 		}
 		draft, err := brain.DecodeArguments[conclusionDraft](call.Arguments)
 		if err != nil {
-			logger.Warn("submit_conclusion 的参数不对", "err", err)
-			return conclusionDraft{}, false
+			return conclusionDraft{}, false, fmt.Errorf("submit_conclusion 的参数不对: %w", err)
 		}
 		draft.Conclusion = strings.TrimSpace(draft.Conclusion)
-		return draft, true
+		return draft, true, nil
 	}
-	return conclusionDraft{}, false
+	return conclusionDraft{}, false, nil
 }
 
-// runTool 执行调查里的一次工具调用，返回给模型看的文字（出错也作为文字交给模型，让它换个办法）。
-func (r *Runner) runTool(ctx context.Context, call brain.ToolCall, question string, result *outcome) string {
+// runTool 执行调查里的一次搜索或读网页，返回给模型看的文字（出错也作为文字交给模型，让它换个办法）。
+// 成功拿到的才算资料（report.gathered）；没成功的记下原因。
+func (r *Runner) runTool(ctx context.Context, call brain.ToolCall, question string, report *investigationReport) string {
 	switch call.Name {
 	case "search_web":
-		if result.searches >= r.limits.MaxSearches {
+		if report.searches >= r.limits.MaxSearches {
 			return fmt.Sprintf("搜索次数已经用完（上限 %d 次）。请根据已有资料写结论。", r.limits.MaxSearches)
 		}
 		in, err := brain.DecodeArguments[searchInput](call.Arguments)
 		if err != nil || strings.TrimSpace(in.Query) == "" {
-			return orError("", errors.Join(errors.New("query 不能为空"), err))
+			return failureText(errors.Join(errors.New("query 不能为空"), err))
 		}
 		text, err := r.metered(ctx, r.searcher.SearchCredits(), func() (string, error) {
 			return r.searcher.Search(ctx, in.Query, searchResults)
 		})
-		result.searches++
+		report.searches++
 		r.logger.Info("调查：搜索", "query", in.Query, "err", err)
-		return orError(text, err)
+		return report.lookupResult(text, err)
 	case "read_pages":
 		in, err := brain.DecodeArguments[readPagesInput](call.Arguments)
 		if err != nil || len(in.URLs) == 0 {
-			return orError("", errors.Join(errors.New("urls 不能为空"), err))
+			return failureText(errors.Join(errors.New("urls 不能为空"), err))
 		}
-		urls := in.URLs
+		urls, skipped := in.URLs, []string(nil)
 		if len(urls) > maxPagesPerRead {
-			urls = urls[:maxPagesPerRead]
+			urls, skipped = urls[:maxPagesPerRead], urls[maxPagesPerRead:]
 		}
 		text, err := r.metered(ctx, r.searcher.ReadCredits(len(urls)), func() (string, error) {
 			return r.searcher.ReadPages(ctx, urls, r.limits.PageRunes, question)
 		})
-		result.reads++
-		r.logger.Info("调查：读网页", "urls", len(urls), "err", err)
-		return orError(text, err)
+		report.reads++
+		r.logger.Info("调查：读网页", "urls", len(urls), "skipped", len(skipped), "err", err)
+		result := report.lookupResult(text, err)
+		if len(skipped) > 0 { // 多给的网址没读：告诉模型是哪几个，需要的话它再分批读
+			result += fmt.Sprintf("\n一次最多读 %d 个网址，这次没读：%s。需要的话再调用一次 read_pages 读它们。",
+				maxPagesPerRead, strings.Join(skipped, "、"))
+		}
+		return result
 	default:
 		return "没有叫 " + call.Name + " 的工具"
 	}
+}
+
+// lookupResult 记下一次搜索或读网页的结果：成功的算一份资料，没成功的记下原因；返回给模型看的文字。
+func (report *investigationReport) lookupResult(text string, err error) string {
+	if err != nil {
+		report.lookupFailure = err.Error()
+		return failureText(err)
+	}
+	report.gathered++
+	return text
 }
 
 // metered 先查额度、执行、成功后记账。
@@ -435,21 +524,19 @@ func (r *Runner) metered(ctx context.Context, credits int, run func() (string, e
 	if err != nil {
 		return "", err
 	}
+	// 写不进时由计量那边留着补写，补写成功之前不放行有上限的调查和搜索（spending.WithBookkeeping）
 	if err := r.meter.RecordSearch(context.WithoutCancel(ctx), credits); err != nil {
-		r.logger.Warn("调查的搜索用量没记上", "err", err)
+		r.logger.Warn("调查的搜索用量没写进账本", "err", err, "credits", credits)
 	}
 	return text, nil
 }
 
-func orError(text string, err error) string {
-	if err != nil {
-		return "失败：" + err.Error()
-	}
-	return text
+func failureText(err error) string {
+	return "失败：" + err.Error()
 }
 
-// complete 请求模型一次，收齐文字、工具调用与 token 数（出错时也算上知道的用量）；被截断按失败（brain.ErrTruncated）。
-func complete(ctx context.Context, model brain.ChatModel, messages []brain.ChatMessage, specs []brain.ToolSpec) (string, []brain.ToolCall, int, error) {
+// askModel 请求模型一次，收齐文字、工具调用与 token 数（出错时也算上知道的用量）；被截断按失败（brain.ErrTruncated）。
+func askModel(ctx context.Context, model brain.ChatModel, messages []brain.ChatMessage, specs []brain.ToolSpec) (string, []brain.ToolCall, int, error) {
 	reply, err := brain.CollectReply(ctx, model, brain.ChatRequest{Messages: messages, Tools: specs})
 	return reply.Text, reply.ToolCalls, reply.Usage.PromptTokens + reply.Usage.OutputTokens, err
 }
@@ -468,8 +555,8 @@ var submitConclusionSpec = brain.ToolSpec{Name: "submit_conclusion",
 
 var researchToolSpecs = []brain.ToolSpec{
 	{Name: "search_web", Description: "联网搜索，返回几条结果（标题、网址、摘要）。", Parameters: brain.ParametersFor[searchInput]()},
-	{Name: "read_pages", Description: "读网页正文（一次最多 3 个网址，每页只给开头一部分）。摘要不够用时才读。",
-		Parameters: brain.ParametersFor[readPagesInput]()},
+	{Name: "read_pages", Description: fmt.Sprintf("读网页正文（一次最多 %d 个网址；每页给出和调查的问题相关的段落）。摘要不够用时才读。",
+		maxPagesPerRead), Parameters: brain.ParametersFor[readPagesInput]()},
 	submitConclusionSpec,
 }
 
@@ -477,6 +564,6 @@ func researchPrompt(limits Limits, now time.Time) string {
 	// 告诉模型今天的日期（2026-11-17 实测：不说的话搜索词里写的是两年前的年份，搜回来的都是旧资料）
 	today := fmt.Sprintf("今天是 %s（%s）。要查「现在」「最近」的事时按这个日期来，不要用别的年份。\n", now.Format("2006年1月2日"), brain.WeekdayName(now))
 	return today + fmt.Sprintf(`你是调查助手，在后台替主人查资料。用 search_web 搜索、必要时用 read_pages 读正文，查清楚后直接给出结论。
-限制：最多搜索 %d 次、最多 %d 轮；够用就停，不要为了凑数多查。搜索词按资料最可能使用的语言写（日本的事用日语搜，其他按情况用英语或中文）。
+限制：最多搜索 %d 次、最多 %d 轮；够用就停，不要为了凑数多查。搜索词按资料所在的地区和语言写（那里的资料多半用什么语言，就用什么语言搜），不一定和问题的语言相同。
 查清楚后调用 submit_conclusion 交出结论和来源。`, limits.MaxSearches, limits.MaxRounds)
 }

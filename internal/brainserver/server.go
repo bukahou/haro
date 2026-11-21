@@ -3,7 +3,7 @@
 //
 // 存活 / 就绪检查（/livez、/readyz）由组装处挂在同一个 HTTP 服务上（见 internal/readiness）。
 //
-// 一条连接一个会话（与 OpenAI Realtime 一致）：连接断了，这次的对话历史就没了（性格记在文件里，不受影响）。
+// 一条连接一个会话（与 OpenAI Realtime 一致）；对话跟人走、存在对话库里，换连接、重连、服务端重启都接得上（见 haro-server 的组装）。
 // 本包只管协议和连接，会话由外部注入（haro-server 注入 brain.Session）。
 //
 // 握手时按 WebSocket 子协议协商版本（negotiate）：

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"slices"
 	"strings"
+	"time"
 )
 
 // Agent 是装配好的代理：定义里的规则（internal/agents 从文件读）加上接好的模型，由服务端组装。
@@ -22,6 +23,8 @@ type Agent struct {
 	// RepeatLimit、RepeatWindow：同一个工具、同样的参数在最近 RepeatWindow 步里出现第 RepeatLimit 次算死循环；0 = 不查
 	RepeatLimit  int
 	RepeatWindow int
+	// Timeout 是调用一次最多等多久（子任务用）；0 = 不另设期限
+	Timeout time.Duration
 }
 
 // Handoff 是「接手」：哪些情况把这一轮剩下的部分交给 Agent 回答。
@@ -57,7 +60,7 @@ func (a Agent) offer(specs []ToolSpec) []ToolSpec {
 
 // UnknownTools 是 tools 里会话和工具箱都不提供的名字（服务端启动时检查代理定义的允许名单，写错了就起不来）。
 func UnknownTools(tools []string, toolbox Toolbox) []string {
-	known := []string{lookAtCameraTool, switchPersonaTool, askStrongerTool, raiseMonthlyCapTool, confirmActionTool, cancelActionTool}
+	known := sessionToolNames()
 	if toolbox != nil {
 		for _, spec := range toolbox.Specs() {
 			known = append(known, spec.Name)

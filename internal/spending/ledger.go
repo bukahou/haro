@@ -4,18 +4,19 @@
 // Guard 据此决定还能不能花：后台调查按天封顶、大模型按月封顶、搜索积分按天封顶。
 // 云厂商的预算告警一般只发提醒、不会停服务，真正能拦住的只有服务端自己。
 //
-// 对外：OpenLedger（Facade）+ Ledger（接口）；Guard；MeteredChatModel / BudgetedChatModel（装饰 brain.ChatModel）。
+// 对外：OpenLedger（Facade）+ Ledger（接口）+ WithBookkeeping（记账日志与补写）；Guard；
+// MeteredChatModel / BudgetedChatModel（装饰 brain.ChatModel）。
 package spending
 
 import (
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
-	"path/filepath"
+	"log/slog"
+	"strings"
 	"time"
 
-	_ "modernc.org/sqlite" // 纯 Go 的 SQLite 驱动
+	"github.com/bukahou/haro/internal/sqliteschema"
 )
 
 // Purpose 是花钱的用途：额度按用途分开算。
@@ -69,7 +70,10 @@ type Ledger interface {
 	Record(ctx context.Context, charge Charge) error
 	// Total 合计 since 之后的花费；purposes 为空 = 所有用途。
 	Total(ctx context.Context, since time.Time, purposes ...Purpose) (Totals, error)
-	// CheckWritable 确认账本现在写得进去（就绪检查用）：不改任何数据。
+	// FlushPending 把之前写不进、留在内存里的花费补写进去（见 WithBookkeeping）；补写不成时报错：
+	// 这时合计不完整，不能拿来判断额度。不留待补写的实现（SQLite 账本写不进就直接报错）什么都不做。
+	FlushPending(ctx context.Context) error
+	// CheckWritable 确认账本现在写得进去（就绪检查用）：有待补写的先补写，此外不改任何数据。
 	CheckWritable(ctx context.Context) error
 	// RaiseCap 记下一次主人确认的临时提高上限；CapRaised 合计 since 之后提高了多少日元。
 	RaiseCap(ctx context.Context, raise CapRaise) error
@@ -86,30 +90,26 @@ type CapRaise struct {
 
 // OpenLedger 打开用量账本：path 是 SQLite 文件路径；空 = 只在内存里（服务端重启就清零，额度也跟着重置）。
 func OpenLedger(ctx context.Context, path string) (Ledger, error) {
-	location := "file::memory:"
-	if path != "" {
-		if dir := filepath.Dir(path); dir != "." {
-			if err := os.MkdirAll(dir, 0o755); err != nil {
-				return nil, fmt.Errorf("创建用量账本目录: %w", err)
-			}
-		}
-		location = path + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)"
-	}
-	db, err := sql.Open("sqlite", location)
+	db, err := sqliteschema.Open(ctx, path, migrationFiles, sqliteschema.Options{Migrate: ledgerMigrations})
 	if err != nil {
-		return nil, err
-	}
-	db.SetMaxOpenConns(1) // 单写者；内存库也只能有一个连接（否则每个连接一份）
-	if err := migrateLedger(ctx, db); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("升级用量账本的表结构: %w", err)
+		return nil, fmt.Errorf("打开用量账本: %w", err)
 	}
 	return &sqliteLedger{db: db}, nil
+}
+
+// WithBookkeeping 给账本套上记账的两层：每记上一笔打一行日志（花的钱在日志里就看得见，见 loggingLedger）；
+// 写不进的那笔留在内存里、之后补写，补写成功之前 Guard 不放行有上限的付费调用和搜索（见 pendingChargesLedger）。
+// 补写也经过日志那层：补写上的每一笔照样打一行。
+func WithBookkeeping(ledger Ledger, logger *slog.Logger) Ledger {
+	return &pendingChargesLedger{Ledger: &loggingLedger{Ledger: ledger, logger: logger}, logger: logger, now: time.Now}
 }
 
 type sqliteLedger struct {
 	db *sql.DB
 }
+
+// FlushPending：SQLite 账本写不进时直接报错给调用方，自己不留待补写的。
+func (l *sqliteLedger) FlushPending(context.Context) error { return nil }
 
 func (l *sqliteLedger) Record(ctx context.Context, charge Charge) error {
 	if charge.At.IsZero() {
@@ -133,7 +133,7 @@ func (l *sqliteLedger) Total(ctx context.Context, since time.Time, purposes ...P
 	query := `SELECT COALESCE(SUM(yen), 0), COALESCE(SUM(credits), 0) FROM charges WHERE at >= ?`
 	args := []any{since.Unix()}
 	if len(purposes) > 0 {
-		query += ` AND purpose IN (?` + repeat(",?", len(purposes)-1) + `)`
+		query += ` AND purpose IN (?` + strings.Repeat(",?", len(purposes)-1) + `)`
 		for _, purpose := range purposes {
 			args = append(args, string(purpose))
 		}
@@ -173,11 +173,3 @@ func (l *sqliteLedger) CapRaised(ctx context.Context, since time.Time) (float64,
 }
 
 func (l *sqliteLedger) Close() error { return l.db.Close() }
-
-func repeat(s string, n int) string {
-	out := ""
-	for range n {
-		out += s
-	}
-	return out
-}

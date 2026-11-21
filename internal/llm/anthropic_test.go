@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"testing"
 
@@ -13,7 +14,7 @@ import (
 )
 
 func testClaudeModel(server *llmtest.Server, effort string) *AnthropicChatModel {
-	return NewAnthropicChatModel(AnthropicOptions{API: NewClaudeAPI("test-key", server.URL, server.Client()),
+	return NewAnthropicChatModel(AnthropicOptions{API: claudeAPIForTest("test-key", server.URL, server.Client()),
 		Model: "claude-haiku-5-5", MaxTokens: 800, Effort: effort})
 }
 
@@ -255,17 +256,27 @@ func marshalMessages(t *testing.T, messages any) string {
 	return string(sorted)
 }
 
-// Claude 的回答力度（思考关掉时只有三档，空 = 模型默认）和思考写法：认识的通过，别的报错。
+// Claude 的回答力度（空 = 模型默认）按搭配的思考写法查：三档哪种写法都行；xhigh、max 只在 adaptive 时可用；别的报错。
 func TestValidateClaudeValues(t *testing.T) {
-	for _, effort := range []string{"", "low", "medium", "high"} {
-		if err := ValidateClaudeEffort(effort); err != nil {
-			t.Errorf("力度 %q 应通过：%v", effort, err)
+	for _, thinking := range []string{ThinkingDisabled, ThinkingBetweenTools, ThinkingAdaptive} {
+		for _, effort := range []string{"", "low", "medium", "high"} {
+			if err := ValidateClaudeEffort(effort, thinking); err != nil {
+				t.Errorf("力度 %q（思考 %s）应通过：%v", effort, thinking, err)
+			}
 		}
 	}
-	for _, effort := range []string{"xhigh", "max", "Low"} {
-		if err := ValidateClaudeEffort(effort); err == nil {
-			t.Errorf("力度 %q 应报错", effort)
+	for _, effort := range []string{"xhigh", "max"} {
+		if err := ValidateClaudeEffort(effort, ThinkingAdaptive); err != nil {
+			t.Errorf("思考是 adaptive 时力度 %q 应通过：%v", effort, err)
 		}
+		for _, thinking := range []string{ThinkingDisabled, ThinkingBetweenTools} {
+			if err := ValidateClaudeEffort(effort, thinking); err == nil {
+				t.Errorf("思考是 %s 时力度 %q 应报错", thinking, effort)
+			}
+		}
+	}
+	if err := ValidateClaudeEffort("Low", ThinkingAdaptive); err == nil {
+		t.Error("不认识的力度应报错")
 	}
 	for _, thinking := range []string{ThinkingDisabled, ThinkingBetweenTools, ThinkingAdaptive} {
 		if err := ValidateClaudeThinking(thinking); err != nil {
@@ -275,4 +286,13 @@ func TestValidateClaudeValues(t *testing.T) {
 	if err := ValidateClaudeThinking(""); err == nil {
 		t.Error("思考的写法要写明（空的不认）")
 	}
+}
+
+// claudeAPIForTest 建测试用的 Claude 客户端（测试都给了凭证：建不起来是测试本身写错了）。
+func claudeAPIForTest(apiKey, baseURL string, client *http.Client) *ClaudeAPI {
+	api, err := NewClaudeAPI(apiKey, baseURL, client)
+	if err != nil {
+		panic(err)
+	}
+	return api
 }

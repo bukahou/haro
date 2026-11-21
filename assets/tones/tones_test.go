@@ -5,16 +5,20 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
+// 编进程序里的四个提示音都读得出来、长度合理（半秒到几秒）。
 func TestEmbeddedTonesParse(t *testing.T) {
-	for name, load := range map[string]func() (any, time.Duration, error){
-		"offline": func() (any, time.Duration, error) { a, err := Offline(); return a.Format, a.Duration(), err },
-		"online":  func() (any, time.Duration, error) { a, err := Online(); return a.Format, a.Duration(), err },
-	} {
-		format, duration, err := load()
-		if err != nil || duration < 500*time.Millisecond || duration > 5*time.Second {
-			t.Errorf("%s：%v %v %v", name, format, duration, err)
+	builtin, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, tone := range map[string]realtimeproto.PCMAudio{"offline": builtin.Offline, "online": builtin.Online,
+		"sleep": builtin.Sleep, "notice": builtin.Notice} {
+		if d := tone.Duration(); d < 500*time.Millisecond || d > 5*time.Second {
+			t.Errorf("%s：%v %v", name, tone.Format, d)
 		}
 	}
 }

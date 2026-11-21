@@ -1,19 +1,6 @@
 #!/bin/sh
-# haro 终端的安装脚本（装在自己的用户目录里，不需要 root）。再跑一次 = 升级到最新。
-#
-#   curl -fsSL https://github.com/bukahou/haro/releases/latest/download/install.sh | sh -s -- --server-url http://服务端地址:59130
-#
-# 选项：
-#   --server-url URL   服务端地址（第一次安装时必填；配置文件已经有了就不改它）
-#   --version TAG      装指定版本，例如 v0.5.0-1a2b3c4（默认最新）
-#   --no-service       只装程序和配置，不装开机自启
-#   --uninstall        卸载程序和开机自启（配置文件留着）
-#
-# 做的事：下载这台机器对应的终端程序（Linux x86_64 / arm64、macOS Apple 芯片）→ 按 SHA256SUMS 校验 →
-#   装到 ~/.local/bin/haro → 第一次装时写配置 ~/.config/haro/haro.env →
-#   装成开机自启并（重新）启动：Linux 是 systemd 用户服务 haro.service（跟着桌面会话启停），macOS 是 LaunchAgent。
-# 不是这个脚本装的服务文件（例如开发时 make install-terminal-service 装的）不会被改动或删除。
-# 环境变量 HARO_RELEASE_BASE_URL：换掉下载地址（测试用，可以是 file://；指向放着压缩包和 SHA256SUMS 的目录）。
+# haro 终端的安装脚本。用法、选项、做的事只写在下面的 usage 里（--help 打印它）：
+# curl 管道装法（curl … | sh -s -- …）下 $0 不是这个文件，读不到这里的注释。
 set -eu
 
 repo=bukahou/haro
@@ -33,9 +20,39 @@ die() {
 	printf '❌ %s\n' "$*" >&2
 	exit 1
 }
+
+# 拒装的原因各有一个退出码（scripts/test-install.sh 按退出码判断，不比对提示文字）；避开 shell 自己用的 1、2 和 126 以上
+exit_need_server_url=10 # 第一次安装没给服务端地址
+exit_checksum=11        # 下载的安装包和 SHA256SUMS 对不上
+exit_no_platform=12     # 这个版本没有这台机器的平台
+
+# refuse 退出码 说明：因为某个原因拒装
+refuse() {
+	code=$1
+	shift
+	printf '❌ %s\n' "$*" >&2
+	exit "$code"
+}
+
 usage() {
-	sed -n '2,17p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'
-	exit 2
+	cat <<EOF
+haro 终端的安装脚本（装在自己的用户目录里，不需要 root）。再跑一次 = 升级到最新。
+
+  curl -fsSL https://github.com/$repo/releases/latest/download/install.sh | sh -s -- --server-url http://服务端地址:59130
+
+选项：
+  --server-url URL   服务端地址（第一次安装时必填；配置文件已经有了就不改它）
+  --version TAG      装指定版本，例如 v0.5.0-1a2b3c4（默认最新）
+  --no-service       只装程序和配置，不装开机自启
+  --uninstall        卸载程序和开机自启（配置文件留着）
+  -h, --help         打印这段说明
+
+做的事：下载这台机器对应的终端程序（Linux x86_64 / arm64、macOS Apple 芯片）→ 按 SHA256SUMS 校验 →
+  装到 ~/.local/bin/haro → 第一次装时写配置 ~/.config/haro/haro.env →
+  装成开机自启并（重新）启动：Linux 是 systemd 用户服务 haro.service（跟着桌面会话启停），macOS 是 LaunchAgent。
+不是这个脚本装的服务文件（例如开发时 make install-terminal-service 装的）不会被改动或删除。
+环境变量 HARO_RELEASE_BASE_URL：换掉下载地址（测试用，可以是 file://；指向放着压缩包和 SHA256SUMS 的目录）。
+EOF
 }
 
 server_url=
@@ -58,7 +75,10 @@ while [ $# -gt 0 ]; do
 	--version=*) version=${1#*=} ;;
 	--no-service) with_service=false ;;
 	--uninstall) action=uninstall ;;
-	-h | --help) usage ;;
+	-h | --help)
+		usage
+		exit 0
+		;;
 	*) die "不认识的选项：$1（--help 看用法）" ;;
 	esac
 	shift
@@ -133,7 +153,7 @@ esac
 base_url=${HARO_RELEASE_BASE_URL:-$default_base}
 
 if [ ! -e "$env_file" ]; then
-	[ -n "$server_url" ] || die "第一次安装要告诉终端服务端在哪：--server-url http://服务端地址:59130"
+	[ -n "$server_url" ] || refuse "$exit_need_server_url" "第一次安装要告诉终端服务端在哪：--server-url http://服务端地址:59130"
 fi
 if [ -n "$server_url" ]; then
 	case $server_url in
@@ -158,11 +178,11 @@ curl -fsSL --retry 3 --retry-delay 2 -o "$work/SHA256SUMS" "$base_url/SHA256SUMS
 	die "下载不了 $base_url/SHA256SUMS（版本写对了吗？）"
 # 发布的平台以这个版本的 SHA256SUMS 为准：不在里面就是这个版本没有这个平台的安装包
 expected=$(awk -v name="$asset" '$2 == name || $2 == "*" name { print $1; exit }' "$work/SHA256SUMS")
-[ -n "$expected" ] || die "这个版本没有 ${platform} 的安装包（发布了哪些平台见 $base_url/SHA256SUMS）"
+[ -n "$expected" ] || refuse "$exit_no_platform" "这个版本没有 ${platform} 的安装包（发布了哪些平台见 $base_url/SHA256SUMS）"
 curl -fsSL --retry 3 --retry-delay 2 -o "$work/$asset" "$base_url/$asset" ||
 	die "下载不了 $base_url/$asset"
 actual=$(sha256_of "$work/$asset")
-[ "$actual" = "$expected" ] || die "校验不过：$asset 的 sha256 是 ${actual}，SHA256SUMS 写的是 ${expected}（下载出错或文件被改过），没有安装"
+[ "$actual" = "$expected" ] || refuse "$exit_checksum" "校验不过：$asset 的 sha256 是 ${actual}，SHA256SUMS 写的是 ${expected}（下载出错或文件被改过），没有安装"
 
 mkdir -p "$work/unpacked" "$bin_dir"
 tar -xzf "$work/$asset" -C "$work/unpacked"
@@ -183,7 +203,7 @@ else
 	mkdir -p "$config_dir"
 	cat >"$env_file" <<EOF
 # haro 终端的配置（安装脚本第一次安装时写的；之后可以手动改，重新安装不会覆盖这个文件）。
-# 每行 KEY="value"，启动时由 sh 读取。全部配置项：https://github.com/$repo/blob/main/internal/config/config.go
+# 每行 KEY="value"，启动时由 sh 读取。全部配置项和说明：https://github.com/$repo/blob/main/deploy/systemd/terminal.env.example
 HARO_SERVER_URL="$server_url"
 
 # 麦克风 / 音箱：空 = 跟系统默认（麦克风会跳过蓝牙的）。要指定就填设备 ID（麦克风的 ID 见启动日志 🎤 那一行的 id）；

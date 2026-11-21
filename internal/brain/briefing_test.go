@@ -199,7 +199,6 @@ func (spokenErr) Phrase() (string, map[string]string) {
 func (overBudgetModel) StreamReply(context.Context, brain.ChatRequest) iter.Seq2[brain.ReplyDelta, error] {
 	return func(yield func(brain.ReplyDelta, error) bool) { yield(brain.ReplyDelta{}, spokenErr{}) }
 }
-func (overBudgetModel) Warmup(context.Context) error { return nil }
 
 // 念哪种语言跟着主人最近一句话识别出的语种：没有这种语言（或不知道）时用默认的。
 func TestSpokenErrorIsSaidAloud(t *testing.T) {

@@ -3,7 +3,7 @@
 //
 //	platform（门面）
 //	  ├ audio   录音放音：miniaudio，Linux / macOS / 树莓派共用
-//	  ├ camera  取帧：ffmpeg（输入参数由 osdiff 给）
+//	  ├ camera  取帧：mediadevices（Linux 默认），或 ffmpeg（备用，macOS 现在用它；输入参数由 osdiff 给）
 //	  └ osdiff  各系统不同的部分：认接口类型、列摄像头、摄像头输入参数
 //
 // LocalDevices 满足服务层（internal/terminal）定义的 DeviceCatalog 与 DeviceOpener；服务层不 import 本包。
@@ -18,6 +18,7 @@ import (
 	"github.com/bukahou/haro/internal/platform/audio"
 	"github.com/bukahou/haro/internal/platform/camera"
 	"github.com/bukahou/haro/internal/platform/osdiff"
+	"github.com/bukahou/haro/internal/realtimeproto"
 	"github.com/bukahou/haro/internal/terminal"
 )
 
@@ -65,10 +66,13 @@ func (d *LocalDevices) Cameras(ctx context.Context) ([]terminal.Device, error) {
 	return d.os.Cameras(ctx)
 }
 
-// OpenMicrophone 打开常驻麦克风流；id 为空 = 系统默认。
+// OpenMicrophone 打开常驻麦克风流；id 为空 = 系统默认。送出的格式见 MicrophoneFormat。
 func (d *LocalDevices) OpenMicrophone(id string) assistant.Microphone {
 	return audio.NewMiniaudioMicrophone(d.audio, id)
 }
+
+// MicrophoneFormat 是麦克风（OpenMicrophone、OpenRecorder）送出的音频格式：连服务端时声明在 session.update 里。
+func (d *LocalDevices) MicrophoneFormat() realtimeproto.AudioFormat { return audio.MicrophoneFormat }
 
 // OpenRecorder 打开一段一段的录音（登记声纹用）。
 func (d *LocalDevices) OpenRecorder(id string) assistant.AudioRecorder {
@@ -134,7 +138,7 @@ func (d *LocalDevices) OpenCamera(startup terminal.Choice, pick terminal.CameraP
 func (d *LocalDevices) describe(devices []audio.Device) []terminal.Device {
 	described := make([]terminal.Device, 0, len(devices))
 	for _, device := range devices {
-		traits, err := d.os.AudioTraits(context.Background(), device.Key, device.Name)
+		traits, err := d.os.AudioTraits(context.Background(), device.Key)
 		if err != nil && d.traitsWarned.CompareAndSwap(false, true) {
 			d.logger.Warn("认不出音频设备的接口类型和回录源：蓝牙麦克风、回录源分不出来（Linux 上要装 pactl）", "err", err)
 		}

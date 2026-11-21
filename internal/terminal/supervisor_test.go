@@ -146,7 +146,7 @@ type rig struct {
 	dialedAt     []time.Time // 每次连服务端的时刻
 	micScannedAt []time.Time // 每次列麦克风的时刻
 	conns        []*fakeConn
-	sessions     []Devices
+	sessions     []SelectedDevices
 	fail         chan error
 	openErr      error        // 设了：每次对话运行一开始就以它结束（设备在列表里、却打不开）
 	running      atomic.Int32 // 对话正常运行起来的次数
@@ -166,8 +166,8 @@ func newRig() *rig {
 	return r
 }
 
-func (r *rig) parts() Parts {
-	return Parts{
+func (r *rig) dependencies() SupervisorDependencies {
+	return SupervisorDependencies{
 		Dial: func(context.Context) (Connection, error) {
 			n := r.dials.Add(1)
 			r.mu.Lock()
@@ -192,7 +192,7 @@ func (r *rig) parts() Parts {
 		MicrophoneOverride: r.micOverride,
 		CameraName:         func() string { return r.camera.Load().(string) },
 		Tools:              &r.tools,
-		NewSession: func(_ Connection, devices Devices) Session {
+		NewSession: func(_ Connection, devices SelectedDevices) Session {
 			r.mu.Lock()
 			r.sessions = append(r.sessions, devices)
 			r.mu.Unlock()
@@ -240,7 +240,7 @@ func (r *rig) times(which *[]time.Time) []time.Time {
 	defer r.mu.Unlock()
 	return append([]time.Time(nil), *which...)
 }
-func (r *rig) lastSession() Devices {
+func (r *rig) lastSession() SelectedDevices {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.sessions[len(r.sessions)-1]
@@ -251,7 +251,7 @@ func startSupervisor(t *testing.T, r *rig) (stop func() error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- NewSupervisor(r.parts(), testTiming, slog.New(slog.NewTextHandler(io.Discard, nil))).Run(ctx)
+		done <- NewSupervisor(r.dependencies(), testTiming, slog.New(slog.NewTextHandler(io.Discard, nil))).Run(ctx)
 	}()
 	return func() error {
 		cancel()
@@ -307,7 +307,7 @@ func TestSupervisorRetriesBeforeAnnouncing(t *testing.T) {
 		BackoffMin: 200 * time.Millisecond, BackoffMax: time.Second} // 重试在 0、200、600 ms：提示时间 300 ms 落在中间
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go NewSupervisor(r.parts(), timing, slog.New(slog.NewTextHandler(io.Discard, nil))).Run(ctx)
+	go NewSupervisor(r.dependencies(), timing, slog.New(slog.NewTextHandler(io.Discard, nil))).Run(ctx)
 	eventually(t, "连上并运行", func() bool { return r.sessionCount() == 1 })
 	// 提示音在连上之前播（connect 返回前），所以连上时还没出声就是没出声
 	if n := r.sink.count(); n != 0 {
@@ -336,6 +336,42 @@ func TestSupervisorWaitsForAndSwitchesMicrophone(t *testing.T) {
 	r.fail <- assistant.ErrMicrophoneStopped // 麦克风流自己停了
 	eventually(t, "麦克风停了之后重来", func() bool { return r.sessionCount() == 3 })
 	_ = stop()
+}
+
+// 对话运行没出错就结束了（不该发生）：按出错重来，不当成关机退出（只有关机信号才退出）。
+func TestSupervisorRestartsWhenRunEndsWithoutError(t *testing.T) {
+	r := newRig()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- NewSupervisor(r.dependencies(), testTiming, slog.New(slog.NewTextHandler(io.Discard, nil))).Run(ctx)
+	}()
+	eventually(t, "运行", func() bool { return r.sessionCount() == 1 })
+	r.fail <- nil
+	eventually(t, "没出错就结束了也重来", func() bool { return r.sessionCount() == 2 })
+	select {
+	case err := <-done:
+		t.Fatalf("没收到关机信号不该退出：%v", err)
+	default:
+	}
+}
+
+// 麦克风流自己停了：先等 Timing.MicrophoneStopGrace（关机信号可能晚一步到）再去重新找设备。
+func TestSupervisorWaitsMicrophoneStopGrace(t *testing.T) {
+	r := newRig()
+	timing := testTiming
+	timing.MicrophoneStopGrace = 600 * time.Millisecond // 比默认的长：用的确实是传进来的值
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go NewSupervisor(r.dependencies(), timing, slog.New(slog.NewTextHandler(io.Discard, nil))).Run(ctx)
+	eventually(t, "运行", func() bool { return r.sessionCount() == 1 })
+	stopped := time.Now()
+	r.fail <- assistant.ErrMicrophoneStopped
+	eventually(t, "麦克风停了之后重来", func() bool { return r.sessionCount() == 2 })
+	if waited := time.Since(stopped); waited < timing.MicrophoneStopGrace {
+		t.Errorf("应先等 %v 再重来，只等了 %v", timing.MicrophoneStopGrace, waited)
+	}
 }
 
 // 音箱没了 / 回来了，都告诉服务端（没有音箱时服务端只发文字）。
@@ -389,7 +425,7 @@ func TestSupervisorBacksOffOnIncompatibleProtocol(t *testing.T) {
 	timing.IncompatibleRetry = 400 * time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go NewSupervisor(r.parts(), timing, slog.New(slog.NewTextHandler(io.Discard, nil))).Run(ctx)
+	go NewSupervisor(r.dependencies(), timing, slog.New(slog.NewTextHandler(io.Discard, nil))).Run(ctx)
 	eventually(t, "提示一次", func() bool { return r.sink.count() == 1 })
 	r.incompatible.Store(false)
 	eventually(t, "隔一段时间再试，连上并运行", func() bool { return r.sessionCount() == 1 })
@@ -427,7 +463,7 @@ func TestSupervisorStandbyBacksOff(t *testing.T) {
 	timing.Poll, timing.BackoffMax = 10*time.Millisecond, 40*time.Millisecond // 间隔 10、20、40、40……
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go NewSupervisor(r.parts(), timing, slog.New(slog.NewTextHandler(io.Discard, nil))).Run(ctx)
+	go NewSupervisor(r.dependencies(), timing, slog.New(slog.NewTextHandler(io.Discard, nil))).Run(ctx)
 	eventually(t, "待机时查了 5 次设备", func() bool { return r.micScans() >= 5 })
 	scans := r.times(&r.micScannedAt)
 	if gap(scans, 0) < timing.Poll || gap(scans, 2) < 4*timing.Poll || gap(scans, 3) < timing.BackoffMax {
@@ -445,7 +481,7 @@ func TestSupervisorBacksOffWhenRunKeepsFailing(t *testing.T) {
 	timing.BackoffMin, timing.BackoffMax = 10*time.Millisecond, 40*time.Millisecond // 间隔 10、20、40、40……
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go NewSupervisor(r.parts(), timing, slog.New(slog.NewTextHandler(io.Discard, nil))).Run(ctx)
+	go NewSupervisor(r.dependencies(), timing, slog.New(slog.NewTextHandler(io.Discard, nil))).Run(ctx)
 	eventually(t, "重来了 5 次", func() bool { return r.dials.Load() >= 5 })
 	dials := r.times(&r.dialedAt)
 	if gap(dials, 0) < timing.BackoffMin || gap(dials, 2) < 4*timing.BackoffMin || gap(dials, 3) < timing.BackoffMax {
@@ -459,7 +495,7 @@ func TestSupervisorBacksOffWhenRunKeepsFailing(t *testing.T) {
 // 重连的间隔：从 BackoffMin 翻倍到 BackoffMax；协议版本不兼容隔 IncompatibleRetry；还没提示断开时不越过提示时间。
 func TestReconnectDelay(t *testing.T) {
 	timing := Timing{OfflineNotice: 10 * time.Second, BackoffMin: time.Second, BackoffMax: 5 * time.Second, IncompatibleRetry: 5 * time.Minute}
-	s := NewSupervisor(Parts{}, timing, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	s := NewSupervisor(SupervisorDependencies{}, timing, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	announced := &offlineState{since: time.Now().Add(-time.Hour), announced: true}
 	refused := errors.New("连不上")
 	for retries, want := range []time.Duration{time.Second, 2 * time.Second, 4 * time.Second, 5 * time.Second, 5 * time.Second} {

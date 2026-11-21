@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -50,8 +51,6 @@ func (f *fakeModel) StreamReply(ctx context.Context, request brain.ChatRequest) 
 	}
 }
 
-func (f *fakeModel) Warmup(context.Context) error { return nil }
-
 // fakeSynthesizer 把句子原样放进 PCM，方便断言顺序；failOn 非空时对该句报错；seen 非空时记下收到的每一句。
 type fakeSynthesizer struct {
 	failOn string
@@ -82,13 +81,19 @@ type talker struct {
 // newTalker 建会话并打开识别流（服务端判断说完，不开唤醒门）。parts 里没给断句器时用 4 / 40 字的切句器。
 func newTalker(t *testing.T, parts brain.Components, opts brain.Options) *talker {
 	t.Helper()
+	return newTalkerLogging(t, parts, opts, quiet)
+}
+
+// newTalkerLogging 同 newTalker，日志写到 logger。
+func newTalkerLogging(t *testing.T, parts brain.Components, opts brain.Options, logger *slog.Logger) *talker {
+	t.Helper()
 	voice := braintest.NewVoice()
 	parts.Streaming = voice
 	parts.Front = withTestSteps(parts.Front)
 	if parts.NewSegmenter == nil {
 		parts.NewSegmenter = func() brain.TextSegmenter { return speech.NewSentenceSegmenter(4, 40) }
 	}
-	session := brain.NewSession(parts, opts, quiet)
+	session := brain.NewSession(parts, opts, logger)
 	t.Cleanup(func() { _ = session.Close() })
 	return &talker{t: t, session: session, voice: voice,
 		stream: braintest.Open(t, session, voice, realtimeproto.SessionUpdate{})}
@@ -364,5 +369,66 @@ func TestEmotionTagEndsTheSentenceBeforeIt(t *testing.T) {
 	want := []brain.Utterance{{Text: "好的", Emotion: brain.EmotionDefault}, {Text: "哈哈，开玩笑的。", Emotion: brain.EmotionLaugh}}
 	if !slices.Equal(seen, want) {
 		t.Errorf("got %+v\nwant %+v", seen, want)
+	}
+}
+
+// attrRecorder 记下告警级别日志的属性（只看级别和属性，不比对文字）。
+type attrRecorder struct {
+	mu    sync.Mutex
+	warns []map[string]string
+}
+
+func (r *attrRecorder) Enabled(context.Context, slog.Level) bool { return true }
+func (r *attrRecorder) WithAttrs([]slog.Attr) slog.Handler       { return r }
+func (r *attrRecorder) WithGroup(string) slog.Handler            { return r }
+func (r *attrRecorder) Handle(_ context.Context, record slog.Record) error {
+	if record.Level < slog.LevelWarn {
+		return nil
+	}
+	attrs := map[string]string{}
+	record.Attrs(func(a slog.Attr) bool { attrs[a.Key] = a.Value.String(); return true })
+	r.mu.Lock()
+	r.warns = append(r.warns, attrs)
+	r.mu.Unlock()
+	return nil
+}
+
+func (r *attrRecorder) hasWarn(key, value string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.ContainsFunc(r.warns, func(attrs map[string]string) bool { return attrs[key] == value })
+}
+
+// 模型在句首写了清单外的情绪标记：照原样念出，记一条带标记的告警（先看实际出现多少再定怎么处理）。
+func TestUnknownEmotionTagIsLogged(t *testing.T) {
+	logs := &attrRecorder{}
+	model := braintest.NewModel(t, braintest.Say("[无奈]好吧，那就这样。"))
+	k := newTalkerLogging(t, brain.Components{Front: brain.Agent{Model: model}, Synthesizer: fakeSynthesizer{}},
+		brain.Options{MaxHistoryTurn: 6}, slog.New(logs))
+	if spoken := k.say("算了吧"); !strings.HasPrefix(spoken, "[无奈]") {
+		t.Errorf("清单外的标记照原样念：%q", spoken)
+	}
+	if !logs.hasWarn("tag", "[无奈]") {
+		t.Error("应记一条带标记的告警")
+	}
+}
+
+// 窗口轮数只由对话簿持有：会话的选项和对话簿的不一样时，以对话簿的为准（重启接上时用的也是它）。
+func TestHistoryWindowComesFromTheBook(t *testing.T) {
+	model := braintest.NewModel(t, braintest.Say("一。"), braintest.Say("二。"), braintest.Say("三。"))
+	book := brain.NewConversationBook(nil, brain.Options{MaxHistoryTurn: 1}, quiet)
+	k := newTalker(t, brain.Components{Front: brain.Agent{Model: model}, Synthesizer: fakeSynthesizer{}, Conversations: book},
+		brain.Options{MaxHistoryTurn: 6})
+	for _, text := range []string{"第一句", "第二句", "第三句"} {
+		k.say(text)
+	}
+	owner := 0
+	for _, msg := range model.LastRequest().Messages {
+		if msg.Role == brain.RoleUser && !msg.Synthetic {
+			owner++
+		}
+	}
+	if owner != 2 { // 窗口里的 1 轮 + 这一句
+		t.Errorf("窗口应按对话簿的 1 轮：请求里有 %d 句主人的话", owner)
 	}
 }

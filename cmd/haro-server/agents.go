@@ -124,7 +124,7 @@ func (a agentAssembly) build(toolbox brain.Toolbox, expertSearch vision.Search) 
 		if err != nil {
 			return built, err
 		}
-		summary, err := a.agent(definition, spending.NewBudgetedChatModel(summaryModel, a.guard, a.logger), nil, nil)
+		summary, err := a.agent(definition, spending.NewBudgetedChatModel(summaryModel, a.guard, a.logger), brain.SummaryPromptValues(), nil)
 		if err != nil {
 			return built, err
 		}
@@ -143,7 +143,8 @@ func (a agentAssembly) agent(definition agents.Definition, model brain.ChatModel
 		return brain.Agent{}, fmt.Errorf("代理 %s（%s）的工具名不认识：%s", definition.Name, definition.Source, strings.Join(unknown, "、"))
 	}
 	return brain.Agent{Name: definition.Title, Model: model, Instructions: instructions, Tools: definition.Tools,
-		MaxSteps: definition.MaxSteps, RepeatLimit: definition.RepeatLimit, RepeatWindow: definition.RepeatWindow}, nil
+		MaxSteps: definition.MaxSteps, RepeatLimit: definition.RepeatLimit, RepeatWindow: definition.RepeatWindow,
+		Timeout: definition.Timeout}, nil
 }
 
 // metered 是按定义接好的具体模型（模型档换成具体模型，按代理的用途记账；不查额度、不熔断），以及模型 ID（日志用）。
@@ -170,8 +171,8 @@ func (a agentAssembly) metered(definition agents.Definition) (brain.ChatModel, s
 			thinking: s.StrongLLMThinking, firstTokenTimeout: s.StrongLLMTimeout, requestTimeout: s.RequestTimeout}, a.client)
 	case s.LLMProvider == config.LLMLocal: // base 档、本地模型
 		id = s.Model
-		model = llm.WithRequestTelemetry(llm.NewOllamaChatModel(s.OllamaURL, id, maxTokens, llm.OpenAIOptions{HTTPClient: a.client,
-			FirstTokenTimeout: s.CloudLLMTimeout, RequestTimeout: s.RequestTimeout}), llm.ProviderOllama, id)
+		model = llm.WithRequestTelemetry(llm.NewOllamaChatModel(s.OllamaURL, id, maxTokens, localModelOptions(s, a.client)),
+			llm.ProviderOllama, id)
 	default: // base 档、云端模型
 		id = s.CloudLLMModel
 		model = newCloudChatModel(s, a.claude, cloudModelSpec{model: id, maxTokens: maxTokens, effort: s.CloudLLMEffort,
@@ -179,4 +180,9 @@ func (a agentAssembly) metered(definition agents.Definition) (brain.ChatModel, s
 	}
 	// 每个具体模型都记账（本地模型在价格表里标了不花钱，照样记 token）
 	return spending.NewMeteredChatModel(model, id, purpose, a.pricing, a.ledger, logger), id, nil
+}
+
+// localModelOptions 是本地模型（ollama）的请求参数：等它开始回答按本地的上限（冷启动要先载入模型），不按云端的。
+func localModelOptions(s config.ServerSettings, client *http.Client) llm.OpenAIOptions {
+	return llm.OpenAIOptions{HTTPClient: client, FirstTokenTimeout: s.LocalLLMTimeout, RequestTimeout: s.RequestTimeout}
 }

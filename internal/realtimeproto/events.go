@@ -7,6 +7,7 @@ package realtimeproto
 
 import (
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -240,6 +241,44 @@ type TurnDetection struct {
 	PrefixPaddingMs   int     `json:"prefix_padding_ms,omitempty" jsonschema:"识别时带上语音开始前的这段音频（毫秒）"`
 	SilenceDurationMs int     `json:"silence_duration_ms,omitempty" jsonschema:"静音持续多久算说完（毫秒）"`
 	CreateResponse    *bool   `json:"create_response,omitempty" jsonschema:"判定说完后服务端自己开始回答（默认 true）；false = 等客户端发 response.create"`
+}
+
+// 说完怎么判断（TurnDetection.Type）。
+const (
+	TurnServerVAD   = "server_vad"
+	TurnSemanticVAD = "semantic_vad"
+)
+
+// semantic_vad 判定没说完后最多再等多久的档位（TurnDetection.Eagerness）；不写 = auto，medium 等同 auto。
+const (
+	EagernessLow    = "low"
+	EagernessMedium = "medium"
+	EagernessHigh   = "high"
+	EagernessAuto   = "auto"
+)
+
+// Validate 检查取值：type 只能是 server_vad / semantic_vad，eagerness 只能是 low / medium / high / auto 或不写，
+// threshold 在 0–1（0 = 默认），毫秒数不能是负数。终端启动时和 haro-asr 收到 session.update 时都用它（取值只定义在这里）。
+func (t TurnDetection) Validate() error {
+	switch t.Type {
+	case TurnServerVAD, TurnSemanticVAD:
+	default:
+		return fmt.Errorf("turn_detection.type 只能是 %s 或 %s，现在是 %q", TurnServerVAD, TurnSemanticVAD, t.Type)
+	}
+	switch t.Eagerness {
+	case "", EagernessLow, EagernessMedium, EagernessHigh, EagernessAuto:
+	default:
+		return fmt.Errorf("turn_detection.eagerness 只能是 %s、%s、%s 或 %s，现在是 %q",
+			EagernessLow, EagernessMedium, EagernessHigh, EagernessAuto, t.Eagerness)
+	}
+	if t.Threshold < 0 || t.Threshold > 1 {
+		return fmt.Errorf("turn_detection.threshold 要在 0–1 之间，现在是 %v", t.Threshold)
+	}
+	if t.PrefixPaddingMs < 0 || t.SilenceDurationMs < 0 {
+		return fmt.Errorf("turn_detection 的 prefix_padding_ms、silence_duration_ms 不能是负数（现在是 %d、%d）",
+			t.PrefixPaddingMs, t.SilenceDurationMs)
+	}
+	return nil
 }
 
 // ResponseStatus 对应 Realtime response.status。

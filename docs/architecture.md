@@ -37,6 +37,8 @@ haro 是一个家用语音助手：家里每个房间放一台**终端**（麦�
   模型调用 `look_at_camera` 时，服务端才让终端打开摄像头拍一帧，摄像头平时关着；摄像头插拔时终端增删这个工具，服务端随之给不给模型看画面。
 - 一轮对话由服务端开始：语音前端判定说完时，服务端马上开始回答（先发标准的 `response.created`），识别和准备回答同时进行；
   终端不上传画面、也不发 `response.create`，只负责播放（`create_response` 设成 false 的普通 Realtime 客户端照旧自己请求）。
+  说完方式和积极度的取值只在 `realtimeproto` 定义一处，终端启动时和 haro-asr 收到会话设置时都按它查，写错就明确拒绝；
+  semantic_vad 判定没说完时会把下一段并进同一句，最长并到 30 秒（`asrserver.Timing.MergeLimit`），再长就按说完交出、后面的另成一句。
 
 ## 服务端（`internal/brain` 与周边）
 
@@ -67,6 +69,7 @@ haro 是一个家用语音助手：家里每个房间放一台**终端**（麦�
   每个代理一个 markdown 文件（开头 YAML 是配置，正文是系统提示词；正文用 `{{.名字}}` 引用代码里定义的值，例如情绪标记的列表）。
   程序里带一套（`internal/agents/builtin/`）：前台（主对话）、强模型（接手）、看画面（子任务）、摘要（子任务）；
   `HARO_AGENTS_DIR` 里同名的文件替换程序里带的那份（启动日志写明用了哪份；字段写错、文件名不认识、工具名不认识都起不来）。
+  只有部分代理认的配置项写在不认的代理上也起不来：`timeout`（调用一次最多等多久：看画面、摘要）、`max_searches`（看画面最多联网查几次）。
   交出去只有一个入口（`brain.EnterAgent`）：**接手**带着完整的对话历史回答这一轮剩下的部分（主人纠正时交给强模型），
   **子任务**不带历史、交回一份结果（看画面、摘要）；代理链最多 3 层。模型只执行这一步给了它的工具（确认、取消除外：它们自己核对并说明为什么不执行）。
 - **提示词的结构**（从前到后）：
@@ -88,7 +91,7 @@ haro 是一个家用语音助手：家里每个房间放一台**终端**（麦�
 
 | 工具 | 说明 |
 |---|---|
-| `save_note` / `search_notes` / `delete_note` / `list_deleted_notes` / `restore_note` | 记事本（SQLite）；按编号删，删掉的可以恢复 |
+| `save_note` / `search_notes` / `delete_note` / `list_deleted_notes` / `restore_note` | 记事本（SQLite，时间存 UTC 的 Unix 秒）；按编号删，删掉的可以恢复 |
 | `confirm_action` / `cancel_action` | 会破坏的操作（删记事）先存成待确认的操作（有时效），主人算不算同意由模型判断后调用；只在有待确认的操作时提供 |
 | `get_weather` | 天气（Open-Meteo，不用密钥）；家的位置可以配坐标，或按公网 IP 推定。Open-Meteo 查不到时改用日本气象厅（见下） |
 | `look_at_camera` | 看终端摄像头的画面：调用时才经 MCP 让终端拍一帧（终端的工具清单里有「拍一帧」时才提供） |
@@ -124,7 +127,8 @@ Open-Meteo 连不上或报错时，日本境内的地点改查日本气象厅网
 
 大模型和搜索按量计费时：每次调用都记账（token、搜索积分，按单价与汇率折成本地货币），按用途分开记
 （每个代理定义里写自己的用途：前台 `chat`、强模型 `strong`、看画面 `vision`、摘要 `summary`；另有快查 `search`、后台调查 `research`），
-按天、按月封顶。超过月度上限后不再回答，念一句固定的话（到上限了、下个月一号恢复）；主人可以口头临时提高这个月的上限
+按天、按月封顶。账本写不进时（例如数据卷满了）那笔先留在内存里，之后每次放行前先补写，补写不成就和读不出账本一样不再付费调用
+（不让上限因为没记上而失效），写进去了自动恢复。超过月度上限后不再回答，念一句固定的话（到上限了、下个月一号恢复）；主人可以口头临时提高这个月的上限
 （`HARO_MONTHLY_RAISE_YEN`，每次加多少），要过确认闸（登记过的声纹 + 有时效的确认）。听懂「要提高」靠一次很小的模型调用
 （不带历史，只给提高上限和确认的工具，模型说的话不念），它不受额度管，按天限次数（`HARO_OVER_BUDGET_DAILY_CALLS`）。
 
@@ -146,7 +150,7 @@ Open-Meteo 连不上或报错时，日本境内的地点改查日本气象厅网
 - **服务层** `internal/terminal`、`internal/assistant`：看守（连服务端 → 等麦克风 → 运行，出错就退回去重来）、
   选设备的规则（只看设备的接口类型：有别的麦克风时不用蓝牙麦克风，因为蓝牙耳机当麦克风会切到通话模式、音质下降）。
 - **平台层** `internal/platform`：门面 `OpenLocalDevices`；`audio`（miniaudio）、`camera`（要看时才打开摄像头拍一帧：Linux 用 pion/mediadevices，预热到曝光稳定再取；ffmpeg 是备用，macOS 现在用它）、
-  `osdiff`（各操作系统的差异：设备的接口类型怎么认、摄像头怎么找、向摄像头要什么格式和分辨率；按编译标签自动选，`make check-darwin` 在 Linux 上检查 macOS 版能否编译）。
+  `osdiff`（各操作系统的差异：设备的接口类型怎么认、摄像头怎么找、向摄像头要什么格式和分辨率；按编译标签自动选，`make check-darwin`、`make check-windows` 在 Linux 上检查 macOS、Windows 版能否编译）。
   Linux 上都看系统报的结构化信息、不按名字猜：音频设备的接口类型和回录源取 PipeWire / PulseAudio 的设备属性（`pactl -f json`，
   所以终端要装 pulseaudio-utils；没有时照系统默认选麦克风、认不出蓝牙）；摄像头是按 V4L2 查询能列出视频采集格式的节点（元数据节点不算）。
 - 摄像头画面和具体摄像头无关：`HARO_CAMERA_SIZE` 是想要的分辨率，Linux 上先列出摄像头支持的格式（同一摄像头各格式能出的分辨率不同，
@@ -159,15 +163,18 @@ Open-Meteo 连不上或报错时，日本境内的地点改查日本气象厅网
 
 全部来自环境变量（`internal/config/config.go` 里每一项都有说明）。通常写在一个 env 文件里，
 systemd 用户服务从 `~/.config/haro/haro.env` 读取（`deploy/systemd/`）。凭证（云端模型、搜索服务的密钥）只放在环境变量里，没有默认值。
+样例（只有占位值）：服务端 `deploy/server/server.env.example`，终端 `deploy/systemd/terminal.env.example`；
+终端和服务端各读各的，写在同一个 env 文件里也互不影响（已删除的配置项也只查自己那边的）。
 
 云端模型（`HARO_LLM_PROVIDER=cloud`）的接口格式由 `HARO_CLOUD_LLM_API` 选：
 
 - `anthropic`（默认）：Claude API（官方 Go SDK `anthropic-sdk-go`）。`HARO_CLOUD_LLM_MODEL` 例如 `claude-haiku-5-5`；
   思考关掉求快，回答力度用 `HARO_CLOUD_LLM_EFFORT`（聊天、摘要）/ `HARO_RESEARCH_EFFORT`（后台调查）；
   开着提示词缓存，缓存读写按模型价格目录里的单价分开记账。
-  凭证：`HARO_ANTHROPIC_API_KEY`；不填时交给 SDK 自己找——在 Kubernetes 里可以用 Workload Identity Federation
-  （服务账号令牌换短期令牌，不放长期密钥），配法见 Anthropic 文档「Use WIF with Kubernetes」。
-  不要用 `ANTHROPIC_API_KEY` 放 haro 的 key：开发机上 Claude Code 也读这个变量。
+  凭证：`HARO_ANTHROPIC_API_KEY`；不填时只认配齐的 Workload Identity Federation（`ANTHROPIC_FEDERATION_RULE_ID`、
+  `ANTHROPIC_ORGANIZATION_ID`、`ANTHROPIC_IDENTITY_TOKEN_FILE`：在 Kubernetes 里用服务账号令牌换短期令牌，不放长期密钥，
+  配法见 Anthropic 文档「Use WIF with Kubernetes」），没配齐就起不来。不走 SDK 的默认凭证链：
+  环境里的 `ANTHROPIC_API_KEY`（开发机上是 Claude Code 的）不会被拿来用。
   服务端全进程只建一个 Claude 客户端（`llm.ClaudeAPI`），聊天、摘要、调查共用，HTTP 客户端也只用一个：
   SDK 按「客户端 × HTTP 客户端」各存一份令牌，而集群的服务账号令牌只能换一次，多一份就会被拒（401）。
 - `openai`：任意 OpenAI 兼容的 `/chat/completions`（`HARO_CLOUD_LLM_URL`、`HARO_CLOUD_LLM_API_KEY`）。

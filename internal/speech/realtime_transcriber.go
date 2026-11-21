@@ -12,7 +12,8 @@ import (
 	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
-// RealtimeTranscriptionClient 连接 OpenAI Realtime 风格的转写会话（WebSocket，server_vad）。
+// RealtimeTranscriptionClient 连接 OpenAI Realtime 风格的转写会话（WebSocket；说完判断用 server_vad 还是
+// semantic_vad 由 session.update 里的 turn_detection 指定，唤醒门、播放这些 haro 扩展事件也走这条连接）。
 // 服务端可以是 haro-asr，也可以是其他实现了同一子集的服务（事件定义见 realtimeproto）。
 // 连着的时候按 Heartbeat 定时 ping：对端卡住（进程还在、不回应）时断开连接，由会话按断开重开。
 type RealtimeTranscriptionClient struct {

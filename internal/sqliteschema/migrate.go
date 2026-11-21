@@ -1,5 +1,5 @@
-// Package sqliteschema 管各个 SQLite 库的表结构：每个库的迁移文件放在自己包的 migrations/ 目录、编进程序，
-// 由 goose 按版本只跑一次（版本记在库里的 goose_db_version 表）。
+// Package sqliteschema 管各个 SQLite 库的打开方式（Open：同一套设置）和表结构：每个库的迁移文件放在自己包的
+// migrations/ 目录、编进程序，由 goose 按版本只跑一次（版本记在库里的 goose_db_version 表）。
 package sqliteschema
 
 import (

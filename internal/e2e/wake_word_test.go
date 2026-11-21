@@ -100,7 +100,6 @@ func (stubModel) StreamReply(context.Context, brain.ChatRequest) iter.Seq2[brain
 		}
 	}
 }
-func (stubModel) Warmup(context.Context) error { return nil }
 
 // echoSynthesizer 把句子的文字原样当成声音，播出了什么一看便知。
 type echoSynthesizer struct{}
@@ -205,7 +204,7 @@ func TestWakeWordThroughServerSession(t *testing.T) {
 	defer session.Close()
 
 	speaker := &recordingSpeaker{}
-	haro := assistant.NewAssistant(assistant.Components{
+	haro := assistant.NewAssistant(assistant.Dependencies{
 		Manual: noKeyboard{}, Microphone: loudMicrophone{}, Speaker: speaker, Brain: session,
 	}, assistant.Options{TurnDetection: realtimeproto.TurnDetection{Type: "server_vad"}, EchoGuard: 10 * time.Millisecond,
 		NoticeTone:  pcm("[叮咚]"),

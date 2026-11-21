@@ -35,6 +35,9 @@ type SearchMeter interface {
 	RecordSearch(ctx context.Context, credits int) error
 }
 
+// TavilyName 是联网搜索服务商的名字（MCP 连接的名字，也是记账时这笔花费的名目）。
+const TavilyName = "tavily"
+
 // TavilySearcher 经 Tavily 官方远程 MCP（https://mcp.tavily.com/mcp/）搜索。
 // 只用 tavily_search / tavily_extract 两个工具；crawl / map / research 不用（贵、慢，调查流程由服务端自己控制）。
 // 第一次用到时才连；会话断了（Tavily 重启、网络断过）丢掉旧的，当次重连再试一次，之后用到时照样重连。
@@ -54,7 +57,7 @@ const (
 
 // NewTavilySearcher 准备经 Tavily 远程 MCP 搜索（这时不连）；密钥放在 Authorization 请求头里（不放网址，免得进日志）。
 func NewTavilySearcher(endpoint, apiKey string, client *http.Client, logger *slog.Logger) *TavilySearcher {
-	return &TavilySearcher{logger: logger, spec: ServerSpec{Name: "tavily", URL: endpoint, Client: client,
+	return &TavilySearcher{logger: logger, spec: ServerSpec{Name: TavilyName, URL: endpoint, Client: client,
 		Headers: map[string]string{"Authorization": "Bearer " + apiKey}}}
 }
 
@@ -240,8 +243,9 @@ func QuickSearch(ctx context.Context, searcher WebSearcher, meter SearchMeter, q
 	if err != nil {
 		return "", err
 	}
+	// 写不进时由计量那边留着补写，补写成功之前不放行有上限的搜索（spending.WithBookkeeping）
 	if err := meter.RecordSearch(context.WithoutCancel(ctx), credits); err != nil {
-		logger.Warn("搜索用量没记上", "err", err)
+		logger.Warn("搜索用量没写进账本", "err", err, "credits", credits)
 	}
 	return truncateRunes(text, quickSearchMaxRunes), nil
 }

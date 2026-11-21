@@ -82,8 +82,16 @@ func (l *lengthTranscriber) Transcribe(_ context.Context, audio realtimeproto.PC
 
 func dialRealtime(t *testing.T, factory VoiceDetectorFactory, transcriber Transcriber, turnDetector TurnDetector) (*websocket.Conn, context.Context) {
 	t.Helper()
-	server := httptest.NewServer(NewHandler(Dependencies{Transcriber: transcriber, NewVoiceDetector: factory,
-		TurnDetector: turnDetector, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}))
+	return dialRealtimeWith(t, Dependencies{Transcriber: transcriber, NewVoiceDetector: factory, TurnDetector: turnDetector})
+}
+
+// dialRealtimeWith 用给定的依赖起一个转写服务并连上（没给 Logger 时丢掉日志）。
+func dialRealtimeWith(t *testing.T, deps Dependencies) (*websocket.Conn, context.Context) {
+	t.Helper()
+	if deps.Logger == nil {
+		deps.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	}
+	server := httptest.NewServer(NewHandler(deps))
 	t.Cleanup(server.Close)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	t.Cleanup(cancel)
@@ -96,7 +104,7 @@ func dialRealtime(t *testing.T, factory VoiceDetectorFactory, transcriber Transc
 }
 
 func TestRealtimeTranscriptionSession(t *testing.T) {
-	factory := func(realtimeproto.TurnDetection) (VoiceDetector, error) {
+	factory := func(VoiceDetectorConfig) (VoiceDetector, error) {
 		return &energyDetector{silenceSamples: 300 * 16}, nil // 300ms 静音算说完
 	}
 	transcriber := &lengthTranscriber{}
@@ -149,7 +157,7 @@ func TestRealtimeTranscriptionSession(t *testing.T) {
 }
 
 func TestRealtimeRejectsBadSessionUpdate(t *testing.T) {
-	factory := func(realtimeproto.TurnDetection) (VoiceDetector, error) { return &energyDetector{}, nil }
+	factory := func(VoiceDetectorConfig) (VoiceDetector, error) { return &energyDetector{}, nil }
 	conn, ctx := dialRealtime(t, factory, &lengthTranscriber{}, nil)
 	update := transcriptionUpdate(realtimeproto.TurnDetection{Type: "server_vad"}, false)
 	update.InputFormat = realtimeproto.AudioFormat{SampleRate: 24000, Channels: 1}
@@ -161,6 +169,19 @@ func TestRealtimeRejectsBadSessionUpdate(t *testing.T) {
 	event, _ := realtimeproto.DecodeServerEvent(data)
 	if e, ok := event.(realtimeproto.Error); !ok || e.Code != realtimeproto.CodeUnsupportedAudioFormat {
 		t.Errorf("应返回采样率错误，得到 %s", data)
+	}
+}
+
+// 说完方式、积极度写错：明确拒绝（不悄悄当成默认值）。
+func TestRealtimeRejectsUnknownTurnSettings(t *testing.T) {
+	factory := func(VoiceDetectorConfig) (VoiceDetector, error) { return &energyDetector{}, nil }
+	for _, turn := range []realtimeproto.TurnDetection{{Type: "vad"}, {Type: realtimeproto.TurnSemanticVAD, Eagerness: "fast"}} {
+		conn, ctx := dialRealtime(t, factory, &lengthTranscriber{}, nil)
+		_ = writeClientEvent(ctx, conn, transcriptionUpdate(turn, false))
+		events := readEvents(t, ctx, conn, 1)
+		if e, ok := events[0].(realtimeproto.Error); !ok || e.Code != realtimeproto.CodeInvalidEvent {
+			t.Errorf("%+v 应被拒绝：%v", turn, events)
+		}
 	}
 }
 
@@ -198,13 +219,17 @@ func (s *scriptedTurnDetector) EndOfTurnProbability([]float32) (float64, error) 
 	return probability, nil
 }
 
-// semanticFactory 让替身 VAD 按 session 传来的静音时长切段（semantic_vad 时应为 300ms，v3 D-2）。
+// semanticFactory 让替身 VAD 按会话的静音时长切段（semantic_vad 时应为 Timing.SemanticSilence），
+// 并核对最短 / 最长语音段来自 Timing。
 func semanticFactory(t *testing.T) VoiceDetectorFactory {
-	return func(turn realtimeproto.TurnDetection) (VoiceDetector, error) {
-		if want := int(DefaultTiming.SemanticSilence.Milliseconds()); turn.SilenceDurationMs != want {
-			t.Errorf("semantic_vad 时 VAD 静音应为 %dms，实际 %d", want, turn.SilenceDurationMs)
+	return func(config VoiceDetectorConfig) (VoiceDetector, error) {
+		if want := DefaultTiming.SemanticSilence; config.MinSilence != want {
+			t.Errorf("semantic_vad 时 VAD 静音应为 %v，实际 %v", want, config.MinSilence)
 		}
-		return &energyDetector{silenceSamples: turn.SilenceDurationMs * 16}, nil
+		if config.MinSpeech != DefaultTiming.VADMinSpeech || config.MaxSpeech != DefaultTiming.VADMaxSpeech {
+			t.Errorf("最短 / 最长语音段应来自 Timing：%+v", config)
+		}
+		return &energyDetector{silenceSamples: samplesIn(config.MinSilence)}, nil
 	}
 }
 
@@ -330,7 +355,7 @@ func dialWakeSession(t *testing.T, transcriber Transcriber, spotter *fakeSpotter
 func dialWakeSessionWith(t *testing.T, transcriber Transcriber, spotter *fakeSpotter, speakers *SpeakerCheck) (*websocket.Conn, context.Context) {
 	t.Helper()
 	server := httptest.NewServer(NewHandler(Dependencies{Transcriber: transcriber, Speakers: speakers,
-		NewVoiceDetector: func(realtimeproto.TurnDetection) (VoiceDetector, error) {
+		NewVoiceDetector: func(VoiceDetectorConfig) (VoiceDetector, error) {
 			return &energyDetector{silenceSamples: 300 * 16}, nil
 		},
 		NewKeywordSpotter: func() (KeywordSpotter, error) { return spotter, nil },
@@ -431,7 +456,7 @@ func TestWakeWordOnlyIsPassedThrough(t *testing.T) {
 }
 
 func TestWakeWordRequiresSpotter(t *testing.T) {
-	conn, ctx := dialRealtime(t, func(realtimeproto.TurnDetection) (VoiceDetector, error) { return &energyDetector{}, nil },
+	conn, ctx := dialRealtime(t, func(VoiceDetectorConfig) (VoiceDetector, error) { return &energyDetector{}, nil },
 		&lengthTranscriber{}, nil)
 	_ = writeClientEvent(ctx, conn, transcriptionUpdate(realtimeproto.TurnDetection{Type: "server_vad"}, true))
 	events := readEvents(t, ctx, conn, 1)
@@ -479,7 +504,27 @@ func TestBargeInDuringPlayback(t *testing.T) {
 	}
 }
 
-// 回声（v3 E-1）：播放时开始、播完才结束的语音段是 haro 自己的声音——剩一点尾巴就整段丢掉；
+// 播放中收到休眠：播完不能按播放前的状态又醒过来——说话不上报，要再叫唤醒词才醒。
+func TestSleepDuringPlaybackStaysAsleep(t *testing.T) {
+	conn, ctx := dialWakeSession(t, &fixedTranscriber{text: "好的"}, &fakeSpotter{})
+	sendKeyword(t, ctx, conn) // 先唤醒、说一句，进入对话窗口
+	sendPattern(t, ctx, conn, [2]int{500, 1}, [2]int{400, 0})
+	readEvents(t, ctx, conn, 4)
+
+	for _, control := range []string{"haro.playback.started", "haro.wake_word.sleep", "haro.playback.stopped"} {
+		if err := wsjson.Write(ctx, conn, map[string]string{"type": control}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sendPattern(t, ctx, conn, [2]int{500, 1}, [2]int{400, 0}) // 睡着了：这句不应上报
+	sendKeyword(t, ctx, conn)
+	events := readEvents(t, ctx, conn, 1)
+	if _, ok := events[0].(realtimeproto.HaroWakeWordDetected); !ok {
+		t.Fatalf("播放中收到休眠后应一直睡着，第一个事件应是再次唤醒：%v", events)
+	}
+}
+
+// 回声：播放时开始、播完才结束的语音段是 haro 自己的声音——剩一点尾巴就整段丢掉；
 // 用户紧接着开口（和回声连成一段）时，只取播完之后的部分。
 func TestEchoTailAfterPlaybackIsClipped(t *testing.T) {
 	transcriber := &fixedTranscriber{text: "好的"}
@@ -522,7 +567,7 @@ func (e *switchableEmbedder) Embed([]float32) ([]float32, error) {
 	return e.current.Load().([]float32), nil
 }
 
-// 声纹（v3 H-3）：陌生人喊唤醒词叫不醒；登记过的人叫得醒，每句话标上是谁说的；醒着时陌生人的话标为没认出来。
+// 声纹：陌生人喊唤醒词叫不醒；登记过的人叫得醒，每句话标上是谁说的；醒着时陌生人的话标为没认出来。
 func TestVoiceprintGatesWakeAndLabelsSpeaker(t *testing.T) {
 	owner, stranger := []float32{1, 0, 0}, []float32{0, 1, 0}
 	embedder := &switchableEmbedder{}
@@ -558,7 +603,7 @@ func TestVoiceprintGatesWakeAndLabelsSpeaker(t *testing.T) {
 	}
 }
 
-// V-a：唤醒时认出来的人，这一句沿用——不让很短的唤醒句重新比对推翻它（真机：唤醒 0.52 认出、唤醒句重比 0.49 判成不认识）。
+// 唤醒时认出来的人，这一句沿用——不让很短的唤醒句重新比对推翻它（真机：唤醒 0.52 认出、唤醒句重比 0.49 判成不认识）。
 func TestWakeUtteranceKeepsWakeSpeaker(t *testing.T) {
 	owner, stranger := []float32{1, 0, 0}, []float32{0, 1, 0}
 	embedder := &switchableEmbedder{}
@@ -580,7 +625,7 @@ func TestWakeUtteranceKeepsWakeSpeaker(t *testing.T) {
 	}
 }
 
-// BV：唤醒词很短、声纹算不稳，唤醒用低一些的门槛；只过了唤醒门槛的，接着说的话还要再比对。
+// 唤醒词很短、声纹算不稳，唤醒用低一些的门槛；只过了唤醒门槛的，接着说的话还要再比对。
 func TestWeakWakeRechecksTheSentence(t *testing.T) {
 	owner, weak := []float32{1, 0, 0}, []float32{0.35, 0.94, 0} // weak 和主人的相似度约 0.35：过唤醒门槛 0.2、不到 0.5
 	embedder := &switchableEmbedder{}
@@ -604,7 +649,7 @@ func TestWeakWakeRechecksTheSentence(t *testing.T) {
 			if !ok {
 				t.Fatalf("过了唤醒门槛应能唤醒：%v", events)
 			}
-			if wake.Score < 0.3 || wake.Score > 0.4 || wake.Level <= 0 { // v4 D2：唤醒质量带给服务端做仲裁
+			if wake.Score < 0.3 || wake.Score > 0.4 || wake.Level <= 0 { // 唤醒质量带给服务端做仲裁
 				t.Errorf("唤醒事件应带上声纹分数和音量：%+v", wake)
 			}
 			completed, ok := events[3].(realtimeproto.InputAudioTranscriptionCompleted)
@@ -661,7 +706,7 @@ func (failingTranscriber) Transcribe(context.Context, realtimeproto.PCMAudio) (T
 
 // 识别失败：发带编号的 transcription.failed（和 speech_stopped 的编号一致），服务端据此结束等这句的回答。
 func TestRealtimeTranscriptionFailureNamesTheItem(t *testing.T) {
-	factory := func(realtimeproto.TurnDetection) (VoiceDetector, error) {
+	factory := func(VoiceDetectorConfig) (VoiceDetector, error) {
 		return &energyDetector{silenceSamples: 300 * 16}, nil
 	}
 	conn, ctx := dialRealtime(t, factory, failingTranscriber{}, nil)

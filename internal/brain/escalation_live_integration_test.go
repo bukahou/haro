@@ -45,7 +45,11 @@ func TestLiveAskStronger(t *testing.T) {
 	if key == "" {
 		t.Skip("没设 HARO_ANTHROPIC_API_KEY")
 	}
-	model := llm.NewAnthropicChatModel(llm.AnthropicOptions{API: llm.NewClaudeAPI(key, "", nil), Model: "claude-haiku-5-5",
+	api, err := llm.NewClaudeAPI(key, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	model := llm.NewAnthropicChatModel(llm.AnthropicOptions{API: api, Model: "claude-haiku-5-5",
 		MaxTokens: 400, Effort: "low", Thinking: llm.ThinkingDisabled})
 	cases := []struct {
 		reply string

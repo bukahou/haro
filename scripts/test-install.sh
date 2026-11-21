@@ -29,10 +29,28 @@ fail() {
 	exit 1
 }
 
+# 拒装原因的退出码只定义在安装脚本里（exit_原因=数字）：从那里读，按退出码判断为什么拒装，不比对提示文字
+refusal_code() { sed -n "s/^exit_$1=\([0-9][0-9]*\).*/\1/p" "$root/scripts/install.sh"; }
+
+# expect_refusal 原因 说明 [安装脚本的参数…]：安装脚本必须以这个原因的退出码拒装
+expect_refusal() {
+	reason=$1
+	what=$2
+	shift 2
+	code=$(refusal_code "$reason")
+	[ -n "$code" ] || fail "安装脚本里没有拒装原因 exit_${reason}"
+	status=0
+	installer ${1+"$@"} >"$work/out" 2>&1 || status=$?
+	[ "$status" -eq "$code" ] || fail "${what}：退出码是 ${status}，应为 ${code}（exit_${reason}）：$(cat "$work/out")"
+}
+
+echo "== --help：curl 管道装法下（脚本从标准输入读，\$0 不是脚本文件）也打印用法"
+HOME=$home sh -s -- --help <"$root/scripts/install.sh" >"$work/out" 2>&1 || fail "--help 应正常退出：$(cat "$work/out")"
+grep -F -- '--server-url' "$work/out" >/dev/null || fail "--help 没打印用法：$(cat "$work/out")"
+
 echo "== 第一次安装不给服务端地址：必须拒绝"
-if installer >"$work/out" 2>&1; then fail "没给 --server-url 也装上了"; fi
-# 阳性对照：要确认是因为没给地址才拒绝，而不是脚本自己出错（macOS 上曾经是后者，这一条却照样通过）
-grep -F '第一次安装要告诉终端服务端在哪' "$work/out" >/dev/null || fail "拒绝的原因不对：$(cat "$work/out")"
+# 按退出码确认是因为没给地址才拒绝，而不是脚本自己出错（脚本出错时也是「没装上」）
+expect_refusal need_server_url "没给 --server-url 时应因此拒装"
 
 echo "== 第一次安装"
 installer --server-url http://192.0.2.10:59130
@@ -46,13 +64,11 @@ cmp -s "$work/env.before" "$home/.config/haro/haro.env" || fail "重装时改了
 
 echo "== 阳性对照：SHA256SUMS 不对时必须拒装"
 printf '%064d  %s\n' 0 "$asset" >"$release/SHA256SUMS"
-if installer >"$work/out" 2>&1; then fail "校验和不对也装上了"; fi
-grep -F '校验不过' "$work/out" >/dev/null || fail "拒装的原因不是校验不过：$(cat "$work/out")"
+expect_refusal checksum "校验和不对时应因此拒装"
 
 echo "== 这个版本没有这台机器的平台（SHA256SUMS 里只有别的平台）：必须拒装，并说明是没有这个平台"
 printf '%s  %s\n' "$sum" "haro-other-platform.tar.gz" >"$release/SHA256SUMS"
-if installer >"$work/out" 2>&1; then fail "这个版本没有这个平台也装上了"; fi
-grep -F '这个版本没有' "$work/out" >/dev/null || fail "拒装的原因不是没有这个平台：$(cat "$work/out")"
+expect_refusal no_platform "这个版本没有这个平台时应因此拒装"
 
 echo "== 卸载：程序删掉，配置文件留着"
 installer --uninstall

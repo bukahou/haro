@@ -85,3 +85,24 @@ func TestEmotionTagListComesFromTheTags(t *testing.T) {
 		}
 	}
 }
+
+// 句首标记语法的片段（方括号里几个字）不在清单里：认出来；不在句首的方括号、普通句子不算。
+func TestLeadingUnknownTag(t *testing.T) {
+	for text, want := range map[string]string{"[无奈]好吧。": "[无奈]", "【 叹气 】嗯。": "【 叹气 】", "车停在 [B2] 层。": "", "好的。": ""} {
+		if got, _ := leadingUnknownTag(text); got != want {
+			t.Errorf("%q：%q，应为 %q", text, got, want)
+		}
+	}
+}
+
+// 配置文件里的情绪名按同一张情绪清单认：清单里的都认得（含留空 = 平常），不认识的报错。
+func TestParseEmotionUsesTheTagList(t *testing.T) {
+	for _, tag := range emotionTags {
+		if got, err := ParseEmotion(string(tag.Emotion)); err != nil || got != tag.Emotion {
+			t.Errorf("%q 应认得：%q %v", tag.Emotion, got, err)
+		}
+	}
+	if _, err := ParseEmotion("angry"); err == nil {
+		t.Error("清单外的情绪名应报错")
+	}
+}

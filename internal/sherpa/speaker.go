@@ -1,4 +1,4 @@
-package sensevoice
+package sherpa
 
 import (
 	"errors"
@@ -7,16 +7,16 @@ import (
 	"path/filepath"
 	"sync"
 
-	sherpa "github.com/k2-fsa/sherpa-onnx-go/v2/sherpa_onnx"
+	sherpaonnx "github.com/k2-fsa/sherpa-onnx-go/v2/sherpa_onnx"
 
 	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
-// SpeakerEmbedder 用说话人识别模型（sherpa-onnx，CAM++）把一段 16 kHz 语音算成声纹向量（v3 H-3）。
+// SpeakerEmbedder 用说话人识别模型（sherpa-onnx，CAM++）把一段 16 kHz 语音算成声纹向量。
 // 只算向量；比对和存取在纯 Go 的 voiceprint 包里。并发安全（同一时间只算一段）。
 type SpeakerEmbedder struct {
 	mu        sync.Mutex
-	extractor *sherpa.SpeakerEmbeddingExtractor
+	extractor *sherpaonnx.SpeakerEmbeddingExtractor
 	model     string
 }
 
@@ -25,7 +25,7 @@ func NewSpeakerEmbedder(model string, threads int) (*SpeakerEmbedder, error) {
 	if _, err := os.Stat(model); err != nil {
 		return nil, fmt.Errorf("说话人识别模型不可用: %w", err)
 	}
-	extractor := sherpa.NewSpeakerEmbeddingExtractor(&sherpa.SpeakerEmbeddingExtractorConfig{
+	extractor := sherpaonnx.NewSpeakerEmbeddingExtractor(&sherpaonnx.SpeakerEmbeddingExtractorConfig{
 		Model: model, NumThreads: threads, Provider: "cpu"})
 	if extractor == nil {
 		return nil, errors.New("sherpa-onnx 创建说话人识别器失败（模型文件有误？）")
@@ -41,7 +41,7 @@ func (e *SpeakerEmbedder) Embed(samples []float32) ([]float32, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	stream := e.extractor.CreateStream()
-	defer sherpa.DeleteOnlineStream(stream)
+	defer sherpaonnx.DeleteOnlineStream(stream)
 	stream.AcceptWaveform(realtimeproto.TranscriptionSampleRate, samples)
 	stream.InputFinished()
 	if !e.extractor.IsReady(stream) {
@@ -51,4 +51,4 @@ func (e *SpeakerEmbedder) Embed(samples []float32) ([]float32, error) {
 }
 
 // Close 释放模型。
-func (e *SpeakerEmbedder) Close() { sherpa.DeleteSpeakerEmbeddingExtractor(e.extractor) }
+func (e *SpeakerEmbedder) Close() { sherpaonnx.DeleteSpeakerEmbeddingExtractor(e.extractor) }

@@ -19,36 +19,11 @@ var endpointDelay = telemetry.MustLatencyHistogram(otel.Meter("github.com/bukaho
 
 // respondHandsFree 处理一轮（item 是服务端给这句话的编号，日志里和服务端的「一轮结束」对得上）：
 // 服务端判定说完时已经自己开始回答（画面由它要的时候经 MCP 来拍），这里负责播放，播完后恢复收音。返回是否被打断。
-//
-// 播放期间不能听用户说话，否则会把自己的声音当成用户说的（没有回声消除）：
-//   - 可以打断时：麦克风照常上传，告诉语音前端「正在播放」，它只听唤醒词；
-//   - 不能打断时（半双工）：上传静音。
 func (a *Assistant) respondHandsFree(ctx context.Context, item string, speechEnd time.Time) (interrupted bool) {
 	a.busy.Store(true)
 	defer a.busy.Store(false)
-	bargeIn := a.opts.BargeIn
-	if bargeIn {
-		if err := a.parts.Brain.Send(ctx, realtimeproto.HaroPlaybackStarted{}); err != nil {
-			a.logger.Error("通知开始播放失败", "err", err)
-		}
-	} else {
-		a.uplink.setMuted(true)
-	}
-	defer func() {
-		if !interrupted {
-			select { // 播完再等一会儿，让音箱里的余音散掉
-			case <-time.After(a.opts.EchoGuard):
-			case <-ctx.Done():
-			}
-		}
-		if bargeIn {
-			if err := a.parts.Brain.Send(context.WithoutCancel(ctx), realtimeproto.HaroPlaybackStopped{}); err != nil {
-				a.logger.Error("通知播放结束失败", "err", err)
-			}
-		} else {
-			a.uplink.setMuted(false)
-		}
-	}()
+	resume := a.suppressEcho(ctx)
+	defer func() { resume(!interrupted) }() // 被打断时主人已经在说了：不等余音
 
 	ctx, span := tracer.Start(ctx, "haro.turn")
 	defer span.End()
@@ -67,13 +42,44 @@ func (a *Assistant) respondHandsFree(ctx context.Context, item string, speechEnd
 	return false
 }
 
+// suppressEcho 在终端出声（回答、醒着时的提示音）之前调用：出声期间不能听主人说话，
+// 否则会把自己的声音当成主人说的（没有回声消除）。
+//   - 可以打断时：麦克风照常上传，告诉语音前端「正在播放」，它只听唤醒词；
+//   - 不能打断时（半双工）：上传静音。
+//
+// 返回的 resume 在出声结束后调用：settle 为 true 时先等 EchoGuard（音箱里的余音散掉）再恢复收听。
+func (a *Assistant) suppressEcho(ctx context.Context) (resume func(settle bool)) {
+	if a.opts.BargeIn {
+		if err := a.deps.Brain.Send(ctx, realtimeproto.HaroPlaybackStarted{}); err != nil {
+			a.logger.Error("通知开始播放失败", "err", err)
+		}
+	} else {
+		a.uplink.setMuted(true)
+	}
+	return func(settle bool) {
+		if settle {
+			select {
+			case <-time.After(a.opts.EchoGuard):
+			case <-ctx.Done():
+			}
+		}
+		if a.opts.BargeIn {
+			if err := a.deps.Brain.Send(context.WithoutCancel(ctx), realtimeproto.HaroPlaybackStopped{}); err != nil {
+				a.logger.Error("通知播放结束失败", "err", err)
+			}
+		} else {
+			a.uplink.setMuted(false)
+		}
+	}
+}
+
 // uploadMicrophone 把麦克风的每一块音频交给服务端；静音期间上传等长的静音，保持时间轴连续。
 func (a *Assistant) uploadMicrophone(ctx context.Context, mic MicrophoneStream) error {
 	for chunk := range mic.Chunks() {
 		if a.uplink.muted() {
 			chunk.Data = make([]byte, len(chunk.Data))
 		}
-		if err := a.parts.Brain.Send(ctx, realtimeproto.InputAudioBufferAppend{Audio: chunk}); err != nil {
+		if err := a.deps.Brain.Send(ctx, realtimeproto.InputAudioBufferAppend{Audio: chunk}); err != nil {
 			return err
 		}
 		a.uplink.advance(chunk)

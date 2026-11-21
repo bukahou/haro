@@ -3,9 +3,11 @@ package tools
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 
+	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/bukahou/haro/internal/weather"
@@ -19,6 +21,9 @@ type PlaceFinder interface {
 // placeCandidates 是按地名找时最多要几个候选。
 const placeCandidates = 5
 
+// defaultForecastDays 是没说要几天时查几天（含今天）。
+const defaultForecastDays = 3
+
 // WeatherTools 是查天气的工具。地点不填就是家（home 给出位置；nil = 必须给地点）。说了地名就按地名库的第一个候选查，
 // 同名的其他地方一并交给模型：主人说的是别处时，模型带坐标再查一次。查不到也照实交给模型，由它换个写法或问主人。
 // language 是按地名找坐标时用的语言。
@@ -31,7 +36,7 @@ func WeatherTools(places PlaceFinder, forecaster weather.Forecaster, home weathe
 		description += "必须给出地点（家的位置没有设置）。"
 	}
 	return func(server *mcp.Server) {
-		AddTool(server, &mcp.Tool{Name: "get_weather", Description: description, Annotations: ReadOnly},
+		AddTool(server, &mcp.Tool{Name: "get_weather", Description: description, Annotations: ReadOnly, InputSchema: weatherInputSchema()},
 			func(ctx context.Context, in weatherInput) (weatherOutput, error) {
 				var out weatherOutput
 				place, found, err := pickPlace(ctx, places, home, language, in, &out)
@@ -40,7 +45,7 @@ func WeatherTools(places PlaceFinder, forecaster weather.Forecaster, home weathe
 				}
 				days := in.Days
 				if days == 0 {
-					days = 3
+					days = defaultForecastDays
 				}
 				forecast, err := forecaster.ForecastFor(ctx, place, days)
 				logger.Info("查天气", "place", place.Name, "days", days, "source", forecast.Source, "err", err)
@@ -88,7 +93,19 @@ type weatherInput struct {
 	Place     string   `json:"place,omitempty" jsonschema:"地名，例如「大阪市」「Osaka」「上海」；查家里时不填"`
 	Latitude  *float64 `json:"latitude,omitempty" jsonschema:"纬度：从上一次结果的 other_places 里挑了别的地方时，和经度一起填"`
 	Longitude *float64 `json:"longitude,omitempty" jsonschema:"经度：和纬度一起填"`
-	Days      int      `json:"days,omitempty" jsonschema:"要几天的预报（含今天），1–7，默认 3"`
+	Days      int      `json:"days,omitempty"` // 说明由 weatherInputSchema 用常量拼出
+}
+
+// weatherInputSchema 是 get_weather 的参数定义：由 weatherInput 生成；天数的范围和默认值用常量拼进说明
+// （结构体标签里写不了常量）。生成不了就是写错了：直接 panic，测试和启动时就暴露。
+func weatherInputSchema() *jsonschema.Schema {
+	schema, err := jsonschema.For[weatherInput](nil)
+	if err != nil {
+		panic(fmt.Sprintf("get_weather 的参数生成不了定义: %v", err))
+	}
+	schema.Properties["days"].Description = fmt.Sprintf("要几天的预报（含今天），%d–%d，默认 %d",
+		weather.MinForecastDays, weather.MaxForecastDays, defaultForecastDays)
+	return schema
 }
 
 type weatherOutput struct {

@@ -158,15 +158,34 @@ type Conversation struct {
 // Person 是这份对话属于谁。
 func (c *Conversation) Person() string { return c.person }
 
+// record 取一份写盘用的快照。轮次和消息都复制一份：写盘在锁外进行，期间这份对话还会被改（被打断时改回答文字），
+// 快照不能和它共用底层数组。消息里的 ToolCalls、Image 只会整体替换、不会原地改，不必再往下复制。
 func (c *Conversation) record() ConversationRecord {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	record := ConversationRecord{Person: c.person, History: c.history, ToolCallCount: c.toolCallCount, TurnCount: c.turnCount,
-		Summary: c.summary, Unsummarized: c.unsummarized, OpenTurn: c.openTurn, UpdatedAt: time.Now()}
+	record := ConversationRecord{Person: c.person, History: cloneTurns(c.history), ToolCallCount: c.toolCallCount,
+		TurnCount: c.turnCount, Summary: c.summary, Unsummarized: cloneTurns(c.unsummarized), UpdatedAt: time.Now()}
+	if c.openTurn != nil {
+		open := cloneTurns([]ConversationTurn{*c.openTurn})[0]
+		record.OpenTurn = &open
+	}
 	if c.persona != nil {
 		record.PersonaID = c.persona.ID
 	}
 	return record
+}
+
+// cloneTurns 复制轮次和每一轮的消息切片。
+func cloneTurns(turns []ConversationTurn) []ConversationTurn {
+	if turns == nil {
+		return nil
+	}
+	cloned := make([]ConversationTurn, len(turns))
+	for i, turn := range turns {
+		turn.Messages = slices.Clone(turn.Messages)
+		cloned[i] = turn
+	}
+	return cloned
 }
 
 // messages 返回历史消息的副本（不含系统提示词）。每一轮前面加一条时间标记（系统合成）：
@@ -206,14 +225,14 @@ const compactKeepTurns = 2
 // appendTurn 记下一轮（编上号，只留最近 maxTurns 轮）并写盘；这一轮收尾了，「没收尾」的记录随之清掉。
 // contextTokens 是这一轮请求模型时带的上下文（最大的那次请求的输入 token，模型报的）：到了 Options.CompactContextTokens，
 // 最近 compactKeepTurns 轮之前的提前移出窗口、马上压缩（完整的对话记录里都还在）。
-func (c *Conversation) appendTurn(turn ConversationTurn, maxTurns, contextTokens int) {
+func (c *Conversation) appendTurn(turn ConversationTurn, contextTokens int) {
 	summarizing := c.book.summarizer() != nil // 先取：不在持有 Conversation.mu 时去锁对话簿
 	c.mu.Lock()
 	c.turnCount++
 	turn.Seq = c.turnCount
 	c.history = append(c.history, turn)
 	c.openTurn = nil
-	c.trimLocked(maxTurns, summarizing)
+	c.trimLocked(c.book.opts.MaxHistoryTurn, summarizing) // 窗口轮数只由对话簿持有（和重启时接上用的是同一个数）
 	if threshold := c.book.opts.CompactContextTokens; threshold > 0 && contextTokens >= threshold && len(c.history) > compactKeepTurns {
 		c.book.logger.Info("上下文太长：提前移出窗口、压缩", "person", c.person, "context_tokens", contextTokens,
 			"threshold", threshold, "moved_turns", len(c.history)-compactKeepTurns)
@@ -262,23 +281,23 @@ func (c *Conversation) keepOpenTurn(turn ConversationTurn) {
 	c.book.save(c)
 }
 
-// replaceLastAnswer 把最近一轮的回答改成 text（被打断时只记听到的部分）并写盘；返回改没改（本来就是 text 时不改）。
+// replaceLastAnswer 把内存里最近一轮的回答改成 text（被打断时只记听到的部分），返回改没改（本来就是 text 时不改）。
+// 不写盘：调用方常持有 Session.mu，写盘要等别的保存、可能慢，改完后由调用方放开锁再调 persist。
 func (c *Conversation) replaceLastAnswer(text string) bool {
 	c.mu.Lock()
-	changed := false
+	defer c.mu.Unlock()
 	if n := len(c.history); n > 0 {
 		turn := c.history[n-1].Messages
 		if last := len(turn) - 1; last >= 0 && turn[last].Role == RoleAssistant && turn[last].Text != text {
 			turn[last].Text = text
-			changed = true
+			return true
 		}
 	}
-	c.mu.Unlock()
-	if changed {
-		c.book.save(c)
-	}
-	return changed
+	return false
 }
+
+// persist 把这份对话写盘（见 ConversationBook.save）。
+func (c *Conversation) persist() { c.book.save(c) }
 
 func (c *Conversation) currentPersona() *Persona {
 	c.mu.Lock()

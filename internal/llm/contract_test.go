@@ -43,7 +43,7 @@ type contractVendor struct {
 var contractVendors = []contractVendor{
 	{name: "claude", newServer: llmtest.NewClaudeServer, events: claudeEvents, firstText: 2,
 		newModel: func(server *llmtest.Server) brain.ChatModel {
-			return NewAnthropicChatModel(AnthropicOptions{API: NewClaudeAPI("test-key", server.URL, server.Client()),
+			return NewAnthropicChatModel(AnthropicOptions{API: claudeAPIForTest("test-key", server.URL, server.Client()),
 				Model: "claude-haiku-5-5", MaxTokens: 800})
 		},
 		tools:    func(body map[string]any) []any { tools, _ := body["tools"].([]any); return tools },

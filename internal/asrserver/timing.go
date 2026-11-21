@@ -1,8 +1,13 @@
 package asrserver
 
-import "time"
+import (
+	"time"
 
-// Timing 是转写会话里决定「说完没有」「是不是只叫了唤醒词」「是不是回声」的时长与门槛，集中在这里。
+	"github.com/bukahou/haro/internal/realtimeproto"
+)
+
+// Timing 是转写会话里决定「说完没有」「是不是只叫了唤醒词」「是不是回声」的时长与门槛，集中在这里（VAD 的参数也在这里，
+// 经 VoiceDetectorConfig 交给注入的 VAD）。
 // 是在真机（USB 麦克风 + 蓝牙音箱、唤醒词「哈罗哈罗」）上调出来的，每个字段写明是怎么来的：
 // 实测、参考实现，还是没有单独实测的定值。换唤醒词、换设备时按这里改；haro-asr 经 Dependencies.Timing 注入，
 // 零值 = DefaultTiming。
@@ -17,7 +22,7 @@ type Timing struct {
 	MaxWaitLow, MaxWaitAuto, MaxWaitHigh time.Duration
 	// DefaultWait：不是 semantic_vad 时（例如刚唤醒、还没开口）等主人接着说的上限。定值，没有单独实测
 	DefaultWait time.Duration
-	// WakeOnlyWait：唤醒词说完就停了，等这么久没开口就按「只叫了唤醒词」处理（回「我在」）。
+	// WakeOnlyWait：唤醒词说完就停了，等这么久没开口就把这一句（只有唤醒词）交出去，由服务端的模型简短应一声。
 	// 真机上试过 2 s，显得迟钝；1 s 足够开口
 	WakeOnlyWait time.Duration
 	// WakeKeywordWindow：唤醒词识别报告时刻之前的这一段一定包含整个唤醒词，也是算唤醒词声纹用的那一段。
@@ -28,7 +33,23 @@ type Timing struct {
 	MinWakeWindow time.Duration
 	// MinAfterEcho：语音段剪掉开头的回声后剩下不到这么长，就当整段都是回声。定值，没有单独实测
 	MinAfterEcho time.Duration
-	// History：只保留最近这么长的音频（截取一句话、算声纹从这里取）。定值：比 VAD 的最长语音段（20 s）长
+	// VADThreshold / VADSilence：会话的 turn_detection 没给语音概率门槛 / 静音时长时用的值。门槛取自 Silero VAD
+	// 参考实现的默认值；静音时长是定值，和终端 HARO_VAD_SILENCE 的默认值相同
+	VADThreshold float64
+	VADSilence   time.Duration
+	// VADMinSpeech：短于这么长的声音（咳嗽、碰桌子）不算说话。取自 Silero VAD 参考实现的默认值，没有单独实测
+	VADMinSpeech time.Duration
+	// VADMaxSpeech：一口气说到这么长，VAD 设法在下一个短停顿处切段（sherpa-onnx 的做法是临时提高门槛，所以一段可能比它
+	// 略长）。定值，没有单独实测
+	VADMaxSpeech time.Duration
+	// MergeLimit：semantic_vad 把停顿前后的几段并成一句，并到这么长（从这句开头到刚结束的那一段）就不再等接着说、按说完
+	// 处理，后面的话另成一句。不设上限时一句可以无限长，保留的音频（History）就装不下了。定值：对着音箱说的一句话
+	// 很少有这么长，没有单独实测
+	MergeLimit time.Duration
+	// History：只保留最近这么长的音频（截取一句话、算声纹从这里取）。要装得下可能合并出的最长句（longestUtterance）：
+	// MergeLimit 30 s + 最长的等待 3 s（MaxWaitLow）+ 最后并进来的一段 VADMaxSpeech 20 s = 53 s，再留 7 s 给 VAD
+	// 超过最长语音段之后切段的延迟、识别时往前多取的 prefix_padding（终端默认 0.3 s），取 60 s。万一还是装不下，
+	// 截掉开头时记一条警告
 	History time.Duration
 }
 
@@ -44,7 +65,12 @@ var DefaultTiming = Timing{
 	WakeKeywordWindow: 1500 * time.Millisecond,
 	MinWakeWindow:     time.Second,
 	MinAfterEcho:      250 * time.Millisecond,
-	History:           30 * time.Second,
+	VADThreshold:      0.5,
+	VADSilence:        700 * time.Millisecond,
+	VADMinSpeech:      250 * time.Millisecond,
+	VADMaxSpeech:      20 * time.Second,
+	MergeLimit:        30 * time.Second,
+	History:           60 * time.Second,
 }
 
 func (t Timing) orDefault() Timing {
@@ -54,16 +80,37 @@ func (t Timing) orDefault() Timing {
 	return t
 }
 
-// maxWait 是 semantic_vad 判定「没说完」之后最多再等多久（按 eagerness；medium / auto / 空都按 auto）。
+// maxWait 是 semantic_vad 判定「没说完」之后最多再等多久（按 eagerness；medium / auto / 空都按 auto，
+// 别的取值在收到 session.update 时已经拒绝了，见 realtimeproto.TurnDetection.Validate）。
 func (t Timing) maxWait(eagerness string) time.Duration {
 	switch eagerness {
-	case "low":
+	case realtimeproto.EagernessLow:
 		return t.MaxWaitLow
-	case "high":
+	case realtimeproto.EagernessHigh:
 		return t.MaxWaitHigh
 	default:
 		return t.MaxWaitAuto
 	}
+}
+
+// longestUtterance 是可能合并出的最长一句（History 要装得下它）：semantic_vad 下一句没并到 MergeLimit 时还会再等
+// 一次接着说（最多等最长的那个等待），再并进来一段（最长 VADMaxSpeech）。其他情况（server_vad、刚唤醒）都比这短。
+func (t Timing) longestUtterance() time.Duration {
+	return t.MergeLimit + max(t.MaxWaitLow, t.MaxWaitAuto, t.MaxWaitHigh, t.DefaultWait, t.WakeOnlyWait) + t.VADMaxSpeech
+}
+
+// voiceDetectorConfig 是一个会话的 VAD 参数：语音概率门槛、静音时长按会话的 turn_detection（没给时用这里的默认值；
+// semantic_vad 的静音时长由调用方先换成 SemanticSilence），最短 / 最长语音段按这里。
+func (t Timing) voiceDetectorConfig(turn realtimeproto.TurnDetection) VoiceDetectorConfig {
+	config := VoiceDetectorConfig{Threshold: turn.Threshold, MinSilence: time.Duration(turn.SilenceDurationMs) * time.Millisecond,
+		MinSpeech: t.VADMinSpeech, MaxSpeech: t.VADMaxSpeech}
+	if config.Threshold <= 0 {
+		config.Threshold = t.VADThreshold
+	}
+	if config.MinSilence <= 0 {
+		config.MinSilence = t.VADSilence
+	}
+	return config
 }
 
 // samplesIn 是 d 这么长的音频有多少个采样点。
