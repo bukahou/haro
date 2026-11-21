@@ -16,12 +16,12 @@ import (
 	"io"
 	"math"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
 	"github.com/bukahou/haro/internal/assistant"
 	"github.com/bukahou/haro/internal/buildinfo"
+	"github.com/bukahou/haro/internal/endpoint"
 	"github.com/bukahou/haro/internal/realtimeproto"
 	"github.com/bukahou/haro/internal/voiceprint"
 )
@@ -116,8 +116,11 @@ func upload(ctx context.Context, opts Options, clips []string) (realtimeproto.Vo
 	if err != nil {
 		return none, err
 	}
-	endpoint := strings.TrimRight(opts.ServerURL, "/") + realtimeproto.VoiceprintPath + url.PathEscape(opts.Name)
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	address, err := endpoint.Join(opts.ServerURL, realtimeproto.VoiceprintPath, nil, opts.Name)
+	if err != nil {
+		return none, err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, address, bytes.NewReader(body))
 	if err != nil {
 		return none, err
 	}

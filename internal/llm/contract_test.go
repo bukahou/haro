@@ -66,7 +66,7 @@ var contractVendors = []contractVendor{
 	{name: "ollama", newServer: llmtest.NewOpenAIServer, events: openAIEvents, firstText: 0, omitsForbiddenTools: true,
 		overloaded: openAIOverloaded,
 		newModel: func(server *llmtest.Server) brain.ChatModel {
-			return NewOllamaChatModel(server.URL, "qwen3-vl:8b-instruct", 800, OpenAIOptions{HTTPClient: server.Client()})
+			return mustOllama(server.URL, "qwen3-vl:8b-instruct", 800, OpenAIOptions{HTTPClient: server.Client()})
 		},
 		tools: openAITools, toolName: openAIToolName, forbids: openAIForbids},
 }

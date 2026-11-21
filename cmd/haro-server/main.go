@@ -27,6 +27,7 @@ import (
 	"github.com/bukahou/haro/internal/brainserver"
 	"github.com/bukahou/haro/internal/buildinfo"
 	"github.com/bukahou/haro/internal/config"
+	"github.com/bukahou/haro/internal/endpoint"
 	"github.com/bukahou/haro/internal/llm"
 	"github.com/bukahou/haro/internal/persona"
 	"github.com/bukahou/haro/internal/pricecatalog"
@@ -133,7 +134,7 @@ const (
 
 // readinessChecks 是服务端的就绪检查：识别、合成连得上，云端模型的凭证能用，账本写得进去。
 func readinessChecks(settings config.ServerSettings, claude *llm.ClaudeAPI, ledger spending.Ledger, httpClient *http.Client) ([]readiness.Check, error) {
-	asrReady, err := url.JoinPath(settings.ASRURL, "readyz")
+	asrReady, err := endpoint.Join(settings.ASRURL, "/readyz", nil)
 	if err != nil {
 		return nil, fmt.Errorf("HARO_ASR_URL: %w", err)
 	}

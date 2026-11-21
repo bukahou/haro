@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+
+	"github.com/bukahou/haro/internal/endpoint"
 )
 
 // OpenMeteoClient 是 Open-Meteo 客户端：按坐标查天气（全球），按地名找坐标。
@@ -33,7 +35,11 @@ func (c *OpenMeteoClient) FindPlaces(ctx context.Context, name, language string,
 			Admin1    string  `json:"admin1"`
 		} `json:"results"`
 	}
-	if err := c.fetch.getJSON(ctx, c.geocodingURL+"?"+query.Encode(), &response); err != nil {
+	address, err := endpoint.Join(c.geocodingURL, "", query)
+	if err != nil {
+		return nil, err
+	}
+	if err := c.fetch.getJSON(ctx, address, &response); err != nil {
 		return nil, err
 	}
 	places := make([]Place, 0, len(response.Results))
@@ -76,7 +82,11 @@ func (c *OpenMeteoClient) ForecastFor(ctx context.Context, place Place, days int
 			RainSum     []*float64 `json:"precipitation_sum"`
 		} `json:"daily"`
 	}
-	if err := c.fetch.getJSON(ctx, c.forecastURL+"?"+query.Encode(), &response); err != nil {
+	address, err := endpoint.Join(c.forecastURL, "", query)
+	if err != nil {
+		return Forecast{}, err
+	}
+	if err := c.fetch.getJSON(ctx, address, &response); err != nil {
 		return Forecast{}, err
 	}
 	now := response.Current

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/bukahou/haro/internal/brain"
+	"github.com/bukahou/haro/internal/endpoint"
 	"github.com/bukahou/haro/internal/pcmwav"
 	"github.com/bukahou/haro/internal/realtimeproto"
 )
@@ -53,7 +54,11 @@ func (p *PiperHTTPSynthesizer) synthesizeWhole(ctx context.Context, sentence str
 	if err != nil {
 		return realtimeproto.PCMAudio{}, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.BaseURL+"/synthesize", bytes.NewReader(payload))
+	address, err := endpoint.Join(p.BaseURL, "/synthesize", nil)
+	if err != nil {
+		return realtimeproto.PCMAudio{}, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, address, bytes.NewReader(payload))
 	if err != nil {
 		return realtimeproto.PCMAudio{}, err
 	}

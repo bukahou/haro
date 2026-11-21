@@ -11,7 +11,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"time"
 
@@ -25,6 +24,7 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 
 	"github.com/bukahou/haro/internal/buildinfo"
+	"github.com/bukahou/haro/internal/endpoint"
 )
 
 // 各程序报的 service.name（终端和服务端的 span、指标分开；OTEL_SERVICE_NAME 设了时以它为准）。
@@ -132,7 +132,7 @@ func exportTarget(getenv func(string) string, signalEndpointVar, signalProtocolV
 	if fallback == "" {
 		return target{}, nil
 	}
-	endpointURL, err := url.JoinPath(fallback, "v1", signal)
+	endpointURL, err := endpoint.Join(fallback, "/v1/"+signal, nil)
 	if err != nil {
 		return target{}, fmt.Errorf("HARO_OTLP_ENDPOINT %q：%w", fallback, err)
 	}

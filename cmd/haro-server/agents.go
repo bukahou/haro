@@ -188,8 +188,11 @@ func (a agentAssembly) metered(definition agents.Definition) (brain.ChatModel, s
 			thinking: s.StrongLLMThinking, firstTokenTimeout: s.StrongLLMTimeout, requestTimeout: s.RequestTimeout}, a.client)
 	case s.LLMProvider == config.LLMLocal: // base 档、本地模型
 		id = s.Model
-		model = llm.WithRequestTelemetry(llm.NewOllamaChatModel(s.OllamaURL, id, maxTokens, localModelOptions(s, a.client)),
-			llm.ProviderOllama, id)
+		local, err := llm.NewOllamaChatModel(s.OllamaURL, id, maxTokens, localModelOptions(s, a.client))
+		if err != nil {
+			return nil, "", err
+		}
+		model = llm.WithRequestTelemetry(local, llm.ProviderOllama, id)
 	default: // base 档、云端模型
 		id = s.CloudLLMModel
 		model = newCloudChatModel(s, a.claude, cloudModelSpec{model: id, maxTokens: maxTokens, effort: s.CloudLLMEffort,

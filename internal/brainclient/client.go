@@ -15,7 +15,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +23,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/bukahou/haro/internal/buildinfo"
+	"github.com/bukahou/haro/internal/endpoint"
 	"github.com/bukahou/haro/internal/heartbeat"
 	"github.com/bukahou/haro/internal/mcpbridge"
 	"github.com/bukahou/haro/internal/realtimeproto"
@@ -118,26 +118,14 @@ func Dial(ctx context.Context, opts DialOptions, logger *slog.Logger) (*Client, 
 	return client, nil
 }
 
-// conversationURL 由服务端地址拼出对话会话的 WebSocket 地址：按结构把 scheme 换成 ws(s)（http → ws、https → wss，
+// conversationURL 由服务端地址拼出对话会话的 WebSocket 地址：scheme 换成 ws(s)（http → ws、https → wss，
 // 已经是 ws(s) 的原样用），接上 ConversationPath（保留地址里原有的路径）。
 func conversationURL(base string) (string, error) {
-	address, err := url.Parse(base)
+	address, err := endpoint.WebSocket(base, realtimeproto.ConversationPath, nil)
 	if err != nil {
-		return "", fmt.Errorf("服务端地址 %q: %w", base, err)
+		return "", fmt.Errorf("服务端地址：%w", err)
 	}
-	switch address.Scheme { // url.Parse 已把 scheme 转成小写
-	case "http":
-		address.Scheme = "ws"
-	case "https":
-		address.Scheme = "wss"
-	case "ws", "wss":
-	default:
-		return "", fmt.Errorf("服务端地址要是 http(s)://主机[:端口]，现在是 %q", base)
-	}
-	if address.Host == "" {
-		return "", fmt.Errorf("服务端地址里没有主机名：%q", base)
-	}
-	return address.JoinPath(realtimeproto.ConversationPath).String(), nil
+	return address, nil
 }
 
 // protocolRejection 从被拒的握手响应里取出「协议版本不兼容」的说明；不是这种拒绝时 ok = false。

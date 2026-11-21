@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+
+	"github.com/bukahou/haro/internal/endpoint"
 )
 
 // 本文件是事件在 WebSocket 上的 JSON 结构，全协议只有这一份：编解码在 codec.go，JSON Schema 由它生成（schema.go）。
@@ -31,23 +33,13 @@ const TranscriptionPath = "/v1/realtime"
 const TranscriptionIntent = "transcription"
 
 // TranscriptionURL 由转写服务的根地址（http(s)://host:port）拼出转写会话的 WebSocket 地址：
-// 按结构把 scheme 换成 ws(s)、接上 TranscriptionPath、带上 intent 参数。
+// scheme 换成 ws(s)、接上 TranscriptionPath、带上 intent 参数。
 func TranscriptionURL(base string) (string, error) {
-	address, err := url.Parse(base)
+	address, err := endpoint.WebSocket(base, TranscriptionPath, url.Values{"intent": {TranscriptionIntent}})
 	if err != nil {
-		return "", fmt.Errorf("转写服务地址 %q: %w", base, err)
+		return "", fmt.Errorf("转写服务地址：%w", err)
 	}
-	switch address.Scheme {
-	case "http":
-		address.Scheme = "ws"
-	case "https":
-		address.Scheme = "wss"
-	default:
-		return "", fmt.Errorf("转写服务地址要是 http(s)://，现在是 %q", base)
-	}
-	address = address.JoinPath(TranscriptionPath)
-	address.RawQuery = url.Values{"intent": {TranscriptionIntent}}.Encode()
-	return address.String(), nil
+	return address, nil
 }
 
 // TranscriptionSampleRate 是转写会话要求的采样率（识别、唤醒词、声纹的模型都按 16 kHz）。

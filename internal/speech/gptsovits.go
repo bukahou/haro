@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/bukahou/haro/internal/brain"
+	"github.com/bukahou/haro/internal/endpoint"
 	"github.com/bukahou/haro/internal/pcmwav"
 	"github.com/bukahou/haro/internal/realtimeproto"
 )
@@ -165,7 +166,11 @@ func (g *GPTSoVITSSynthesizer) post(ctx context.Context, utterance brain.Utteran
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, g.BaseURL+"/tts", bytes.NewReader(payload))
+	address, err := endpoint.Join(g.BaseURL, "/tts", nil)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, address, bytes.NewReader(payload))
 	if err != nil {
 		return nil, err
 	}

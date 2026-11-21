@@ -17,6 +17,7 @@ import (
 	"github.com/openai/openai-go/v3/shared"
 
 	"github.com/bukahou/haro/internal/brain"
+	"github.com/bukahou/haro/internal/endpoint"
 )
 
 // OpenAIChatModel 调用 OpenAI 兼容的 Chat Completions 接口（官方 openai-go，流式）：OpenAI、Gemini、通义千问、
@@ -94,11 +95,15 @@ func NewOpenAIChatModel(options OpenAIOptions) *OpenAIChatModel {
 //   - 不认 tool_choice:"none"（实测照样调用工具）⇒ 不许调用工具的一轮不带工具（本地没有按提示词缓存计费的问题）；
 //   - 模型按需加载 ⇒ 预热时发一个最小请求；
 //   - 上下文长度、模型在显存里留多久在 Ollama 那边配（OLLAMA_CONTEXT_LENGTH、OLLAMA_KEEP_ALIVE），这个端点不收这两个参数。
-func NewOllamaChatModel(baseURL, model string, maxTokens int, options OpenAIOptions) *OpenAIChatModel {
-	options.BaseURL, options.Model, options.MaxTokens, options.APIKey = strings.TrimRight(baseURL, "/")+"/v1", model, maxTokens, ""
+func NewOllamaChatModel(baseURL, model string, maxTokens int, options OpenAIOptions) (*OpenAIChatModel, error) {
+	compatible, err := endpoint.Join(baseURL, "/v1", nil)
+	if err != nil {
+		return nil, fmt.Errorf("Ollama 的地址：%w", err)
+	}
+	options.BaseURL, options.Model, options.MaxTokens, options.APIKey = compatible, model, maxTokens, ""
 	chat := NewOpenAIChatModel(options)
 	chat.omitForbiddenTool, chat.preload = true, true
-	return chat
+	return chat, nil
 }
 
 // Warmup 按需加载模型的服务（Ollama）：发一个只要 1 个 token 的请求，让它把模型装进显存；别的服务什么都不做。

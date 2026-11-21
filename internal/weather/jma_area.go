@@ -9,6 +9,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/bukahou/haro/internal/endpoint"
 )
 
 // JMAArea 是一个地点在气象厅数据里对应的预报地区与观测站。
@@ -135,7 +137,11 @@ func (j *JMA) downloadTables(ctx context.Context) (*jmaTables, error) {
 		{"/forecast/const/week_area.json", &tables.weekAreas},
 		{"/amedas/const/amedastable.json", &stations},
 	} {
-		if err := j.fetch.getJSON(ctx, j.baseURL+table.path, table.target); err != nil {
+		address, err := endpoint.Join(j.baseURL, table.path, nil)
+		if err != nil {
+			return nil, err
+		}
+		if err := j.fetch.getJSON(ctx, address, table.target); err != nil {
 			return nil, fmt.Errorf("下载气象厅的地区表 %s: %w", table.path, err)
 		}
 	}
@@ -166,7 +172,11 @@ func (j *JMA) municipality(ctx context.Context, place Place) (string, error) {
 			MuniCd string `json:"muniCd"`
 		} `json:"results"`
 	}
-	if err := j.geocode.getJSON(ctx, j.geocoderURL+"?"+query.Encode(), &response); err != nil {
+	address, err := endpoint.Join(j.geocoderURL, "", query)
+	if err != nil {
+		return "", err
+	}
+	if err := j.geocode.getJSON(ctx, address, &response); err != nil {
 		return "", err
 	}
 	code := strings.TrimSpace(response.Results.MuniCd)
