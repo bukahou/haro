@@ -18,6 +18,11 @@ import (
 
 var quietLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
 
+// deliveries 收下工具登记的「主人听完才算数」的事（代替会话里的这一轮记录）。
+type deliveries []func()
+
+func (d *deliveries) Add(delivered func()) { *d = append(*d, delivered) }
+
 // scriptedModel 按 replies 依次回答；replies 用完后重复 repeat（nil = 给出结论）。记下每次是否给了工具。
 // gate 不为 nil 时，每次回答前都等测试关掉它（由测试决定调查什么时候往下走，不靠时间）。
 type scriptedModel struct {
@@ -159,23 +164,34 @@ func TestResearchFindsAnswerAndBriefsOnce(t *testing.T) {
 	if searcher.searches != 1 || searcher.reads != 1 || budget.credits != 2 {
 		t.Errorf("搜索 %d、读 %d、记账 %d 积分", searcher.searches, searcher.reads, budget.credits)
 	}
+	// 任务板只说查完了、让模型这一轮用 research_status 取结论：结论不放在任务板上（模型不取就讲不出来）
 	briefing := runner.Brief("主人")
-	if !strings.Contains(strings.Join(briefing.Lines, ""), "A 比 B 便宜") || briefing.Delivered == nil {
-		t.Errorf("任务板应带上没告诉过的结论：%+v", briefing)
+	if board := strings.Join(briefing.Lines, ""); !strings.Contains(board, "查完了") || !strings.Contains(board, "research_status") ||
+		strings.Contains(board, "A 比 B 便宜") || briefing.Delivered != nil {
+		t.Errorf("任务板应只说查完了、让模型取结论，不带结论、不靠这一轮说完就算告诉了：%+v", briefing)
 	}
-	// 那一轮没说完（被打断、出错，没确认）：下一轮照样附上
-	if again := runner.Brief("主人"); !strings.Contains(strings.Join(again.Lines, ""), "A 比 B 便宜") {
-		t.Errorf("没确认说过之前应一直附上：%v", again.Lines)
+	// 不在一轮回答里查（没有收集处）：不算告诉了
+	if found, _ := runner.status(ctx, "主人", "便宜"); !strings.Contains(found, "A 比 B 便宜") {
+		t.Errorf("按关键词找以前的调查：%s", found)
 	}
-	briefing.Delivered()
+	// 一轮回答里取了结论：登记「主人听完才算告诉了」；还没确认听完之前，任务板照样附上
+	var heard deliveries
+	if found, _ := runner.status(brain.WithDeliveries(ctx, &heard), "主人", ""); !strings.Contains(found, "A 比 B 便宜") || len(heard) != 1 {
+		t.Fatalf("取结论：应带上结论，并登记一件听完才算数的事（%d 件）：%s", len(heard), found)
+	}
+	if again := runner.Brief("主人"); !strings.Contains(strings.Join(again.Lines, ""), "查完了") {
+		t.Errorf("主人还没听完（被打断、出错）：应一直附上：%v", again.Lines)
+	}
+	heard[0]()
 	if again := runner.Brief("主人"); len(again.Lines) != 0 {
-		t.Errorf("说完之后结论不再附上：%v", again.Lines)
+		t.Errorf("主人听完之后不再附上：%v", again.Lines)
 	}
 	if others := runner.Brief("别人"); len(others.Lines) != 0 {
 		t.Errorf("不给别人看：%v", others.Lines)
 	}
-	if found, _ := runner.status(ctx, "主人", "便宜"); !strings.Contains(found, "A 比 B 便宜") {
-		t.Errorf("按关键词找以前的调查：%s", found)
+	var again deliveries
+	if _, err := runner.status(brain.WithDeliveries(ctx, &again), "主人", ""); err != nil || len(again) != 0 {
+		t.Errorf("已经告诉过的结论再取一次：不用再登记（%d 件，%v）", len(again), err)
 	}
 }
 

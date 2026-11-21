@@ -83,7 +83,10 @@ type Session struct {
 	truncateAtMs       int64           // 终端说用户只听到了前这么多毫秒；-1 = 没有截断
 	answeredInResponse bool            // 这次回答已经记进历史（截断时只改这次的，不碰上一轮）
 	responseItem       string          // 这次回答的是哪一句话（编号，打断的日志用）
-	noSpeaker          bool            // 终端说现在没有音箱：不合成语音，只发文字
+	// pendingDelivered：上一轮说完了，这一轮附上的情况（任务板的结论、额度提醒）等确认主人听完才算告诉了——
+	// 下一轮回答开始时还没收到截断就调用；播放中被打断就丢掉（之后再附上）。声音在终端播完要比服务端发完晚得多
+	pendingDelivered []func()
+	noSpeaker        bool // 终端说现在没有音箱：不合成语音，只发文字
 }
 
 // errNoStream：识别流还没打开（session.update 没带 turn_detection）或已断开，音频无处可送。

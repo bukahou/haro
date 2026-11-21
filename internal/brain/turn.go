@@ -31,7 +31,8 @@ type turnRecord struct {
 	final strings.Builder
 	// askedConfirmation：这一轮问了主人「确定要删掉吗」（被打断时撤掉这个待确认的操作）
 	askedConfirmation bool
-	// delivered：这一轮附上的、要「说完才算告诉了」的情况的确认（任务板的结论、额度提醒）；只在说完时调用
+	// delivered：要「主人听完这一轮才算告诉了」的事——附上的情况的确认（任务板、额度提醒）和工具登记的（OnDelivered）；
+	// 只在说完、播放没被打断时调用
 	delivered []func()
 }
 
@@ -60,6 +61,9 @@ func (r *turnRecord) beginRound(text string, calls []ToolCall) int {
 func (r *turnRecord) recordResult(round int, call ToolCall, result string) {
 	r.rounds[round].results[call.ID] = result
 }
+
+// Add 实现 Deliveries：工具登记的「主人听完才算数」的事，和附上的情况一起在主人听完这一轮之后调用。
+func (r *turnRecord) Add(delivered func()) { r.delivered = append(r.delivered, delivered) }
 
 // rememberAs 让这个调用的结果在历史里记成 text（交给模型的仍是 recordResult 那份）。
 func (r *turnRecord) rememberAs(round int, call ToolCall, text string) {
@@ -156,10 +160,12 @@ func (s *Session) closeTurn(record *turnRecord, ending turnEnding) bool {
 		s.logger.Info("问确认时被打断：撤掉待确认的操作")
 	}
 	s.rememberTurn(record.startedAt, record.messages(ending, answer))
-	if ending == turnCompleted { // 说完了才算把附上的结论、提醒告诉了主人；被打断、出错时下一轮再附上
-		for _, delivered := range record.delivered {
-			delivered()
+	if ending == turnCompleted && len(record.delivered) > 0 { // 被打断、出错时不算告诉了，下一轮再附上
+		s.mu.Lock()
+		if s.truncateAtMs < 0 { // 说完了，还要等主人听完（见 pendingDelivered）
+			s.pendingDelivered = record.delivered
 		}
+		s.mu.Unlock()
 	}
 	if ending != turnCompleted {
 		s.logger.Info("这一轮没说完：照实记进历史", "item", item, "ending", endingLabel(ending),
