@@ -9,12 +9,12 @@ package tones
 
 import (
 	_ "embed"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 
+	"github.com/bukahou/haro/internal/pcmwav"
 	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
@@ -39,10 +39,10 @@ type Tones struct {
 }
 
 // Offline 返回「断开了」的提示音。
-func Offline() (realtimeproto.PCMAudio, error) { return ParseWAV(offlineWAV) }
+func Offline() (realtimeproto.PCMAudio, error) { return pcmwav.Decode(offlineWAV) }
 
 // Online 返回「回来了」的提示音。
-func Online() (realtimeproto.PCMAudio, error) { return ParseWAV(onlineWAV) }
+func Online() (realtimeproto.PCMAudio, error) { return pcmwav.Decode(onlineWAV) }
 
 // Load 读提示音：dir 为空用编进程序里的；否则读 dir 里的 offline.wav、online.wav、sleep.wav、notice.wav（缺哪个就用内置的那个）。
 func Load(dir string) (Tones, error) {
@@ -63,45 +63,11 @@ func Load(dir string) (Tones, error) {
 				return tones, err
 			}
 		}
-		audio, err := ParseWAV(data)
+		audio, err := pcmwav.Decode(data)
 		if err != nil {
 			return tones, fmt.Errorf("提示音 %s: %w", tone.file, err)
 		}
 		*tone.target = audio
 	}
 	return tones, nil
-}
-
-// ParseWAV 读 16 bit PCM 的 WAV（跳过 data 以外的块）。
-func ParseWAV(wav []byte) (realtimeproto.PCMAudio, error) {
-	if len(wav) < 12 || string(wav[0:4]) != "RIFF" || string(wav[8:12]) != "WAVE" {
-		return realtimeproto.PCMAudio{}, errors.New("不是 WAV 文件")
-	}
-	var format realtimeproto.AudioFormat
-	for offset := 12; offset+8 <= len(wav); {
-		id := string(wav[offset : offset+4])
-		size := int(binary.LittleEndian.Uint32(wav[offset+4 : offset+8]))
-		body := offset + 8
-		if body+size > len(wav) {
-			size = len(wav) - body // 有的合成服务流式写 WAV，data 长度填的是占位值
-		}
-		switch id {
-		case "fmt ":
-			if size < 16 {
-				return realtimeproto.PCMAudio{}, errors.New("WAV 的 fmt 块太短")
-			}
-			if audioFormat, bits := binary.LittleEndian.Uint16(wav[body:]), binary.LittleEndian.Uint16(wav[body+14:]); audioFormat != 1 || bits != 16 {
-				return realtimeproto.PCMAudio{}, fmt.Errorf("只支持 16 bit PCM 的 WAV（格式 %d，%d bit）", audioFormat, bits)
-			}
-			format.Channels = int(binary.LittleEndian.Uint16(wav[body+2:]))
-			format.SampleRate = int(binary.LittleEndian.Uint32(wav[body+4:]))
-		case "data":
-			if format.SampleRate == 0 {
-				return realtimeproto.PCMAudio{}, errors.New("WAV 的 data 块在 fmt 块之前")
-			}
-			return realtimeproto.PCMAudio{Format: format, Data: wav[body : body+size-size%2]}, nil
-		}
-		offset = body + size + size%2
-	}
-	return realtimeproto.PCMAudio{}, errors.New("WAV 里没有 data 块")
 }

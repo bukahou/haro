@@ -15,7 +15,9 @@ package main
 import (
 	"encoding/binary"
 	"math"
-	"os"
+
+	"github.com/bukahou/haro/internal/pcmwav"
+	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
 const sampleRate = 24000
@@ -40,24 +42,14 @@ func render(volume float64, notes []note) []int16 {
 	return append(samples, make([]int16, sampleRate/10)...) // 结尾留 0.1 秒静音
 }
 
+// writeWAV 把单声道样本写成 16 位 PCM 的 WAV 文件。
 func writeWAV(path string, samples []int16) {
-	data := make([]byte, 44+2*len(samples))
-	copy(data[0:], "RIFF")
-	binary.LittleEndian.PutUint32(data[4:], uint32(36+2*len(samples)))
-	copy(data[8:], "WAVEfmt ")
-	binary.LittleEndian.PutUint32(data[16:], 16)
-	binary.LittleEndian.PutUint16(data[20:], 1) // PCM
-	binary.LittleEndian.PutUint16(data[22:], 1) // 单声道
-	binary.LittleEndian.PutUint32(data[24:], sampleRate)
-	binary.LittleEndian.PutUint32(data[28:], sampleRate*2)
-	binary.LittleEndian.PutUint16(data[32:], 2)
-	binary.LittleEndian.PutUint16(data[34:], 16)
-	copy(data[36:], "data")
-	binary.LittleEndian.PutUint32(data[40:], uint32(2*len(samples)))
+	data := make([]byte, 2*len(samples))
 	for i, sample := range samples {
-		binary.LittleEndian.PutUint16(data[44+2*i:], uint16(sample))
+		binary.LittleEndian.PutUint16(data[2*i:], uint16(sample))
 	}
-	if err := os.WriteFile(path, data, 0o644); err != nil {
+	audio := realtimeproto.PCMAudio{Format: realtimeproto.AudioFormat{SampleRate: sampleRate, Channels: 1}, Data: data}
+	if err := pcmwav.WriteFile(path, audio); err != nil {
 		panic(err)
 	}
 }

@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/bukahou/haro/internal/pcmwav"
 )
 
 func TestDetectorLive(t *testing.T) {
@@ -26,10 +28,13 @@ func TestDetectorLive(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		pcm := wav[44:] // ffmpeg 生成的标准 44 字节头
-		samples := make([]float32, len(pcm)/2)
+		audio, err := pcmwav.Decode(wav)
+		if err != nil {
+			t.Fatal(err)
+		}
+		samples := make([]float32, len(audio.Data)/2)
 		for i := range samples {
-			samples[i] = float32(int16(binary.LittleEndian.Uint16(pcm[2*i:]))) / 32768
+			samples[i] = float32(int16(binary.LittleEndian.Uint16(audio.Data[2*i:]))) / 32768
 		}
 		started := time.Now()
 		probability, err := detector.EndOfTurnProbability(samples)

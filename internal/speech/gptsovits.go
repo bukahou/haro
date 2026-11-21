@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +16,7 @@ import (
 	"time"
 
 	"github.com/bukahou/haro/internal/brain"
+	"github.com/bukahou/haro/internal/pcmwav"
 	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
@@ -123,7 +123,7 @@ func (g *GPTSoVITSSynthesizer) Synthesize(ctx context.Context, utterance brain.U
 		defer resp.Body.Close()
 
 		reader := bufio.NewReaderSize(resp.Body, readChunkBytes)
-		format, err := readWAVStreamHeader(reader)
+		format, err := pcmwav.ReadStreamHeader(reader)
 		if err != nil {
 			yield(realtimeproto.PCMAudio{}, fmt.Errorf("gpt-sovits 返回的不是 WAV 流: %w", err))
 			return
@@ -178,48 +178,4 @@ func (g *GPTSoVITSSynthesizer) post(ctx context.Context, utterance brain.Utteran
 		return nil, fmt.Errorf("gpt-sovits 返回 %d: %s", resp.StatusCode, detail)
 	}
 	return resp, nil
-}
-
-// readWAVStreamHeader 读到 data 块的开头为止，返回声音格式；之后 reader 里全是 PCM。
-// 流式 WAV 的 data 块长度写的是 0（生成前不知道多长），所以不看长度。
-func readWAVStreamHeader(reader *bufio.Reader) (realtimeproto.AudioFormat, error) {
-	riff := make([]byte, 12)
-	if _, err := io.ReadFull(reader, riff); err != nil {
-		return realtimeproto.AudioFormat{}, err
-	}
-	if string(riff[0:4]) != "RIFF" || string(riff[8:12]) != "WAVE" {
-		return realtimeproto.AudioFormat{}, fmt.Errorf("开头不是 RIFF/WAVE")
-	}
-	var format realtimeproto.AudioFormat
-	for {
-		header := make([]byte, 8)
-		if _, err := io.ReadFull(reader, header); err != nil {
-			return realtimeproto.AudioFormat{}, err
-		}
-		id, size := string(header[0:4]), int(binary.LittleEndian.Uint32(header[4:8]))
-		switch id {
-		case "data":
-			if format.SampleRate == 0 {
-				return realtimeproto.AudioFormat{}, fmt.Errorf("data 之前没有 fmt 块")
-			}
-			return format, nil
-		case "fmt ":
-			body := make([]byte, size+size%2)
-			if _, err := io.ReadFull(reader, body); err != nil {
-				return realtimeproto.AudioFormat{}, err
-			}
-			if size < 16 {
-				return realtimeproto.AudioFormat{}, fmt.Errorf("fmt 块太短")
-			}
-			if bits := binary.LittleEndian.Uint16(body[14:16]); bits != 16 {
-				return realtimeproto.AudioFormat{}, fmt.Errorf("只支持 16 位 PCM，收到 %d 位", bits)
-			}
-			format = realtimeproto.AudioFormat{SampleRate: int(binary.LittleEndian.Uint32(body[4:8])),
-				Channels: int(binary.LittleEndian.Uint16(body[2:4]))}
-		default:
-			if _, err := reader.Discard(size + size%2); err != nil {
-				return realtimeproto.AudioFormat{}, err
-			}
-		}
-	}
 }

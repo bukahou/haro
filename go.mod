@@ -8,6 +8,8 @@ require (
 	github.com/coder/websocket v1.8.15
 	github.com/failsafe-go/failsafe-go v0.9.8
 	github.com/gen2brain/malgo v0.11.28
+	github.com/go-audio/audio v1.0.0
+	github.com/go-audio/wav v1.1.0
 	github.com/google/jsonschema-go v0.4.3
 	github.com/k2-fsa/sherpa-onnx-go/v2 v2.0.2
 	github.com/modelcontextprotocol/go-sdk v1.8.0
@@ -37,6 +39,7 @@ require (
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/dustin/go-humanize v1.1.0 // indirect
+	github.com/go-audio/riff v1.0.0 // indirect
 	github.com/go-logr/logr v1.4.4 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect
