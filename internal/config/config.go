@@ -121,6 +121,7 @@ type ServerSettings struct {
 	// 不放长期密钥。⚠️ 不用 ANTHROPIC_API_KEY 这个名字：Claude Code 也读它
 	AnthropicAPIKey string `env:"HARO_ANTHROPIC_API_KEY"`
 	// anthropic 的回答力度（low / medium / high；思考写法是 adaptive 时还可以 xhigh / max）：聊天和摘要求快，调查多花点力气
+	// （HARO_RESEARCH_EFFORT 管后台调查的两个代理：查资料的云端模型、审查结论的更强的模型）
 	CloudLLMEffort  string        `env:"HARO_CLOUD_LLM_EFFORT" envDefault:"low"`
 	ResearchEffort  string        `env:"HARO_RESEARCH_EFFORT" envDefault:"medium"`
 	CloudLLMTimeout time.Duration `env:"HARO_CLOUD_LLM_TIMEOUT" envDefault:"4s"`     // 等云端开始响应的上限（要大于 0），超过就当连不上（正常 2 s 内开始响应）
@@ -130,10 +131,11 @@ type ServerSettings struct {
 
 	// 更强的模型（可选）：按规则把几类请求交给它，其余仍用 HARO_CLOUD_LLM_MODEL；接口（HARO_CLOUD_LLM_API）与凭证和云端模型相同。
 	// 空 = 不分，全部用云端模型。用在哪些地方（逗号分隔）：vision = 看摄像头画面；correction = 主人纠正、或明说要想清楚时由前台模型交给它重答；
-	// research = 后台调查写结论。思考写法同 HARO_CLOUD_LLM_THINKING（默认按 Sonnet 5.5）；它出错或等太久时由云端模型接手
+	// research = 审查后台调查的结论（云端模型查资料、写草稿，它只核对、提出疑点，疑点退回云端模型复查；不设就不审查）。
+	// 思考写法同 HARO_CLOUD_LLM_THINKING（默认按 Sonnet 5.5）；接手回答时它出错或等太久由云端模型接手，审查出错时用草稿
 	StrongLLMModel    string        `env:"HARO_STRONG_LLM_MODEL"`
 	StrongLLMUse      []string      `env:"HARO_STRONG_LLM_USE" envDefault:"vision,correction,research" envSeparator:","`
-	StrongLLMEffort   string        `env:"HARO_STRONG_LLM_EFFORT" envDefault:"low"` // 调查写结论用 HARO_RESEARCH_EFFORT
+	StrongLLMEffort   string        `env:"HARO_STRONG_LLM_EFFORT" envDefault:"low"` // 审查调查结论时用 HARO_RESEARCH_EFFORT
 	StrongLLMThinking string        `env:"HARO_STRONG_LLM_THINKING" envDefault:"between_tools"`
 	StrongLLMTimeout  time.Duration `env:"HARO_STRONG_LLM_TIMEOUT" envDefault:"10s"` // 看画面 / 纠正时等它开始回答的上限（带图片比平时慢）
 	// vision 用在哪：expert = 它当幕后专家看画面，把判断交给云端模型转述（前台始终是云端模型）；
@@ -171,11 +173,11 @@ type ServerSettings struct {
 	// 联网搜索：Tavily 官方远程 MCP。密钥不设 = 不提供联网搜索（凭证：无默认值，只来自环境变量）
 	TavilyAPIKey string `env:"HARO_TAVILY_API_KEY"`
 	TavilyMCPURL string `env:"HARO_TAVILY_MCP_URL" envDefault:"https://mcp.tavily.com/mcp/"`
-	// 后台调查（有搜索时才有，只用云端模型）：任务账本、每个任务的上限。
-	// 四个上限不设（0）= 程序里的默认值（research.DefaultLimits，默认值只在那里写）；不能是负数
+	// 后台调查（有搜索时才有，只用云端模型）：任务账本、每个任务的上限。四个上限不能是负数，不设（0）= 程序里的默认值：
+	// 时限、搜索次数、token 在 research.DefaultLimits，轮数是代理定义 research（internal/agents/builtin/research.md）的 max_steps
 	ResearchDB          string        `env:"HARO_RESEARCH_DB"`           // 任务账本（SQLite）；空 = 只在内存里
 	ResearchTimeout     time.Duration `env:"HARO_RESEARCH_TIMEOUT"`      // 搜索阶段最多多久
-	ResearchMaxRounds   int           `env:"HARO_RESEARCH_MAX_ROUNDS"`   // 最多请求模型几轮（搜一次、读一次各占一轮）
+	ResearchMaxRounds   int           `env:"HARO_RESEARCH_MAX_ROUNDS"`   // 搜索阶段最多请求模型几轮（搜一次、读一次各占一轮）
 	ResearchMaxSearches int           `env:"HARO_RESEARCH_MAX_SEARCHES"` // 最多搜几次
 	ResearchMaxTokens   int           `env:"HARO_RESEARCH_MAX_TOKENS"`   // 累计 token 上限
 	// 天气：Open-Meteo 公开接口，不用密钥。家的位置：「纬度,经度」（只放在配置里，不进代码），
@@ -567,7 +569,7 @@ const (
 const (
 	StrongForVision     = "vision"     // 带摄像头画面的请求
 	StrongForCorrection = "correction" // 主人纠正、或明说要想清楚时，由前台模型交给它重答
-	StrongForResearch   = "research"   // 后台调查写结论
+	StrongForResearch   = "research"   // 审查后台调查的结论（只核对、提出疑点，不重写）
 )
 
 // HARO_STRONG_LLM_VISION_MODE 的取值：看画面时更强的模型怎么用。
