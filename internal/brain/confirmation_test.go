@@ -233,3 +233,26 @@ func TestConfirmedExecutionCarriesConfirmationAndReportsFailure(t *testing.T) {
 		t.Errorf("确认后执行失败：应交回 failed 和出错的原因：%v", result)
 	}
 }
+
+// requestMentions 判断这次请求的消息里有没有出现 text（看历史里带着哪一轮）。
+func requestMentions(request braintest.Request, text string) bool {
+	return slices.ContainsFunc(request.Messages, func(message brain.ChatMessage) bool { return strings.Contains(message.Text, text) })
+}
+
+// 开着声纹、这句却算不出来（很短的话常这样）：沿用这次醒着期间最近认出的人的对话，但不算声纹确认——
+// 接得上刚才问到一半的事，确认不了会破坏的操作。
+func TestUncheckableSpeakerContinuesButCannotConfirm(t *testing.T) {
+	model := braintest.NewModel(t, deleteNoteThree, braintest.Say("要删第 3 条吗？"),
+		braintest.Call("confirm_action", map[string]any{"action_id": "act_1"}), braintest.Say("好的。"))
+	toolbox := &fakeToolbox{}
+	k := newGateTalker(t, model, toolbox, 0)
+	k.owner("把第 3 条删了")
+	braintest.Ask(t, k.session, k.stream, braintest.Utterance{Text: "删吧", CheckFailed: true})
+	requests := model.Requests()
+	if len(requests) != 4 || !requestMentions(requests[2], "把第 3 条删了") {
+		t.Fatalf("算不出声纹的这句应接着主人的对话（历史里有主人刚才那轮）：%d 次请求", len(requests))
+	}
+	if result := toolResultOf(t, requests[3]); result["status"] != "refused" || len(toolbox.called()) != 0 {
+		t.Errorf("沿用的人不算声纹确认：不应执行 %v %v", result, toolbox.called())
+	}
+}

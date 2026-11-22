@@ -37,6 +37,27 @@ type transcriptionJob struct {
 	speakerCheckFailed bool // 开着声纹、这句却算不出声纹（声纹的第三种结果，和没比对分开）
 }
 
+// speakerFor 决定这句接谁的对话：认出是谁就接这个人的（对话跟人走），并记作这次醒着期间最近认出的人；
+// 开着声纹、这句却算不出来（很短的话常这样）时沿用最近认出的人——只接上他的对话，不算声纹确认（确认闸看 voiceVerified）；
+// 这次醒着还没认出过谁、或没开声纹时进全家共用的对话。
+func (s *Session) speakerFor(job *transcriptionJob) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch {
+	case job.speakerChecked:
+		s.lastSpeaker = job.speaker
+		return job.speaker
+	case job.speakerCheckFailed && s.lastSpeaker != "":
+		s.logger.Info("这句的声纹没算出来：沿用这次醒着期间最近认出的人（不算声纹确认）", "item", job.item,
+			"person", s.lastSpeaker, "speaker_check_failed", true)
+		return s.lastSpeaker
+	case job.speakerCheckFailed:
+		s.logger.Warn("这句的声纹没算出来，这次醒着期间也还没认出过谁：进全家共用的对话", "item", job.item,
+			"speaker_check_failed", true)
+	}
+	return SharedPerson
+}
+
 // runResponse 执行一次回答：开始时发 response.created，结束时恰好发出一个 response.done。
 func (s *Session) runResponse(ctx context.Context, job *transcriptionJob) {
 	s.emit(realtimeproto.ResponseCreated{})
@@ -96,15 +117,7 @@ func (s *Session) respond(ctx context.Context, job *transcriptionJob) (done real
 		s.logger.Info("不是登记的人说的，不回答", "text", job.text)
 		return realtimeproto.ResponseDone{Status: realtimeproto.StatusIncomplete, Reason: realtimeproto.ReasonUnknownSpeaker}
 	}
-	if job.speakerChecked { // 对话跟人走：认出是谁就接这个人的对话
-		s.useConversationOf(job.speaker)
-	} else {
-		if job.speakerCheckFailed { // 开着声纹、这句却算不出来：和没比对一样处理，单独记一条
-			s.logger.Warn("这句的声纹没算出来：按没比对处理（进全家共用的对话、照样回答）", "item", job.item,
-				"speaker_check_failed", true)
-		}
-		s.useConversationOf(SharedPerson)
-	}
+	s.useConversationOf(s.speakerFor(job))
 	s.rememberLanguage(job.language)
 	if !hasSpokenText(job.text) {
 		return realtimeproto.ResponseDone{Status: realtimeproto.StatusIncomplete, Reason: realtimeproto.ReasonEmptyTranscript}

@@ -93,6 +93,9 @@ type Session struct {
 	awake        bool
 	playing      bool // 终端正在播放回答（只听唤醒词；打断自己的唤醒在仲裁里最优先）
 	droppedAudio int  // 识别流断开期间收到、只能丢掉的音频块数（重开时记一次日志）
+	// lastSpeaker 是这次醒着期间（这条连接上）最近一句认出来的人：算不出声纹的那句沿用他的对话（不算声纹确认）；
+	// 识别流回复睡着了（对话窗口结束）时清掉
+	lastSpeaker string
 	// speech 是识别流报了「开始说话」、还没报「说完」的那句；识别流在这时断开，这句就丢了（不会再有「说完」）
 	speech *realtimeproto.InputAudioBufferSpeechStarted
 

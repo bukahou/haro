@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -471,7 +472,7 @@ func (w *warnKeys) with(key string) int {
 	return count
 }
 
-// 开着声纹、这句却算不出声纹（第三种结果）：怎么处理还没定，现在照没比对处理（照样回答），但记一条明确的警告。
+// 开着声纹、这句却算不出声纹（第三种结果），这次醒着期间也还没认出过谁：进全家共用的对话、照样回答，记一条明确的警告。
 func TestUncheckableSpeakerIsAnsweredAndLogged(t *testing.T) {
 	voice := braintest.NewVoice()
 	logs := &warnKeys{}
@@ -602,5 +603,37 @@ func TestClosingSessionIsNotAStreamDisconnect(t *testing.T) {
 	case <-warned:
 		t.Error("会话正常结束时关掉的流不应当成断开来告警")
 	case <-time.After(100 * time.Millisecond): // 有问题时告警在关流后立刻就打
+	}
+}
+
+// historyMentions 判断模型最近一次收到的历史里有没有出现 text。
+func historyMentions(model *fakeModel, text string) bool {
+	for _, message := range model.history {
+		if strings.Contains(message.Text, text) {
+			return true
+		}
+	}
+	return false
+}
+
+// 醒着期间认出过主人：算不出声纹的那句接主人的对话；对话窗口结束（识别流回复睡着了）以后不再沿用，进全家共用的对话。
+func TestUncheckableSpeakerFollowsLastSpeakerUntilSleep(t *testing.T) {
+	voice := braintest.NewVoice()
+	model := &fakeModel{tokens: []string{"好的。"}}
+	session := newStreamSession(t, voice, model, nil)
+	turn := realtimeproto.TurnDetection{Type: "server_vad"}
+	stream := braintest.Open(t, session, voice, realtimeproto.SessionUpdate{TurnDetection: &turn, WakeWord: true})
+	braintest.Done(t, braintest.Ask(t, session, stream, braintest.Utterance{Wake: true, Text: "我叫小明", Speaker: "主人", SpeakerChecked: true}))
+	braintest.Done(t, braintest.Ask(t, session, stream, braintest.Utterance{Text: "嗯", CheckFailed: true}))
+	if !historyMentions(model, "我叫小明") {
+		t.Error("醒着期间：算不出声纹的这句应沿用主人的对话")
+	}
+	if err := stream.Emit(realtimeproto.HaroWakeWordState{Awake: false}); err != nil {
+		t.Fatal(err)
+	}
+	braintest.Expect[realtimeproto.HaroWakeWordState](t, session)
+	braintest.Done(t, braintest.Ask(t, session, stream, braintest.Utterance{Wake: true, Text: "在吗", CheckFailed: true}))
+	if historyMentions(model, "我叫小明") {
+		t.Error("睡着以后再醒：算不出声纹的这句不应再沿用之前认出的人")
 	}
 }
