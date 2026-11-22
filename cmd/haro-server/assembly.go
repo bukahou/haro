@@ -168,7 +168,7 @@ func buildTooling(ctx context.Context, settings config.ServerSettings, deps serv
 			return kit, err
 		}
 		shutdown.add("后台调查", closeRunner)
-		builtins = append(builtins, runner.Tools())
+		builtins = append(builtins, tools.ResearchTools(runner))
 		kit.briefers = append(kit.briefers, runner)
 		runner.OnFinished(func(task research.Task) { // 查完了：让他最近说话的那台终端响一声，叫醒后任务板会先说结论
 			delivered := kit.notices.Notify(task.Person, realtimeproto.HaroNotice{Kind: realtimeproto.NoticeResearchDone})

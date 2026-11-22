@@ -2,20 +2,19 @@ package research
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"iter"
 	"log/slog"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/bukahou/haro/internal/brain"
-	"github.com/bukahou/haro/internal/tools"
 )
 
 var quietLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -140,7 +139,7 @@ type fakeSearcher struct {
 	searchErr  error
 }
 
-func (f *fakeSearcher) Search(ctx context.Context, _ string, _ int, record tools.SearchRecorder) ([]tools.SearchResult, error) {
+func (f *fakeSearcher) Search(ctx context.Context, _ string, _ int, record Recorder) ([]SearchHit, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.searches++
@@ -150,10 +149,10 @@ func (f *fakeSearcher) Search(ctx context.Context, _ string, _ int, record tools
 	if f.searchErr != nil {
 		return nil, f.searchErr
 	}
-	return []tools.SearchResult{{Title: "A 的价格", URL: "https://example.com/a", Snippet: "A 100 円"}}, nil
+	return []SearchHit{{Title: "A 的价格", URL: "https://example.com/a", Snippet: "A 100 円"}}, nil
 }
 
-func (f *fakeSearcher) ReadPages(ctx context.Context, urls []string, _ int, _ string, record tools.SearchRecorder) ([]tools.PageContent, error) {
+func (f *fakeSearcher) ReadPages(ctx context.Context, urls []string, _ int, _ string, record Recorder) ([]Page, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.reads++
@@ -161,9 +160,9 @@ func (f *fakeSearcher) ReadPages(ctx context.Context, urls []string, _ int, _ st
 	if err := record.RecordSearch(ctx, 1, false); err != nil {
 		return nil, err
 	}
-	pages := make([]tools.PageContent, len(urls))
+	pages := make([]Page, len(urls))
 	for i, url := range urls {
-		pages[i] = tools.PageContent{URL: url, Content: "A 的详细价格 100 円"}
+		pages[i] = Page{URL: url, Content: "A 的详细价格 100 円"}
 	}
 	return pages, nil
 }
@@ -337,15 +336,15 @@ func TestResearchFindsAnswerAndBriefsOnce(t *testing.T) {
 		t.Errorf("任务板应只提查完了，不带结论、不靠这一轮说完就算告诉了：%+v", briefing)
 	}
 	// 不在一轮回答里查（没有收集处）：不算告诉了；按编号查到那一个，别人的编号查不到
-	if found, err := rig.runner.lookUpStatus(ctx, "主人", &task.ID); err != nil || len(found.Tasks) != 1 || found.Tasks[0].Conclusion != scriptedConclusion {
+	if found, err := rig.runner.Status(ctx, "主人", &task.ID); err != nil || len(found.Tasks) != 1 || found.Tasks[0].Conclusion != scriptedConclusion {
 		t.Errorf("按编号查：%+v %v", found, err)
 	}
-	if found, err := rig.runner.lookUpStatus(ctx, "别人", &task.ID); err != nil || len(found.Tasks) != 0 || found.Note == "" {
+	if found, err := rig.runner.Status(ctx, "别人", &task.ID); err != nil || len(found.Tasks) != 0 || found.Note == "" {
 		t.Errorf("别人的编号查不到：%+v %v", found, err)
 	}
 	// 一轮回答里取了结论：登记「主人听完才算告诉了」；还没确认听完之前，任务板照样附上
 	var heard deliveries
-	if found, err := rig.runner.lookUpStatus(brain.WithDeliveries(ctx, &heard), "主人", nil); err != nil || len(found.Tasks) != 1 ||
+	if found, err := rig.runner.Status(brain.WithDeliveries(ctx, &heard), "主人", nil); err != nil || len(found.Tasks) != 1 ||
 		found.Tasks[0].Conclusion != scriptedConclusion || len(heard) != 1 {
 		t.Fatalf("取结论：应带上结论，并登记一件听完才算数的事（%d 件）：%+v %v", len(heard), found, err)
 	}
@@ -363,7 +362,7 @@ func TestResearchFindsAnswerAndBriefsOnce(t *testing.T) {
 		t.Errorf("不给别人看：%v", others.Lines)
 	}
 	var again deliveries
-	if _, err := rig.runner.lookUpStatus(brain.WithDeliveries(ctx, &again), "主人", nil); err != nil || len(again) != 0 {
+	if _, err := rig.runner.Status(brain.WithDeliveries(ctx, &again), "主人", nil); err != nil || len(again) != 0 {
 		t.Errorf("已经告诉过的结论再取一次：不用再登记（%d 件，%v）", len(again), err)
 	}
 }
@@ -587,19 +586,17 @@ func TestReadPagesTellsWhichURLsWereNotRead(t *testing.T) {
 	if want := []string{"https://example.com/1", "https://example.com/2", "https://example.com/3"}; !slices.Equal(read, want) || chargedFor != maxPagesPerRead {
 		t.Errorf("只读前 %d 个、按 %d 页记账：读了 %v，按 %d 页记账", maxPagesPerRead, maxPagesPerRead, read, chargedFor)
 	}
-	var result string
+	var result readPagesOutput
 	for _, message := range model.messagesOfLastRequest() {
 		if message.Role == brain.RoleTool && message.ToolName == "read_pages" {
-			result = message.Text
+			if err := json.Unmarshal([]byte(message.Text), &result); err != nil {
+				t.Fatalf("读网页交给模型的结果应是 JSON：%v %q", err, message.Text)
+			}
 		}
 	}
-	for _, skipped := range urls[maxPagesPerRead:] {
-		if !strings.Contains(result, skipped.(string)) {
-			t.Errorf("交给模型的结果里应写明没读 %s：%q", skipped, result)
-		}
-	}
-	if note := result[strings.LastIndex(result, "\n")+1:]; strings.Contains(note, "https://example.com/1") {
-		t.Errorf("读了的不该算进没读的：%q", note)
+	if want := []string{"https://example.com/4", "https://example.com/5"}; !slices.Equal(result.NotRead, want) || result.Note == "" ||
+		len(result.Pages) != maxPagesPerRead {
+		t.Errorf("交给模型的结果里应写明没读哪几个（读了的不算）：%+v", result)
 	}
 }
 
@@ -706,17 +703,14 @@ func TestResearchPromptHasToday(t *testing.T) {
 	}
 }
 
-// 派出后告诉主人最长等多久：由搜索阶段的时限加写结论的时间算出（分钟，往上取整）。
-func TestLongestNoteFollowsLimits(t *testing.T) {
-	for _, c := range []struct {
-		timeout time.Duration
-		minutes int
-	}{{3 * time.Minute, 4}, {90 * time.Second, 3}} {
+// 派出后最长要等多久：搜索阶段的时限加写结论的时间。
+func TestLongestWaitFollowsLimits(t *testing.T) {
+	for _, timeout := range []time.Duration{3 * time.Minute, 90 * time.Second} {
 		limits := DefaultLimits
-		limits.Timeout = c.timeout
+		limits.Timeout = timeout
 		runner := NewRunner(openTestStore(t), &scriptedModel{}, &fakeSearcher{}, &fakeBudget{}, &fakeBudget{}, limits, quietLogger)
-		if note := runner.longestNote(); !strings.Contains(note, strconv.Itoa(c.minutes)) {
-			t.Errorf("时限 %v + 写结论 %v：应说约 %d 分钟：%q", c.timeout, writeUpTimeout, c.minutes, note)
+		if got := runner.LongestWait(); got != timeout+writeUpTimeout {
+			t.Errorf("时限 %v + 写结论 %v：得到 %v", timeout, writeUpTimeout, got)
 		}
 	}
 }

@@ -2,7 +2,8 @@
 // 受程序强制的上限约束（时间 / 轮数 / 搜索次数 / token，R2），结论写进任务账本；
 // 每轮对话的系统提示词里放「任务板」（R3 a / R4），服务端不会忘了自己派过什么、查到了什么。
 //
-// 对外：OpenTaskStore（Facade）+ TaskStore（接口）；Runner（排队与执行）；Tools（主对话的工具）；Runner 兼任 brain.Briefer。
+// 对外：OpenTaskStore（Facade）+ TaskStore（接口）；Runner（排队与执行，兼任 brain.Briefer；主对话的三个工具由 internal/tools
+// 的 ResearchTools 按它注册）。要用的联网搜索、额度与记账是这里定义的小接口（ports.go），由装配处接上。
 package research
 
 import (
