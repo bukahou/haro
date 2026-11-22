@@ -21,15 +21,32 @@ import (
 // 记账由实现用调用方给的 record 记：每真的发出一次请求（重试时每次各算）记一笔，不管成没成功——
 // 请求到了服务商那边就可能已经扣了积分；没拿到结果的标不完整。只有实现知道一次调用发出了几次请求。
 type WebSearcher interface {
-	// Search 搜一次，返回给模型看的结果文字（标题、网址、摘要）。
-	Search(ctx context.Context, query string, maxResults int, record SearchRecorder) (string, error)
-	// ReadPages 抓几个网页的正文；每页最多 maxRunesPerPage 字（R2：读得越多 token 越贵）。
+	// Search 搜一次，返回几条结果（标题、网址、摘要）。
+	Search(ctx context.Context, query string, maxResults int, record SearchRecorder) ([]SearchResult, error)
+	// ReadPages 抓几个网页的正文；每页最多 maxRunesPerPage 字（R2：读得越多 token 越贵）。读不到的那页在结果里写原因。
 	// focus 是要找的内容（调查的问题）：不空时优先给出和它相关的段落，而不是网页开头（长网页、PDF 很有用）。
-	ReadPages(ctx context.Context, urls []string, maxRunesPerPage int, focus string, record SearchRecorder) (string, error)
+	ReadPages(ctx context.Context, urls []string, maxRunesPerPage int, focus string, record SearchRecorder) ([]PageContent, error)
 	// SearchCredits / ReadCredits 是一次请求要用的积分（记账、查额度用）。
 	SearchCredits() int
 	ReadCredits(pages int) int
 }
+
+// SearchResult 是搜索结果里的一条：只留标题、网址、摘要（request_id、图片等杂项不要，省 token）。
+type SearchResult struct {
+	Title   string `json:"title"`
+	URL     string `json:"url"`
+	Snippet string `json:"snippet"`
+}
+
+// PageContent 是读到的一个网页：Content 是正文（已截到每页的上限）；读不到时 Error 写原因，没有正文。
+type PageContent struct {
+	URL     string `json:"url"`
+	Content string `json:"content,omitempty"`
+	Error   string `json:"error,omitempty"`
+}
+
+// errUnexpectedResponse 表示 Tavily 的回复不是约定的格式（服务改版了？）：报错，不把认不出的内容当成结果。
+var errUnexpectedResponse = errors.New("Tavily 的回复格式不对（服务改版了？）")
 
 // SearchRecorder 记下发出去的一次搜索请求（由 spending 实现）。
 type SearchRecorder interface {
@@ -128,13 +145,13 @@ func (t *TavilySearcher) call(ctx context.Context, name string, arguments map[st
 	})
 }
 
-// Search 基础深度、不带网页全文（快）。只留标题、网址、摘要给模型（request_id、图片等杂项去掉，省 token）。
-func (t *TavilySearcher) Search(ctx context.Context, query string, maxResults int, record SearchRecorder) (string, error) {
+// Search 基础深度、不带网页全文（快）。Tavily 的回复认不出（不是约定的 JSON、没有 results）时报错。
+func (t *TavilySearcher) Search(ctx context.Context, query string, maxResults int, record SearchRecorder) ([]SearchResult, error) {
 	text, err := t.call(ctx, "tavily_search", map[string]any{
 		"query": query, "max_results": maxResults, "search_depth": "basic", "include_raw_content": false},
 		t.SearchCredits(), record)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	var response struct {
 		Results []struct {
@@ -143,31 +160,27 @@ func (t *TavilySearcher) Search(ctx context.Context, query string, maxResults in
 			Content string `json:"content"`
 		} `json:"results"`
 	}
-	if json.Unmarshal([]byte(text), &response) != nil || response.Results == nil {
-		return text, nil // 格式变了：原样交给模型
+	if err := json.Unmarshal([]byte(text), &response); err != nil || response.Results == nil {
+		return nil, fmt.Errorf("搜索：%w（%v）", errUnexpectedResponse, err)
 	}
-	type result struct {
-		Title   string `json:"title"`
-		URL     string `json:"url"`
-		Snippet string `json:"snippet"`
-	}
-	compact := make([]result, 0, len(response.Results))
+	results := make([]SearchResult, 0, len(response.Results))
 	for _, found := range response.Results {
-		compact = append(compact, result{Title: found.Title, URL: found.URL, Snippet: found.Content})
+		results = append(results, SearchResult{Title: found.Title, URL: found.URL, Snippet: found.Content})
 	}
-	return marshalResult(map[string]any{"results": compact})
+	return results, nil
 }
 
-// ReadPages 基础深度抓正文，每页单独截到 maxRunesPerPage 字（不会因为第一页太长把后面的挤掉）。
+// ReadPages 基础深度抓正文，每页单独截到 maxRunesPerPage 字（不会因为第一页太长把后面的挤掉）；没读到的那页带上原因。
 // focus 交给 Tavily 的 query 参数，按相关度挑段落（2026-11-17 实测：21 页的考场空席 PDF，只取开头 2,000 字只看得到一个考场）。
-func (t *TavilySearcher) ReadPages(ctx context.Context, urls []string, maxRunesPerPage int, focus string, record SearchRecorder) (string, error) {
+// Tavily 的回复认不出时报错。
+func (t *TavilySearcher) ReadPages(ctx context.Context, urls []string, maxRunesPerPage int, focus string, record SearchRecorder) ([]PageContent, error) {
 	arguments := map[string]any{"urls": urls, "extract_depth": "basic"}
 	if focus != "" {
 		arguments["query"] = focus
 	}
 	text, err := t.call(ctx, "tavily_extract", arguments, t.ReadCredits(len(urls)), record)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	var response struct {
 		Results []struct {
@@ -179,28 +192,17 @@ func (t *TavilySearcher) ReadPages(ctx context.Context, urls []string, maxRunesP
 			Error string `json:"error"`
 		} `json:"failed_results"`
 	}
-	if json.Unmarshal([]byte(text), &response) != nil || response.Results == nil {
-		return truncateRunes(text, maxRunesPerPage*len(urls)), nil // 格式变了：按总长度截
+	if err := json.Unmarshal([]byte(text), &response); err != nil || response.Results == nil {
+		return nil, fmt.Errorf("读网页：%w（%v）", errUnexpectedResponse, err)
 	}
-	type page struct {
-		URL     string `json:"url"`
-		Content string `json:"content,omitempty"`
-		Error   string `json:"error,omitempty"`
-	}
-	pages := make([]page, 0, len(urls))
+	pages := make([]PageContent, 0, len(urls))
 	for _, read := range response.Results {
-		pages = append(pages, page{URL: read.URL, Content: truncateRunes(read.RawContent, maxRunesPerPage)})
+		pages = append(pages, PageContent{URL: read.URL, Content: truncateRunes(read.RawContent, maxRunesPerPage)})
 	}
 	for _, failed := range response.Failed {
-		pages = append(pages, page{URL: failed.URL, Error: failed.Error})
+		pages = append(pages, PageContent{URL: failed.URL, Error: failed.Error})
 	}
-	return marshalResult(map[string]any{"pages": pages})
-}
-
-// marshalResult 把整理好的结果编成 JSON 文本（交给调查和快查）。
-func marshalResult(value any) (string, error) {
-	data, err := json.Marshal(value)
-	return string(data), err
+	return pages, nil
 }
 
 func (t *TavilySearcher) SearchCredits() int { return tavilySearchCredits }
@@ -249,19 +251,30 @@ type webSearchInput struct {
 	Query string `json:"query" jsonschema:"搜索词，简洁具体，例如「日经平均 今日 終値」"`
 }
 
-// QuickSearch 是一次快查（最多 quickSearchResults 条、截到 quickSearchMaxRunes 字）：先查额度再搜；
+// QuickSearch 是一次快查（最多 quickSearchResults 条、编成 JSON 后截到 quickSearchMaxRunes 字）：先查额度再搜；
 // 发出去的每次请求不管成没成功都记账（搜索那一层记，见 WebSearcher）。
 // 主对话的 web_search 和看画面的专家都用它，额度算在同一处。
 func QuickSearch(ctx context.Context, searcher WebSearcher, meter SearchMeter, query string, logger *slog.Logger) (string, error) {
 	if err := meter.AllowSearch(ctx, searcher.SearchCredits()); err != nil {
 		return "", err
 	}
-	text, err := searcher.Search(ctx, query, quickSearchResults, meter)
-	logger.Info("联网搜索", "query", query, "chars", utf8.RuneCountInString(text), "err", err)
+	results, err := searcher.Search(ctx, query, quickSearchResults, meter)
+	if err != nil {
+		logger.Info("联网搜索", "query", query, "err", err)
+		return "", err
+	}
+	data, err := json.Marshal(quickSearchOutput{Results: results})
 	if err != nil {
 		return "", err
 	}
+	text := string(data)
+	logger.Info("联网搜索", "query", query, "results", len(results), "chars", utf8.RuneCountInString(text))
 	return truncateRunes(text, quickSearchMaxRunes), nil
+}
+
+// quickSearchOutput 是快查交给模型的结果。
+type quickSearchOutput struct {
+	Results []SearchResult `json:"results"`
 }
 
 // truncateRunes 截到 limit 个字（按字符，不切坏中文）。

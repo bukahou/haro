@@ -45,8 +45,8 @@ func TestLiveExpert(t *testing.T) {
 	if tavilyKey := os.Getenv("HARO_TAVILY_API_KEY"); tavilyKey != "" {
 		searcher := tools.NewTavilySearcher("https://mcp.tavily.com/mcp/", tavilyKey, http.DefaultClient, logger)
 		defer searcher.Close()
-		search = func(ctx context.Context, query string) (string, error) {
-			return searcher.Search(ctx, query, 3, loggedSearches{t})
+		search = func(ctx context.Context, query string) (string, error) { // 和服务端的装配一样走快查
+			return tools.QuickSearch(ctx, searcher, loggedSearches{t}, query, logger)
 		}
 	}
 	request := os.Getenv("HARO_EVAL_REQUEST")
@@ -64,8 +64,10 @@ func TestLiveExpert(t *testing.T) {
 	t.Logf("说给主人听的（%d 字）：%s\n细节：%s", utf8.RuneCountInString(report.Spoken), report.Spoken, report.Details)
 }
 
-// loggedSearches 把每次发出去的搜索请求写进测试日志（这里不接账本，花的积分照样看得见）。
+// loggedSearches 把每次发出去的搜索请求写进测试日志（这里不接账本、不设额度，花的积分照样看得见）。
 type loggedSearches struct{ t *testing.T }
+
+func (l loggedSearches) AllowSearch(context.Context, int) error { return nil }
 
 func (l loggedSearches) RecordSearch(_ context.Context, credits int, incomplete bool) error {
 	l.t.Logf("搜索用了 %d 积分（没拿到结果：%v）", credits, incomplete)

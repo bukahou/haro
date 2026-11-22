@@ -2,6 +2,7 @@ package research
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -525,7 +526,11 @@ func (r *Runner) runTool(ctx context.Context, call brain.ToolCall, question stri
 			return failureText(errors.Join(errors.New("query 不能为空"), err))
 		}
 		text, err := r.withinBudget(ctx, r.searcher.SearchCredits(), func() (string, error) {
-			return r.searcher.Search(ctx, in.Query, searchResults, r.meter)
+			results, err := r.searcher.Search(ctx, in.Query, searchResults, r.meter)
+			if err != nil {
+				return "", err
+			}
+			return renderJSON(map[string]any{"results": results})
 		})
 		report.searches++
 		r.logger.Info("调查：搜索", "query", in.Query, "err", err)
@@ -540,7 +545,11 @@ func (r *Runner) runTool(ctx context.Context, call brain.ToolCall, question stri
 			urls, skipped = urls[:maxPagesPerRead], urls[maxPagesPerRead:]
 		}
 		text, err := r.withinBudget(ctx, r.searcher.ReadCredits(len(urls)), func() (string, error) {
-			return r.searcher.ReadPages(ctx, urls, r.limits.PageRunes, question, r.meter)
+			pages, err := r.searcher.ReadPages(ctx, urls, r.limits.PageRunes, question, r.meter)
+			if err != nil {
+				return "", err
+			}
+			return renderJSON(map[string]any{"pages": pages})
 		})
 		report.reads++
 		r.logger.Info("调查：读网页", "urls", len(urls), "skipped", len(skipped), "err", err)
@@ -571,6 +580,12 @@ func (r *Runner) withinBudget(ctx context.Context, credits int, run func() (stri
 		return "", err
 	}
 	return run()
+}
+
+// renderJSON 把搜索、读网页的结果编成交给模型的 JSON 文本。
+func renderJSON(value any) (string, error) {
+	data, err := json.Marshal(value)
+	return string(data), err
 }
 
 func failureText(err error) string {

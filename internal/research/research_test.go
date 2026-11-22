@@ -140,28 +140,32 @@ type fakeSearcher struct {
 	searchErr  error
 }
 
-func (f *fakeSearcher) Search(ctx context.Context, _ string, _ int, record tools.SearchRecorder) (string, error) {
+func (f *fakeSearcher) Search(ctx context.Context, _ string, _ int, record tools.SearchRecorder) ([]tools.SearchResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.searches++
 	if err := record.RecordSearch(ctx, 1, f.searchErr != nil); err != nil {
-		return "", err
+		return nil, err
 	}
 	if f.searchErr != nil {
-		return "", f.searchErr
+		return nil, f.searchErr
 	}
-	return "Title: A 的价格\nURL: https://example.com/a\nContent: A 100 円", nil
+	return []tools.SearchResult{{Title: "A 的价格", URL: "https://example.com/a", Snippet: "A 100 円"}}, nil
 }
 
-func (f *fakeSearcher) ReadPages(ctx context.Context, urls []string, _ int, _ string, record tools.SearchRecorder) (string, error) {
+func (f *fakeSearcher) ReadPages(ctx context.Context, urls []string, _ int, _ string, record tools.SearchRecorder) ([]tools.PageContent, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.reads++
 	f.readURLs = append(f.readURLs, urls...)
 	if err := record.RecordSearch(ctx, 1, false); err != nil {
-		return "", err
+		return nil, err
 	}
-	return "A 的详细价格 100 円", nil
+	pages := make([]tools.PageContent, len(urls))
+	for i, url := range urls {
+		pages[i] = tools.PageContent{URL: url, Content: "A 的详细价格 100 円"}
+	}
+	return pages, nil
 }
 
 func (f *fakeSearcher) SearchCredits() int { return 1 }
@@ -594,8 +598,8 @@ func TestReadPagesTellsWhichURLsWereNotRead(t *testing.T) {
 			t.Errorf("交给模型的结果里应写明没读 %s：%q", skipped, result)
 		}
 	}
-	if strings.Contains(result, "https://example.com/1") {
-		t.Errorf("读了的不该算进没读的：%q", result)
+	if note := result[strings.LastIndex(result, "\n")+1:]; strings.Contains(note, "https://example.com/1") {
+		t.Errorf("读了的不该算进没读的：%q", note)
 	}
 }
 
