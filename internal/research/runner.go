@@ -11,7 +11,8 @@ import (
 	"github.com/bukahou/haro/internal/brain"
 )
 
-// 调查执行器的队列与生命周期：派任务、排队、一个一个查、取消、查完通知。查的过程见 investigate.go，任务板见 board.go。
+// 调查执行器的队列与生命周期：派任务、排队、一个一个查、取消、查完通知。查的过程见 investigate.go（查资料的工具 lookup.go，
+// 审查与复查 review.go），任务板见 board.go。
 
 // Limits 是每个调查任务的硬上限（R2）：由程序强制，不靠模型自己停。先到先停。配置可以改（HARO_RESEARCH_*）。
 // 轮数也是上限之一，是调查的代理的步数（Agents.Investigator.MaxSteps：默认在代理定义 research.md 里）。
