@@ -13,19 +13,26 @@ import (
 
 // 调查执行器的队列与生命周期：派任务、排队、一个一个查、取消、查完通知。查的过程见 investigate.go，任务板见 board.go。
 
-// Limits 是每个调查任务的硬上限（R2）：由程序强制，不靠模型自己停。先到先停。
+// Limits 是每个调查任务的硬上限（R2）：由程序强制，不靠模型自己停。先到先停。配置可以改（HARO_RESEARCH_*）。
 type Limits struct {
 	Timeout     time.Duration // 搜索阶段最多多久（默认 3 分钟）
 	MaxRounds   int           // 最多请求模型几轮（默认 10）
 	MaxSearches int           // 最多搜几次（默认 5；没搜成的也算一次）
 	MaxTokens   int           // 累计 token 上限（默认 8 万）
-	PageRunes   int           // 每个网页最多给多少字（按调查的问题挑相关的段落；默认 2,000）
-	MaxPending  int           // 全家最多同时有几个任务（1 个在查 + 排队；默认 3）
 }
 
 // DefaultLimits 是 R2 裁定的默认值（服务端没设 HARO_RESEARCH_TIMEOUT、HARO_RESEARCH_MAX_* 时用它，默认值只写在这里）。
 // MaxRounds 10：搜一次、读一次各占一轮，实测 6 轮不够。
-var DefaultLimits = Limits{Timeout: 3 * time.Minute, MaxRounds: 10, MaxSearches: 5, MaxTokens: 80_000, PageRunes: 2000, MaxPending: 3}
+var DefaultLimits = Limits{Timeout: 3 * time.Minute, MaxRounds: 10, MaxSearches: 5, MaxTokens: 80_000}
+
+const (
+	// maxPending 是全家最多同时有几个调查（在查的加排队的）。不开放成配置：同时只查一个（R2），排队的要等前面的查完，
+	// 每个最长 LongestWait，排多了主人要等很久；R2 定的是 1 个在查、2 个排队。
+	maxPending = 3
+	// queueCapacity 是排队的队列能放几个。排队时被取消的任务还占着队列里的位置（Run 取到时才跳过），所以要比 maxPending
+	// 大得多；满了（一个任务查着的时候连着派了又取消几十次）时先不派，不建任务（见 Start）。
+	queueCapacity = 64
+)
 
 // Runner 排队执行调查任务：全家同时只跑 1 个（R2），其余排队。
 type Runner struct {
@@ -41,7 +48,8 @@ type Runner struct {
 	queue chan int64
 	ready chan struct{} // Run 做完启动清理（把上次没查完的标成被中断）后关闭；Start 等它，免得新任务被误标
 
-	// creating 让「数在查的任务」和「建新任务」连在一起做：并发派调查时不会都看到还没满、一起建出来超过 MaxPending
+	// creating 让「数在查的任务」和「建新任务」连在一起做：并发派调查时不会都看到还没满、一起建出来超过 maxPending；
+	// 往队列里放也只在它锁着时做（见 Start）
 	creating sync.Mutex
 
 	mu       sync.Mutex
@@ -60,7 +68,7 @@ func (r *Runner) OnFinished(callback func(Task)) {
 func NewRunner(store TaskStore, model brain.ChatModel, searcher Searcher, meter Meter, budget Budget,
 	limits Limits, logger *slog.Logger) *Runner {
 	return &Runner{store: store, model: model, searcher: searcher, meter: meter, budget: budget, limits: limits,
-		logger: logger.With("component", "research"), queue: make(chan int64, 64), ready: make(chan struct{}),
+		logger: logger.With("component", "research"), queue: make(chan int64, queueCapacity), ready: make(chan struct{}),
 		cancels: map[int64]context.CancelFunc{}}
 }
 
@@ -109,22 +117,24 @@ func (r *Runner) Start(ctx context.Context, person, question string) (Task, int,
 	if err != nil {
 		return Task{}, 0, err
 	}
-	if len(active) >= r.limits.MaxPending {
+	if len(active) >= maxPending {
 		return Task{}, 0, fmt.Errorf("现在已经有 %d 个调查在查或排队，等前面的查完再派", len(active))
+	}
+	if len(r.queue) == cap(r.queue) { // 先看有没有位置再建任务：放不进队列的任务不建（建了再记失败，主人会听到两次）
+		r.logger.Warn("调查队列满了（排队时取消的还占着位置）：这次不派", "capacity", cap(r.queue))
+		return Task{}, 0, errQueueFull
 	}
 	task, err := r.store.Create(ctx, person, question)
 	if err != nil {
 		return Task{}, 0, err
 	}
-	select {
-	case r.queue <- task.ID:
-	default:
-		_, _ = r.store.Finish(ctx, task.ID, StatusFailed, "", nil, "队列满了")
-		return Task{}, 0, errors.New("调查队列满了")
-	}
+	r.queue <- task.ID // 只有这里往队列里放（creating 锁着），上面看过有位置：不会等
 	r.logger.Info("派出调查", "id", task.ID, "person", person, "question", question, "ahead", len(active))
 	return task, len(active), nil
 }
+
+// errQueueFull 是排队的队列满了、这次没派（没建任务）。
+var errQueueFull = errors.New("调查队列满了（刚才取消的调查还没清掉），过一会儿再派")
 
 // Cancel 取消某人的一个调查；id 为 0 时取消他最近一个没结束的。
 func (r *Runner) Cancel(ctx context.Context, person string, id int64) (Task, error) {

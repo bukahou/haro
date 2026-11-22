@@ -13,10 +13,19 @@ import (
 
 // 调查的过程：调查的模型决定搜什么、读哪几页，查够了交结论；到上限就不再给工具，逼它用已有资料写。
 
+// 调查过程里写死的几项（都不开放成配置）。
 const (
-	writeUpTimeout  = 45 * time.Second // 到上限后写结论的时间（不算在搜索阶段里）
-	searchResults   = 5                // 调查时每次搜索的条数
-	maxPagesPerRead = 3                // 一次最多读几页
+	// writeUpTimeout 是到上限后写结论最多等多久（不算在搜索阶段里）：一次不带搜索工具、输出不长的请求，一般几秒就完；
+	// 也算进告诉主人的最长等待（LongestWait）。是请求要的时间，不是部署时要调的参数。
+	writeUpTimeout = 45 * time.Second
+	// searchResults 是调查时每次搜索要几条结果：多一条，之后每一轮都多带几百字的输入；5 条是对比四种调查做法的试验时
+	// 用的数（Tavily 基础搜索不论几条都是 1 积分），改它要重新对比质量和花费。
+	searchResults = 5
+	// pageRunes 是读网页时每页最多给模型多少字（按调查的问题挑相关的段落）：读得越多，之后每一轮越贵；
+	// 2,000 字同样是试验时用的数，改它要重新对比，不是部署时调的参数。
+	pageRunes = 2000
+	// maxPagesPerRead 是一次最多读几页：读得越多这一步越贵；多给的网址告诉模型没读，需要的话它再分批读。
+	maxPagesPerRead = 3
 )
 
 // investigationReport 是一次调查的经过和结果。
@@ -287,7 +296,7 @@ func (r *Runner) runTool(ctx context.Context, call brain.ToolCall, question stri
 		}
 		var pages []Page
 		err = r.withinBudget(ctx, r.searcher.ReadCredits(len(urls)), func() (err error) {
-			pages, err = r.searcher.ReadPages(ctx, urls, r.limits.PageRunes, question, r.meter)
+			pages, err = r.searcher.ReadPages(ctx, urls, pageRunes, question, r.meter)
 			return err
 		})
 		report.reads++

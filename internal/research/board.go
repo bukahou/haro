@@ -18,7 +18,8 @@ const (
 	CancelTool = "cancel_research"
 )
 
-// statusRecent 是不给编号时列出最近几个调查。
+// statusRecent 是 research_status 不给编号时列出最近几个调查。不开放成配置：是给模型挑的，盖得住同时进行的上限
+// （maxPending）再加最近查完的两个；多了只是每次多带几个旧结论。
 const statusRecent = 5
 
 // StatusReport 是 research_status 交给模型的结果：调查（新的在前）和附注。

@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -409,7 +410,6 @@ func TestResearchBudgetQueueCancelAndRestart(t *testing.T) {
 	search := call("search_web", map[string]any{"query": "慢"})
 	model := &scriptedModel{repeat: &search, gate: make(chan struct{}), entered: make(chan struct{}, 64)} // 闸一直不开：在查的一直在查
 	limits := DefaultLimits
-	limits.MaxPending = 2
 	rig := newRig(t, model, limits)
 	ctx, cancel := context.WithCancel(context.Background())
 	stopped := rig.run(ctx)
@@ -423,11 +423,15 @@ func TestResearchBudgetQueueCancelAndRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, ahead, err := rig.runner.Start(ctx, "主人", "第二个")
-	if err != nil || ahead != 1 {
-		t.Fatalf("第二个应排队：%v ahead=%d", err, ahead)
+	var queued []Task // 排在第一个后面的（同时上限是 maxPending）
+	for i := 1; i < maxPending; i++ {
+		task, ahead, err := rig.runner.Start(ctx, "主人", "排队的 "+strconv.Itoa(i))
+		if err != nil || ahead != i {
+			t.Fatalf("第 %d 个应排队：%v ahead=%d", i+1, err, ahead)
+		}
+		queued = append(queued, task)
 	}
-	if _, _, err := rig.runner.Start(ctx, "主人", "第三个"); err == nil {
+	if _, _, err := rig.runner.Start(ctx, "主人", "超出的"); err == nil {
 		t.Error("超过同时上限应拒绝")
 	}
 	if _, err := rig.runner.Cancel(ctx, "别人", first.ID); err == nil {
@@ -439,7 +443,7 @@ func TestResearchBudgetQueueCancelAndRestart(t *testing.T) {
 		t.Fatalf("取消在查的：%+v %v", cancelled, err)
 	}
 
-	// 服务端停掉：第二个在查、没查完；重启后标成被中断，并在任务板上告诉主人（这一轮说完就算告诉了）
+	// 服务端停掉：第二个在查、后面的在排队，都没查完；重启后标成被中断，并在任务板上告诉主人（这一轮说完就算告诉了）
 	waitEntered(t, model.entered) // 第二个在查
 	cancel()
 	<-stopped
@@ -448,12 +452,50 @@ func TestResearchBudgetQueueCancelAndRestart(t *testing.T) {
 	defer cancel2()
 	go restarted.Run(ctx2)
 	<-restarted.ready // 启动清理做完了
-	interrupted, err := rig.store.Get(ctx2, second.ID)
-	if err != nil || interrupted.Status != StatusInterrupted {
-		t.Fatalf("重启后应标成被中断：%+v %v", interrupted, err)
+	for _, task := range queued {
+		interrupted, err := rig.store.Get(ctx2, task.ID)
+		if err != nil || interrupted.Status != StatusInterrupted {
+			t.Fatalf("重启后应标成被中断：%+v %v", interrupted, err)
+		}
 	}
-	if board := restarted.Brief("主人"); len(board.Lines) != 1 || !strings.Contains(board.Lines[0], second.Question) || board.Delivered == nil {
+	board := restarted.Brief("主人")
+	if len(board.Lines) != len(queued) || !strings.Contains(board.Lines[0], queued[0].Question) || board.Delivered == nil {
 		t.Errorf("任务板应告诉主人被中断了，这一轮说完就算告诉了：%+v", board)
+	}
+}
+
+// 排队的队列满了（排队时取消的任务还占着位置）：这次不派、不建任务（不会建了再记失败、让主人听两次）；队列空出来就又能派。
+func TestStartRefusesWhenQueueIsFullWithoutCreatingTask(t *testing.T) {
+	store := openTestStore(t)
+	runner := NewRunner(store, &scriptedModel{}, &fakeSearcher{}, &fakeBudget{}, &fakeBudget{}, DefaultLimits, quietLogger)
+	close(runner.ready) // 不跑 Run：队列里的不会被取走
+	ctx := context.Background()
+	for len(runner.queue) < cap(runner.queue) { // 派了又取消：任务都结束了，队列里的位置还占着
+		task, _, err := runner.Start(ctx, "主人", "派了又取消")
+		if err != nil {
+			t.Fatalf("队列还有位置时应能派（队列里 %d 个）：%v", len(runner.queue), err)
+		}
+		if _, err := runner.Cancel(ctx, "主人", task.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, err := store.Recent(ctx, "主人", queueCapacity+10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := runner.Start(ctx, "主人", "放不进去的"); !errors.Is(err, errQueueFull) {
+		t.Fatalf("队列满了应拒绝：%v", err)
+	}
+	after, err := store.Recent(ctx, "主人", queueCapacity+10)
+	if err != nil || len(after) != len(before) {
+		t.Errorf("队列满了不该建任务：之前 %d 个、之后 %d 个（%v）", len(before), len(after), err)
+	}
+	if board := runner.Brief("主人"); len(board.Lines) != 0 {
+		t.Errorf("没派出去的不上任务板（主人已经从工具的报错听到了）：%v", board.Lines)
+	}
+	<-runner.queue // 取走一个（像 Run 跳过一个取消了的）：又能派
+	if _, _, err := runner.Start(ctx, "主人", "空出来之后"); err != nil {
+		t.Errorf("队列空出位置后应能派：%v", err)
 	}
 }
 
@@ -631,11 +673,14 @@ func (s *gatedStore) Create(ctx context.Context, person, question string) (Task,
 func TestStartRespectsPendingLimitUnderConcurrency(t *testing.T) {
 	store := &gatedStore{TaskStore: openTestStore(t), activeCalls: make(chan struct{}, 4), creating: make(chan struct{}),
 		release: make(chan struct{})}
-	limits := DefaultLimits
-	limits.MaxPending = 1
-	runner := NewRunner(store, &scriptedModel{}, &fakeSearcher{}, &fakeBudget{}, &fakeBudget{}, limits, quietLogger)
+	runner := NewRunner(store, &scriptedModel{}, &fakeSearcher{}, &fakeBudget{}, &fakeBudget{}, DefaultLimits, quietLogger)
 	close(runner.ready) // 不跑任务：只看派任务
 	ctx := context.Background()
+	for i := 1; i < maxPending; i++ { // 先占满到只剩一个名额（直接建在账本里：不经过下面的闸）
+		if _, err := store.TaskStore.Create(ctx, "主人", "已经在排队的 "+strconv.Itoa(i)); err != nil {
+			t.Fatal(err)
+		}
+	}
 	results := make(chan error, 2)
 	go func() { _, _, err := runner.Start(ctx, "主人", "第一个"); results <- err }()
 	<-store.activeCalls
@@ -653,8 +698,8 @@ func TestStartRespectsPendingLimitUnderConcurrency(t *testing.T) {
 		}
 	}
 	active, err := store.TaskStore.Active(ctx)
-	if err != nil || succeeded != 1 || len(active) != 1 {
-		t.Errorf("同时上限是 1：应只派出一个，派出 %d 个、在查或排队的有 %d 个（%v）", succeeded, len(active), err)
+	if err != nil || succeeded != 1 || len(active) != maxPending {
+		t.Errorf("只剩一个名额：应只派出一个，派出 %d 个、在查或排队的有 %d 个（上限 %d，%v）", succeeded, len(active), maxPending, err)
 	}
 }
 
