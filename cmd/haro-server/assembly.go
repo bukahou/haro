@@ -80,13 +80,6 @@ type services struct {
 	pricing    spending.Pricing
 }
 
-// meteredCloudModel 是按 spec 接好的云端模型，按 purpose 记账（模型 ID 只在 spec 里写一次）。不查额度、不熔断。
-func (deps services) meteredCloudModel(settings config.ServerSettings, spec cloudModelSpec, purpose spending.Purpose,
-	logger *slog.Logger) brain.ChatModel {
-	return spending.NewMeteredChatModel(newCloudChatModel(settings, deps.claude, spec, deps.modelHTTP), spec.model, purpose,
-		deps.pricing, deps.ledger, logger)
-}
-
 // connectServices 准备外部服务（语音合成、识别、模型的客户端）和费用的刹车：先有刹车，再接搜索、后台调查。
 func connectServices(ctx context.Context, settings config.ServerSettings, logger *slog.Logger, shutdown *shutdownSteps) (services, error) {
 	deps := services{httpClient: &http.Client{Timeout: settings.RequestTimeout},
@@ -135,7 +128,9 @@ type tooling struct {
 }
 
 // buildTooling 准备工具：自研工具内置（记事本直接连数据库；天气；联网搜索与后台调查），MCP 只接第三方（现在还没有）。
-func buildTooling(ctx context.Context, settings config.ServerSettings, deps services, logger *slog.Logger, shutdown *shutdownSteps) (tooling, error) {
+// catalog 是代理定义（后台调查的代理按它装配）。
+func buildTooling(ctx context.Context, settings config.ServerSettings, catalog agents.Catalog, deps services, logger *slog.Logger,
+	shutdown *shutdownSteps) (tooling, error) {
 	kit := tooling{briefers: []brain.Briefer{brain.ClockBriefer{}, deps.guard}, notices: brain.NewNoticeHub()}
 	if !settings.Tools {
 		return kit, nil
@@ -163,7 +158,7 @@ func buildTooling(ctx context.Context, settings config.ServerSettings, deps serv
 		kit.expertSearch = func(ctx context.Context, query string) (string, error) {
 			return tools.QuickSearch(ctx, searcher, meter, query, logger)
 		}
-		runner, closeRunner, err := startResearch(ctx, settings, deps, searcher, logger)
+		runner, closeRunner, err := startResearch(ctx, settings, newAgentAssembly(settings, catalog, deps, logger), searcher, logger)
 		if err != nil {
 			return kit, err
 		}
@@ -191,8 +186,7 @@ func assembleBrain(ctx context.Context, settings config.ServerSettings, catalog 
 	if err != nil {
 		return brain.Components{}, options, err
 	}
-	built, err := agentAssembly{settings: settings, catalog: catalog, claude: deps.claude, client: deps.modelHTTP, pricing: deps.pricing,
-		ledger: deps.ledger, guard: deps.guard, logger: logger}.build(kit.toolbox, kit.expertSearch)
+	built, err := newAgentAssembly(settings, catalog, deps, logger).build(kit.toolbox, kit.expertSearch)
 	if err != nil {
 		return brain.Components{}, options, err
 	}

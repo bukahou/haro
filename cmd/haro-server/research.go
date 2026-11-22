@@ -3,6 +3,7 @@ package main
 import (
 	"cmp"
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 
@@ -12,11 +13,17 @@ import (
 	"github.com/bukahou/haro/internal/tools"
 )
 
-// 后台调查的装配：任务账本、调查用的模型、上限，接上联网搜索（internal/tools）与额度、记账（internal/spending）。
+// 后台调查的装配：任务账本、调查和审查的代理（按定义，见 agentAssembly.researchAgents）、上限，接上联网搜索（internal/tools）
+// 与额度、记账（internal/spending）。
 
-// startResearch 开启后台调查：任务账本、调查用的模型、上限，并在后台开始处理队列。
-func startResearch(ctx context.Context, settings config.ServerSettings, deps services, searcher tools.WebSearcher,
+// startResearch 开启后台调查：先按定义装配好代理（写错了就起不来），再开任务账本，在后台开始处理队列。
+func startResearch(ctx context.Context, settings config.ServerSettings, assembly agentAssembly, searcher tools.WebSearcher,
 	logger *slog.Logger) (*research.Runner, func() error, error) {
+	limits := researchLimits(settings)
+	built, err := assembly.researchAgents(limits)
+	if err != nil {
+		return nil, nil, err
+	}
 	store, err := research.OpenTaskStore(ctx, settings.ResearchDB)
 	if err != nil {
 		return nil, nil, err
@@ -24,26 +31,19 @@ func startResearch(ctx context.Context, settings config.ServerSettings, deps ser
 	if settings.ResearchDB == "" {
 		logger.Warn("没设 HARO_RESEARCH_DB：调查任务只记在内存里，服务端重启后就忘了")
 	}
-	// 调查在后台、不急：限流 / 服务端一时出错时让 SDK 重试两次；每次请求不另设期限，受调查自己的总时限管
-	model := deps.meteredCloudModel(settings, cloudModelSpec{model: settings.CloudLLMModel, maxTokens: researchMaxTokens,
-		effort: settings.ResearchEffort, thinking: settings.CloudLLMThinking, retries: 2}, spending.PurposeResearch, logger)
-	limits := researchLimits(settings)
-	meter := spending.NewSearchMeter(deps.guard, deps.ledger, deps.pricing, spending.PurposeResearch, tools.TavilyName)
-	runner := research.NewRunner(store, model, researchSearch{searcher: searcher}, meter, deps.guard, limits, logger)
-	writer := "（调查模型自己写）"
-	if settings.StrongLLMFor(config.StrongForResearch) { // 搜索和读网页用便宜的模型，结论交给更强的模型写
-		runner.WriteConclusionsWith(deps.meteredCloudModel(settings, cloudModelSpec{model: settings.StrongLLMModel,
-			maxTokens: researchConclusionMaxTokens, effort: settings.ResearchEffort, thinking: settings.StrongLLMThinking, retries: 2},
-			spending.PurposeResearch, logger))
-		writer = settings.StrongLLMModel
+	meter := spending.NewSearchMeter(assembly.guard, assembly.ledger, assembly.pricing, spending.PurposeResearch, tools.TavilyName)
+	runner, err := research.NewRunner(store, built, researchSearch{searcher: searcher}, meter, assembly.guard, limits, logger)
+	if err != nil {
+		return nil, nil, errors.Join(err, store.Close())
 	}
 	running := make(chan struct{})
 	go func() {
 		defer close(running)
 		runner.Run(ctx) // ctx 随退出信号结束：手上的调查停下（下次启动标成被中断）
 	}()
-	logger.Info("后台调查已开启", "model", settings.CloudLLMModel, "conclusion_writer", writer, "timeout", limits.Timeout,
-		"max_rounds", limits.MaxRounds, "max_searches", limits.MaxSearches, "max_tokens", limits.MaxTokens)
+	logger.Info("后台调查已开启", "timeout", limits.Timeout, "max_rounds", built.Investigator.MaxSteps,
+		"max_searches", limits.MaxSearches, "max_tokens", limits.MaxTokens, "reviewed", built.Reviewer != nil,
+		"longest_wait", runner.LongestWait())
 	stop := func() error { // 先等调查的循环退出，再关任务账本：不然它最后一次写任务时库已经关了
 		select {
 		case <-running:
@@ -55,19 +55,11 @@ func startResearch(ctx context.Context, settings config.ServerSettings, deps ser
 	return runner, stop, nil
 }
 
-// researchMaxTokens 是调查时每次请求的输出上限（结论比聊天长，聊天用 HARO_CLOUD_LLM_MAX_TOKENS）。
-const researchMaxTokens = 1000
-
-// researchConclusionMaxTokens 是更强的模型写结论时的输出上限：它开着思考（思考也算在输出上限里），结论连同来源
-// 经 submit_conclusion 一次交出，按 researchMaxTokens 会写到一半被截断（实测），这次调用白花。只按实际用的计费，
-// 每天的调查额度照样管着。
-const researchConclusionMaxTokens = 4000
-
-// researchLimits 是每个调查任务的上限：配置里设了的用配置的，没设（0）的用程序里的默认值（research.DefaultLimits，默认值只在那里写）。
+// researchLimits 是每个调查任务的上限：配置里设了的用配置的，没设（0）的用程序里的默认值（research.DefaultLimits，默认值只在
+// 那里写）。轮数不在这里：是调查的代理的步数（见 agentAssembly.researchAgents）。
 func researchLimits(settings config.ServerSettings) research.Limits {
 	limits := research.DefaultLimits
 	limits.Timeout = cmp.Or(settings.ResearchTimeout, limits.Timeout)
-	limits.MaxRounds = cmp.Or(settings.ResearchMaxRounds, limits.MaxRounds)
 	limits.MaxSearches = cmp.Or(settings.ResearchMaxSearches, limits.MaxSearches)
 	limits.MaxTokens = cmp.Or(settings.ResearchMaxTokens, limits.MaxTokens)
 	return limits

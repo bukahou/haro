@@ -14,16 +14,24 @@ import (
 // 调查执行器的队列与生命周期：派任务、排队、一个一个查、取消、查完通知。查的过程见 investigate.go，任务板见 board.go。
 
 // Limits 是每个调查任务的硬上限（R2）：由程序强制，不靠模型自己停。先到先停。配置可以改（HARO_RESEARCH_*）。
+// 轮数也是上限之一，是调查的代理的步数（Agents.Investigator.MaxSteps：默认在代理定义 research.md 里）。
 type Limits struct {
 	Timeout     time.Duration // 搜索阶段最多多久（默认 3 分钟）
-	MaxRounds   int           // 最多请求模型几轮（默认 10）
 	MaxSearches int           // 最多搜几次（默认 5；没搜成的也算一次）
 	MaxTokens   int           // 累计 token 上限（默认 8 万）
 }
 
-// DefaultLimits 是 R2 裁定的默认值（服务端没设 HARO_RESEARCH_TIMEOUT、HARO_RESEARCH_MAX_* 时用它，默认值只写在这里）。
-// MaxRounds 10：搜一次、读一次各占一轮，实测 6 轮不够。
-var DefaultLimits = Limits{Timeout: 3 * time.Minute, MaxRounds: 10, MaxSearches: 5, MaxTokens: 80_000}
+// DefaultLimits 是 R2 裁定的默认值（服务端没设 HARO_RESEARCH_TIMEOUT、HARO_RESEARCH_MAX_SEARCHES、HARO_RESEARCH_MAX_TOKENS 时
+// 用它，默认值只写在这里）。
+var DefaultLimits = Limits{Timeout: 3 * time.Minute, MaxSearches: 5, MaxTokens: 80_000}
+
+// check 检查上限：都要大于 0（配置里没设的，装配处已经换成默认值）。
+func (l Limits) check() error {
+	if l.Timeout <= 0 || l.MaxSearches <= 0 || l.MaxTokens <= 0 {
+		return fmt.Errorf("调查的上限都要大于 0：时限 %v、搜索 %d 次、%d token", l.Timeout, l.MaxSearches, l.MaxTokens)
+	}
+	return nil
+}
 
 const (
 	// maxPending 是全家最多同时有几个调查（在查的加排队的）。不开放成配置：同时只查一个（R2），排队的要等前面的查完，
@@ -37,13 +45,16 @@ const (
 // Runner 排队执行调查任务：全家同时只跑 1 个（R2），其余排队。
 type Runner struct {
 	store    TaskStore
-	model    brain.ChatModel // 调查用的模型（R6：单独配置，默认云端），已按 research 用途记账
-	writer   brain.ChatModel // 写结论的模型（nil = 调查模型自己写）；见 WriteConclusionsWith
+	agents   Agents // 调查、审查的代理（模型已按 research 用途记账）
 	searcher Searcher
 	meter    Meter // 按 research 用途查额度、记账
 	budget   Budget
 	limits   Limits
 	logger   *slog.Logger
+	now      func() time.Time // 告诉模型的现在的日期按它（测试可以换）
+
+	// 交给模型的工具（按两个代理的允许名单筛好）：调查时的、到上限写结论时的（只有交结论）、审查的
+	investigationSpecs, submitSpecs, reviewSpecs []brain.ToolSpec
 
 	queue chan int64
 	ready chan struct{} // Run 做完启动清理（把上次没查完的标成被中断）后关闭；Start 等它，免得新任务被误标
@@ -64,23 +75,31 @@ func (r *Runner) OnFinished(callback func(Task)) {
 	r.finished = callback
 }
 
-// NewRunner 创建调查执行器；要再调用 Run 才开始干活。
-func NewRunner(store TaskStore, model brain.ChatModel, searcher Searcher, meter Meter, budget Budget,
-	limits Limits, logger *slog.Logger) *Runner {
-	return &Runner{store: store, model: model, searcher: searcher, meter: meter, budget: budget, limits: limits,
-		logger: logger.With("component", "research"), queue: make(chan int64, queueCapacity), ready: make(chan struct{}),
-		cancels: map[int64]context.CancelFunc{}}
+// NewRunner 创建调查执行器；要再调用 Run 才开始干活。代理（见 Agents.check）、上限不对时报错。
+func NewRunner(store TaskStore, agents Agents, searcher Searcher, meter Meter, budget Budget, limits Limits,
+	logger *slog.Logger) (*Runner, error) {
+	if err := errors.Join(agents.check(), limits.check()); err != nil {
+		return nil, err
+	}
+	r := &Runner{store: store, agents: agents, searcher: searcher, meter: meter, budget: budget, limits: limits,
+		logger: logger.With("component", "research"), now: time.Now,
+		investigationSpecs: offered(agents.Investigator, searchWebSpec, readPagesSpec, submitConclusionSpec),
+		submitSpecs:        offered(agents.Investigator, submitConclusionSpec),
+		queue:              make(chan int64, queueCapacity), ready: make(chan struct{}), cancels: map[int64]context.CancelFunc{}}
+	if agents.Reviewer != nil {
+		r.reviewSpecs = offered(*agents.Reviewer, submitReviewSpec)
+	}
+	return r, nil
 }
 
-// WriteConclusionsWith 让另一个模型写结论：调查模型（便宜的）负责搜索和读网页，搜完把全部资料交给 writer（更强的）
-// 写结论，不给工具。writer 出错时：查够了的用调查模型自己的草稿，到上限的由调查模型写。要在 Run 之前调用。
-func (r *Runner) WriteConclusionsWith(writer brain.ChatModel) {
-	r.writer = writer
-}
-
-// LongestWait 是派出后最长要等多久：搜索阶段的时限加上写结论的时间（到时限就用查到的资料收尾）。
+// LongestWait 是派出后最长要等多久：搜索阶段的时限加上到上限后写结论的时间；有审查时再加审查一次和复查的时限
+// （到时限就用已经查到的资料收尾）。
 func (r *Runner) LongestWait() time.Duration {
-	return r.limits.Timeout + writeUpTimeout
+	longest := r.limits.Timeout + writeUpTimeout
+	if r.agents.Reviewer != nil {
+		longest += r.agents.Reviewer.Timeout + recheckTimeout
+	}
+	return longest
 }
 
 // Run 处理队列，直到 ctx 取消。启动时把上次没查完的标成「被中断」（下次对话时告诉主人）。
@@ -248,6 +267,7 @@ func (r *Runner) runTask(ctx context.Context, id int64) {
 	}
 	r.logger.Info("调查结束", "id", id, "status", status, "reason", report.reason, "rounds", report.rounds,
 		"searches", report.searches, "reads", report.reads, "gathered", report.gathered, "tokens", report.tokens,
+		"review", report.review, "doubts", report.doubts, "recheck_rounds", report.recheckRounds, "review_tokens", report.reviewTokens,
 		"elapsed", time.Since(started).Round(time.Second))
 	r.notifyFinished(ctx, id)
 }

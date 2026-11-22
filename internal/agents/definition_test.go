@@ -9,7 +9,7 @@ import (
 	"github.com/bukahou/haro/internal/agents"
 )
 
-// 程序里带的四个代理都读得出来，调用方式、模型档、用途和程序用它们的方式一致。
+// 程序里带的代理都读得出来，调用方式、模型档、用途和程序用它们的方式一致。
 func TestBuiltinDefinitions(t *testing.T) {
 	catalog, err := agents.Load("")
 	if err != nil {
@@ -19,11 +19,16 @@ func TestBuiltinDefinitions(t *testing.T) {
 		mode           agents.Mode
 		model, purpose string
 	}{
-		agents.Front:      {agents.ModePrimary, agents.TierBase, "chat"},
-		agents.Strong:     {agents.ModeHandoff, agents.TierStrong, "strong"},
-		agents.Vision:     {agents.ModeSubtask, agents.TierStrong, "vision"},
-		agents.Summary:    {agents.ModeSubtask, agents.TierBase, "summary"},
-		agents.OverBudget: {agents.ModeSubtask, agents.TierBase, "chat"},
+		agents.Front:          {agents.ModePrimary, agents.TierBase, "chat"},
+		agents.Strong:         {agents.ModeHandoff, agents.TierStrong, "strong"},
+		agents.Vision:         {agents.ModeSubtask, agents.TierStrong, "vision"},
+		agents.Summary:        {agents.ModeSubtask, agents.TierBase, "summary"},
+		agents.OverBudget:     {agents.ModeSubtask, agents.TierBase, "chat"},
+		agents.Research:       {agents.ModeSubtask, agents.TierBase, "research"},
+		agents.ResearchReview: {agents.ModeSubtask, agents.TierStrong, "research"}, // 审查和调查记在一起，受每天的调查额度管
+	}
+	if len(catalog) != len(want) {
+		t.Errorf("程序里带了 %d 个代理，这里核对了 %d 个", len(catalog), len(want))
 	}
 	for name, w := range want {
 		definition, err := catalog.Get(name)
@@ -37,6 +42,36 @@ func TestBuiltinDefinitions(t *testing.T) {
 	strong, _ := catalog.Get(agents.Strong)
 	if strong.Prompt != "" {
 		t.Errorf("接手的代理正文应为空：%q", strong.Prompt)
+	}
+	review, _ := catalog.Get(agents.ResearchReview)
+	if review.MaxSteps != 1 || review.Timeout <= 0 || review.MaxOutputTokens <= 1000 {
+		t.Errorf("调查审查只审一次、要有时限、输出上限要放得下思考和疑点：%+v", review)
+	}
+}
+
+// 调查的时限、搜索次数在配置里（HARO_RESEARCH_*），定义里写了不会生效：起不来。审查要写时限。阳性对照：去掉那一项就读得进来。
+func TestResearchDefinitionsFields(t *testing.T) {
+	const research = "---\ntitle: 调查\nmode: subtask\nmodel: base\npurpose: research\nmax_steps: 10\n%s---\n查资料。\n"
+	const review = "---\ntitle: 调查审查\nmode: subtask\nmodel: strong\npurpose: research\nmax_steps: 1\n%s---\n核对草稿。\n"
+	cases := map[string]struct {
+		name, text, want string
+	}{
+		"调查写了时限":   {agents.Research, strings.Replace(research, "%s", "timeout: 30s\n", 1), "不认 timeout"},
+		"调查写了搜索次数": {agents.Research, strings.Replace(research, "%s", "max_searches: 3\n", 1), "不认 max_searches"},
+		"审查没写时限":   {agents.ResearchReview, strings.Replace(review, "%s", "", 1), "要写 timeout"},
+		"调查原样":     {agents.Research, strings.Replace(research, "%s", "", 1), ""},
+		"审查写了时限":   {agents.ResearchReview, strings.Replace(review, "%s", "timeout: 60s\n", 1), ""},
+	}
+	for label, c := range cases {
+		dir := t.TempDir()
+		writeAgent(t, dir, c.name, c.text)
+		_, err := agents.Load(dir)
+		switch {
+		case c.want == "" && err != nil:
+			t.Errorf("%s：应读得进来：%v", label, err)
+		case c.want != "" && (err == nil || !strings.Contains(err.Error(), c.want)):
+			t.Errorf("%s：应读不进来、报错里有 %q：%v", label, c.want, err)
+		}
 	}
 }
 

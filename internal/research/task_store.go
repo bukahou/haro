@@ -26,7 +26,7 @@ const (
 	StatusQueued      Status = "queued"      // 排队中
 	StatusRunning     Status = "running"     // 在查
 	StatusDone        Status = "done"        // 查完了
-	StatusPartial     Status = "partial"     // 到上限收工，结论可能不全
+	StatusPartial     Status = "partial"     // 结论可能不全：到上限收工，或审查发现的疑点没能复查
 	StatusFailed      Status = "failed"      // 出错（模型 / 搜索服务不可用）
 	StatusCancelled   Status = "cancelled"   // 主人说不查了
 	StatusInterrupted Status = "interrupted" // 服务端重启，没查完
@@ -42,7 +42,7 @@ func (s Status) Label() string {
 	case StatusDone:
 		return "查完了"
 	case StatusPartial:
-		return "查了一部分（到上限收工）"
+		return "查了一部分（可能不全）"
 	case StatusFailed:
 		return "失败了"
 	case StatusCancelled:
@@ -66,7 +66,7 @@ type Task struct {
 	StatusText string    `json:"status"`
 	Conclusion string    `json:"conclusion,omitempty"`
 	Sources    []string  `json:"sources,omitempty"`
-	StopReason string    `json:"stop_reason,omitempty"` // 为什么没查完 / 为什么失败
+	StopReason string    `json:"stop_reason,omitempty"` // 为什么没查完 / 为什么失败；查完了但没审查成时也写在这里
 	CreatedAt  time.Time `json:"created_at"`
 	FinishedAt time.Time `json:"-"`
 	Reported   bool      `json:"-"` // 结论（或失败）已经告诉过主人

@@ -99,7 +99,7 @@ func (r *Runner) Brief(person string) brain.Briefing {
 		case StatusDone, StatusPartial:
 			note := ""
 			if task.Status == StatusPartial {
-				note = "（到上限收工，可能不全：" + task.StopReason + "）"
+				note = "（可能不全：" + task.StopReason + "）"
 			}
 			lines = append(lines, fmt.Sprintf("后台调查 #%d「%s」查完了%s，还没告诉主人。这一轮先调用 %s（id 填 %d）取结论讲给主人"+
 				"（按需要的长短说，讲清楚为止），再回答他这次说的话。", task.ID, task.Question, note, StatusTool, task.ID))

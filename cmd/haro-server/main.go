@@ -89,7 +89,7 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	kit, err := buildTooling(ctx, settings, deps, logger, &shutdown)
+	kit, err := buildTooling(ctx, settings, catalog, deps, logger, &shutdown)
 	if err != nil {
 		return err
 	}
@@ -164,7 +164,7 @@ func checkClaudeSettings(settings config.ServerSettings) error {
 			return fmt.Errorf("%s %w", check.name, err)
 		}
 	}
-	// 力度和它实际搭配的思考写法一起查：调查的力度两种都会用到（调查用云端模型的、写结论用更强的模型的）
+	// 力度和它实际搭配的思考写法一起查：调查的力度两种都会用到（调查用云端模型的、审查用更强的模型的）
 	for _, check := range []struct{ name, effort, thinking string }{
 		{"HARO_CLOUD_LLM_EFFORT", settings.CloudLLMEffort, settings.CloudLLMThinking},
 		{"HARO_STRONG_LLM_EFFORT", settings.StrongLLMEffort, settings.StrongLLMThinking},

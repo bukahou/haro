@@ -10,6 +10,7 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/bukahou/haro/internal/agents"
 	"github.com/bukahou/haro/internal/brain"
 	"github.com/bukahou/haro/internal/config"
 	"github.com/bukahou/haro/internal/docstest"
@@ -40,7 +41,11 @@ func fullTooling(t *testing.T) tooling {
 		cancel()
 		shutdown.run(logger)
 	})
-	kit, err := buildTooling(ctx, settings, deps, logger, &shutdown)
+	catalog, err := agents.Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	kit, err := buildTooling(ctx, settings, catalog, deps, logger, &shutdown)
 	if err != nil {
 		t.Fatal(err)
 	}
