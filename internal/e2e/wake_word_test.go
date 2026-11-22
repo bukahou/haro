@@ -98,6 +98,7 @@ func (stubModel) StreamReply(context.Context, brain.ChatRequest) iter.Seq2[brain
 				return
 			}
 		}
+		yield(brain.ReplyDelta{Stop: brain.StopCompleted}, nil)
 	}
 }
 
@@ -110,16 +111,17 @@ func (echoSynthesizer) Synthesize(_ context.Context, utterance brain.Utterance) 
 	}
 }
 
-// wakeStream 是替身转写会话：收到第 10 块音频时报告「唤醒 + 一句话」；记录 SetAwake，以及之后收到的全零音频块（半双工静音）。
-// failSleeps 是前几次休眠要失败（模拟通知休眠失败）。
+// wakeStream 是替身转写会话：收到第 10 块音频时报告「唤醒 + 一句话」；收到醒 / 睡请求时像 haro-asr 那样回复
+// haro.wake_word.state。记录 SetAwake，以及之后收到的全零音频块（半双工静音）。
+// unansweredSleeps 是前几次休眠请求收下了却不回复（模拟语音前端没回）。
 type wakeStream struct {
-	mu          sync.Mutex
-	chunks      int
-	silentAfter int
-	awakeCalls  []bool
-	failSleeps  int
-	events      chan realtimeproto.ServerEvent
-	closeOnce   sync.Once
+	mu               sync.Mutex
+	chunks           int
+	silentAfter      int
+	awakeCalls       []bool
+	unansweredSleeps int
+	events           chan realtimeproto.ServerEvent
+	closeOnce        sync.Once
 }
 
 func (w *wakeStream) SendAudio(_ context.Context, pcm []byte) error {
@@ -142,10 +144,11 @@ func (w *wakeStream) SetAwake(_ context.Context, awake bool) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.awakeCalls = append(w.awakeCalls, awake)
-	if !awake && w.failSleeps > 0 {
-		w.failSleeps--
-		return errors.New("通知休眠失败")
+	if !awake && w.unansweredSleeps > 0 {
+		w.unansweredSleeps--
+		return nil
 	}
+	w.events <- realtimeproto.HaroWakeWordState{Awake: awake}
 	return nil
 }
 func (w *wakeStream) Events() <-chan realtimeproto.ServerEvent { return w.events }
@@ -194,8 +197,8 @@ func waitForPlayed(t *testing.T, speaker *recordingSpeaker, want string, deadlin
 
 func TestWakeWordThroughServerSession(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	// 第一次让识别休眠失败：会话把失败交回终端，终端过一个对话窗口再试（不能停在「醒着且永不到期」）
-	streaming := &wakeStreaming{stream: &wakeStream{events: make(chan realtimeproto.ServerEvent, 8), failSleeps: 1}}
+	// 第一次休眠请求识别没回复：终端等不到就当没切成，过一个对话窗口再试（不能停在「醒着且永不到期」）
+	streaming := &wakeStreaming{stream: &wakeStream{events: make(chan realtimeproto.ServerEvent, 8), unansweredSleeps: 1}}
 	notices := brain.NewNoticeHub()
 	session := brain.NewSession(brain.Components{
 		Streaming: streaming, Front: brain.Agent{Model: stubModel{}}, Synthesizer: echoSynthesizer{}, Notices: notices,
@@ -210,14 +213,15 @@ func TestWakeWordThroughServerSession(t *testing.T) {
 		NoticeTone:  pcm("[叮咚]"),
 		NoticeTones: map[string]realtimeproto.PCMAudio{realtimeproto.NoticeTranscriptionLost: pcm("[断开]")},
 		WakeWord: assistant.WakeWordOptions{Phrase: "哈罗哈罗", IdleTimeout: 150 * time.Millisecond,
-			SleepTone: pcm("[我去睡觉了]")}}, logger)
+			SleepTone: pcm("[我去睡觉了]")},
+		Timing: assistant.Timing{WakeConfirm: 50 * time.Millisecond}}, logger)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	runErr := make(chan error, 1)
 	go func() { runErr <- haro.Run(ctx) }()
 
-	// 唤醒后的问题被回答；回答播完、对话窗口结束：识别休眠之后终端再说一声「我去睡觉了」
+	// 唤醒后的问题被回答；回答播完、对话窗口结束：识别回复睡着了之后终端再说一声「我去睡觉了」
 	deadline := time.Now().Add(3 * time.Second)
 	want := "你旁边有一个杯子。还有键盘。[我去睡觉了]"
 	waitForPlayed(t, speaker, want, deadline, "唤醒后的问题应被回答、休眠时说一声")
@@ -225,7 +229,7 @@ func TestWakeWordThroughServerSession(t *testing.T) {
 		t.Error("终端要求唤醒门：服务端应以唤醒门模式打开转写会话")
 	}
 	if calls := streaming.stream.sleepCalls(); calls != 2 {
-		t.Errorf("第一次让识别休眠失败后应再试一次：试了 %d 次", calls)
+		t.Errorf("第一次休眠请求没回复后应再试一次：试了 %d 次", calls)
 	}
 	// 不能打断时（半双工）：回答期间终端上传的静音一直送到识别
 	if streaming.stream.silentChunks() == 0 {

@@ -21,7 +21,7 @@ import (
 	"text/template"
 	"time"
 
-	"go.yaml.in/yaml/v3"
+	"github.com/bukahou/haro/internal/frontmatter"
 )
 
 // Mode 是代理被调用的方式。
@@ -44,14 +44,16 @@ const (
 
 // 程序用到的代理（文件名，不含 .md）。
 const (
-	Front   = "front"   // 前台：主对话
-	Strong  = "strong"  // 强模型：主人纠正时（或看画面接手时）接手这一轮
-	Vision  = "vision"  // 看画面：幕后专家
-	Summary = "summary" // 摘要：滚动摘要
+	Front      = "front"       // 前台：主对话
+	Strong     = "strong"      // 强模型：主人纠正时（或看画面接手时）接手这一轮
+	Vision     = "vision"      // 看画面：幕后专家
+	Summary    = "summary"     // 摘要：滚动摘要
+	OverBudget = "over_budget" // 额度判断：月度上限到了以后判断主人要不要临时提高
 )
 
 // known 是程序认识的代理，以及每个该用的调用方式（程序按这个方式调用它）。
-var known = map[string]Mode{Front: ModePrimary, Strong: ModeHandoff, Vision: ModeSubtask, Summary: ModeSubtask}
+var known = map[string]Mode{Front: ModePrimary, Strong: ModeHandoff, Vision: ModeSubtask, Summary: ModeSubtask,
+	OverBudget: ModeSubtask}
 
 // agentFields 是只有部分代理认的配置项：值为 true 表示这个代理必须写。写在不认的代理上不会生效，起不来比悄悄不生效好。
 var agentFields = map[string]map[string]bool{
@@ -81,12 +83,11 @@ type Definition struct {
 	MaxSearches int           `yaml:"max_searches"`
 
 	Prompt string `yaml:"-"` // 正文：系统提示词的模板
-	Source string `yaml:"-"` // 从哪读的（日志用）
-	prompt *template.Template
+	Source string `yaml:"-"` // 从哪读的（只给日志看）
+	// Builtin：这份是程序里带的（没被覆盖目录替换）。读的时候按来源记下，不从 Source 的写法推（覆盖目录也可能叫 builtin）
+	Builtin bool `yaml:"-"`
+	prompt  *template.Template
 }
-
-// Builtin 判断这份定义是不是程序里带的（没被覆盖目录替换）。
-func (d Definition) Builtin() bool { return strings.HasPrefix(d.Source, builtinDir+"/") }
 
 // RenderPrompt 填好正文里引用的值，得到系统提示词。正文引用了 values 里没有的名字时报错（不静默留空）。
 func (d Definition) RenderPrompt(values map[string]any) (string, error) {
@@ -128,7 +129,7 @@ func Load(dir string) (Catalog, error) {
 		if err != nil {
 			return nil, fmt.Errorf("读取 %s: %w", source, err)
 		}
-		if err := catalog.add(entry.Name(), source, data); err != nil {
+		if err := catalog.add(entry.Name(), source, data, true); err != nil {
 			return nil, err
 		}
 	}
@@ -159,15 +160,15 @@ func (c Catalog) override(dir string) error {
 		if err != nil {
 			return fmt.Errorf("读取代理定义: %w", err)
 		}
-		if err := c.add(filepath.Base(path), path, data); err != nil {
+		if err := c.add(filepath.Base(path), path, data, false); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// add 解析一个文件并记下（同名的替换）。
-func (c Catalog) add(fileName, source string, data []byte) error {
+// add 解析一个文件并记下（同名的替换）；builtin 表示是不是程序里带的那份。
+func (c Catalog) add(fileName, source string, data []byte, builtin bool) error {
 	name := strings.TrimSuffix(fileName, ".md")
 	if _, ok := known[name]; !ok {
 		return fmt.Errorf("%s：程序不认识叫 %s 的代理（认识的：%s）", source, name, strings.Join(knownNames(), "、"))
@@ -176,6 +177,7 @@ func (c Catalog) add(fileName, source string, data []byte) error {
 	if err != nil {
 		return err
 	}
+	definition.Builtin = builtin
 	c[name] = definition
 	return nil
 }
@@ -191,14 +193,12 @@ func knownNames() []string {
 
 // parse 解析一个代理文件：--- 之间的 YAML 是配置（不认识的字段报错），之后是正文。
 func parse(name, source string, data []byte) (Definition, error) {
-	header, body, err := splitFrontMatter(data)
+	header, body, err := frontmatter.Split(data)
 	if err != nil {
 		return Definition{}, fmt.Errorf("%s：%w", source, err)
 	}
-	decoder := yaml.NewDecoder(bytes.NewReader(header))
-	decoder.KnownFields(true)
 	var definition Definition
-	if err := decoder.Decode(&definition); err != nil {
+	if err := frontmatter.Decode(header, &definition); err != nil {
 		return Definition{}, fmt.Errorf("%s 的配置: %w", source, err)
 	}
 	definition.Name, definition.Source, definition.Prompt = name, source, strings.TrimSpace(string(body))
@@ -213,25 +213,6 @@ func parse(name, source string, data []byte) (Definition, error) {
 		return Definition{}, fmt.Errorf("%s 的正文: %w", source, err)
 	}
 	return definition, nil
-}
-
-// splitFrontMatter 把文件分成开头的配置（第一行 --- 到下一行 ---）和之后的正文。
-func splitFrontMatter(data []byte) (header, body []byte, err error) {
-	data = bytes.ReplaceAll(data, []byte("\r\n"), []byte("\n"))
-	const fence = "---\n"
-	if !bytes.HasPrefix(data, []byte(fence)) {
-		return nil, nil, errors.New("开头要是一行 ---，接着是配置")
-	}
-	rest := data[len(fence):]
-	end := bytes.Index(rest, []byte("\n"+fence))
-	switch {
-	case end >= 0:
-		return rest[:end+1], rest[end+1+len(fence):], nil
-	case bytes.HasSuffix(rest, []byte("\n---")):
-		return rest[:len(rest)-len("---")], nil, nil
-	default:
-		return nil, nil, errors.New("配置没有用一行 --- 结束")
-	}
 }
 
 // validate 检查各字段的取值（不按格式猜默认值：写错了就起不来）。

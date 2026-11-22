@@ -1,6 +1,7 @@
 package realtimeproto
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 )
@@ -19,17 +20,24 @@ const (
 	CodeResponseInProgress         ErrorCode = "response_in_progress"         // 已有进行中的回答
 	CodeUnsupportedFeature         ErrorCode = "unsupported_feature"          // 对端没有这项能力（例如没配唤醒词模型却要求唤醒门）
 	CodeUnsupportedProtocolVersion ErrorCode = "unsupported_protocol_version" // 握手时报的协议版本不受支持
+	CodeTooManySessions            ErrorCode = "too_many_sessions"            // 对端同时进行的会话到了上限：过一会儿再试
 	CodeServerError                ErrorCode = "server_error"                 // 服务端自己的问题
 )
 
 // errorType 是 Realtime 错误事件里的 error.type：请求有问题，还是服务端自己的问题。
 func (c ErrorCode) errorType() string {
 	switch c {
-	case CodeServerError, CodeTranscriptionFailed:
+	case CodeServerError, CodeTranscriptionFailed, CodeTooManySessions:
 		return "server_error"
 	default:
 		return "invalid_request_error"
 	}
+}
+
+// ServerSide 表示错误出在对端自己（error.type = server_error）：同样的请求过一会儿再发可能就好了。
+// 其他码是请求本身的问题，原样再发也一样被拒。没有码的按 server_error（和编码时一样）。
+func (c ErrorCode) ServerSide() bool {
+	return cmp.Or(c, CodeServerError).errorType() == "server_error"
 }
 
 // ProtocolError 是带错误码的 error。处理事件时返回它，连接层把码原样发给对端；其他 error 一律按 server_error。

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"golang.org/x/sync/semaphore"
 
 	"github.com/bukahou/haro/internal/realtimeproto"
 )
@@ -56,13 +57,14 @@ type TurnDetector interface {
 const samplesPerMs = realtimeproto.TranscriptionSampleRate / 1000
 
 // handleRealtimeTranscription 实现 Realtime 转写会话的子集（事件定义见 realtimeproto）。
-func handleRealtimeTranscription(w http.ResponseWriter, r *http.Request, deps Dependencies) {
+// slots 是同时进行的转写会话的名额（Limits.MaxSessions）：满了就拒绝新的会话。
+func handleRealtimeTranscription(w http.ResponseWriter, r *http.Request, deps Dependencies, slots *semaphore.Weighted) {
 	if r.URL.Query().Get("intent") != realtimeproto.TranscriptionIntent {
 		writeError(w, http.StatusBadRequest, "只支持 intent="+realtimeproto.TranscriptionIntent)
 		return
 	}
 	if deps.NewVoiceDetector == nil {
-		writeError(w, http.StatusServiceUnavailable, "haro-asr 启动时没有指定 -vad-model，无法提供流式转写")
+		writeError(w, http.StatusServiceUnavailable, "haro-asr "+missing("VAD 模型", deps.Settings.VoiceDetector)+"，提供不了流式转写")
 		return
 	}
 	conn, err := websocket.Accept(w, r, nil)
@@ -73,15 +75,20 @@ func handleRealtimeTranscription(w http.ResponseWriter, r *http.Request, deps De
 	conn.SetReadLimit(realtimeproto.MaxMessageBytes)
 	ctx := r.Context()
 
-	session, err := startTranscriptionSession(ctx, conn, deps)
-	if err != nil {
-		_ = writeEvent(ctx, conn, realtimeproto.ErrorEventFor("", err))
+	session, err := startTranscriptionSession(ctx, conn, deps, slots)
+	if err != nil { // 不接受这份设置（或者没开起来、满了）：回带码的 error 再断开，对端据码判断要不要再连
+		refusal := realtimeproto.ErrorEventFor("", err)
+		deps.Logger.Warn("转写会话没有开始", "code", refusal.Code, "err", err)
+		_ = writeEvent(ctx, conn, refusal)
 		conn.Close(websocket.StatusPolicyViolation, "bad session.update")
 		return
 	}
-	defer session.vad.detector.Close()
-	defer session.wake.close()
+	defer session.close()
 	turn := session.turnDetection
+	if err := writeEvent(ctx, conn, realtimeproto.SessionUpdated{Session: session.accepted()}); err != nil {
+		deps.Logger.Warn("转写会话：确认设置的 session.updated 没发出去", "err", err)
+		return
+	}
 	deps.Logger.Info("转写会话开始", "type", turn.Type, "silence_ms", turn.SilenceDurationMs,
 		"eagerness", turn.Eagerness, "prefix_ms", turn.PrefixPaddingMs, "threshold", turn.Threshold,
 		"wake_word", session.wake.enabled)
@@ -129,11 +136,18 @@ type transcriptionSession struct {
 
 	current   *utterance
 	itemCount int
+
+	releaseSlot func() // 交还同时进行的会话的名额（close 时调用）
 }
 
-// startTranscriptionSession 读取第一条消息（必须是 session.update）并创建 VAD。
-func startTranscriptionSession(ctx context.Context, conn *websocket.Conn, deps Dependencies) (*transcriptionSession, error) {
-	_, data, err := conn.Read(ctx)
+// startTranscriptionSession 读取第一条消息（必须是 session.update，最多等 Limits.SessionUpdateWait），
+// 校验通过、还有名额时占一个名额，创建这个会话的 VAD 和唤醒词识别。会话结束时 close 交还名额。
+func startTranscriptionSession(ctx context.Context, conn *websocket.Conn, deps Dependencies,
+	slots *semaphore.Weighted) (*transcriptionSession, error) {
+	limits := deps.Limits.orDefault()
+	readCtx, cancel := context.WithTimeout(ctx, limits.SessionUpdateWait)
+	defer cancel()
+	_, data, err := conn.Read(readCtx)
 	if err != nil {
 		return nil, fmt.Errorf("读取 session.update: %w", err)
 	}
@@ -164,29 +178,53 @@ func startTranscriptionSession(ctx context.Context, conn *websocket.Conn, deps D
 	case realtimeproto.TurnServerVAD:
 	case realtimeproto.TurnSemanticVAD:
 		if deps.TurnDetector == nil {
-			return nil, realtimeproto.ProtocolErrorf(realtimeproto.CodeUnsupportedFeature, "haro-asr 启动时没有指定 -turn-model，不支持 semantic_vad")
+			return nil, realtimeproto.ProtocolErrorf(realtimeproto.CodeUnsupportedFeature, "haro-asr %s，不支持 semantic_vad",
+				missing("说完判断模型", deps.Settings.TurnDetector))
 		}
 		session.turn.semantic, session.turn.detector = true, deps.TurnDetector
 		session.turn.maxWait = samplesIn(session.timing.maxWait(turn.Eagerness))
 		vadConfig.SilenceDurationMs = int(session.timing.SemanticSilence.Milliseconds())
 	}
+	if update.WakeWord && deps.NewKeywordSpotter == nil {
+		return nil, realtimeproto.ProtocolErrorf(realtimeproto.CodeUnsupportedFeature, "haro-asr %s，不支持唤醒词",
+			missing("唤醒词模型", deps.Settings.KeywordSpotter))
+	}
+	if !slots.TryAcquire(1) { // 每个会话自己建 VAD（重新载入模型）和唤醒词流：数量不设上限，连接失控时会撑爆内存
+		return nil, realtimeproto.ProtocolErrorf(realtimeproto.CodeTooManySessions, "haro-asr 同时进行的转写会话已经有 %d 个（上限）：稍后再试",
+			limits.MaxSessions)
+	}
+	session.releaseSlot = func() { slots.Release(1) }
 	if update.WakeWord {
-		if deps.NewKeywordSpotter == nil {
-			return nil, realtimeproto.ProtocolErrorf(realtimeproto.CodeUnsupportedFeature, "haro-asr 启动时没有指定 -kws-model-dir / -keywords-file，不支持唤醒词")
-		}
 		spotter, err := deps.NewKeywordSpotter()
 		if err != nil {
+			session.close()
 			return nil, fmt.Errorf("创建唤醒词识别: %w", err)
 		}
 		session.wake = wakeGate{enabled: true, spotter: spotter}
 	}
 	detector, err := deps.NewVoiceDetector(timing.voiceDetectorConfig(vadConfig))
 	if err != nil {
-		session.wake.close()
+		session.close()
 		return nil, fmt.Errorf("创建 VAD: %w", err)
 	}
 	session.vad.detector = detector
 	return session, nil
+}
+
+// close 释放这个会话的 VAD、唤醒词识别，交还名额。
+func (s *transcriptionSession) close() {
+	if s.vad.detector != nil {
+		s.vad.detector.Close()
+	}
+	s.wake.close()
+	s.releaseSlot()
+}
+
+// accepted 是这个会话接受之后的设置（session.updated 里回给对端）。
+func (s *transcriptionSession) accepted() realtimeproto.SessionUpdate {
+	turn := s.turnDetection
+	return realtimeproto.SessionUpdate{Kind: realtimeproto.SessionTranscription, TurnDetection: &turn,
+		WakeWord: s.wake.enabled, InputFormat: realtimeproto.TranscriptionFormat}
 }
 
 func (s *transcriptionSession) run(ctx context.Context) error {
@@ -212,7 +250,9 @@ func (s *transcriptionSession) run(ctx context.Context) error {
 					Message: event.Type() + ": 这个会话没有启用唤醒门"})
 				continue
 			}
-			s.applyWakeEvent(event)
+			if err := s.applyWakeEvent(ctx, event); err != nil {
+				return err
+			}
 		default:
 			_ = writeEvent(ctx, s.conn, realtimeproto.Error{Code: realtimeproto.CodeUnsupportedEvent,
 				Message: "转写会话不支持 " + event.Type()})
@@ -450,38 +490,41 @@ func (s *transcriptionSession) finishUtterance(ctx context.Context) error {
 	s.deps.Logger.Info("识别完成", "item", current.itemID, "audio", audio.Duration().Round(time.Millisecond),
 		"elapsed", time.Since(started).Round(time.Millisecond), "text", transcript.Text, "language", transcript.Language,
 		"wake", current.wake, "barge_in", current.bargeIn)
-	speaker, checked := s.identifySpeaker(current.itemID, audio.Data)
-	tentative := ""
-	switch {
-	case current.wakeSpeaker != "": // 唤醒时已经认出来了：这句沿用，不让很短的唤醒句重新比对推翻它
-		speaker, checked = current.wakeSpeaker, true
-	case current.wakeGuess != "" && speaker == "":
-		// 唤醒时只过了唤醒门槛：不算认出来，告诉服务端像是谁，由它按这句话的长短决定怎么回（短句受限回答）
-		tentative = current.wakeGuess
+	// 唤醒时已经认出来了：这句沿用，不再对整句另算一次声纹（也不让很短的唤醒句重新比对推翻它）
+	speaker, checked, failed, tentative := current.wakeSpeaker, true, false, ""
+	if current.wakeSpeaker == "" {
+		speaker, checked, failed = s.identifySpeaker(current.itemID, audio.Data)
+		if current.wakeGuess != "" && speaker == "" {
+			// 唤醒时只过了唤醒门槛：不算认出来，告诉服务端像是谁，由它按这句话的长短决定怎么回（短句受限回答）
+			tentative = current.wakeGuess
+		}
 	}
 	return writeEvent(ctx, s.conn, realtimeproto.InputAudioTranscriptionCompleted{ItemID: current.itemID,
-		Transcript: transcript.Text, Speaker: speaker, SpeakerChecked: checked, SpeakerTentative: tentative,
-		Language: transcript.Language, Wake: current.wake, BargeIn: current.bargeIn, AudioMs: audio.Duration().Milliseconds()})
+		Transcript: transcript.Text, Speaker: speaker, SpeakerChecked: checked, SpeakerCheckFailed: failed,
+		SpeakerTentative: tentative, Language: transcript.Language, Wake: current.wake, BargeIn: current.bargeIn,
+		AudioMs: audio.Duration().Milliseconds()})
 }
 
-// identifySpeaker 比对这句话的声纹；没登记声纹或算不出来时 checked = false（服务端不过滤）。
-func (s *transcriptionSession) identifySpeaker(itemID string, pcm []byte) (string, bool) {
+// identifySpeaker 比对这句话的声纹。没登记声纹时不比对（checked、failed 都是 false）；
+// 算不出声纹时 failed = true：和「没比对」分开报，由服务端决定怎么处理。
+func (s *transcriptionSession) identifySpeaker(itemID string, pcm []byte) (name string, checked, failed bool) {
 	if !s.deps.Speakers.enabled() {
-		return "", false
+		return "", false, false
 	}
 	started := time.Now()
 	name, score, err := s.deps.Speakers.identify(pcm16ToFloat(pcm))
 	if err != nil {
-		s.deps.Logger.Warn("声纹算不出来，不过滤", "item", itemID, "err", err)
-		return "", false
+		s.deps.Logger.Warn("这句的声纹算不出来：报给服务端（speaker_check_failed）", "item", itemID, "err", err)
+		return "", false, true
 	}
 	s.deps.Logger.Info("声纹", "item", itemID, "speaker", name, "score", fmt.Sprintf("%.2f", score),
 		"elapsed", time.Since(started).Round(time.Millisecond))
-	return name, true
+	return name, true, false
 }
 
 // applyWakeEvent 处理唤醒门的四个控制事件（会话启用了唤醒门时才会走到这里）。
-func (s *transcriptionSession) applyWakeEvent(event realtimeproto.ClientEvent) {
+// 休眠 / 手动唤醒处理完回 haro.wake_word.state：醒 / 睡只在这里改，服务端和终端照这个回复改它们记的。
+func (s *transcriptionSession) applyWakeEvent(ctx context.Context, event realtimeproto.ClientEvent) error {
 	switch event.(type) {
 	case realtimeproto.HaroWakeWordSleep:
 		s.sleep()
@@ -490,9 +533,12 @@ func (s *transcriptionSession) applyWakeEvent(event realtimeproto.ClientEvent) {
 		s.deps.Logger.Info("手动唤醒")
 	case realtimeproto.HaroPlaybackStarted:
 		s.startPlayback()
+		return nil
 	case realtimeproto.HaroPlaybackStopped:
 		s.stopPlayback()
+		return nil
 	}
+	return writeEvent(ctx, s.conn, realtimeproto.HaroWakeWordState{Awake: s.wake.awake})
 }
 
 // writeEvent 把一个服务端事件编码后发给对端。

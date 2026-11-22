@@ -28,7 +28,10 @@ func TestOllamaStreamReplyLive(t *testing.T) {
 	if modelName == "" {
 		modelName = "qwen3-vl:4b"
 	}
-	model := NewOllamaChatModel(baseURL, modelName, 800, OpenAIOptions{HTTPClient: &http.Client{}, RequestTimeout: 2 * time.Minute})
+	model, err := NewOllamaChatModel(baseURL, modelName, 800, OpenAIOptions{HTTPClient: &http.Client{}, RequestTimeout: 2 * time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
 	ctx := context.Background()
 	if err := brain.WarmUp(ctx, model); err != nil {
 		t.Fatal(err)

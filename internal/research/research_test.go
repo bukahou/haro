@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/bukahou/haro/internal/brain"
+	"github.com/bukahou/haro/internal/tools"
 )
 
 var quietLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -43,7 +44,8 @@ type scriptedModel struct {
 	hang      bool
 	entered   chan struct{}
 	requests  int
-	toolsSeen []bool // 每次请求有没有给搜索工具（到上限后只给交结论的工具）
+	toolsSeen []bool   // 每次请求有没有给搜索工具（到上限后只给交结论的工具）
+	questions []string // 每次请求查的是哪个问题（系统提示词后面那条）
 	lastMsgs  []brain.ChatMessage
 }
 
@@ -69,6 +71,7 @@ func (m *scriptedModel) StreamReply(ctx context.Context, request brain.ChatReque
 	m.mu.Lock()
 	m.requests++
 	m.toolsSeen = append(m.toolsSeen, offers(request.Tools, "search_web"))
+	m.questions = append(m.questions, request.Messages[1].Text)
 	m.lastMsgs = request.Messages
 	failure := m.failures[m.requests]
 	reply := submit(scriptedConclusion, "https://example.com/a")
@@ -107,7 +110,7 @@ func (m *scriptedModel) StreamReply(ctx context.Context, request brain.ChatReque
 			yield(brain.ReplyDelta{}, failure)
 			return
 		}
-		reply.Usage = &brain.ReplyUsage{PromptTokens: 1000, OutputTokens: 100}
+		reply.Usage, reply.Stop = &brain.ReplyUsage{PromptTokens: 1000, OutputTokens: 100}, brain.StopCompleted
 		yield(reply, nil)
 	}
 }
@@ -127,6 +130,7 @@ func (m *scriptedModel) messagesOfLastRequest() []brain.ChatMessage {
 }
 
 // fakeSearcher 是假的搜索服务：记下搜了几次、读了哪些网址；searchErr 不为 nil 时搜索失败。
+// 每次调用算发出一次请求，用 record 记一笔（失败的标不完整）。
 type fakeSearcher struct {
 	mu         sync.Mutex
 	searches   int
@@ -136,21 +140,27 @@ type fakeSearcher struct {
 	searchErr  error
 }
 
-func (f *fakeSearcher) Search(context.Context, string, int) (string, error) {
+func (f *fakeSearcher) Search(ctx context.Context, _ string, _ int, record tools.SearchRecorder) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.searches++
+	if err := record.RecordSearch(ctx, 1, f.searchErr != nil); err != nil {
+		return "", err
+	}
 	if f.searchErr != nil {
 		return "", f.searchErr
 	}
 	return "Title: A 的价格\nURL: https://example.com/a\nContent: A 100 円", nil
 }
 
-func (f *fakeSearcher) ReadPages(_ context.Context, urls []string, _ int, _ string) (string, error) {
+func (f *fakeSearcher) ReadPages(ctx context.Context, urls []string, _ int, _ string, record tools.SearchRecorder) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.reads++
 	f.readURLs = append(f.readURLs, urls...)
+	if err := record.RecordSearch(ctx, 1, false); err != nil {
+		return "", err
+	}
 	return "A 的详细价格 100 円", nil
 }
 
@@ -171,9 +181,10 @@ func (f *fakeSearcher) counts() (searches, reads int) {
 }
 
 type fakeBudget struct {
-	mu      sync.Mutex
-	refuse  error
-	credits int
+	mu         sync.Mutex
+	refuse     error
+	credits    int
+	incomplete int // 记成不完整的笔数（请求发出去了、没拿到结果）
 }
 
 func (b *fakeBudget) refuseWith(err error) {
@@ -190,11 +201,20 @@ func (b *fakeBudget) AllowResearch(context.Context) error {
 func (b *fakeBudget) AllowSearch(context.Context, int) error {
 	return b.AllowResearch(context.Background())
 }
-func (b *fakeBudget) RecordSearch(_ context.Context, credits int) error {
+func (b *fakeBudget) RecordSearch(_ context.Context, credits int, incomplete bool) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.credits += credits
+	if incomplete {
+		b.incomplete++
+	}
 	return nil
+}
+
+func (b *fakeBudget) incompleteCharges() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.incomplete
 }
 
 func (b *fakeBudget) recorded() int {
@@ -538,6 +558,10 @@ func TestResearchAtLimitsWithoutMaterialWritesNothing(t *testing.T) {
 	if done.Status != StatusFailed || done.Conclusion != "" || !strings.Contains(done.StopReason, "搜索服务挂了") {
 		t.Errorf("一份资料都没有：不写结论，原因带上没搜成的说明：%+v", done)
 	}
+	if searches, _ := rig.searcher.counts(); rig.budget.recorded() != searches || rig.budget.incompleteCharges() != searches {
+		t.Errorf("发出去没搜成的请求也记账（标不完整）：搜了 %d 次，记了 %d 积分、%d 笔不完整", searches,
+			rig.budget.recorded(), rig.budget.incompleteCharges())
+	}
 	model.mu.Lock()
 	defer model.mu.Unlock()
 	if want := []bool{true, true}; !slices.Equal(model.toolsSeen, want) {
@@ -718,7 +742,7 @@ func (m *writerModel) StreamReply(_ context.Context, request brain.ChatRequest) 
 			return
 		}
 		reply := submit(text, "https://example.com/b")
-		reply.Usage = &brain.ReplyUsage{PromptTokens: 2000, OutputTokens: 300}
+		reply.Usage, reply.Stop = &brain.ReplyUsage{PromptTokens: 2000, OutputTokens: 300}, brain.StopCompleted
 		yield(reply, nil)
 	}
 }
@@ -791,7 +815,9 @@ func TestTaskStoreBoard(t *testing.T) {
 	}
 	queued := create("主人", "排队中")
 	running := create("主人", "在查")
-	_ = store.MarkRunning(ctx, running)
+	if marked, err := store.MarkRunning(ctx, running); err != nil || !marked {
+		t.Fatalf("排队中的应能改成在查：%v %v", marked, err)
+	}
 	unreported := create("主人", "查完没说")
 	_, _ = store.Finish(ctx, unreported, StatusDone, "结论", nil, "")
 	reported := create("主人", "查完说过")
@@ -822,7 +848,9 @@ func TestFinishOnlyOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = store.MarkRunning(ctx, task.ID)
+	if marked, err := store.MarkRunning(ctx, task.ID); err != nil || !marked {
+		t.Fatalf("排队中的应能改成在查：%v %v", marked, err)
+	}
 	if cancelled, err := store.Finish(ctx, task.ID, StatusCancelled, "", nil, "主人说不查了"); err != nil || !cancelled {
 		t.Fatalf("在查的任务应能取消：%v %v", cancelled, err)
 	}
@@ -831,5 +859,222 @@ func TestFinishOnlyOnce(t *testing.T) {
 	}
 	if got, _ := store.Get(ctx, task.ID); got.Status != StatusCancelled || got.Conclusion != "" {
 		t.Errorf("应保持取消：%+v", got)
+	}
+}
+
+// 改成在查只对排队中的任务生效：已经在查、已经取消的改不到，交回没改到（runTask 据此不开查）。
+func TestMarkRunningReportsWhetherItChanged(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	queued, err := store.Create(ctx, "主人", "排队中")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if marked, err := store.MarkRunning(ctx, queued.ID); err != nil || !marked {
+		t.Errorf("排队中的应改成在查：%v %v", marked, err)
+	}
+	if marked, err := store.MarkRunning(ctx, queued.ID); err != nil || marked {
+		t.Errorf("已经在查的不算改到：%v %v", marked, err)
+	}
+	cancelled, err := store.Create(ctx, "主人", "取消了")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Finish(ctx, cancelled.ID, StatusCancelled, "", nil, "主人说不查了"); err != nil {
+		t.Fatal(err)
+	}
+	if marked, err := store.MarkRunning(ctx, cancelled.ID); err != nil || marked {
+		t.Errorf("已经取消的改不到：%v %v", marked, err)
+	}
+}
+
+// 来源存成 JSON 数组：来源里带换行（模型可以这样交）读回来还是一条，不会被切成两条。
+func TestTaskSourcesKeepNewlines(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t)
+	task, err := store.Create(ctx, "主人", "A 和 B 哪个便宜")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sources := []string{"https://example.com/a\n第二行", "https://example.com/b"}
+	if _, err := store.Finish(ctx, task.ID, StatusDone, "A 便宜。", sources, ""); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := store.Get(ctx, task.ID); err != nil || !slices.Equal(got.Sources, sources) {
+		t.Errorf("来源应原样读回：%q %v", got.Sources, err)
+	}
+}
+
+// faultyStore 是真的任务账本（SQLite），按测试的要求让接下来几次操作出错，或在第一次读到任务之后插一件事。
+type faultyStore struct {
+	TaskStore
+	mu         sync.Mutex
+	failGets   int        // 接下来这么多次 Get 出错
+	failFinish int        // 接下来这么多次 Finish 出错
+	failBoard  bool       // Board 一律出错
+	afterGet   func(Task) // 第一次读到任务之后要做的事（只做一次）
+}
+
+var errStoreDown = errors.New("database is locked")
+
+func (s *faultyStore) Get(ctx context.Context, id int64) (Task, error) {
+	s.mu.Lock()
+	if s.failGets > 0 {
+		s.failGets--
+		s.mu.Unlock()
+		return Task{}, errStoreDown
+	}
+	after := s.afterGet
+	s.afterGet = nil
+	s.mu.Unlock()
+	task, err := s.TaskStore.Get(ctx, id)
+	if after != nil && err == nil {
+		after(task)
+	}
+	return task, err
+}
+
+func (s *faultyStore) Finish(ctx context.Context, id int64, status Status, conclusion string, sources []string, reason string) (bool, error) {
+	s.mu.Lock()
+	if s.failFinish > 0 {
+		s.failFinish--
+		s.mu.Unlock()
+		return false, errStoreDown
+	}
+	s.mu.Unlock()
+	return s.TaskStore.Finish(ctx, id, status, conclusion, sources, reason)
+}
+
+func (s *faultyStore) Board(ctx context.Context, person string) ([]Task, error) {
+	s.mu.Lock()
+	fail := s.failBoard
+	s.mu.Unlock()
+	if fail {
+		return nil, errStoreDown
+	}
+	return s.TaskStore.Board(ctx, person)
+}
+
+// newFaultyRig 同 newRig，任务账本换成按要求出错的那份。
+func newFaultyRig(t *testing.T, model brain.ChatModel, store *faultyStore) *researchRig {
+	t.Helper()
+	store.TaskStore = openTestStore(t)
+	rig := &researchRig{store: store, searcher: &fakeSearcher{}, budget: &fakeBudget{}, finished: make(chan Task, 16)}
+	rig.runner = NewRunner(store, model, rig.searcher, rig.budget, rig.budget, DefaultLimits, quietLogger)
+	rig.runner.OnFinished(func(task Task) { rig.finished <- task })
+	return rig
+}
+
+// finishedUntil 收下结束的任务，直到 id 这个（含）；返回收到的全部。时限只是防止测试卡死。
+func (rig *researchRig) finishedUntil(t *testing.T, id int64) []Task {
+	t.Helper()
+	var seen []Task
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case task := <-rig.finished:
+			seen = append(seen, task)
+			if task.ID == id {
+				return seen
+			}
+		case <-deadline:
+			t.Fatalf("任务 #%d 没结束（收到 %+v）", id, seen)
+		}
+	}
+}
+
+// 查完了，结论却没存上：不报「查完了」，改记成失败（任务板上告诉主人没存上），记上了才通知。
+func TestResultNotSavedIsRecordedAsFailure(t *testing.T) {
+	model := &scriptedModel{replies: []brain.ReplyDelta{call("search_web", map[string]any{"query": "A B 价格"})}}
+	rig := newFaultyRig(t, model, &faultyStore{failFinish: 1})
+	done := rig.research(t, "A 和 B 哪个便宜")
+	if done.Status != StatusFailed || done.Conclusion != "" || !strings.Contains(done.StopReason, errStoreDown.Error()) {
+		t.Errorf("结论没存上：应记成失败、写明原因，不报查完：%+v", done)
+	}
+}
+
+// 结论没存上、改记失败也记不上：不通知（终端不响「查完了」），任务留在账本里等重启时标成被中断；后面的任务照常查。
+func TestResultNotSavedAtAllIsNotNotified(t *testing.T) {
+	model := &scriptedModel{replies: []brain.ReplyDelta{call("search_web", map[string]any{"query": "第一个"}),
+		submit(scriptedConclusion, "https://example.com/a"), call("search_web", map[string]any{"query": "第二个"})}}
+	rig := newFaultyRig(t, model, &faultyStore{failFinish: 2})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rig.run(ctx)
+	first, _, err := rig.runner.Start(ctx, "主人", "第一个")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, _, err := rig.runner.Start(ctx, "主人", "第二个")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, task := range rig.finishedUntil(t, second.ID) {
+		if task.ID == first.ID {
+			t.Errorf("结果没存上的不该通知：%+v", task)
+		}
+	}
+	if task, err := rig.store.Get(ctx, first.ID); err != nil || task.Status != StatusRunning {
+		t.Errorf("没存上的留在账本里（在查，重启时标成被中断）：%+v %v", task, err)
+	}
+}
+
+// 读不出排队的任务：记成失败并通知（任务板上告诉主人），不让它一直「排队中」占着名额；也不开查。
+func TestQueuedTaskThatCannotBeReadIsRecordedAsFailure(t *testing.T) {
+	model := &scriptedModel{}
+	rig := newFaultyRig(t, model, &faultyStore{failGets: 1})
+	done := rig.research(t, "A 和 B 哪个便宜")
+	if done.Status != StatusFailed || !strings.Contains(done.StopReason, errStoreDown.Error()) {
+		t.Errorf("读不出来的任务应记成失败、写明原因：%+v", done)
+	}
+	model.mu.Lock()
+	defer model.mu.Unlock()
+	if model.requests != 0 {
+		t.Errorf("读不出来就不开查：请求了模型 %d 次", model.requests)
+	}
+}
+
+// 读到任务之后、开查之前刚好被取消（这时还没登记取消用的函数，Cancel 只改了账本）：改不成在查，就不开查、不通知。
+func TestTaskCancelledBeforeMarkRunningIsNotInvestigated(t *testing.T) {
+	model := &scriptedModel{replies: []brain.ReplyDelta{call("search_web", map[string]any{"query": "第二个"})}}
+	store := &faultyStore{}
+	rig := newFaultyRig(t, model, store)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store.afterGet = func(task Task) {
+		if _, err := rig.runner.Cancel(ctx, "主人", task.ID); err != nil {
+			t.Errorf("取消：%v", err)
+		}
+	}
+	rig.run(ctx)
+	first, _, err := rig.runner.Start(ctx, "主人", "第一个")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, _, err := rig.runner.Start(ctx, "主人", "第二个")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, task := range rig.finishedUntil(t, second.ID) {
+		if task.ID == first.ID {
+			t.Errorf("取消了的不该通知：%+v", task)
+		}
+	}
+	model.mu.Lock()
+	questions := slices.Clone(model.questions)
+	model.mu.Unlock()
+	if slices.Contains(questions, "第一个") {
+		t.Errorf("开查之前被取消的不该查：模型收到的问题 %v", questions)
+	}
+	if task, err := rig.store.Get(ctx, first.ID); err != nil || task.Status != StatusCancelled {
+		t.Errorf("应保持取消：%+v %v", task, err)
+	}
+}
+
+// 任务板读不出来：记警告，并告诉模型这一轮不知道调查的情况（不当成没有调查）。
+func TestBriefSaysWhenBoardCannotBeRead(t *testing.T) {
+	rig := newFaultyRig(t, &scriptedModel{}, &faultyStore{failBoard: true})
+	if board := rig.runner.Brief("主人"); !slices.Equal(board.Lines, []string{boardUnreadableNote}) || board.Delivered != nil {
+		t.Errorf("任务板读不出来：应告诉模型不知道调查的情况：%+v", board)
 	}
 }

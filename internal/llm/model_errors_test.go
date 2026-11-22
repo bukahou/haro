@@ -38,6 +38,14 @@ func TestContractUnavailableIsTyped(t *testing.T) {
 			t.Errorf("流中途断开应算连不上：%v", reply.err)
 		}
 
+		// 已经回了 200、开始推流之后服务端才发来错误事件（过载）：照样算连不上；之前说了的照样交出，用量标不完整
+		started := vendor.events([]string{"从前"}, nil, contractDone)[:vendor.firstText+1]
+		overloaded := vendor.newServer(t, llmtest.Script{Events: append(started, vendor.overloaded)})
+		if reply := collectContract(t.Context(), vendor.newModel(overloaded), request, nil); !errors.Is(reply.err, brain.ErrModelUnavailable) ||
+			reply.text() != "从前" || reply.usage == nil || !reply.usage.Incomplete {
+			t.Errorf("流开始之后发来的过载应算连不上：%+v", reply)
+		}
+
 		hanging := vendor.newServer(t, llmtest.Script{Events: vendor.events([]string{"从前"}, nil, contractDone)[:vendor.firstText+1], Hang: true})
 		ctx, cancel := context.WithCancel(t.Context())
 		reply := collectContract(ctx, vendor.newModel(hanging), request, cancel)
@@ -53,4 +61,33 @@ func TestContractUnavailableIsTyped(t *testing.T) {
 			t.Errorf("调用方的期限到了不算连不上：%v", reply.err)
 		}
 	})
+}
+
+// 流开始之后才来的错误事件按错误码认，不看说明文字：Claude 看错误类型（请求本身有问题的不算连不上）；
+// OpenAI 兼容接口错误体带数字状态码的看状态码，不带的（OpenAI 写的是字符串类型）算连不上。
+func TestStreamErrorEventsAreClassifiedByCode(t *testing.T) {
+	request := brain.ChatRequest{Messages: contractQuestion}
+	claude, openai := contractVendors[0], contractVendors[1]
+	claudeStart := claudeEvents(nil, nil, contractDone)[0]
+	openAIText := openAIEvents([]string{"从前"}, nil, contractDone)[0]
+	for _, c := range []struct {
+		name        string
+		vendor      contractVendor
+		events      []string
+		unavailable bool
+	}{
+		{"Claude 过载", claude, []string{claudeStart, `{"type":"error","error":{"type":"overloaded_error","message":"bad request"}}`}, true},
+		{"Claude 服务端出错", claude, []string{claudeStart, `{"type":"error","error":{"type":"api_error","message":"bad request"}}`}, true},
+		{"Claude 限流", claude, []string{claudeStart, `{"type":"error","error":{"type":"rate_limit_error","message":"bad request"}}`}, true},
+		{"Claude 请求有问题", claude, []string{claudeStart, `{"type":"error","error":{"type":"invalid_request_error","message":"Overloaded"}}`}, false},
+		{"OpenAI 兼容 数字 503", openai, []string{openAIText, `{"error":{"message":"bad request","code":503}}`}, true},
+		{"OpenAI 兼容 数字 400", openai, []string{openAIText, `{"error":{"message":"Overloaded","code":400}}`}, false},
+		{"OpenAI 兼容 字符串类型", openai, []string{openAIText, `{"error":{"message":"bad request","type":"server_error"}}`}, true},
+	} {
+		server := c.vendor.newServer(t, llmtest.Script{Events: c.events})
+		reply := collectContract(t.Context(), c.vendor.newModel(server), request, nil)
+		if reply.err == nil || errors.Is(reply.err, brain.ErrModelUnavailable) != c.unavailable {
+			t.Errorf("%s：算不算连不上应为 %v：%v", c.name, c.unavailable, reply.err)
+		}
+	}
 }

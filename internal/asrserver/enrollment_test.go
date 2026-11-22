@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -39,13 +40,13 @@ func TestEnrollmentSavesAndTakesEffect(t *testing.T) {
 	clip := base64.StdEncoding.EncodeToString(make([]byte, 3200))
 	clips := []string{clip, clip, clip}
 
-	if response, _ := postEnrollment(t, handler, "主人", realtimeproto.VoiceprintEnrollment{Append: true, Clips: clips}); response.StatusCode != http.StatusBadRequest {
+	if response, _ := postEnrollment(t, handler, "主人", realtimeproto.VoiceprintEnrollment{Append: new(true), Clips: clips}); response.StatusCode != http.StatusBadRequest {
 		t.Errorf("没登记过就补录应拒绝：%d", response.StatusCode)
 	}
 	if speakers.enabled() {
 		t.Fatal("登记之前不该开始比对")
 	}
-	response, result := postEnrollment(t, handler, "主人", realtimeproto.VoiceprintEnrollment{Clips: clips})
+	response, result := postEnrollment(t, handler, "主人", realtimeproto.VoiceprintEnrollment{Append: new(false), Clips: clips})
 	if response.StatusCode != http.StatusOK || result.Sentences != 3 || len(result.Pairwise) != 3 || result.Pairwise[0].Score < 0.99 {
 		t.Fatalf("登记：%d %+v", response.StatusCode, result)
 	}
@@ -55,15 +56,39 @@ func TestEnrollmentSavesAndTakesEffect(t *testing.T) {
 	if saved, err := voiceprint.Load(dir, "主人"); err != nil || saved.Model != "campplus.onnx" || len(saved.Embeddings) != 3 {
 		t.Errorf("应存进声纹目录：%+v %v", saved, err)
 	}
-	_, result = postEnrollment(t, handler, "主人", realtimeproto.VoiceprintEnrollment{Append: true, Clips: clips[:2]})
+	_, result = postEnrollment(t, handler, "主人", realtimeproto.VoiceprintEnrollment{Append: new(true), Clips: clips[:2]})
 	if result.Sentences != 5 || result.BestVsExisting == nil || *result.BestVsExisting < 0.99 {
 		t.Errorf("补录应加进原来的、报告和原来的相似度：%+v", result)
 	}
-	if response, _ := postEnrollment(t, handler, url.PathEscape("名 字"), realtimeproto.VoiceprintEnrollment{Clips: clips}); response.StatusCode != http.StatusBadRequest {
+	if response, _ := postEnrollment(t, handler, url.PathEscape("名 字"), realtimeproto.VoiceprintEnrollment{Append: new(false), Clips: clips}); response.StatusCode != http.StatusBadRequest {
 		t.Errorf("不合法的名字应拒绝：%d", response.StatusCode)
 	}
-	if response, _ := postEnrollment(t, handler, "主人", realtimeproto.VoiceprintEnrollment{Clips: clips[:1]}); response.StatusCode != http.StatusBadRequest {
+	if response, _ := postEnrollment(t, handler, "主人", realtimeproto.VoiceprintEnrollment{Append: new(false), Clips: clips[:1]}); response.StatusCode != http.StatusBadRequest {
 		t.Errorf("句子太少应拒绝：%d", response.StatusCode)
+	}
+}
+
+// 请求里没写明补录还是覆盖（没带 append、或者 null）：拒绝（400），不按覆盖处理，原来的声纹一点不动。
+func TestEnrollmentRequiresAppend(t *testing.T) {
+	embedder := &switchableEmbedder{}
+	embedder.current.Store([]float32{0, 1, 0}) // 和原来的不一样：要是被覆盖了一看便知
+	dir := t.TempDir()
+	original := voiceprint.Voiceprint{Name: "主人", Model: "campplus.onnx", Embeddings: [][]float32{{1, 0, 0}, {1, 0, 0}}}
+	if _, err := voiceprint.Save(dir, original); err != nil {
+		t.Fatal(err)
+	}
+	handler := NewHandler(Dependencies{Speakers: &SpeakerCheck{Embedder: embedder, Threshold: 0.5, Dir: dir, Model: "campplus.onnx"},
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	clip := base64.StdEncoding.EncodeToString(make([]byte, 3200))
+	for _, body := range []string{`{"clips":["` + clip + `","` + clip + `"]}`, `{"append":null,"clips":["` + clip + `","` + clip + `"]}`} {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, realtimeproto.VoiceprintPath+"主人", strings.NewReader(body)))
+		if recorder.Code != http.StatusBadRequest {
+			t.Errorf("没写明 append 应拒绝：%d %s", recorder.Code, body)
+		}
+	}
+	if saved, err := voiceprint.Load(dir, "主人"); err != nil || len(saved.Embeddings) != 2 || saved.Embeddings[0][0] != 1 {
+		t.Errorf("原来的声纹不应被动：%+v %v", saved, err)
 	}
 }
 
@@ -78,7 +103,7 @@ func TestEnrollmentSaveFailureIsServerError(t *testing.T) {
 	handler := NewHandler(Dependencies{Speakers: &SpeakerCheck{Embedder: embedder, Threshold: 0.5, Dir: dir, Model: "campplus.onnx"},
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
 	clip := base64.StdEncoding.EncodeToString(make([]byte, 3200))
-	response, _ := postEnrollment(t, handler, "主人", realtimeproto.VoiceprintEnrollment{Clips: []string{clip, clip}})
+	response, _ := postEnrollment(t, handler, "主人", realtimeproto.VoiceprintEnrollment{Append: new(false), Clips: []string{clip, clip}})
 	if response.StatusCode != http.StatusInternalServerError {
 		t.Errorf("存盘失败应回 500：%d", response.StatusCode)
 	}
@@ -119,7 +144,7 @@ func TestConcurrentEnrollmentKeepsEverySentence(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			response, _ := postEnrollment(t, handler, "主人", realtimeproto.VoiceprintEnrollment{Append: true, Clips: []string{clip, clip}})
+			response, _ := postEnrollment(t, handler, "主人", realtimeproto.VoiceprintEnrollment{Append: new(true), Clips: []string{clip, clip}})
 			statuses <- response.StatusCode
 		}()
 	}

@@ -30,7 +30,7 @@ func loadAgentDefinitions(settings config.ServerSettings, logger *slog.Logger) (
 	}
 	slices.Sort(names)
 	for _, name := range names {
-		if definition := catalog[name]; !definition.Builtin() {
+		if definition := catalog[name]; !definition.Builtin {
 			logger.Warn("代理定义：用覆盖目录里的这份（程序里带的那份以后更新了也不会跟着变）", "agent", name, "file", definition.Source)
 		}
 	}
@@ -55,6 +55,8 @@ type conversationAgents struct {
 	handoff brain.Handoff     // 主人纠正时（或看画面接手时）接手的强模型；没配时为零值
 	expert  brain.FrameExpert // 看画面的专家；没配时为 nil
 	summary *brain.Agent      // 写滚动摘要；没开时为 nil
+	// overBudget：月度上限到了以后判断主人要不要临时提高（不受额度管、按天限次数）；不能口头提高时为 nil
+	overBudget *brain.Agent
 	// breaker：前台和接手的模型共用的「连不上」熔断；刚恢复时由它告诉模型断过多久（每轮的情况说明）
 	breaker *llm.UnavailabilityBreaker
 }
@@ -130,6 +132,21 @@ func (a agentAssembly) build(toolbox brain.Toolbox, expertSearch vision.Search) 
 		}
 		built.summary = &summary
 	}
+
+	if s.CanRaiseMonthlyCap() {
+		definition := a.catalog[agents.OverBudget]
+		judgeModel, _, err := a.metered(definition)
+		if err != nil {
+			return built, err
+		}
+		// 不受额度管（否则上限到了就没法判断），按天限次数、照样记账
+		judge, err := a.agent(definition, spending.NewDailyCallLimit(judgeModel, s.OverBudgetDailyCalls),
+			brain.OverBudgetPromptValues(definition.Tools), toolbox)
+		if err != nil {
+			return built, err
+		}
+		built.overBudget = &judge
+	}
 	return built, nil
 }
 
@@ -171,8 +188,11 @@ func (a agentAssembly) metered(definition agents.Definition) (brain.ChatModel, s
 			thinking: s.StrongLLMThinking, firstTokenTimeout: s.StrongLLMTimeout, requestTimeout: s.RequestTimeout}, a.client)
 	case s.LLMProvider == config.LLMLocal: // base 档、本地模型
 		id = s.Model
-		model = llm.WithRequestTelemetry(llm.NewOllamaChatModel(s.OllamaURL, id, maxTokens, localModelOptions(s, a.client)),
-			llm.ProviderOllama, id)
+		local, err := llm.NewOllamaChatModel(s.OllamaURL, id, maxTokens, localModelOptions(s, a.client))
+		if err != nil {
+			return nil, "", err
+		}
+		model = llm.WithRequestTelemetry(local, llm.ProviderOllama, id)
 	default: // base 档、云端模型
 		id = s.CloudLLMModel
 		model = newCloudChatModel(s, a.claude, cloudModelSpec{model: id, maxTokens: maxTokens, effort: s.CloudLLMEffort,

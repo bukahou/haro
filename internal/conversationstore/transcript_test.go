@@ -4,8 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"io/fs"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -76,6 +79,37 @@ func TestTranscriptKeepsEveryTurn(t *testing.T) {
 	loaded, ok, err := store.LoadConversation("主人")
 	if err != nil || !ok || loaded.TurnCount != 5 || loaded.History[0].Seq != 3 || loaded.History[3].Seq != 0 {
 		t.Errorf("轮次编号和编到第几都要存下：%+v %v", loaded, err)
+	}
+}
+
+// 同一编号来了另一轮（说话的时间不同，例如对话从头编号了）：完整记录里原来那一轮不被盖掉；这份对话照样存下，
+// 交回说明哪几轮没写进记录的错误。同一轮（时间相同）照常更新，见 TestTranscriptKeepsEveryTurn。
+func TestTranscriptKeepsTurnWhenSeqIsReused(t *testing.T) {
+	store, _ := openTestStore(t)
+	var history []brain.ConversationTurn
+	for seq := 1; seq <= 3; seq++ { // 一轮一轮存：完整记录里攒下 1..3
+		history = append(history, numberedTurn(seq, "旧问", "旧答"+strconv.Itoa(seq)))
+		if err := store.SaveConversation(brain.ConversationRecord{Person: "主人", Summary: "旧摘要", TurnCount: seq,
+			History: history, UpdatedAt: time.Now()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reused := brain.ConversationTurn{Seq: 1, At: time.Unix(1_800_000_000, 0),
+		Messages: []brain.ChatMessage{{Role: brain.RoleUser, Text: "新问"}, {Role: brain.RoleAssistant, Text: "新答"}}}
+	err := store.SaveConversation(brain.ConversationRecord{Person: "主人", TurnCount: 1,
+		History: []brain.ConversationTurn{reused}, UpdatedAt: time.Now()})
+	var kept *TranscriptKeptError
+	if !errors.As(err, &kept) || !slices.Equal(kept.Seqs, []int64{1}) {
+		t.Errorf("编号 1 已经是另一轮：应交回没覆盖的是哪几轮：%v", err)
+	}
+	got := transcriptOf(t, store, "主人")
+	for seq, answer := range map[int]string{1: "旧答1", 2: "旧答2", 3: "旧答3"} {
+		if got[seq] != answer {
+			t.Errorf("完整记录第 %d 轮被改了：%q，应为 %q", seq, got[seq], answer)
+		}
+	}
+	if loaded, ok, err := store.LoadConversation("主人"); err != nil || !ok || loaded.TurnCount != 1 || len(loaded.History) != 1 {
+		t.Errorf("这份对话照样存下：%+v %v", loaded, err)
 	}
 }
 

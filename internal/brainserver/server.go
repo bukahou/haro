@@ -7,15 +7,17 @@
 // 本包只管协议和连接，会话由外部注入（haro-server 注入 brain.Session）。
 //
 // 握手时按 WebSocket 子协议协商版本（negotiate）：
-//   - 报了 realtimeproto.ProtocolV2：haro 终端；
+//   - 报了 realtimeproto.Protocol：haro 终端；
 //   - 报了别的 haro.realtime.* 版本，或者带着 haro 版本头却没报子协议（旧版终端）：拒绝握手，响应里给错误码和支持的版本；
 //   - 什么都没报：普通的 Realtime 客户端，只用标准事件。
 package brainserver
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -25,6 +27,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"golang.org/x/sync/semaphore"
 
 	"github.com/bukahou/haro/internal/buildinfo"
 	"github.com/bukahou/haro/internal/heartbeat"
@@ -51,7 +54,8 @@ type SessionFactory func(terminal Terminal) Session
 
 // Options 是连接层的设置。零值可用。
 type Options struct {
-	Heartbeat heartbeat.Timing // 零值 = heartbeat.Default
+	Heartbeat   heartbeat.Timing // 零值 = heartbeat.Default
+	MaxSessions int              // 同时最多几条对话会话；零值 = realtimeproto.MaxSessions（和 haro-asr 的转写会话同一个数）
 }
 
 // haroProtocolPrefix 是 haro 各版本子协议名的共同开头。
@@ -60,11 +64,28 @@ const haroProtocolPrefix = "haro.realtime."
 // NewHandler 返回挂好路由的 HTTP handler。
 func NewHandler(newSession SessionFactory, opts Options, logger *slog.Logger) http.Handler {
 	opts.Heartbeat = opts.Heartbeat.OrDefault()
+	opts.MaxSessions = cmp.Or(opts.MaxSessions, realtimeproto.MaxSessions)
+	sessions := semaphore.NewWeighted(int64(opts.MaxSessions))
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET "+realtimeproto.ConversationPath, func(w http.ResponseWriter, r *http.Request) {
+		// 先限量再做事：满了就回 503，不握手、不建会话（不连 haro-asr）
+		if !sessions.TryAcquire(1) {
+			logger.Warn("拒绝连接：对话会话数到了上限", "remote", r.RemoteAddr, "limit", opts.MaxSessions)
+			writeHTTPError(w, http.StatusServiceUnavailable, realtimeproto.NewHTTPError(http.StatusServiceUnavailable,
+				realtimeproto.CodeTooManySessions, fmt.Sprintf("服务端同时最多 %d 条对话会话，现在满了：稍后再连", opts.MaxSessions)))
+			return
+		}
+		defer sessions.Release(1)
 		serveConversation(w, r, newSession, opts, logger)
 	})
 	return mux
+}
+
+// writeHTTPError 回一个出错的 HTTP 响应（握手之前）：状态码 + Realtime 形状的错误说明。
+func writeHTTPError(w http.ResponseWriter, status int, body realtimeproto.HTTPError) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(body)
 }
 
 // negotiate 按终端在握手里报的子协议决定接不接这条连接；拒绝时 reason 说明原因。
@@ -79,7 +100,7 @@ func negotiate(r *http.Request) (reason string, ok bool) {
 		return strings.HasPrefix(protocol, haroProtocolPrefix)
 	})
 	switch {
-	case slices.Contains(offered, realtimeproto.ProtocolV2):
+	case slices.Contains(offered, realtimeproto.Protocol):
 		return "", true
 	case haroOffered:
 		return "终端报的协议版本（" + strings.Join(offered, ", ") + "）服务端不支持", false
@@ -94,10 +115,8 @@ func negotiate(r *http.Request) (reason string, ok bool) {
 func reject(w http.ResponseWriter, reason string) {
 	body := realtimeproto.NewHTTPError(http.StatusBadRequest, realtimeproto.CodeUnsupportedProtocolVersion,
 		reason+"：把终端和服务端升到同一版本")
-	body.Error.SupportedProtocols = []string{realtimeproto.ProtocolV2}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusBadRequest)
-	_ = json.NewEncoder(w).Encode(body)
+	body.Error.SupportedProtocols = []string{realtimeproto.Protocol}
+	writeHTTPError(w, http.StatusBadRequest, body)
 }
 
 func serveConversation(w http.ResponseWriter, r *http.Request, newSession SessionFactory, opts Options, logger *slog.Logger) {
@@ -109,7 +128,7 @@ func serveConversation(w http.ResponseWriter, r *http.Request, newSession Sessio
 		reject(w, reason)
 		return
 	}
-	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{Subprotocols: []string{realtimeproto.ProtocolV2}})
+	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{Subprotocols: []string{realtimeproto.Protocol}})
 	if err != nil {
 		logger.Warn("WebSocket 握手失败", "remote", r.RemoteAddr, "err", err)
 		return
@@ -150,7 +169,7 @@ func serveConversation(w http.ResponseWriter, r *http.Request, newSession Sessio
 
 	var terminal Terminal
 	var tools *mcpbridge.Transport // haro 终端的设备能力（MCP）；普通客户端没有
-	if protocol == realtimeproto.ProtocolV2 {
+	if protocol == realtimeproto.Protocol {
 		tools = mcpbridge.NewTransport(func(_ context.Context, message json.RawMessage) error {
 			return write(realtimeproto.HaroMCPMessage{Message: message})
 		})
@@ -199,11 +218,13 @@ func serveConversation(w http.ResponseWriter, r *http.Request, newSession Sessio
 			}
 			continue
 		}
-		if update, ok := event.(realtimeproto.SessionUpdate); ok && update.InputFormat.SampleRate > 0 {
-			inputFormat = update.InputFormat
-		}
 		if err := session.Send(ctx, event); err != nil {
 			_ = write(realtimeproto.ErrorEventFor(event.Type(), err))
+			continue
+		}
+		// 会话收下了 session.update 才按它声明的格式解之后的音频（被拒的 session.update 整条不生效）
+		if update, ok := event.(realtimeproto.SessionUpdate); ok && update.InputFormat.SampleRate > 0 {
+			inputFormat = update.InputFormat
 		}
 	}
 }

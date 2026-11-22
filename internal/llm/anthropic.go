@@ -222,6 +222,7 @@ func (e *RefusalError) Error() string {
 func (e *RefusalError) Phrase() (string, map[string]string) { return brain.PhraseRefused, nil }
 
 // StreamReply 流式产出文字；工具调用、用量和停下的原因在流结束时一次性产出（与 OpenAIChatModel 相同）。
+// 流要以停下的原因（message_delta）和 message_stop 收尾：连接正常关掉却没收到它们，按流没收尾报错（和断开同一类）。
 func (m *AnthropicChatModel) StreamReply(ctx context.Context, request brain.ChatRequest) iter.Seq2[brain.ReplyDelta, error] {
 	return func(yield func(brain.ReplyDelta, error) bool) {
 		params, err := m.request(request)
@@ -234,6 +235,7 @@ func (m *AnthropicChatModel) StreamReply(ctx context.Context, request brain.Chat
 		stream := m.api.client.Messages.NewStreaming(deadline.ctx, params, option.WithMaxRetries(m.maxRetries))
 		defer stream.Close() // 调用方提前 break 时关掉连接，即中止生成
 		var message anthropic.Message
+		stopped := false // 收到了 message_stop
 		for stream.Next() {
 			deadline.started()
 			event := stream.Current()
@@ -241,13 +243,14 @@ func (m *AnthropicChatModel) StreamReply(ctx context.Context, request brain.Chat
 				yield(brain.ReplyDelta{Usage: partialUsage(message)}, fmt.Errorf("解析 Claude 的流式响应: %w", err))
 				return
 			}
-			blockDelta, ok := event.AsAny().(anthropic.ContentBlockDeltaEvent)
-			if !ok {
-				continue
-			}
-			if text, ok := blockDelta.Delta.AsAny().(anthropic.TextDelta); ok && text.Text != "" {
-				if !yield(brain.ReplyDelta{Text: text.Text}, nil) {
-					return
+			switch event := event.AsAny().(type) {
+			case anthropic.MessageStopEvent:
+				stopped = true
+			case anthropic.ContentBlockDeltaEvent:
+				if text, ok := event.Delta.AsAny().(anthropic.TextDelta); ok && text.Text != "" {
+					if !yield(brain.ReplyDelta{Text: text.Text}, nil) {
+						return
+					}
 				}
 			}
 		}
@@ -260,23 +263,29 @@ func (m *AnthropicChatModel) StreamReply(ctx context.Context, request brain.Chat
 			yield(brain.ReplyDelta{Usage: partialUsage(message)}, markUnavailable(ctx, fmt.Errorf("请求 Claude: %w", err)))
 			return
 		}
+		if !stopped || message.StopReason == "" {
+			yield(brain.ReplyDelta{Usage: partialUsage(message)}, markUnavailable(ctx, fmt.Errorf("请求 Claude: %w", errStreamUnfinished)))
+			return
+		}
 		usage := usageOf(message.Usage)
 		switch message.StopReason {
+		case anthropic.StopReasonEndTurn, anthropic.StopReasonToolUse, anthropic.StopReasonStopSequence:
+			calls, err := toolCallsOf(message.Content)
+			if err != nil {
+				yield(brain.ReplyDelta{Usage: usage}, err)
+				return
+			}
+			yield(brain.ReplyDelta{ToolCalls: calls, Usage: usage, Stop: brain.StopCompleted}, nil)
+		case anthropic.StopReasonMaxTokens, anthropic.StopReasonModelContextWindowExceeded:
+			// 截断（到了输出上限，或上下文满了）：不交出工具调用（写到一半的参数不完整）
+			yield(brain.ReplyDelta{Usage: usage, Stop: brain.StopMaxTokens}, nil)
 		case anthropic.StopReasonRefusal:
 			// 带上用量：被拒的请求照样计费，记账的装饰器先记下这一笔
 			yield(brain.ReplyDelta{Usage: usage}, &RefusalError{Category: string(message.StopDetails.Category),
 				Explanation: message.StopDetails.Explanation})
-			return
-		case anthropic.StopReasonMaxTokens: // 截断：不交出工具调用（写到一半的参数不完整）
-			yield(brain.ReplyDelta{Usage: usage, Stop: brain.StopMaxTokens}, nil)
-			return
+		default: // 认不出的原因（pause_turn 要接着请求才说得完，haro 不用服务端工具、接不上；以后新加的）：不当成说完
+			yield(brain.ReplyDelta{Usage: usage}, fmt.Errorf("Claude 停下的原因是 %s: %w", message.StopReason, brain.ErrStopUnknown))
 		}
-		calls, err := toolCallsOf(message.Content)
-		if err != nil {
-			yield(brain.ReplyDelta{Usage: usage}, err)
-			return
-		}
-		yield(brain.ReplyDelta{ToolCalls: calls, Usage: usage}, nil)
 	}
 }
 
@@ -297,6 +306,7 @@ func (m *AnthropicChatModel) request(request brain.ChatRequest) (anthropic.Messa
 		params.System = []anthropic.TextBlockParam{{Text: system, CacheControl: anthropic.NewCacheControlEphemeralParam()}}
 	}
 	markPreviousTurnForCache(converted) // 断点 ②
+	markToolLoopForCache(converted)     // 断点 ③
 	params.Messages = converted
 	if len(tools) == 0 {
 		// 没有工具的请求，历史里却可能有工具往来（例如后台调查最后写结论）：
@@ -424,6 +434,22 @@ func markPreviousTurnForCache(messages []anthropic.MessageParam) {
 			}
 		}
 		return
+	}
+}
+
+// markToolLoopForCache 在一轮里连着调工具时（最后一条消息以工具结果开头）给最后一条消息的最后一块打缓存断点：
+// 这一轮的下一步原样带着到这里为止的全部内容，从缓存读，不再每一步都按没缓存的价格重付这一轮已有的工具往来
+// （后台调查一个任务就是一轮里十几步）。这一轮的第一步（最后一条是主人的话）不打：一问一答的轮次不多付写缓存的钱。
+func markToolLoopForCache(messages []anthropic.MessageParam) {
+	if len(messages) == 0 {
+		return
+	}
+	last := messages[len(messages)-1].OfUser
+	if last == nil || len(last.Content) == 0 || last.Content[0].OfToolResult == nil {
+		return
+	}
+	if cache := last.Content[len(last.Content)-1].GetCacheControl(); cache != nil {
+		*cache = anthropic.NewCacheControlEphemeralParam()
 	}
 }
 

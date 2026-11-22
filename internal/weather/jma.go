@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/bukahou/haro/internal/endpoint"
 )
 
 // JMA 是日本气象厅网站数据（bosai）的天气来源：只覆盖日本，按地区预报，不用密钥。
@@ -49,7 +51,11 @@ func (j *JMA) ForecastFor(ctx context.Context, place Place, days int) (Forecast,
 		return Forecast{}, err
 	}
 	var reports []jmaReport
-	if err := j.fetch.getJSON(ctx, j.baseURL+"/forecast/data/forecast/"+area.Office+".json", &reports); err != nil {
+	address, err := endpoint.Join(j.baseURL, "/forecast/data/forecast", nil, area.Office+".json")
+	if err != nil {
+		return Forecast{}, err
+	}
+	if err := j.fetch.getJSON(ctx, address, &reports); err != nil {
 		return Forecast{}, err
 	}
 	forecast := Forecast{Place: place, Area: area.Describe(), Source: "日本气象厅",
@@ -185,7 +191,11 @@ func shortTermTemperatures(defines, temps []string, day func(string) (*DayCast, 
 // observe 取附近观测站最新的实况（每 10 分钟更新；每个站按 3 小时一个文件）。
 // 观测站会缺测（例如维修中，气温为 null）⇒ 最近的站没有气温时改看下一个；都没有气温时用最近那个站有的数据。
 func (j *JMA) observe(ctx context.Context, area JMAArea) (Current, error) {
-	latest, err := j.fetch.getText(ctx, j.baseURL+"/amedas/data/latest_time.txt")
+	address, err := endpoint.Join(j.baseURL, "/amedas/data/latest_time.txt", nil)
+	if err != nil {
+		return Current{}, err
+	}
+	latest, err := j.fetch.getText(ctx, address)
 	if err != nil {
 		return Current{}, err
 	}
@@ -217,7 +227,11 @@ func (j *JMA) observe(ctx context.Context, area JMAArea) (Current, error) {
 func (j *JMA) observeStation(ctx context.Context, station JMAStation, at time.Time) (Current, error) {
 	block := at.Format("20060102") + fmt.Sprintf("_%02d", at.Hour()/3*3)
 	var points map[string]jmaObservation
-	if err := j.fetch.getJSON(ctx, j.baseURL+"/amedas/data/point/"+station.Code+"/"+block+".json", &points); err != nil {
+	address, err := endpoint.Join(j.baseURL, "/amedas/data/point", nil, station.Code, block+".json")
+	if err != nil {
+		return Current{}, err
+	}
+	if err := j.fetch.getJSON(ctx, address, &points); err != nil {
 		return Current{}, err
 	}
 	key := at.Format("20060102150405")

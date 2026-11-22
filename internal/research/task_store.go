@@ -9,6 +9,7 @@ import (
 	"context"
 	"database/sql"
 	"embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -74,7 +75,8 @@ type Task struct {
 type TaskStore interface {
 	Create(ctx context.Context, person, question string) (Task, error)
 	Get(ctx context.Context, id int64) (Task, error)
-	MarkRunning(ctx context.Context, id int64) error
+	// MarkRunning 把排队中的任务改成在查；返回这次有没有改到（已经不在排队，例如刚被取消了，就没改）。
+	MarkRunning(ctx context.Context, id int64) (bool, error)
 	// Finish 结束一个还在排队或在查的任务；返回这次有没有结束它（已经结束的不改：取消和查完同时到时，先到的算数）。
 	Finish(ctx context.Context, id int64, status Status, conclusion string, sources []string, reason string) (bool, error)
 	// Active 是所有人排队中、在查的任务（按派出顺序）。
@@ -97,14 +99,14 @@ var ErrTaskNotFound = errors.New("没有这个调查任务")
 
 // OpenTaskStore 打开任务账本：path 是 SQLite 文件路径；空 = 只在内存里（服务端重启就没了）。
 func OpenTaskStore(ctx context.Context, path string) (TaskStore, error) {
-	db, err := sqliteschema.Open(ctx, path, migrationFiles, sqliteschema.Options{})
+	db, err := sqliteschema.Open(ctx, path, migrationFiles, sqliteschema.Options{Migrate: taskMigrations})
 	if err != nil {
 		return nil, fmt.Errorf("打开调查任务账本: %w", err)
 	}
 	return &sqliteTaskStore{db: db}, nil
 }
 
-// 任务账本的表结构由迁移文件管理（sqliteschema）。
+// 任务账本的表结构由迁移文件管理（sqliteschema）；迁移 2 要逐条转换来源，用 Go 写（task_store_migrations.go）。
 //
 //go:embed migrations/*.sql
 var migrationFiles embed.FS
@@ -128,8 +130,8 @@ func scanTasks(rows *sql.Rows) ([]Task, error) {
 			return nil, err
 		}
 		task.Status, task.StatusText = Status(status), Status(status).Label()
-		if sources != "" {
-			task.Sources = strings.Split(sources, "\n")
+		if err := json.Unmarshal([]byte(sources), &task.Sources); err != nil {
+			return nil, fmt.Errorf("解析调查 %d 的来源: %w", task.ID, err)
 		}
 		task.CreatedAt = time.Unix(created, 0)
 		if finished > 0 {
@@ -177,17 +179,28 @@ func (s *sqliteTaskStore) Get(ctx context.Context, id int64) (Task, error) {
 	return tasks[0], nil
 }
 
-func (s *sqliteTaskStore) MarkRunning(ctx context.Context, id int64) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE research_tasks SET status = ? WHERE id = ? AND status = ?`,
+func (s *sqliteTaskStore) MarkRunning(ctx context.Context, id int64) (bool, error) {
+	result, err := s.db.ExecContext(ctx, `UPDATE research_tasks SET status = ? WHERE id = ? AND status = ?`,
 		string(StatusRunning), id, string(StatusQueued))
-	return err
+	if err != nil {
+		return false, err
+	}
+	changed, err := result.RowsAffected()
+	return changed == 1, err
 }
 
 func (s *sqliteTaskStore) Finish(ctx context.Context, id int64, status Status, conclusion string, sources []string, reason string) (bool, error) {
+	if sources == nil {
+		sources = []string{}
+	}
+	encoded, err := json.Marshal(sources)
+	if err != nil {
+		return false, fmt.Errorf("编调查 %d 的来源: %w", id, err)
+	}
 	result, err := s.db.ExecContext(ctx,
 		`UPDATE research_tasks SET status = ?, conclusion = ?, sources = ?, stop_reason = ?, finished_at = ?
 		 WHERE id = ? AND status IN (?, ?)`,
-		string(status), conclusion, strings.Join(sources, "\n"), reason, time.Now().Unix(), id,
+		string(status), conclusion, string(encoded), reason, time.Now().Unix(), id,
 		string(StatusQueued), string(StatusRunning))
 	if err != nil {
 		return false, err

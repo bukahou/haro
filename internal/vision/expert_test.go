@@ -39,7 +39,7 @@ func (m *scriptedModel) StreamReply(_ context.Context, request brain.ChatRequest
 	} else {
 		reply = brain.ReplyDelta{Text: m.final}
 	}
-	reply.Usage = &brain.ReplyUsage{PromptTokens: 100, OutputTokens: 10}
+	reply.Usage, reply.Stop = &brain.ReplyUsage{PromptTokens: 100, OutputTokens: 10}, brain.StopCompleted
 	err := m.err
 	m.mu.Unlock()
 	return func(yield func(brain.ReplyDelta, error) bool) {
@@ -272,7 +272,8 @@ func (m *stubbornModel) StreamReply(context.Context, brain.ChatRequest) iter.Seq
 			yield(brain.ReplyDelta{}, errors.New("请求太多次：专家没有停下来"))
 			return
 		}
-		yield(brain.ReplyDelta{Text: "看着像硬盘盒。", ToolCalls: []brain.ToolCall{{Name: searchTool, Arguments: map[string]any{"query": "再搜"}}}}, nil)
+		yield(brain.ReplyDelta{Text: "看着像硬盘盒。", ToolCalls: []brain.ToolCall{{Name: searchTool, Arguments: map[string]any{"query": "再搜"}}},
+			Stop: brain.StopCompleted}, nil)
 	}
 }
 
@@ -321,15 +322,74 @@ func TestSearchCallWithoutSearchIsNotRun(t *testing.T) {
 	}
 }
 
+// 交结论、搜索的参数按定义校验：缺了必填的、类型不对时不照收，把哪里不对原样交回给专家，它再交一次。
+func TestExpertToolArgumentsAreValidated(t *testing.T) {
+	noSpoken := map[string]any{"details": "蓝色盒子，印着 M.2。"}
+	model := &scriptedModel{replies: []brain.ReplyDelta{
+		{ToolCalls: []brain.ToolCall{{Name: reportTool, Arguments: noSpoken}}}, reportCall("是硬盘盒。", "蓝色盒子。")}}
+	report, err := newExpert(t, model, nil).ExamineFrame(context.Background(), question)
+	if err != nil || report.Spoken != "是硬盘盒。" || len(model.requests) != 2 {
+		t.Fatalf("缺了 spoken 不该照收，应让它再交：%+v %v，请求了 %d 次", report, err, len(model.requests))
+	}
+	_, wantErr := brain.DecodeArguments[reportArgs](noSpoken)
+	if last := lastMessage(model.requests[1]); last.Role != brain.RoleTool || wantErr == nil || !strings.Contains(last.Text, wantErr.Error()) {
+		t.Errorf("应把哪里不对交回给专家（%v）：%+v", wantErr, last)
+	}
+
+	badQuery := map[string]any{"query": 42}
+	searches := &recordedSearch{}
+	model = &scriptedModel{replies: []brain.ReplyDelta{
+		{ToolCalls: []brain.ToolCall{{Name: searchTool, Arguments: badQuery}}}, reportCall("是硬盘盒。", "蓝色盒子。")}}
+	if _, err := newExpert(t, model, searches.search).ExamineFrame(context.Background(), question); err != nil || len(searches.queries) != 0 {
+		t.Fatalf("搜索词类型不对时不该去搜：%v %v", err, searches.queries)
+	}
+	_, wantErr = brain.DecodeArguments[searchArgs](badQuery)
+	if last := lastMessage(model.requests[1]); wantErr == nil || !strings.Contains(last.Text, wantErr.Error()) {
+		t.Errorf("应把搜索参数哪里不对交回给专家（%v）：%+v", wantErr, last)
+	}
+}
+
+// 不能联网时（没配搜索，或规则里去掉了 search_web）系统提示词里不提搜索；能联网时提。
+func TestExpertPromptMentionsSearchOnlyWhenAvailable(t *testing.T) {
+	rules := builtinRules(t)
+	reportOnly := rules
+	reportOnly.Tools = []string{reportTool}
+	for _, c := range []struct {
+		name     string
+		rules    Rules
+		search   Search
+		mentions bool
+	}{
+		{"能联网", rules, (&recordedSearch{}).search, true},
+		{"没配搜索", rules, nil, false},
+		{"规则里去掉了搜索", reportOnly, (&recordedSearch{}).search, false},
+	} {
+		model := &scriptedModel{replies: []brain.ReplyDelta{reportCall("是硬盘盒。", "蓝色盒子。")}}
+		expert, err := NewExpert(model, "strong", c.rules, c.search, discard)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := expert.ExamineFrame(context.Background(), question); err != nil {
+			t.Fatal(err)
+		}
+		if system := model.requests[0][0].Text; strings.Contains(system, searchTool) != c.mentions {
+			t.Errorf("%s：系统提示词提不提 %s 应为 %v：\n%s", c.name, searchTool, c.mentions, system)
+		}
+	}
+}
+
+func lastMessage(messages []brain.ChatMessage) brain.ChatMessage { return messages[len(messages)-1] }
+
 // 规则不对时建不起来：工具名写错、没有交结论的工具、步数为零。规则里去掉 search_web 时不提供搜索。
 func TestExpertRulesAreChecked(t *testing.T) {
 	rules := builtinRules(t)
 	for label, change := range map[string]func(*Rules){
-		"不认识的工具":  func(r *Rules) { r.Tools = []string{reportTool, "web_search"} },
-		"不能交结论":   func(r *Rules) { r.Tools = []string{searchTool} },
-		"步数为零":    func(r *Rules) { r.MaxSteps = 0 },
-		"没有系统提示词": func(r *Rules) { r.Prompt = "" },
-		"没有期限":    func(r *Rules) { r.Timeout = 0 },
+		"不认识的工具":       func(r *Rules) { r.Tools = []string{reportTool, "web_search"} },
+		"不能交结论":        func(r *Rules) { r.Tools = []string{searchTool} },
+		"步数为零":         func(r *Rules) { r.MaxSteps = 0 },
+		"没有系统提示词":      func(r *Rules) { r.Prompt = "" },
+		"没有不联网时的系统提示词": func(r *Rules) { r.OfflinePrompt = "" },
+		"没有期限":         func(r *Rules) { r.Timeout = 0 },
 	} {
 		broken := rules
 		change(&broken)

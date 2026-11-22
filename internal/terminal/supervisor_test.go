@@ -38,15 +38,18 @@ func newFakeConn() *fakeConn {
 
 func (c *fakeConn) DeviceTools() mcp.Transport { return c.tools }
 
-// fakeTools 记下「拍一帧」的增删；Serve 一直跑到连接结束。
+// fakeTools 记下「拍一帧」的增删；Serve 一直跑到连接结束（endFirst 设了时第一次马上结束：连接还在，会话自己结束了）。
 type fakeTools struct {
 	mu        sync.Mutex
 	available []bool
 	serves    atomic.Int32
+	endFirst  atomic.Bool
 }
 
 func (f *fakeTools) Serve(ctx context.Context, _ mcp.Transport) error {
-	f.serves.Add(1)
+	if f.serves.Add(1) == 1 && f.endFirst.Load() {
+		return errors.New("MCP 会话结束了")
+	}
 	<-ctx.Done()
 	return nil
 }
@@ -412,6 +415,25 @@ func TestSupervisorOffersCameraToolWhileCameraIsAvailable(t *testing.T) {
 	eventually(t, "摄像头回来了：加回「拍一帧」", r.tools.lastCamera)
 	if r.sessionCount() != 1 || r.tools.serves.Load() != 1 {
 		t.Error("摄像头变化不该重来")
+	}
+	_ = stop()
+}
+
+// 设备能力（MCP）的会话自己结束了而连接还在：关掉这条连接、重连（两边重新建 MCP 会话），不留着一条摄像头一直用不了的连接。
+func TestSupervisorReconnectsWhenDeviceToolsSessionEnds(t *testing.T) {
+	r := newRig()
+	r.tools.endFirst.Store(true)
+	stop := startSupervisor(t, r)
+	eventually(t, "MCP 会话结束后断开重连、再跑起来", func() bool {
+		return r.dials.Load() == 2 && r.tools.serves.Load() == 2 && r.sessionCount() == 2
+	})
+	r.mu.Lock()
+	first := r.conns[0]
+	r.mu.Unlock()
+	select {
+	case <-first.done:
+	default:
+		t.Error("MCP 会话结束的那条连接应被关掉")
 	}
 	_ = stop()
 }

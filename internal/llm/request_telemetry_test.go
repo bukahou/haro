@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"fmt"
+	"iter"
 	"sync"
 	"testing"
 
@@ -46,7 +47,8 @@ func spanAttributes(span sdktrace.ReadOnlySpan) map[attribute.Key]attribute.Valu
 func TestRequestTelemetryFollowsGenAIConventions(t *testing.T) {
 	spans, reader, before := telemetryRecorders(t)
 	inner := &scriptedModel{deltas: []brain.ReplyDelta{{Text: "好的"},
-		{Usage: &brain.ReplyUsage{PromptTokens: 1200, OutputTokens: 30, CacheReadTokens: 1000, CacheWriteTokens: 100, Requests: 1}}}}
+		{Usage: &brain.ReplyUsage{PromptTokens: 1200, OutputTokens: 30, CacheReadTokens: 1000, CacheWriteTokens: 100, Requests: 1},
+			Stop: brain.StopCompleted}}}
 	model := WithRequestTelemetry(inner, ProviderAnthropic, "claude-haiku-5-5")
 	if _, _, _, err := collect(t, model.StreamReply(context.Background(), brain.ChatRequest{})); err != nil {
 		t.Fatal(err)
@@ -80,7 +82,42 @@ func TestRequestTelemetryFollowsGenAIConventions(t *testing.T) {
 	}
 }
 
-// 被截断记 length；连不上记出错（error.type = unavailable）；调用方自己取消（主人打断）不算出错。
+// 用量只写知道的：服务端不报用量时不写 token 数；没正常结束时只写输入（输出不知道）——出错那一段带的用量照样记。
+func TestRequestTelemetryRecordsOnlyKnownUsage(t *testing.T) {
+	spans, _, before := telemetryRecorders(t)
+	unreported := WithRequestTelemetry(&scriptedModel{deltas: []brain.ReplyDelta{{Text: "好的"},
+		{Usage: &brain.ReplyUsage{TokensUnknown: true}, Stop: brain.StopCompleted}}}, ProviderOpenAICompatible, "m")
+	collect(t, unreported.StreamReply(context.Background(), brain.ChatRequest{}))
+	cut := WithRequestTelemetry(&cutModel{usage: &brain.ReplyUsage{PromptTokens: 900, Incomplete: true}}, ProviderAnthropic, "m")
+	collect(t, cut.StreamReply(context.Background(), brain.ChatRequest{}))
+
+	ended := spans.Ended()[before:]
+	if len(ended) != 2 {
+		t.Fatalf("应有 2 个 span：%d", len(ended))
+	}
+	if attrs := spanAttributes(ended[0]); attrs["gen_ai.usage.input_tokens"].Type() != attribute.INVALID ||
+		attrs["gen_ai.usage.output_tokens"].Type() != attribute.INVALID {
+		t.Errorf("服务端不报用量时不该写 token 数：%v", attrs)
+	}
+	if attrs := spanAttributes(ended[1]); attrs["gen_ai.usage.input_tokens"].Emit() != "900" ||
+		attrs["gen_ai.usage.output_tokens"].Type() != attribute.INVALID {
+		t.Errorf("没正常结束时只写输入：%v", attrs)
+	}
+}
+
+// cutModel 说到一半出错，出错那一段带着知道的用量（像 Claude 流中途断开时那样）。
+type cutModel struct{ usage *brain.ReplyUsage }
+
+func (m *cutModel) StreamReply(context.Context, brain.ChatRequest) iter.Seq2[brain.ReplyDelta, error] {
+	return func(yield func(brain.ReplyDelta, error) bool) {
+		if yield(brain.ReplyDelta{Text: "从前"}, nil) {
+			yield(brain.ReplyDelta{Usage: m.usage}, fmt.Errorf("%w: 断了", brain.ErrModelUnavailable))
+		}
+	}
+}
+
+// 被截断记 length；连不上记出错（error.type = unavailable）；调用方自己取消（主人打断）不算出错；
+// 最后一段没说为什么停（StopUnknown）时不记为什么停（不编成 stop）。
 func TestRequestTelemetryRecordsStopsAndErrors(t *testing.T) {
 	spans, _, before := telemetryRecorders(t)
 	truncated := WithRequestTelemetry(&scriptedModel{deltas: []brain.ReplyDelta{{Text: "说到一半", Stop: brain.StopMaxTokens}}},
@@ -92,10 +129,12 @@ func TestRequestTelemetryRecordsStopsAndErrors(t *testing.T) {
 	cancel()
 	cancelled := WithRequestTelemetry(&scriptedModel{err: context.Canceled}, ProviderAnthropic, "m")
 	collect(t, cancelled.StreamReply(ctx, brain.ChatRequest{}))
+	unknown := WithRequestTelemetry(&scriptedModel{deltas: []brain.ReplyDelta{{Text: "说完了吗"}}}, ProviderOllama, "local")
+	collect(t, unknown.StreamReply(context.Background(), brain.ChatRequest{}))
 
 	ended := spans.Ended()[before:]
-	if len(ended) != 3 {
-		t.Fatalf("应有 3 个 span：%d", len(ended))
+	if len(ended) != 4 {
+		t.Fatalf("应有 4 个 span：%d", len(ended))
 	}
 	if got := spanAttributes(ended[0])["gen_ai.response.finish_reasons"].Emit(); got != `["length"]` {
 		t.Errorf("被截断应记 length：%q", got)
@@ -105,5 +144,8 @@ func TestRequestTelemetryRecordsStopsAndErrors(t *testing.T) {
 	}
 	if ended[2].Status().Code == codes.Error {
 		t.Error("主人打断（调用方取消）不算出错")
+	}
+	if reasons, set := spanAttributes(ended[3])["gen_ai.response.finish_reasons"]; set {
+		t.Errorf("没说为什么停时不该记为什么停：%q", reasons.Emit())
 	}
 }

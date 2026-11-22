@@ -81,18 +81,16 @@ func (s *SQLiteStore) Restore(ctx context.Context, id int64) (Note, error) {
 	return s.mark(ctx, id, `deleted_at IS NOT NULL`, sql.NullInt64{})
 }
 
-// mark 把满足 state 的那一条的 deleted_at 改成 deletedAt；没有这样的一条时返回 ErrNotFound。
+// mark 把满足 state 的那一条的 deleted_at 改成 deletedAt，交回改完的那一条；没有这样的一条时返回 ErrNotFound。
+// 改和读回是同一条语句（RETURNING）：出错就是出错（交回原来的错误），不会把「已经改了、读回时出错」说成「没有这一条」。
 func (s *SQLiteStore) mark(ctx context.Context, id int64, state string, deletedAt sql.NullInt64) (Note, error) {
-	result, err := s.db.ExecContext(ctx, `UPDATE notes SET deleted_at = ? WHERE id = ? AND `+state, deletedAt, id)
-	if err != nil {
+	notes, err := s.query(ctx, `UPDATE notes SET deleted_at = ? WHERE id = ? AND `+state+
+		` RETURNING id, content, created_at, deleted_at`, deletedAt, id)
+	switch {
+	case err != nil:
 		return Note{}, err
-	}
-	if changed, err := result.RowsAffected(); err != nil || changed == 0 {
-		return Note{}, errors.Join(ErrNotFound, err)
-	}
-	notes, err := s.query(ctx, `SELECT id, content, created_at, deleted_at FROM notes WHERE id = ?`, id)
-	if err != nil || len(notes) == 0 {
-		return Note{}, errors.Join(ErrNotFound, err)
+	case len(notes) == 0:
+		return Note{}, ErrNotFound
 	}
 	return notes[0], nil
 }

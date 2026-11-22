@@ -3,12 +3,13 @@
 ## 合并前在 dev / PR 上建的，和发版时扫描、推送的，是同一种构建（构建参数只写在这里，两边不会改漏一边）
 ## ============================================================
 ##   push: "false"（默认）  模型（本仓库 Release，按 models.lock 校验）→ 构建并载入本机 docker → 检查镜像里的程序版本
+##                          → 在镜像里起 haro-asr、等它就绪（冒烟检查，带阳性对照）
 ##   push: "true"           推送「版本号 + latest」。只能在同一个 job 里先用 "false" 建过（release 还要先扫描）之后调用：
 ##                          参数相同 ⇒ 每一层都命中刚才的构建，推上去的就是刚才检查、扫描过的那一份
 ## 调用前先 actions/checkout（本 action 在仓库里）；要登录 Docker Hub 也在调用前登录
 ## ============================================================
 name: 服务端镜像
-description: 构建 haro-server 镜像并检查镜像里的程序版本；push 为 "true" 时推送
+description: 构建 haro-server 镜像，检查镜像里的程序版本、在镜像里起 haro-asr 等它就绪；push 为 "true" 时推送
 inputs:
   image:
     description: 镜像名，例如 docker.io/bukahou/haro-server
@@ -29,7 +30,7 @@ runs:
   steps:
     # 模型约 280 MB：按 models.lock 的内容缓存，没变就不重新下载（fetch-models.sh 仍会逐个校验 sha256）
     - if: inputs.push != 'true'
-      uses: actions/cache@v6
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: ${{ runner.temp }}/models
         key: models-${{ hashFiles('deploy/server/models.lock') }}
@@ -42,10 +43,10 @@ runs:
           exit 1
         }
     - if: inputs.push != 'true'
-      uses: docker/setup-buildx-action@v4
+      uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
     - id: build
       name: 构建（push 为 "true" 时推送）
-      uses: docker/build-push-action@v7
+      uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
       with:
         context: .
         file: deploy/server/Dockerfile
@@ -64,4 +65,42 @@ runs:
       env:
         IMAGE: ${{ inputs.image }}
         VERSION: ${{ inputs.version }}
-      run: docker run --rm "${IMAGE}:${VERSION}" -version | grep -F "haro-server ${VERSION} "
+      # 按给机器读的 -version -json 比对（不在给人看的那一行里找字）
+      run: |
+        built=$(docker run --rm "${IMAGE}:${VERSION}" -version -json | jq -r .version)
+        [ "$built" = "$VERSION" ] || { echo "::error::镜像里的 haro-server 报的版本是 ${built}，应为 ${VERSION}"; exit 1; }
+    # 用镜像自己的配置在镜像里起 haro-asr，等它就绪（/readyz 要在期限内真的识别完一小段静音）：模型文件名、动态库、
+    # ENV 有一样和镜像里的东西对不上，它就起不来或不就绪，这一步失败（不用等到集群里才发现 Pod 一直重启）。
+    # 阳性对照：故意把识别模型的文件名设错，同样的检查必须失败——证明这个检查真的在查
+    - if: inputs.push != 'true'
+      name: 镜像里起 haro-asr（冒烟检查，带阳性对照）
+      shell: bash
+      env:
+        IMAGE: ${{ inputs.image }}
+        VERSION: ${{ inputs.version }}
+      run: |
+        # smoke [docker run 的选项…]：起 haro-asr，最多等 60 秒就绪；就绪返回 0。haro-asr 只监听容器里的本机地址，用 docker exec 探
+        smoke() {
+          local container ready=1
+          container=$(docker run -d "$@" --entrypoint /opt/haro/bin/haro-asr "${IMAGE}:${VERSION}")
+          for _ in $(seq 60); do
+            if docker exec "$container" /opt/haro/bin/haro-asr -probe readyz; then
+              ready=0
+              break
+            fi
+            [ "$(docker inspect -f '{{.State.Running}}' "$container")" = true ] || break # 已经退出：不用再等
+            sleep 1
+          done
+          docker logs "$container" 2>&1 | tail -n 20
+          docker rm -f "$container" >/dev/null
+          return "$ready"
+        }
+        if ! smoke; then
+          echo "::error::镜像里的 haro-asr 没有就绪（日志见上）：模型文件、动态库或 ENV 和镜像里的东西对不上？"
+          exit 1
+        fi
+        if smoke -e HARO_ASR_MODEL_FILE=no-such-model.onnx; then
+          echo "::error::阳性对照：识别模型的文件名设错了，haro-asr 却就绪了——冒烟检查没有真的在查"
+          exit 1
+        fi
+        echo "镜像里的 haro-asr 能起来、能就绪；模型文件名设错时检查会失败（阳性对照通过）"

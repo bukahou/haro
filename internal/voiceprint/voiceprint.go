@@ -14,7 +14,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"time"
 )
 
@@ -112,29 +111,52 @@ func Load(dir, name string) (Voiceprint, error) {
 	return voiceprint, nil
 }
 
-// LoadAll 读取 dir 下所有声纹（目录不存在 = 还没人登记，返回空）。只留用 model 算的（换了模型的旧声纹跳过）。
-func LoadAll(dir, model string) ([]Voiceprint, error) {
-	paths, err := filepath.Glob(filepath.Join(dir, "*.json"))
+// ErrOtherModel：这份声纹是用别的说话人识别模型算的，和现在的模型不能比（换模型后要重新登记）。
+var ErrOtherModel = errors.New("声纹是用别的说话人识别模型算的，要重新登记")
+
+// ErrNoEmbeddings：这份声纹里没有向量。
+var ErrNoEmbeddings = errors.New("声纹里没有向量")
+
+// Skipped 是读到了、但用不上的一份声纹：调用方逐个记下来（不然这个人一直被当成陌生人，看不出原因）。
+type Skipped struct {
+	File  string // 声纹文件
+	Name  string
+	Model string // 算这份声纹用的模型
+	Err   error  // 为什么用不上：满足 errors.Is(err, ErrOtherModel) 或 errors.Is(err, ErrNoEmbeddings)
+}
+
+// LoadAll 读取 dir 下所有声纹，只留用 model 算的；用不上的（换了模型的旧声纹、没有向量的）列在 skipped 里。
+// 目录不存在、读不了（没权限）时报错，不当成「还没人登记」：配了目录却读不到，多半是路径、挂载或权限不对。
+// 目录要在第一次登记之前就有，由调用方建（还没人登记时它本来就是空的）。
+func LoadAll(dir, model string) (voiceprints []Voiceprint, skipped []Skipped, err error) {
+	entries, err := os.ReadDir(dir) // 和 filepath.Glob 不同：读不了目录时报错
 	if err != nil {
-		return nil, err
+		return nil, nil, fmt.Errorf("读取声纹目录: %w", err)
 	}
-	sort.Strings(paths)
-	var voiceprints []Voiceprint
-	for _, path := range paths {
+	for _, entry := range entries { // 按文件名排好序了
+		if filepath.Ext(entry.Name()) != ".json" {
+			continue // 存盘用的临时文件（.tmp）等
+		}
+		path := filepath.Join(dir, entry.Name())
 		data, err := os.ReadFile(path)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		var voiceprint Voiceprint
 		if err := json.Unmarshal(data, &voiceprint); err != nil {
-			return nil, fmt.Errorf("解析声纹 %s: %w", path, err)
+			return nil, nil, fmt.Errorf("解析声纹 %s: %w", path, err)
 		}
-		if voiceprint.Model != model || len(voiceprint.Embeddings) == 0 {
-			continue
+		switch {
+		case voiceprint.Model != model:
+			skipped = append(skipped, Skipped{File: path, Name: voiceprint.Name, Model: voiceprint.Model,
+				Err: fmt.Errorf("%w（它用的是 %s，现在是 %s）", ErrOtherModel, voiceprint.Model, model)})
+		case len(voiceprint.Embeddings) == 0:
+			skipped = append(skipped, Skipped{File: path, Name: voiceprint.Name, Model: voiceprint.Model, Err: ErrNoEmbeddings})
+		default:
+			voiceprints = append(voiceprints, voiceprint)
 		}
-		voiceprints = append(voiceprints, voiceprint)
 	}
-	return voiceprints, nil
+	return voiceprints, skipped, nil
 }
 
 // Match 找和 embedding 最像的人：每个人取他几句登记里最像的一句的分数。

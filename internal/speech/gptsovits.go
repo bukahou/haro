@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/bukahou/haro/internal/brain"
+	"github.com/bukahou/haro/internal/endpoint"
 	"github.com/bukahou/haro/internal/pcmwav"
 	"github.com/bukahou/haro/internal/realtimeproto"
 )
@@ -48,7 +49,9 @@ type GPTSoVITSReference struct {
 	Lang string `json:"lang"`
 }
 
-const defaultReference = "default"
+// DefaultReference 是声音档案里平常语气那段参考录音的名字（必须有；没配的情绪也用它）。其余参考录音按情绪名
+// （brain.Emotion 的值）取，装配处按情绪清单检查。
+const DefaultReference = "default"
 
 // autoLanguage 让 GPT-SoVITS 自己按文字判断用什么语言念（中日英夹杂也能分段念）。
 const autoLanguage = "auto"
@@ -63,7 +66,7 @@ func LoadGPTSoVITSVoice(file string) (GPTSoVITSVoice, error) {
 	if err := json.Unmarshal(data, &voice); err != nil {
 		return GPTSoVITSVoice{}, fmt.Errorf("解析声音文件 %s: %w", file, err)
 	}
-	if _, ok := voice.References[defaultReference]; !ok {
+	if _, ok := voice.References[DefaultReference]; !ok {
 		return GPTSoVITSVoice{}, fmt.Errorf("声音文件 %s 缺少 default 参考录音", file)
 	}
 	for name, ref := range voice.References {
@@ -88,7 +91,7 @@ func (g *GPTSoVITSSynthesizer) reference(emotion brain.Emotion) GPTSoVITSReferen
 			return ref
 		}
 	}
-	return g.Voice.References[defaultReference]
+	return g.Voice.References[DefaultReference]
 }
 
 type gptSoVITSRequest struct {
@@ -163,7 +166,11 @@ func (g *GPTSoVITSSynthesizer) post(ctx context.Context, utterance brain.Utteran
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, g.BaseURL+"/tts", bytes.NewReader(payload))
+	address, err := endpoint.Join(g.BaseURL, "/tts", nil)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, address, bytes.NewReader(payload))
 	if err != nil {
 		return nil, err
 	}

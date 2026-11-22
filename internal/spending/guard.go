@@ -264,7 +264,11 @@ func (g *Guard) overMonthly(spent, limit float64) error {
 }
 
 // RaiseMonthlyCap 实现 brain.MonthlyCap：主人口头确认后，把这个月的上限提高 MonthlyRaiseYen（记进账本，重启后照样算）。
+// 执行方自己守门：ctx 里没有 person 对提高上限的确认（brain.WithConfirmation）就不提高，交回 brain.ErrNotConfirmed。
 func (g *Guard) RaiseMonthlyCap(ctx context.Context, person string) (float64, error) {
+	if _, err := brain.RequireConfirmation(ctx, brain.RaiseMonthlyCapTool, person); err != nil {
+		return 0, err
+	}
 	if g.limits.MonthlyYen <= 0 || g.limits.MonthlyRaiseYen <= 0 {
 		return 0, errors.New("没有设月度上限，或者不允许口头提高")
 	}
@@ -316,9 +320,13 @@ func (m *SearchMeter) AllowSearch(ctx context.Context, credits int) error {
 	return m.guard.AllowSearch(ctx, credits)
 }
 
-// RecordSearch 记一笔搜索。
-func (m *SearchMeter) RecordSearch(ctx context.Context, credits int) error {
-	return m.ledger.Record(ctx, Charge{Purpose: m.purpose, Item: m.item, Credits: credits, Yen: m.pricing.SearchYen(credits)})
+// RecordSearch 记一笔发出去的搜索请求（实现 tools.SearchRecorder）：没拿到结果的标不完整，积分照记（服务商可能已经扣了）。
+// 不跟着调用方取消：请求被打断时，已经发出去的照样要记；期限另算（recordTimeout）。
+func (m *SearchMeter) RecordSearch(ctx context.Context, credits int, incomplete bool) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
+	defer cancel()
+	return m.ledger.Record(ctx, Charge{Purpose: m.purpose, Item: m.item, Credits: credits, Yen: m.pricing.SearchYen(credits),
+		Incomplete: incomplete})
 }
 
 // yen 是念给主人的日元数（取整）。

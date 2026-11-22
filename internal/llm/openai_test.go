@@ -133,7 +133,7 @@ func TestOllamaDoesNotForwardAmbientAPIKey(t *testing.T) {
 		server.Config.Handler.ServeHTTP(w, r)
 	}))
 	defer wrapped.Close()
-	model := NewOllamaChatModel(wrapped.URL, "qwen3-vl:8b-instruct", 300, OpenAIOptions{HTTPClient: wrapped.Client()})
+	model := mustOllama(wrapped.URL, "qwen3-vl:8b-instruct", 300, OpenAIOptions{HTTPClient: wrapped.Client()})
 	if _, _, _, err := collect(t, model.StreamReply(context.Background(), brain.ChatRequest{Messages: []brain.ChatMessage{{Role: brain.RoleUser, Text: "hi"}}})); err != nil {
 		t.Fatal(err)
 	}
@@ -177,8 +177,24 @@ func TestOpenAIWarmupOnlyForOnDemandModels(t *testing.T) {
 	if err := brain.WarmUp(context.Background(), cloud); err != nil || requests.Load() != 0 {
 		t.Errorf("云端不用预热：%v，请求了 %d 次", err, requests.Load())
 	}
-	local := NewOllamaChatModel(server.URL, "qwen3-vl:8b-instruct", 300, OpenAIOptions{HTTPClient: server.Client()})
+	local := mustOllama(server.URL, "qwen3-vl:8b-instruct", 300, OpenAIOptions{HTTPClient: server.Client()})
 	if err := brain.WarmUp(context.Background(), local); err != nil || requests.Load() != 1 || maxTokens.Load() != float64(1) {
 		t.Errorf("Ollama 预热应发一个只要 1 个 token 的请求：%v，请求了 %d 次，max_tokens=%v", err, requests.Load(), maxTokens.Load())
+	}
+}
+
+// mustOllama 是测试用的 Ollama 模型：地址是测试服务给的，拼不出来就是测试本身写错了。
+func mustOllama(baseURL, model string, maxTokens int, options OpenAIOptions) *OpenAIChatModel {
+	chat, err := NewOllamaChatModel(baseURL, model, maxTokens, options)
+	if err != nil {
+		panic(err)
+	}
+	return chat
+}
+
+// Ollama 的地址拼不出 OpenAI 兼容端点（不是 http(s) 地址）时报错，不悄悄拼出一个坏地址。
+func TestOllamaRejectsBadBaseURL(t *testing.T) {
+	if _, err := NewOllamaChatModel("127.0.0.1:11434", "qwen3-vl:8b-instruct", 300, OpenAIOptions{}); err == nil {
+		t.Error("没有 scheme 的地址应报错")
 	}
 }

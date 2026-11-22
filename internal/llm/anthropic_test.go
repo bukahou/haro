@@ -6,8 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/anthropics/anthropic-sdk-go/v2"
 
 	"github.com/bukahou/haro/internal/brain"
 	"github.com/bukahou/haro/internal/llm/llmtest"
@@ -216,6 +219,37 @@ func TestAnthropicRefusalIsAnErrorWithUsage(t *testing.T) {
 	}
 	if usage == nil || usage.PromptTokens != 50 || usage.OutputTokens != 3 {
 		t.Errorf("拒答也要带出用量记账：%+v", usage)
+	}
+}
+
+// 结束标志要齐（message_delta 带的停下原因 + message_stop）：缺哪个都按流没收尾报错（算连不上），用量标不完整；
+// 上下文满了（model_context_window_exceeded）和到了输出上限一样按截断交出，不交出写到一半的工具调用。
+func TestAnthropicStreamEnding(t *testing.T) {
+	question := brain.ChatRequest{Messages: contractQuestion, Tools: []brain.ToolSpec{contractWeather}}
+	unfinished := claudeEvents([]string{"从前"}, nil, contractUnfinished)
+	delta := func(reason string) string {
+		return fmt.Sprintf(`{"type":"message_delta","delta":{"stop_reason":%q,"stop_sequence":null},"usage":{"output_tokens":20}}`, reason)
+	}
+	for _, c := range []struct {
+		name   string
+		events []string
+	}{
+		{"只有停下的原因、没有 message_stop", append(slices.Clone(unfinished), delta("end_turn"))},
+		{"只有 message_stop、没有停下的原因", append(slices.Clone(unfinished), `{"type":"message_stop"}`)},
+	} {
+		server := llmtest.NewClaudeServer(t, llmtest.Script{Events: c.events})
+		reply := collectContract(t.Context(), testClaudeModel(server, ""), question, nil)
+		if !errors.Is(reply.err, brain.ErrModelUnavailable) || reply.text() != "从前" || reply.usage == nil || !reply.usage.Incomplete {
+			t.Errorf("%s：应按没收尾报错：%+v", c.name, reply)
+		}
+	}
+
+	full := claudeEvents([]string{"从前有座山，"}, contractCall, contractMaxTokens)
+	full[len(full)-2] = delta(string(anthropic.StopReasonModelContextWindowExceeded))
+	server := llmtest.NewClaudeServer(t, llmtest.Script{Events: full})
+	reply := collectContract(t.Context(), testClaudeModel(server, ""), question, nil)
+	if reply.err != nil || reply.stop != brain.StopMaxTokens || len(reply.calls) != 0 || reply.usage == nil || reply.usage.Incomplete {
+		t.Errorf("上下文满了应按截断交出：%+v", reply)
 	}
 }
 

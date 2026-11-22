@@ -1,7 +1,7 @@
 ## ============================================================
 ## release —— 合并到 main 就发版
 ## ============================================================
-##   ① ci        调用 ci.yml：测试 + 终端三个平台的程序（测试不过就到此为止）
+##   ① ci        调用 ci.yml：测试 + 终端各平台的程序（平台列表只在 ci.yml 的 platforms；测试不过就到此为止）
 ##   ② terminal  把 ① 编好、测过的程序发到 GitHub Release（标签 = 版本号），附 SHA256SUMS、install.sh、
 ##               来源证明（attestation）；先不设为 latest；v* 的 Release 只留最近 20 个
 ##   ③ server    模型（本仓库 Release models-v1，按 models.lock 校验）→ 构建服务端镜像（和 ci 的 image 是同一个
@@ -20,8 +20,11 @@ name: release
 on:
   push:
     branches: [main]
-    paths-ignore: # 只改文档时不发版
-      - "**/*.md"
+    # 只改文档时不发版：根目录的 *.md（GitHub 的路径规则里 * 不跨目录）、docs/、LICENSE。
+    # ⛔ 不能写 **/*.md：代理的提示词（internal/agents/builtin/*.md）是 go:embed 编进程序的，只改它也要发版。
+    #   编进程序的文件一个都不能被这里匹配到：internal/buildinfo 的 TestReleaseIgnoresNoEmbeddedFile 按 go list 查
+    paths-ignore:
+      - "*.md"
       - "docs/**"
       - "LICENSE"
 
@@ -51,10 +54,10 @@ jobs:
       PLATFORMS: ${{ needs.ci.outputs.platforms }}
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: haro-*
           path: dist
@@ -69,7 +72,7 @@ jobs:
           [ "$n" -eq "$want" ] || { echo "::error::应有 ${want} 个平台的压缩包，只有 ${n} 个"; ls -la; exit 1; }
           sha256sum haro-*.tar.gz install.sh > SHA256SUMS
           cat SHA256SUMS
-      - uses: actions/attest-build-provenance@v4
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-checksums: dist/SHA256SUMS
       - name: 建 Release
@@ -115,11 +118,11 @@ jobs:
     env:
       TAG: ${{ needs.ci.outputs.tag }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # 先登录：拉基础镜像和 Trivy 镜像也走登录后的额度
-      - uses: docker/login-action@v4
+      # 先登录：拉基础镜像和 Trivy 镜像也走登录后的额度（登录信息留在这台机器的 ~/.docker 里：扫描那一步碰不到它）
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -130,10 +133,19 @@ jobs:
           image: ${{ env.IMAGE }}
           version: ${{ env.TAG }}
       - name: Trivy 扫描（有可修的 CRITICAL 或疑似凭证就不推）
+        env:
+          # 按 digest 钉死（标签可能被改指）；Dependabot 不改这里，升级时标签和 digest 一起换：
+          #   docker buildx imagetools inspect aquasec/trivy:<版本>  输出里的 Digest
+          TRIVY_IMAGE: aquasec/trivy:0.76.2@sha256:8f6bb947dbc528902e11f2f5be52f7b519f6a39d5d148f41166f2040499768fb
         run: |
-          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$RUNNER_TEMP:/out" \
-            aquasec/trivy:0.76.2 image --quiet --list-all-pkgs --format json --output /out/trivy.json "${IMAGE}:${TAG}"
-          report="$RUNNER_TEMP/trivy.json"
+          # 扫描的容器只拿到镜像的 tar 包：不挂 docker.sock（挂了就能操纵这台机器的 docker —— 读得到上面登录的凭据，
+          # 也改得了接下来要推的镜像），也不挂 ~/.docker
+          scan="$RUNNER_TEMP/trivy"
+          mkdir -p "$scan"
+          docker save -o "$scan/image.tar" "${IMAGE}:${TAG}"
+          docker run --rm -v "$scan:/scan" "$TRIVY_IMAGE" \
+            image --input /scan/image.tar --quiet --list-all-pkgs --format json --output /scan/trivy.json
+          report="$scan/trivy.json"
           # 阳性对照：确认真的扫到了东西，不是空扫（Trivy 不认识系统版本时会安静地什么都不报）
           jq -e '.Metadata.OS.Family == "debian"' "$report" >/dev/null ||
             { echo "::error::Trivy 没认出镜像的系统 —— 这次扫描不算数"; exit 1; }
@@ -157,7 +169,7 @@ jobs:
           image: ${{ env.IMAGE }}
           version: ${{ env.TAG }}
           push: "true"
-      - uses: actions/attest-build-provenance@v4
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-name: ${{ env.IMAGE }}
           subject-digest: ${{ steps.push.outputs.digest }}
@@ -171,7 +183,7 @@ jobs:
     env:
       TAG: ${{ needs.ci.outputs.tag }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           path: haro
@@ -180,11 +192,16 @@ jobs:
           GH_TOKEN: ${{ secrets.CONFIG_REPO_TOKEN }}
           # 部署仓库里本应用清单的目录（与 melete / atlhyper 的发布流程同样写死；路径里的名字经判定可以公开）
           APP_PATH: clusters/requiem/apps/haro
+          KUSTOMIZE_IMAGE: bukahou/haro-server # kustomization.yaml 的 images 里这个镜像的 name
         run: |
           git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/bukahou/config.git" config
-          sh haro/scripts/set-image-tag.sh "config/${APP_PATH}/kustomization.yaml" bukahou/haro-server "$TAG"
-          printf '{"repo":"%s","sha":"%s","branch":"%s","tag":"%s"}\n' \
-            "$GITHUB_REPOSITORY" "$GITHUB_SHA" "$GITHUB_REF_NAME" "$TAG" > "config/${APP_PATH}/source.json"
+          manifest="config/${APP_PATH}/kustomization.yaml"
+          sh haro/scripts/set-image-tag.sh "$manifest" "$KUSTOMIZE_IMAGE" "$TAG"
+          # 脚本按行改（保留注释和格式）；这里按 YAML 结构再核对一次：解析得出、这个镜像的 newTag 确实是这次的版本号
+          yq -e '.images[] | select(.name == strenv(KUSTOMIZE_IMAGE)) | .newTag == strenv(TAG)' "$manifest" >/dev/null ||
+            { echo "::error::${manifest} 里 ${KUSTOMIZE_IMAGE} 的 newTag 不是 ${TAG}"; exit 1; }
+          jq -nc --arg repo "$GITHUB_REPOSITORY" --arg sha "$GITHUB_SHA" --arg branch "$GITHUB_REF_NAME" --arg tag "$TAG" \
+            '{repo: $repo, sha: $sha, branch: $branch, tag: $tag}' > "config/${APP_PATH}/source.json"
           cd config
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"

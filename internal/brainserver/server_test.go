@@ -26,7 +26,8 @@ import (
 
 var quiet = slog.New(slog.NewTextHandler(io.Discard, nil))
 
-// fakeSession 记下收到的事件；回答请求一律答「已有进行中的回答」（测错误码原样传给客户端）。
+// fakeSession 记下收到的事件；回答请求一律答「已有进行中的回答」（测错误码原样传给客户端）；
+// 声明的输入格式不是 16 kHz 的 session.update 按 unsupported_audio_format 拒绝（和 brain.Session 一样）。
 type fakeSession struct {
 	received  chan realtimeproto.ClientEvent
 	events    chan realtimeproto.ServerEvent
@@ -41,8 +42,13 @@ func newFakeSession() *fakeSession {
 
 func (s *fakeSession) Send(_ context.Context, event realtimeproto.ClientEvent) error {
 	s.received <- event
-	if _, ok := event.(realtimeproto.ResponseCreate); ok {
+	switch e := event.(type) {
+	case realtimeproto.ResponseCreate:
 		return realtimeproto.ProtocolErrorf(realtimeproto.CodeResponseInProgress, "已有进行中的回答")
+	case realtimeproto.SessionUpdate:
+		if e.InputFormat.SampleRate > 0 && e.InputFormat != realtimeproto.TranscriptionFormat {
+			return realtimeproto.ProtocolErrorf(realtimeproto.CodeUnsupportedAudioFormat, "只收 16 kHz")
+		}
 	}
 	return nil
 }
@@ -65,7 +71,7 @@ func wsURL(server *httptest.Server) string {
 	return "ws" + strings.TrimPrefix(server.URL, "http") + realtimeproto.ConversationPath
 }
 
-// 握手时按子协议协商：haro v2 接受；别的 haro 版本、带 haro 版本头却没报子协议（旧终端）拒绝；什么都没报当普通客户端。
+// 握手时按子协议协商：haro 现在的版本接受；别的 haro 版本、带 haro 版本头却没报子协议（旧终端）拒绝；什么都没报当普通客户端。
 func TestHandshakeNegotiatesProtocolVersion(t *testing.T) {
 	for _, c := range []struct {
 		name         string
@@ -74,7 +80,8 @@ func TestHandshakeNegotiatesProtocolVersion(t *testing.T) {
 		accepted     bool
 		protocol     string
 	}{
-		{"haro 终端", []string{realtimeproto.ProtocolV2}, "v0.6.0-aaaaaaa", true, realtimeproto.ProtocolV2},
+		{"haro 终端", []string{realtimeproto.Protocol}, "v0.6.0-aaaaaaa", true, realtimeproto.Protocol},
+		{"旧版 haro 协议（v2）", []string{"haro.realtime.v2"}, "v0.5.0-aaaaaaa", false, ""},
 		{"不认识的 haro 版本", []string{"haro.realtime.v9"}, "v0.9.0-aaaaaaa", false, ""},
 		{"旧终端：带版本头、没报子协议", nil, "v0.5.0-aaaaaaa", false, ""},
 		{"普通 Realtime 客户端", nil, "", true, ""},
@@ -107,7 +114,7 @@ func TestHandshakeNegotiatesProtocolVersion(t *testing.T) {
 				t.Fatalf("拒绝时应返回 400 和错误说明：%v %v", response, err)
 			}
 			if body.Error.Code != realtimeproto.CodeUnsupportedProtocolVersion ||
-				len(body.Error.SupportedProtocols) != 1 || body.Error.SupportedProtocols[0] != realtimeproto.ProtocolV2 {
+				len(body.Error.SupportedProtocols) != 1 || body.Error.SupportedProtocols[0] != realtimeproto.Protocol {
 				t.Errorf("错误说明应带错误码和支持的版本：%+v", body.Error)
 			}
 		})
@@ -119,7 +126,7 @@ func TestErrorEventsCarryCodes(t *testing.T) {
 	server := newServer(t, newFakeSession(), brainserver.Options{})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	conn, _, err := websocket.Dial(ctx, wsURL(server), &websocket.DialOptions{Subprotocols: []string{realtimeproto.ProtocolV2}})
+	conn, _, err := websocket.Dial(ctx, wsURL(server), &websocket.DialOptions{Subprotocols: []string{realtimeproto.Protocol}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +159,7 @@ func TestSilentTerminalIsDisconnected(t *testing.T) {
 	server := newServer(t, session, brainserver.Options{
 		Heartbeat: heartbeat.Timing{Interval: 20 * time.Millisecond, Timeout: 50 * time.Millisecond}})
 	conn, _, err := websocket.Dial(context.Background(), wsURL(server),
-		&websocket.DialOptions{Subprotocols: []string{realtimeproto.ProtocolV2}})
+		&websocket.DialOptions{Subprotocols: []string{realtimeproto.Protocol}})
 	if err != nil {
 		t.Fatal(err)
 	}

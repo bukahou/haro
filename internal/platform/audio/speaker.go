@@ -21,10 +21,17 @@ const (
 	drainTail = playbackPeriodMs*playbackPeriods*time.Millisecond + 80*time.Millisecond
 	// drainPoll：等队列放空时多久看一次。
 	drainPoll = 10 * time.Millisecond
+	// drainSlack：等队列放空最多等「剩下的声音该播多久 + 这么久」（打开设备、蓝牙出声都要一点时间，约 0.2 s）。定值，
+	// 没有单独实测：正常放完远用不了这么久；到点还没放空就当设备不再取数据（没报停也算），不让这一轮一直「在回答」
+	drainSlack = 2 * time.Second
 )
 
-// errSpeakerGone：播放中设备停了（蓝牙断开、被拔掉）。
-var errSpeakerGone = errors.New("播放设备断开了")
+var (
+	// errSpeakerGone：播放中设备停了（蓝牙断开、被拔掉）。
+	errSpeakerGone = errors.New("播放设备断开了")
+	// errSpeakerStalled：等播完时设备一直不取数据，也没报停。
+	errSpeakerStalled = errors.New("播放设备不再取数据")
+)
 
 // Speaker 播放语音，实现 assistant.AudioSink。每轮回答打开一条流（打开时用当时的系统默认设备 ⇒ 跟随切换）。
 type Speaker struct {
@@ -89,22 +96,14 @@ func (s *playbackStream) Write(pcm []byte) error {
 	return nil
 }
 
-// Drain 等队列里的声音全部播完，然后关闭设备。
+// Drain 等队列里的声音全部播完（最多等到该播的时长 + drainSlack），然后关闭设备。
 func (s *playbackStream) Drain() error {
-	for {
-		empty, stopped := s.queue.status()
-		if stopped {
-			s.shutdown()
-			return errSpeakerGone
-		}
-		if empty {
-			break
-		}
-		time.Sleep(drainPoll)
+	err := s.queue.waitEmpty(s.format, drainSlack, drainPoll)
+	if err == nil {
+		time.Sleep(drainTail)
 	}
-	time.Sleep(drainTail)
 	s.shutdown()
-	return nil
+	return err
 }
 
 // Abort 立即停止并丢掉缓冲（打断用）。
@@ -116,11 +115,16 @@ func (s *playbackStream) Abort() error {
 
 // Played 是已经交给设备的时长（按我们自己送出去的帧数算；设备侧再晚几十毫秒、蓝牙约 0.2 s 才真正出声）。
 func (s *playbackStream) Played() time.Duration {
-	perSecond := s.format.BytesPerSecond()
+	return playDuration(s.queue.consumedBytes(), s.format)
+}
+
+// playDuration 是 bytes 字节的 PCM 按 format 播多久。
+func playDuration(bytes int, format realtimeproto.AudioFormat) time.Duration {
+	perSecond := format.BytesPerSecond()
 	if perSecond == 0 {
 		return 0
 	}
-	return time.Duration(s.queue.consumedBytes()) * time.Second / time.Duration(perSecond)
+	return time.Duration(bytes) * time.Second / time.Duration(perSecond)
 }
 
 func (s *playbackStream) shutdown() {
@@ -176,6 +180,27 @@ func (q *pcmQueue) status() (empty, stopped bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	return len(q.pending) == 0, q.stopped
+}
+
+// waitEmpty 等音频线程把队列取空：设备停了返回 errSpeakerGone；过了「现在剩下的声音该播多久 + slack」还没取空，
+// 返回 errSpeakerStalled（设备不取数据、也没报停时，不一直等下去）。
+func (q *pcmQueue) waitEmpty(format realtimeproto.AudioFormat, slack, poll time.Duration) error {
+	q.mu.Lock()
+	remaining := len(q.pending)
+	q.mu.Unlock()
+	deadline := time.Now().Add(playDuration(remaining, format) + slack)
+	for {
+		empty, stopped := q.status()
+		switch {
+		case stopped:
+			return errSpeakerGone
+		case empty:
+			return nil
+		case time.Now().After(deadline):
+			return errSpeakerStalled
+		}
+		time.Sleep(poll)
+	}
 }
 
 func (q *pcmQueue) consumedBytes() int {

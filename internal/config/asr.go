@@ -9,8 +9,9 @@ import (
 // ASRSettings 是语音识别服务 haro-asr 的配置。haro-asr 和服务端各自运行（集群里是同一个 Pod 的两个容器），
 // 只读这些项；服务端只认它的地址（HARO_ASR_URL）。
 //
-// 模型文件按目录 + 文件名给出（文件名相对各自的目录），不按文件名猜。文件名的默认值是现在实际在用的那几个：
-// 镜像里只放了它们（deploy/server/models.lock），解压出来的完整模型目录里也都有。
+// 模型文件按目录 + 文件名给出（文件名相对各自的目录），不按文件名猜。文件名的默认值是现在实际在用的那几个
+// （开发机上的模型目录里都有）。服务端镜像不靠这些默认值：用哪个文件由镜像自己的 ENV 写明，和拷哪个文件写在一起
+// （deploy/server/Dockerfile）。
 type ASRSettings struct {
 	Listen   string `env:"HARO_ASR_LISTEN,required,notEmpty"`    // 监听地址，例如 127.0.0.1:59126（只对本机开放）
 	ModelDir string `env:"HARO_ASR_MODEL_DIR,required,notEmpty"` // SenseVoice 模型目录（词表 tokens.txt 也在这里）

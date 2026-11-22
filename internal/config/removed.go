@@ -59,10 +59,18 @@ var removedSettings = []removedSetting{
 	{name: "HARO_STRONG_LLM_PRICE_OUTPUT", removed: modelPricesFromCatalog},
 	{name: "HARO_STRONG_LLM_PRICE_CACHE_READ", removed: modelPricesFromCatalog},
 	{name: "HARO_STRONG_LLM_PRICE_CACHE_WRITE", removed: modelPricesFromCatalog},
+	// 「大脑」改名「服务端」时改的名字：写着值时旧名字不再起作用（终端会去连默认地址、服务端只听本机），起不来比悄悄用默认值好
+	{name: "HARO_BRAIN_URL", side: terminalSide, stillMeans: isEmpty, removed: "改名为 HARO_SERVER_URL（把值写到新名字下）"},
+	{name: "HARO_BRAIN_LISTEN", stillMeans: isEmpty, removed: "改名为 HARO_SERVER_LISTEN（把值写到新名字下）"},
+	{name: "HARO_CONVERSATIONS_DIR", stillMeans: isEmpty,
+		removed: "旧版每人一个 JSON 文件的对话已经导入对话库（HARO_CONVERSATIONS_DB），导入功能已删除"},
 }
 
 // modelPricesFromCatalog：云端模型的单价不再手写，启动时从模型价格目录取。
 const modelPricesFromCatalog = "云端模型的单价改从模型价格目录（HARO_MODEL_PRICES_URL）取，不再手写"
+
+// isEmpty：写着空值时只是多余；写着值就是要已删除的行为。
+func isEmpty(value string) bool { return value == "" }
 
 // checkRemovedSettings 检查环境里还写着的、side 这边删掉的配置项：返回给人看的提醒；值要求已删除的行为时返回错误。
 func checkRemovedSettings(lookup func(string) (string, bool), side settingSide) ([]string, error) {

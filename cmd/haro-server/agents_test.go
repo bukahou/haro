@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -71,6 +72,33 @@ func TestBuildAgentsFromBuiltinDefinitions(t *testing.T) {
 	}
 }
 
+// 设了月度上限和每次提高的金额（云端模型）时有代理「额度判断」：正文里的工具名由代码填，只给它那三个工具；
+// 没设上限时没有。
+func TestBuildOverBudgetAgent(t *testing.T) {
+	settings := cloudSettings(nil, config.VisionByExpert)
+	settings.MonthlyYen, settings.MonthlyRaiseYen, settings.OverBudgetDailyCalls = 3000, 500, 30
+	built, err := testAssembly(t, settings, nil).build(nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	judge := built.overBudget
+	if judge == nil {
+		t.Fatal("设了上限和提高的金额：应有代理「额度判断」")
+	}
+	for _, tool := range []string{"raise_monthly_cap", "confirm_action", "cancel_action"} {
+		if !strings.Contains(judge.Instructions, tool) || !slices.Contains(judge.Tools, tool) {
+			t.Errorf("正文和允许名单里都应有 %s：%+v", tool, judge)
+		}
+	}
+	if strings.Contains(judge.Instructions, "{{") || judge.MaxSteps != 1 {
+		t.Errorf("额度判断：%+v", judge)
+	}
+	settings.MonthlyYen = 0
+	if built, err := testAssembly(t, settings, nil).build(nil, nil); err != nil || built.overBudget != nil {
+		t.Errorf("不限月度费用时不应有额度判断：%v %+v", err, built.overBudget)
+	}
+}
+
 // 看画面两种用法：expert = 专家（子任务），takeover = 画面交给强模型接手。没设更强的模型时两样都没有。
 func TestBuildAgentsForVisionModes(t *testing.T) {
 	expert, err := testAssembly(t, cloudSettings([]string{config.StrongForVision}, config.VisionByExpert), nil).build(nil, nil)
@@ -118,6 +146,23 @@ func TestBuildAgentsRejectsBadToolLists(t *testing.T) {
 		if (err == nil) != c.ok {
 			t.Errorf("%s：起得来应为 %v，实际错误 %v", label, c.ok, err)
 		}
+	}
+}
+
+// 额度判断的正文只能提到交给了它的工具：覆盖的定义去掉了确认、取消，正文却还提到它们时起不来。
+// 阳性对照：正文跟着去掉就起得来。
+func TestOverBudgetPromptMentionsOnlyAllowedTools(t *testing.T) {
+	settings := cloudSettings(nil, config.VisionByExpert)
+	settings.MonthlyYen, settings.MonthlyRaiseYen, settings.OverBudgetDailyCalls = 3000, 500, 30
+	judge := "---\ntitle: 额度判断\nmode: subtask\nmodel: base\npurpose: chat\ntools: [raise_monthly_cap]\nmax_steps: 1\n---\n%s\n"
+	mentionsConfirm := strings.Replace(judge, "%s", "要提高就调用 {{.RaiseTool}}；同意就调用 {{.ConfirmTool}}。", 1)
+	if _, err := testAssembly(t, settings, map[string]string{agents.OverBudget: mentionsConfirm}).build(nil, nil); err == nil {
+		t.Error("正文提到没交给它的确认工具：应起不来")
+	}
+	raiseOnly := strings.Replace(judge, "%s", "要提高就调用 {{.RaiseTool}}。", 1)
+	built, err := testAssembly(t, settings, map[string]string{agents.OverBudget: raiseOnly}).build(nil, nil)
+	if err != nil || built.overBudget == nil || !strings.Contains(built.overBudget.Instructions, "raise_monthly_cap") {
+		t.Errorf("正文只提到交给它的工具：应起得来：%v %+v", err, built.overBudget)
 	}
 }
 

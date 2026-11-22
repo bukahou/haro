@@ -15,7 +15,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +23,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/bukahou/haro/internal/buildinfo"
+	"github.com/bukahou/haro/internal/endpoint"
 	"github.com/bukahou/haro/internal/heartbeat"
 	"github.com/bukahou/haro/internal/mcpbridge"
 	"github.com/bukahou/haro/internal/realtimeproto"
@@ -74,7 +74,7 @@ const defaultEventBacklog = 5 * time.Second
 const eventQueueSize = 64
 
 // Dial 连接服务端一次；连不上直接返回错误（重试由终端的看守负责）。
-// 协议版本和服务端不兼容时（握手被拒，或者服务端没有选 realtimeproto.ProtocolV2），
+// 协议版本和服务端不兼容时（握手被拒，或者服务端没有选 realtimeproto.Protocol），
 // 返回的错误包着 realtimeproto.ErrIncompatibleProtocol：重连没用，要升级其中一端。
 func Dial(ctx context.Context, opts DialOptions, logger *slog.Logger) (*Client, error) {
 	address, err := conversationURL(opts.BaseURL)
@@ -83,7 +83,7 @@ func Dial(ctx context.Context, opts DialOptions, logger *slog.Logger) (*Client, 
 	}
 	// 握手时报上协议版本和终端的构建版本；服务端在响应里报它的构建版本，不一样时在日志里提醒升级
 	options := &websocket.DialOptions{
-		Subprotocols: []string{realtimeproto.ProtocolV2},
+		Subprotocols: []string{realtimeproto.Protocol},
 		HTTPHeader:   http.Header{"User-Agent": {buildinfo.UserAgent()}, buildinfo.Header: {buildinfo.Version}},
 	}
 	conn, response, err := websocket.Dial(ctx, address, options)
@@ -94,10 +94,10 @@ func Dial(ctx context.Context, opts DialOptions, logger *slog.Logger) (*Client, 
 		}
 		return nil, fmt.Errorf("%w %s: %w", ErrUnreachable, address, err)
 	}
-	if conn.Subprotocol() != realtimeproto.ProtocolV2 {
-		conn.Close(websocket.StatusProtocolError, "需要 "+realtimeproto.ProtocolV2)
+	if conn.Subprotocol() != realtimeproto.Protocol {
+		conn.Close(websocket.StatusProtocolError, "需要 "+realtimeproto.Protocol)
 		return nil, fmt.Errorf("%w：服务端没有选 %s（服务端是旧版本？）", realtimeproto.ErrIncompatibleProtocol,
-			realtimeproto.ProtocolV2)
+			realtimeproto.Protocol)
 	}
 	conn.SetReadLimit(realtimeproto.MaxMessageBytes)
 	readCtx, cancel := context.WithCancel(context.Background())
@@ -118,26 +118,14 @@ func Dial(ctx context.Context, opts DialOptions, logger *slog.Logger) (*Client, 
 	return client, nil
 }
 
-// conversationURL 由服务端地址拼出对话会话的 WebSocket 地址：按结构把 scheme 换成 ws(s)（http → ws、https → wss，
+// conversationURL 由服务端地址拼出对话会话的 WebSocket 地址：scheme 换成 ws(s)（http → ws、https → wss，
 // 已经是 ws(s) 的原样用），接上 ConversationPath（保留地址里原有的路径）。
 func conversationURL(base string) (string, error) {
-	address, err := url.Parse(base)
+	address, err := endpoint.WebSocket(base, realtimeproto.ConversationPath, nil)
 	if err != nil {
-		return "", fmt.Errorf("服务端地址 %q: %w", base, err)
+		return "", fmt.Errorf("服务端地址：%w", err)
 	}
-	switch address.Scheme { // url.Parse 已把 scheme 转成小写
-	case "http":
-		address.Scheme = "ws"
-	case "https":
-		address.Scheme = "wss"
-	case "ws", "wss":
-	default:
-		return "", fmt.Errorf("服务端地址要是 http(s)://主机[:端口]，现在是 %q", base)
-	}
-	if address.Host == "" {
-		return "", fmt.Errorf("服务端地址里没有主机名：%q", base)
-	}
-	return address.JoinPath(realtimeproto.ConversationPath).String(), nil
+	return address, nil
 }
 
 // protocolRejection 从被拒的握手响应里取出「协议版本不兼容」的说明；不是这种拒绝时 ok = false。

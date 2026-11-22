@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+
+	"github.com/bukahou/haro/internal/endpoint"
 )
 
 // 本文件是事件在 WebSocket 上的 JSON 结构，全协议只有这一份：编解码在 codec.go，JSON Schema 由它生成（schema.go）。
@@ -18,7 +20,8 @@ import (
 // 两种会话共用这份定义：
 //   - 对话会话（session.type = realtime）：终端 ↔ haro-server，路径 ConversationPath；
 //   - 转写会话（session.type = transcription）：haro-server ↔ haro-asr，路径 TranscriptionPath、带 intent=TranscriptionIntent，
-//     只用其中一部分事件。
+//     只用其中一部分事件。haro-asr 接受第一条 session.update 后回 session.updated，之后才处理音频；
+//     不接受时回带码的 error 并断开（码是请求类的 = 这份设置它做不到，原样再连没用）。
 
 // ConversationPath 是对话会话的 WebSocket 路径（haro-server 提供）。
 const ConversationPath = "/v1/realtime"
@@ -30,23 +33,13 @@ const TranscriptionPath = "/v1/realtime"
 const TranscriptionIntent = "transcription"
 
 // TranscriptionURL 由转写服务的根地址（http(s)://host:port）拼出转写会话的 WebSocket 地址：
-// 按结构把 scheme 换成 ws(s)、接上 TranscriptionPath、带上 intent 参数。
+// scheme 换成 ws(s)、接上 TranscriptionPath、带上 intent 参数。
 func TranscriptionURL(base string) (string, error) {
-	address, err := url.Parse(base)
+	address, err := endpoint.WebSocket(base, TranscriptionPath, url.Values{"intent": {TranscriptionIntent}})
 	if err != nil {
-		return "", fmt.Errorf("转写服务地址 %q: %w", base, err)
+		return "", fmt.Errorf("转写服务地址：%w", err)
 	}
-	switch address.Scheme {
-	case "http":
-		address.Scheme = "ws"
-	case "https":
-		address.Scheme = "wss"
-	default:
-		return "", fmt.Errorf("转写服务地址要是 http(s)://，现在是 %q", base)
-	}
-	address = address.JoinPath(TranscriptionPath)
-	address.RawQuery = url.Values{"intent": {TranscriptionIntent}}.Encode()
-	return address.String(), nil
+	return address, nil
 }
 
 // TranscriptionSampleRate 是转写会话要求的采样率（识别、唤醒词、声纹的模型都按 16 kHz）。
@@ -57,6 +50,12 @@ var TranscriptionFormat = AudioFormat{SampleRate: TranscriptionSampleRate, Chann
 
 // MaxMessageBytes 是一条消息的大小上限，两端读消息时都按它限。
 const MaxMessageBytes = 8 << 20
+
+// MaxSessions 是同时最多几条会话，两种会话用同一个数：haro-server 的对话会话、haro-asr 的转写会话。每条对话会话在 haro-asr
+// 占一个转写会话，服务端多接下的会话那边开不了识别流，所以两边一样多，满了都在握手时拒绝（too_many_sessions）。
+// 每个转写会话自己建一个 Silero VAD（重新载入模型）和唤醒词流，不设上限时连接失控（终端重连出错、局域网里谁都能连）
+// 会撑爆原生内存。家里每台终端一个会话（断线重连时新旧两个会短暂重叠），远到不了这个数；定值，没有实测每个会话占多少内存
+const MaxSessions = 8
 
 // DefaultOutputFormat 是官方 Realtime 的输出音频格式；delta 没声明格式时用它。
 var DefaultOutputFormat = AudioFormat{SampleRate: 24000, Channels: 1}
@@ -75,11 +74,13 @@ const (
 	typeHaroTerminalDevices      = "haro.terminal.devices"
 	typeHaroMCPMessage           = "haro.mcp.message"
 
+	typeSessionUpdated         = "session.updated"
 	typeSpeechStarted          = "input_audio_buffer.speech_started"
 	typeSpeechStopped          = "input_audio_buffer.speech_stopped"
 	typeTranscriptionCompleted = "conversation.item.input_audio_transcription.completed"
 	typeTranscriptionFailed    = "conversation.item.input_audio_transcription.failed"
 	typeHaroWakeWordDetected   = "haro.wake_word.detected"
+	typeHaroWakeWordState      = "haro.wake_word.state"
 	typeTranscriptDelta        = "response.output_audio_transcript.delta"
 	typeAudioDelta             = "response.output_audio.delta"
 	typeResponseCreated        = "response.created"
@@ -140,13 +141,38 @@ type wireMCPMessage struct {
 }
 
 type wireItemTruncate struct {
-	Type         string `json:"type"`
-	ItemID       string `json:"item_id,omitempty" jsonschema:"haro 不填：截最近一次回答"`
-	ContentIndex int    `json:"content_index"`
-	AudioEndMs   int64  `json:"audio_end_ms" jsonschema:"用户听到了回答的前多少毫秒"`
+	Type         string      `json:"type"`
+	ItemID       string      `json:"item_id,omitempty" jsonschema:"不填：haro 只截最近一次回答（它不发回答的 item_id），填了就拒绝（invalid_event）"`
+	ContentIndex int         `json:"content_index"`
+	AudioEndMs   millisField `json:"audio_end_ms" jsonschema:"用户听到了回答的前多少毫秒（必填；缺了或为负拒绝：invalid_event）"`
 }
 
+// millisField 是必填、不能为负的毫秒数（线上就是一个整数）：解码时记下有没有这个字段，缺了（或是 null）不能当成 0 去执行。
+// 生成 Schema 时按 wireTypeSchemas 里写的算。
+type millisField struct {
+	ms  int64
+	set bool
+}
+
+func (m *millisField) UnmarshalJSON(data []byte) error {
+	if string(data) == "null" {
+		return nil // 和缺了一样
+	}
+	if err := json.Unmarshal(data, &m.ms); err != nil {
+		return err
+	}
+	m.set = true
+	return nil
+}
+
+func (m millisField) MarshalJSON() ([]byte, error) { return json.Marshal(m.ms) }
+
 // ——— 服务端事件 ———
+
+type wireSessionUpdated struct {
+	Type    string      `json:"type"`
+	Session wireSession `json:"session" jsonschema:"对端接受之后的会话设置（和 session.update 的 session 同一形状）"`
+}
 
 type wireSpeechStarted struct {
 	Type         string `json:"type"`
@@ -175,13 +201,14 @@ type wireTranscriptionFailed struct {
 }
 
 type wireTranscriptExtra struct {
-	Speaker   string `json:"speaker" jsonschema:"认出来的人；没认出来为空"`
-	Checked   bool   `json:"speaker_checked"`
-	Tentative string `json:"speaker_tentative,omitempty" jsonschema:"叫醒这句的声纹只过了唤醒的门槛、没确认时，像是谁"`
-	Language  string `json:"language,omitempty" jsonschema:"识别出的语种，例如 zh、ja、en"`
-	Wake      bool   `json:"wake,omitempty" jsonschema:"这句话里叫了唤醒词（叫醒后的第一句）"`
-	BargeIn   bool   `json:"barge_in,omitempty" jsonschema:"这句话是在 haro 说话时打断说的（开头可能混着回声）"`
-	AudioMs   int64  `json:"audio_ms,omitempty" jsonschema:"这句话的音频有多长（毫秒）"`
+	Speaker     string `json:"speaker" jsonschema:"认出来的人；没认出来为空"`
+	Checked     bool   `json:"speaker_checked"`
+	CheckFailed bool   `json:"speaker_check_failed,omitempty" jsonschema:"开着声纹，但这句算不出声纹（这时 speaker_checked 为 false、speaker 为空）：和没开声纹不是一回事"`
+	Tentative   string `json:"speaker_tentative,omitempty" jsonschema:"叫醒这句的声纹只过了唤醒的门槛、没确认时，像是谁"`
+	Language    string `json:"language,omitempty" jsonschema:"识别出的语种，例如 zh、ja、en"`
+	Wake        bool   `json:"wake,omitempty" jsonschema:"这句话里叫了唤醒词（叫醒后的第一句）"`
+	BargeIn     bool   `json:"barge_in,omitempty" jsonschema:"这句话是在 haro 说话时打断说的（开头可能混着回声）"`
+	AudioMs     int64  `json:"audio_ms,omitempty" jsonschema:"这句话的音频有多长（毫秒）"`
 }
 
 type wireWakeWordDetected struct {
@@ -190,6 +217,11 @@ type wireWakeWordDetected struct {
 	AudioMs int64   `json:"audio_ms" jsonschema:"唤醒词结束处在会话音频时间轴上的位置（毫秒）"`
 	Score   float64 `json:"score,omitempty" jsonschema:"唤醒词的声纹分数"`
 	Level   float64 `json:"level,omitempty" jsonschema:"唤醒词那一段的音量（RMS，0–1）"`
+}
+
+type wireWakeWordState struct {
+	Type  string `json:"type"`
+	Awake bool   `json:"awake" jsonschema:"处理完请求之后醒着（true）还是睡着（false）"`
 }
 
 type wireTranscriptDelta struct {

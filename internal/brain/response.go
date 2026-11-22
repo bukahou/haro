@@ -33,6 +33,29 @@ type transcriptionJob struct {
 	language       string        // 识别出的语种（固定的话用哪种语言念）
 	wake, bargeIn  bool          // 叫醒后的第一句；在 haro 说话时打断说的
 	audio          time.Duration // 这句话多长
+
+	speakerCheckFailed bool // 开着声纹、这句却算不出声纹（声纹的第三种结果，和没比对分开）
+}
+
+// speakerFor 决定这句接谁的对话：认出是谁就接这个人的（对话跟人走），并记作这次醒着期间最近认出的人；
+// 开着声纹、这句却算不出来（很短的话常这样）时沿用最近认出的人——只接上他的对话，不算声纹确认（确认闸看 voiceVerified）；
+// 这次醒着还没认出过谁、或没开声纹时进全家共用的对话。
+func (s *Session) speakerFor(job *transcriptionJob) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch {
+	case job.speakerChecked:
+		s.lastSpeaker = job.speaker
+		return job.speaker
+	case job.speakerCheckFailed && s.lastSpeaker != "":
+		s.logger.Info("这句的声纹没算出来：沿用这次醒着期间最近认出的人（不算声纹确认）", "item", job.item,
+			"person", s.lastSpeaker, "speaker_check_failed", true)
+		return s.lastSpeaker
+	case job.speakerCheckFailed:
+		s.logger.Warn("这句的声纹没算出来，这次醒着期间也还没认出过谁：进全家共用的对话", "item", job.item,
+			"speaker_check_failed", true)
+	}
+	return SharedPerson
 }
 
 // runResponse 执行一次回答：开始时发 response.created，结束时恰好发出一个 response.done。
@@ -94,11 +117,7 @@ func (s *Session) respond(ctx context.Context, job *transcriptionJob) (done real
 		s.logger.Info("不是登记的人说的，不回答", "text", job.text)
 		return realtimeproto.ResponseDone{Status: realtimeproto.StatusIncomplete, Reason: realtimeproto.ReasonUnknownSpeaker}
 	}
-	if job.speakerChecked { // 对话跟人走：认出是谁就接这个人的对话
-		s.useConversationOf(job.speaker)
-	} else {
-		s.useConversationOf(SharedPerson)
-	}
+	s.useConversationOf(s.speakerFor(job))
 	s.rememberLanguage(job.language)
 	if !hasSpokenText(job.text) {
 		return realtimeproto.ResponseDone{Status: realtimeproto.StatusIncomplete, Reason: realtimeproto.ReasonEmptyTranscript}
@@ -155,7 +174,7 @@ func (s *Session) finishAnswer(ctx context.Context, record *turnRecord, answer s
 		ending, done = turnTruncated, realtimeproto.ResponseDone{Status: realtimeproto.StatusIncomplete, Reason: realtimeproto.ReasonMaxOutputTokens}
 	}
 	s.closeTurn(record, ending)
-	if usage != nil {
+	if usage.InputKnown() && usage.OutputKnown() { // 用量不知道时不发（不编成 0）
 		done.Usage = &realtimeproto.Usage{InputTokens: usage.PromptTokens, OutputTokens: usage.OutputTokens}
 	}
 	return done
@@ -323,7 +342,7 @@ func (s *Session) generateSentences(ctx context.Context, history []ChatMessage, 
 		var calls []ToolCall
 		var roundText strings.Builder
 		var roundUsage *ReplyUsage
-		truncated := false
+		stop := StopUnknown // 这次请求为什么停：最后一段说了算
 		for delta, err := range agent.Model.StreamReply(ctx, request) {
 			if err != nil {
 				recordSpanError(span, err)
@@ -345,17 +364,22 @@ func (s *Session) generateSentences(ctx context.Context, history []ChatMessage, 
 			if delta.Usage != nil {
 				roundUsage = delta.Usage
 			}
-			truncated = truncated || delta.Stop == StopMaxTokens
+			stop = delta.Stop
 		}
 		usage = usage.add(roundUsage)
-		if roundUsage != nil {
+		if roundUsage.InputKnown() { // 不知道时不算（「上下文太长就提前压缩」对不报用量的服务不起作用，见下面的用量日志）
 			record.contextTokens = max(record.contextTokens, roundUsage.PromptTokens)
+		}
+		if stop == StopUnknown { // 流结束了却没说为什么停：不当成说完，按出错收尾（说出口的照样记进历史）
+			s.logger.Warn("模型的流结束了却没说为什么停：按出错收尾", "agent", agent.Name, "round", round, "tools", toolNames(calls))
+			recordSpanError(span, ErrStopUnknown)
+			return usage, ErrStopUnknown
 		}
 		if len(calls) > 0 && request.ForbidToolCalls { // 不许调用时还要调用：不执行，说了的话就是回答
 			s.logger.Warn("模型在不许调用工具的一轮要求调用工具：不执行", "tools", toolNames(calls))
 			calls = nil
 		}
-		if truncated { // 到了输出上限：说出去的就是这些（适配不交出被截断的工具调用）
+		if stop == StopMaxTokens { // 到了输出上限：说出去的就是这些（适配不交出被截断的工具调用）
 			s.logger.Warn("回答到了模型的输出上限，没说完", "round", round, "output_tokens", outputTokens(roundUsage))
 			record.final.WriteString(roundText.String())
 			record.truncated = true
@@ -472,21 +496,33 @@ func (s *Session) generateSentences(ctx context.Context, history []ChatMessage, 
 	if err := flushText(); err != nil {
 		return usage, err
 	}
-	if usage != nil {
-		// 这一轮所有请求加起来的用量（每次请求各自的 span「chat <模型>」在 llm 包里记）
-		span.SetAttributes(
-			semconv.GenAIUsageInputTokens(usage.PromptTokens),
-			semconv.GenAIUsageOutputTokens(usage.OutputTokens),
-			semconv.GenAIUsageCacheReadInputTokens(usage.CacheReadTokens),
-			semconv.GenAIUsageCacheCreationInputTokens(usage.CacheWriteTokens),
-			attribute.Int("haro.llm.requests", usage.Requests),
-			attribute.Int("haro.llm.thinking_chars", usage.ThinkingChars))
-		s.logger.Info("模型用量", "agent", agent.Name, "requests", usage.Requests, "prompt_tokens", usage.PromptTokens, "output_tokens", usage.OutputTokens,
-			"cache_read_tokens", usage.CacheReadTokens, "cache_write_tokens", usage.CacheWriteTokens,
-			"visible_chars", utf8.RuneCountInString(answer.String()), "thinking_chars", usage.ThinkingChars)
-	}
+	s.recordTurnUsage(span, agent.Name, usage, utf8.RuneCountInString(answer.String()))
 	s.logger.Info("阶段耗时", "stage", "brain.llm.stream", "elapsed", since(started))
 	return usage, nil
+}
+
+// recordTurnUsage 把这一轮所有请求加起来的用量记进 span 和日志（每次请求各自的 span「chat <模型>」在 llm 包里记）。
+// 不知道的 token 数不写（不编成 0）：模型服务不报用量时，「上下文太长就提前压缩」看不到上下文多大、不起作用，
+// 历史只按轮数截断，日志里写明。
+func (s *Session) recordTurnUsage(span trace.Span, agent string, usage *ReplyUsage, visibleChars int) {
+	if usage == nil {
+		return
+	}
+	span.SetAttributes(attribute.Int("haro.llm.requests", usage.Requests), attribute.Int("haro.llm.thinking_chars", usage.ThinkingChars))
+	if !usage.InputKnown() {
+		s.logger.Info("模型用量：模型服务没报 token 数，不能按上下文大小提前压缩（历史只按轮数截断）", "agent", agent,
+			"requests", usage.Requests, "visible_chars", visibleChars, "thinking_chars", usage.ThinkingChars)
+		return
+	}
+	span.SetAttributes(semconv.GenAIUsageInputTokens(usage.PromptTokens), semconv.GenAIUsageCacheReadInputTokens(usage.CacheReadTokens),
+		semconv.GenAIUsageCacheCreationInputTokens(usage.CacheWriteTokens))
+	if usage.OutputKnown() {
+		span.SetAttributes(semconv.GenAIUsageOutputTokens(usage.OutputTokens))
+	}
+	s.logger.Info("模型用量", "agent", agent, "requests", usage.Requests, "prompt_tokens", usage.PromptTokens,
+		"output_tokens", usage.OutputTokens, "output_known", usage.OutputKnown(),
+		"cache_read_tokens", usage.CacheReadTokens, "cache_write_tokens", usage.CacheWriteTokens,
+		"visible_chars", visibleChars, "thinking_chars", usage.ThinkingChars)
 }
 
 // speakUtterance 合成一句并边合成边发给终端：先发这句的文字，再逐段发音频。round 是这句属于这一轮回答的第几段。

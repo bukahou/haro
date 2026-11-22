@@ -34,10 +34,10 @@ type Components struct {
 	Profiles ProfileSource
 	// Notices 是所有终端连接共用的提示中转（后台调查查完了让终端响一声）；nil = 不发提示
 	Notices *NoticeHub
-	// MonthlyCap、OverBudgetModel：月度上限到了以后，主人可以口头临时提高（见 monthly_cap.go）；
-	// 都设了才有这个能力。OverBudgetModel 不受额度管（否则上限到了就没法判断），由组装处限每天的次数
-	MonthlyCap      MonthlyCap
-	OverBudgetModel ChatModel
+	// MonthlyCap、OverBudget：月度上限到了以后，主人可以口头临时提高（见 monthly_cap.go）；
+	// 都设了才有这个能力。OverBudget 的模型不受额度管（否则上限到了就没法判断），由组装处限每天的次数
+	MonthlyCap MonthlyCap
+	OverBudget *Agent
 }
 
 // Options 是服务端的可调参数。
@@ -87,10 +87,15 @@ type Session struct {
 	pendingJobs     map[string]*transcriptionJob // 已判定说完、等待识别结果的语音段（按 item_id）
 	lastWakeKeyword string                       // 最近一次听到的唤醒词（配置里的原文，告诉模型开头可能带着它）
 	language        string                       // 主人最近一句话识别出的语种（固定的话按它选语言）
-	// 醒着 / 正在播放只在这里存一份，识别流是它的跟随者：断开重开后按这两个状态重新告诉新的流
-	awake        bool // 唤醒门开着（听到唤醒词、或终端手动唤醒之后，直到终端说休眠）
+	// awake 照识别流报的记（醒 / 睡只由识别流的唤醒门改：haro.wake_word.detected、haro.wake_word.state）；
+	// 识别流断开期间记终端要的，重开后告诉新的流、由它回复确认。
+	// playing 照终端报的记（播没播由终端决定）。断开重开后按这两个状态重新告诉新的流
+	awake        bool
 	playing      bool // 终端正在播放回答（只听唤醒词；打断自己的唤醒在仲裁里最优先）
 	droppedAudio int  // 识别流断开期间收到、只能丢掉的音频块数（重开时记一次日志）
+	// lastSpeaker 是这次醒着期间（这条连接上）最近一句认出来的人：算不出声纹的那句沿用他的对话（不算声纹确认）；
+	// 识别流回复睡着了（对话窗口结束）时清掉
+	lastSpeaker string
 	// speech 是识别流报了「开始说话」、还没报「说完」的那句；识别流在这时断开，这句就丢了（不会再有「说完」）
 	speech *realtimeproto.InputAudioBufferSpeechStarted
 
@@ -191,17 +196,18 @@ func (s *Session) Send(ctx context.Context, event realtimeproto.ClientEvent) err
 		_, awake := event.(realtimeproto.HaroWakeWordWake)
 		s.mu.Lock()
 		stream, opened := s.stream, s.streamConfig != nil
-		if opened {
-			s.awake = awake
+		if opened && stream == nil {
+			s.awake = awake // 识别流正在重开：记下，重开后告诉新的流（由它回复确认）
 		}
 		s.mu.Unlock()
 		switch {
 		case !opened:
 			return realtimeproto.ProtocolErrorf(realtimeproto.CodeNoTranscriptionStream, "没有流式转写会话，无法切换唤醒状态")
-		case stream == nil: // 正在重开：重开后按记下的状态告诉新的流
+		case stream == nil:
 			return nil
 		}
-		return stream.SetAwake(ctx, awake)
+		s.requestAwake(ctx, stream, awake)
+		return nil
 	}
 	if audio, ok := event.(realtimeproto.InputAudioBufferAppend); ok {
 		if audio.Audio.Format != streamFormat {
@@ -232,6 +238,14 @@ func (s *Session) Send(ctx context.Context, event realtimeproto.ClientEvent) err
 	defer s.mu.Unlock()
 	switch e := event.(type) {
 	case realtimeproto.SessionUpdate:
+		if e.TurnDetection != nil {
+			if err := e.TurnDetection.Validate(); err != nil { // 写错的取值在这里就拒绝，不等识别服务拒
+				return realtimeproto.ProtocolErrorf(realtimeproto.CodeInvalidEvent, "%v", err)
+			}
+		}
+		if err := s.checkSessionUpdateLocked(e); err != nil { // 取值没错但照办不了：整条拒绝，什么都不改
+			return err
+		}
 		if e.TurnDetection != nil {
 			s.autoRespond = e.TurnDetection.CreateResponse == nil || *e.TurnDetection.CreateResponse
 		}

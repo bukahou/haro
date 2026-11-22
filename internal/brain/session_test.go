@@ -47,7 +47,7 @@ func (f *fakeModel) StreamReply(ctx context.Context, request brain.ChatRequest) 
 				return
 			}
 		}
-		yield(brain.ReplyDelta{Usage: &brain.ReplyUsage{PromptTokens: 10, OutputTokens: len(f.tokens)}}, nil)
+		yield(brain.ReplyDelta{Usage: &brain.ReplyUsage{PromptTokens: 10, OutputTokens: len(f.tokens)}, Stop: brain.StopCompleted}, nil)
 	}
 }
 

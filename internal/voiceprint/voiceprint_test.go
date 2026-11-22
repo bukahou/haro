@@ -23,9 +23,12 @@ func TestSaveLoadMatch(t *testing.T) {
 	}
 	_, _ = Save(dir, Voiceprint{Name: "旧模型", Model: "old.onnx", Embeddings: [][]float32{{0, 1, 0}}})
 
-	loaded, err := LoadAll(dir, "campplus.onnx")
+	loaded, skipped, err := LoadAll(dir, "campplus.onnx")
 	if err != nil || len(loaded) != 1 || loaded[0].Name != "主人" {
 		t.Fatalf("应只读到同一模型的声纹：%+v %v", loaded, err)
+	}
+	if len(skipped) != 1 || skipped[0].Name != "旧模型" || skipped[0].Model != "old.onnx" || !errors.Is(skipped[0].Err, ErrOtherModel) {
+		t.Errorf("换了模型的旧声纹要列出来、写明模型不一致：%+v", skipped)
 	}
 	if name, score := Match(loaded, []float32{0.95, 0.05, 0}, 0.5); name != "主人" || score < 0.99 {
 		t.Errorf("像的应认出来：%q %.3f", name, score)
@@ -33,8 +36,33 @@ func TestSaveLoadMatch(t *testing.T) {
 	if name, score := Match(loaded, []float32{0, 0, 1}, 0.5); name != "" || score > 0.01 {
 		t.Errorf("不像的不应认出来：%q %.3f", name, score)
 	}
-	if empty, err := LoadAll(filepath.Join(dir, "不存在"), "campplus.onnx"); err != nil || len(empty) != 0 {
-		t.Errorf("没有目录 = 没人登记：%v %v", empty, err)
+}
+
+// 配了目录却读不到（不存在、没权限）：报错，不当成「还没人登记」（那样声纹过滤会悄悄关掉）。
+func TestLoadAllUnreadableDir(t *testing.T) {
+	if _, _, err := LoadAll(filepath.Join(t.TempDir(), "不存在"), "campplus.onnx"); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("目录不存在应报错：%v", err)
+	}
+	locked := t.TempDir()
+	if err := os.Chmod(locked, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
+	if _, err := os.ReadDir(locked); err == nil {
+		t.Skip("当前用户读得了没有权限的目录（root？），测不了")
+	}
+	if _, _, err := LoadAll(locked, "campplus.onnx"); !errors.Is(err, fs.ErrPermission) {
+		t.Errorf("目录读不了应报错：%v", err)
+	}
+	empty := t.TempDir()
+	if loaded, skipped, err := LoadAll(empty, "campplus.onnx"); err != nil || len(loaded) != 0 || len(skipped) != 0 {
+		t.Errorf("目录在、还没人登记：返回空、不报错：%v %v %v", loaded, skipped, err)
+	}
+	if err := os.WriteFile(filepath.Join(empty, "空.json"), []byte(`{"name":"空","model":"campplus.onnx"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, skipped, err := LoadAll(empty, "campplus.onnx"); err != nil || len(skipped) != 1 || !errors.Is(skipped[0].Err, ErrNoEmbeddings) {
+		t.Errorf("没有向量的声纹也要列出来：%+v %v", skipped, err)
 	}
 }
 

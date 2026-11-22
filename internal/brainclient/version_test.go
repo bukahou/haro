@@ -49,7 +49,7 @@ func TestServerReportsVersionAndWarnsOnMismatch(t *testing.T) {
 				header.Set(buildinfo.Header, c.terminal)
 			}
 			conn, response, err := websocket.Dial(context.Background(), "ws"+strings.TrimPrefix(server.URL, "http")+realtimeproto.ConversationPath,
-				&websocket.DialOptions{Subprotocols: []string{realtimeproto.ProtocolV2}, HTTPHeader: header})
+				&websocket.DialOptions{Subprotocols: []string{realtimeproto.Protocol}, HTTPHeader: header})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -57,7 +57,7 @@ func TestServerReportsVersionAndWarnsOnMismatch(t *testing.T) {
 			if got := response.Header.Get(buildinfo.Header); got != serverVersion {
 				t.Errorf("握手响应里的服务端版本 = %q", got)
 			}
-			level, want := slog.LevelInfo, map[string]any{"version": buildinfo.Reported(c.terminal), "protocol": realtimeproto.ProtocolV2}
+			level, want := slog.LevelInfo, map[string]any{"version": buildinfo.Reported(c.terminal), "protocol": realtimeproto.Protocol}
 			if c.warn {
 				level, want = slog.LevelWarn, map[string]any{"terminal": buildinfo.Reported(c.terminal), "server": serverVersion}
 			}
@@ -76,7 +76,7 @@ func TestClientReportsVersionAndWarnsOnMismatch(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		received <- r.Header.Clone()
 		w.Header().Set(buildinfo.Header, "v0.5.1-ccccccc")
-		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{Subprotocols: []string{realtimeproto.ProtocolV2}})
+		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{Subprotocols: []string{realtimeproto.Protocol}})
 		if err != nil {
 			return
 		}

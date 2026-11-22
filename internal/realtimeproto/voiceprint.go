@@ -13,8 +13,10 @@ const VoiceprintRoute = "POST " + VoiceprintPath + "{name}"
 
 // VoiceprintEnrollment 是登记请求。
 type VoiceprintEnrollment struct {
-	Append bool     `json:"append"` // 补录：加进这个人原来的声纹
-	Clips  []string `json:"clips"`  // 每句一段 base64 的 PCM（TranscriptionFormat：16 kHz 单声道）
+	// Append 必填：true = 补录（加进这个人原来的声纹），false = 重新登记（覆盖原来的）。
+	// 没带（或 null）时拒绝（400），不按覆盖处理：漏了这个字段不能把这个人原来的声纹整份换掉
+	Append *bool    `json:"append"`
+	Clips  []string `json:"clips"` // 每句一段 base64 的 PCM（TranscriptionFormat：16 kHz 单声道）
 }
 
 // VoiceprintEnrollmentResult 是登记结果（给人看的诊断数字）。

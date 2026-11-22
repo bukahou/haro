@@ -17,6 +17,7 @@ import (
 	"github.com/openai/openai-go/v3/shared"
 
 	"github.com/bukahou/haro/internal/brain"
+	"github.com/bukahou/haro/internal/endpoint"
 )
 
 // OpenAIChatModel 调用 OpenAI 兼容的 Chat Completions 接口（官方 openai-go，流式）：OpenAI、Gemini、通义千问、
@@ -94,11 +95,15 @@ func NewOpenAIChatModel(options OpenAIOptions) *OpenAIChatModel {
 //   - 不认 tool_choice:"none"（实测照样调用工具）⇒ 不许调用工具的一轮不带工具（本地没有按提示词缓存计费的问题）；
 //   - 模型按需加载 ⇒ 预热时发一个最小请求；
 //   - 上下文长度、模型在显存里留多久在 Ollama 那边配（OLLAMA_CONTEXT_LENGTH、OLLAMA_KEEP_ALIVE），这个端点不收这两个参数。
-func NewOllamaChatModel(baseURL, model string, maxTokens int, options OpenAIOptions) *OpenAIChatModel {
-	options.BaseURL, options.Model, options.MaxTokens, options.APIKey = strings.TrimRight(baseURL, "/")+"/v1", model, maxTokens, ""
+func NewOllamaChatModel(baseURL, model string, maxTokens int, options OpenAIOptions) (*OpenAIChatModel, error) {
+	compatible, err := endpoint.Join(baseURL, "/v1", nil)
+	if err != nil {
+		return nil, fmt.Errorf("Ollama 的地址：%w", err)
+	}
+	options.BaseURL, options.Model, options.MaxTokens, options.APIKey = compatible, model, maxTokens, ""
 	chat := NewOpenAIChatModel(options)
 	chat.omitForbiddenTool, chat.preload = true, true
-	return chat
+	return chat, nil
 }
 
 // Warmup 按需加载模型的服务（Ollama）：发一个只要 1 个 token 的请求，让它把模型装进显存；别的服务什么都不做。
@@ -112,6 +117,7 @@ func (m *OpenAIChatModel) Warmup(ctx context.Context) error {
 }
 
 // StreamReply 流式产出文字；工具调用、用量和停下的原因在流结束时一次性产出（各家的增量格式只保证在结束时完整）。
+// 流要以 finish_reason 收尾：没有它（不管有没有 [DONE]）按流没收尾报错（和断开同一类）。
 func (m *OpenAIChatModel) StreamReply(ctx context.Context, request brain.ChatRequest) iter.Seq2[brain.ReplyDelta, error] {
 	return func(yield func(brain.ReplyDelta, error) bool) {
 		params, err := m.params(request)
@@ -148,25 +154,28 @@ func (m *OpenAIChatModel) StreamReply(ctx context.Context, request brain.ChatReq
 			return
 		}
 		usage := usageFromOpenAI(accumulated.Usage, usageSeen, thinkingChars)
-		if len(accumulated.Choices) == 0 {
-			yield(brain.ReplyDelta{Usage: usage}, fmt.Errorf("模型（%s）没有给出回答", m.model))
-			return
+		var choice openai.ChatCompletionChoice
+		if len(accumulated.Choices) > 0 {
+			choice = accumulated.Choices[0]
 		}
-		choice := accumulated.Choices[0]
 		switch choice.FinishReason {
+		case "": // 没有回答、或回答没收尾：输出数不知道
+			usage.OutputTokens, usage.Incomplete = 0, true
+			yield(brain.ReplyDelta{Usage: usage}, markUnavailable(ctx, fmt.Errorf("请求模型（%s）: %w", m.model, errStreamUnfinished)))
+		case "stop", "tool_calls", "function_call":
+			calls, err := toolCallsFromOpenAI(choice.Message.ToolCalls)
+			if err != nil {
+				yield(brain.ReplyDelta{Usage: usage}, err)
+				return
+			}
+			yield(brain.ReplyDelta{ToolCalls: calls, Usage: usage, Stop: brain.StopCompleted}, nil)
 		case "length": // 截断：不交出工具调用（写到一半的参数不完整）
 			yield(brain.ReplyDelta{Usage: usage, Stop: brain.StopMaxTokens}, nil)
-			return
 		case "content_filter":
 			yield(brain.ReplyDelta{Usage: usage}, &RefusalError{Category: "content_filter", Explanation: choice.Message.Refusal})
-			return
+		default: // 各家自己加的原因（资源不够被中止、出错……）：不当成说完
+			yield(brain.ReplyDelta{Usage: usage}, fmt.Errorf("模型（%s）停下的原因是 %s: %w", m.model, choice.FinishReason, brain.ErrStopUnknown))
 		}
-		calls, err := toolCallsFromOpenAI(choice.Message.ToolCalls)
-		if err != nil {
-			yield(brain.ReplyDelta{Usage: usage}, err)
-			return
-		}
-		yield(brain.ReplyDelta{ToolCalls: calls, Usage: usage}, nil)
 	}
 }
 

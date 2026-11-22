@@ -76,26 +76,35 @@ func (t *requestTelemetry) StreamReply(ctx context.Context, request brain.ChatRe
 		started := time.Now()
 		var usage *brain.ReplyUsage
 		var failure error
-		finish := finishStop
-		defer func() { t.record(ctx, span, started, usage, finish, failure) }()
+		stop, toolCalls := brain.StopUnknown, false
+		defer func() { t.record(ctx, span, started, usage, finishReason(stop, toolCalls), failure) }()
 		for delta, err := range t.inner.StreamReply(ctx, request) {
-			switch {
-			case err != nil:
+			if err != nil {
 				failure = err
-			case delta.Usage != nil:
+			}
+			if delta.Usage != nil { // 出错、被打断时那一段也带着知道的用量
 				usage = delta.Usage
 			}
-			if len(delta.ToolCalls) > 0 {
-				finish = finishToolCalls
-			}
-			if delta.Stop == brain.StopMaxTokens {
-				finish = finishLength
-			}
+			toolCalls = toolCalls || len(delta.ToolCalls) > 0
+			stop = delta.Stop
 			if !yield(delta, err) || err != nil {
 				return
 			}
 		}
 	}
+}
+
+// finishReason 是这次请求为什么停（gen_ai.response.finish_reasons 的写法）；不知道时为空，不记。
+func finishReason(stop brain.StopReason, toolCalls bool) string {
+	switch {
+	case stop == brain.StopMaxTokens:
+		return finishLength
+	case stop == brain.StopCompleted && toolCalls:
+		return finishToolCalls
+	case stop == brain.StopCompleted:
+		return finishStop
+	}
+	return ""
 }
 
 // record 把这次请求记进 span 和指标。
@@ -112,15 +121,17 @@ func (t *requestTelemetry) record(ctx context.Context, span trace.Span, started 
 		span.SetStatus(codes.Error, failure.Error())
 		span.SetAttributes(semconv.ErrorTypeKey.String(errorType))
 		attrs = append(attrs, operationDuration.AttrErrorType(genaiconv.ErrorTypeAttr(errorType)))
-	case failure == nil:
+	case failure == nil && finish != "":
 		span.SetAttributes(semconv.GenAIResponseFinishReasons(finish))
 	}
-	if usage != nil {
-		span.SetAttributes(semconv.GenAIUsageInputTokens(usage.PromptTokens), semconv.GenAIUsageOutputTokens(usage.OutputTokens),
-			semconv.GenAIUsageCacheReadInputTokens(usage.CacheReadTokens),
+	model := tokenUsage.AttrRequestModel(t.model)
+	if usage.InputKnown() { // 不知道的 token 数不写、不进指标（不编成 0）
+		span.SetAttributes(semconv.GenAIUsageInputTokens(usage.PromptTokens), semconv.GenAIUsageCacheReadInputTokens(usage.CacheReadTokens),
 			semconv.GenAIUsageCacheCreationInputTokens(usage.CacheWriteTokens))
-		model := tokenUsage.AttrRequestModel(t.model)
 		tokenUsage.Record(ctx, int64(usage.PromptTokens), genaiconv.OperationNameChat, t.provider, genaiconv.TokenTypeInput, model)
+	}
+	if usage.OutputKnown() {
+		span.SetAttributes(semconv.GenAIUsageOutputTokens(usage.OutputTokens))
 		tokenUsage.Record(ctx, int64(usage.OutputTokens), genaiconv.OperationNameChat, t.provider, genaiconv.TokenTypeOutput, model)
 	}
 	operationDuration.Record(ctx, time.Since(started).Seconds(), genaiconv.OperationNameChat, t.provider, attrs...)

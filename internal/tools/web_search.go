@@ -18,21 +18,30 @@ import (
 
 // WebSearcher 是联网搜索的能力（v5 E3）：主对话的快查（R1）与后台调查共用。
 // 现在的实现是 Tavily（经它的官方远程 MCP）；换 Exa 等只要新写一个实现。
+// 记账由实现用调用方给的 record 记：每真的发出一次请求（重试时每次各算）记一笔，不管成没成功——
+// 请求到了服务商那边就可能已经扣了积分；没拿到结果的标不完整。只有实现知道一次调用发出了几次请求。
 type WebSearcher interface {
 	// Search 搜一次，返回给模型看的结果文字（标题、网址、摘要）。
-	Search(ctx context.Context, query string, maxResults int) (string, error)
+	Search(ctx context.Context, query string, maxResults int, record SearchRecorder) (string, error)
 	// ReadPages 抓几个网页的正文；每页最多 maxRunesPerPage 字（R2：读得越多 token 越贵）。
 	// focus 是要找的内容（调查的问题）：不空时优先给出和它相关的段落，而不是网页开头（长网页、PDF 很有用）。
-	ReadPages(ctx context.Context, urls []string, maxRunesPerPage int, focus string) (string, error)
-	// SearchCredits / ReadCredits 是一次调用要用的积分（记账、查额度用）。
+	ReadPages(ctx context.Context, urls []string, maxRunesPerPage int, focus string, record SearchRecorder) (string, error)
+	// SearchCredits / ReadCredits 是一次请求要用的积分（记账、查额度用）。
 	SearchCredits() int
 	ReadCredits(pages int) int
+}
+
+// SearchRecorder 记下发出去的一次搜索请求（由 spending 实现）。
+type SearchRecorder interface {
+	// RecordSearch 记一笔：credits 是这次请求要用的积分；incomplete = 这次没拿到结果（出错、被打断：服务商扣没扣不知道，
+	// 照记、标不完整）。ctx 被取消了也要记上（实现自己不跟着取消）。
+	RecordSearch(ctx context.Context, credits int, incomplete bool) error
 }
 
 // SearchMeter 管搜索的额度与记账（由 spending 实现；按用途分开：快查 / 后台调查）。
 type SearchMeter interface {
 	AllowSearch(ctx context.Context, credits int) error
-	RecordSearch(ctx context.Context, credits int) error
+	SearchRecorder
 }
 
 // TavilyName 是联网搜索服务商的名字（MCP 连接的名字，也是记账时这笔花费的名目）。
@@ -94,7 +103,8 @@ func (t *TavilySearcher) drop(server *MCPServer) {
 }
 
 // call 调用一个 Tavily 工具。连接出问题（不是 Tavily 说这次调用有错）时丢掉会话、重连再试一次。
-func (t *TavilySearcher) call(ctx context.Context, name string, arguments map[string]any) (string, error) {
+// 每发出一次请求用 record 记一笔 credits 积分（没拿到结果的标不完整）；连都没连上时请求没发出去，不记。
+func (t *TavilySearcher) call(ctx context.Context, name string, arguments map[string]any, credits int, record SearchRecorder) (string, error) {
 	retry := retrypolicy.NewBuilder[string]().WithMaxRetries(1).
 		HandleIf(func(_ string, err error) bool {
 			var toolErr *ToolError
@@ -106,6 +116,10 @@ func (t *TavilySearcher) call(ctx context.Context, name string, arguments map[st
 			return "", fmt.Errorf("连不上 Tavily: %w", err)
 		}
 		text, err := server.CallKnown(ctx, name, arguments)
+		// 写不进时由计量那边留着补写，补写成功之前不放行有上限的搜索（spending.WithBookkeeping）
+		if recordErr := record.RecordSearch(ctx, credits, err != nil); recordErr != nil {
+			t.logger.Warn("搜索用量没写进账本", "err", recordErr, "credits", credits, "incomplete", err != nil)
+		}
 		var toolErr *ToolError
 		if err != nil && !errors.As(err, &toolErr) && ctx.Err() == nil {
 			t.drop(server)
@@ -115,9 +129,10 @@ func (t *TavilySearcher) call(ctx context.Context, name string, arguments map[st
 }
 
 // Search 基础深度、不带网页全文（快）。只留标题、网址、摘要给模型（request_id、图片等杂项去掉，省 token）。
-func (t *TavilySearcher) Search(ctx context.Context, query string, maxResults int) (string, error) {
+func (t *TavilySearcher) Search(ctx context.Context, query string, maxResults int, record SearchRecorder) (string, error) {
 	text, err := t.call(ctx, "tavily_search", map[string]any{
-		"query": query, "max_results": maxResults, "search_depth": "basic", "include_raw_content": false})
+		"query": query, "max_results": maxResults, "search_depth": "basic", "include_raw_content": false},
+		t.SearchCredits(), record)
 	if err != nil {
 		return "", err
 	}
@@ -145,12 +160,12 @@ func (t *TavilySearcher) Search(ctx context.Context, query string, maxResults in
 
 // ReadPages 基础深度抓正文，每页单独截到 maxRunesPerPage 字（不会因为第一页太长把后面的挤掉）。
 // focus 交给 Tavily 的 query 参数，按相关度挑段落（2026-11-17 实测：21 页的考场空席 PDF，只取开头 2,000 字只看得到一个考场）。
-func (t *TavilySearcher) ReadPages(ctx context.Context, urls []string, maxRunesPerPage int, focus string) (string, error) {
+func (t *TavilySearcher) ReadPages(ctx context.Context, urls []string, maxRunesPerPage int, focus string, record SearchRecorder) (string, error) {
 	arguments := map[string]any{"urls": urls, "extract_depth": "basic"}
 	if focus != "" {
 		arguments["query"] = focus
 	}
-	text, err := t.call(ctx, "tavily_extract", arguments)
+	text, err := t.call(ctx, "tavily_extract", arguments, t.ReadCredits(len(urls)), record)
 	if err != nil {
 		return "", err
 	}
@@ -212,10 +227,13 @@ const (
 	quickSearchMaxRunes = 3000
 )
 
-// WebSearchTools 是主对话里的快查（web_search）：先查额度、搜一次、成功后记账（见 QuickSearch）。
+// WebSearchTool 是主对话里快查工具的名字（别的工具的说明里提到它时引用这里）。
+const WebSearchTool = "web_search"
+
+// WebSearchTools 是主对话里的快查（web_search）：先查额度、搜一次，发出去的请求都记账（见 QuickSearch）。
 func WebSearchTools(searcher WebSearcher, meter SearchMeter, logger *slog.Logger) Builtin {
 	return func(server *mcp.Server) {
-		AddTextTool(server, &mcp.Tool{Name: "web_search", Annotations: ReadOnly,
+		AddTextTool(server, &mcp.Tool{Name: WebSearchTool, Annotations: ReadOnly,
 			Description: "联网搜索一次，查实时或最新的事实（新闻、价格、比分、营业时间、某件事的最新进展等）。" +
 				"你不确定、或者信息可能过时的时候用它，不要凭记忆回答。搜一次就能答的问题用它。"},
 			func(ctx context.Context, in webSearchInput) (string, error) {
@@ -231,21 +249,17 @@ type webSearchInput struct {
 	Query string `json:"query" jsonschema:"搜索词，简洁具体，例如「日经平均 今日 終値」"`
 }
 
-// QuickSearch 是一次快查（最多 quickSearchResults 条、截到 quickSearchMaxRunes 字）：先查额度、搜索、成功后记账。
+// QuickSearch 是一次快查（最多 quickSearchResults 条、截到 quickSearchMaxRunes 字）：先查额度再搜；
+// 发出去的每次请求不管成没成功都记账（搜索那一层记，见 WebSearcher）。
 // 主对话的 web_search 和看画面的专家都用它，额度算在同一处。
 func QuickSearch(ctx context.Context, searcher WebSearcher, meter SearchMeter, query string, logger *slog.Logger) (string, error) {
-	credits := searcher.SearchCredits()
-	if err := meter.AllowSearch(ctx, credits); err != nil {
+	if err := meter.AllowSearch(ctx, searcher.SearchCredits()); err != nil {
 		return "", err
 	}
-	text, err := searcher.Search(ctx, query, quickSearchResults)
+	text, err := searcher.Search(ctx, query, quickSearchResults, meter)
 	logger.Info("联网搜索", "query", query, "chars", utf8.RuneCountInString(text), "err", err)
 	if err != nil {
 		return "", err
-	}
-	// 写不进时由计量那边留着补写，补写成功之前不放行有上限的搜索（spending.WithBookkeeping）
-	if err := meter.RecordSearch(context.WithoutCancel(ctx), credits); err != nil {
-		logger.Warn("搜索用量没写进账本", "err", err, "credits", credits)
 	}
 	return truncateRunes(text, quickSearchMaxRunes), nil
 }

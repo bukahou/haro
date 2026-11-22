@@ -3,6 +3,7 @@ package audio
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -46,7 +47,7 @@ func (m *Microphone) OpenStream(ctx context.Context) (assistant.MicrophoneStream
 	if err != nil {
 		return nil, err
 	}
-	stream := &micStream{backend: m.backend, chunks: make(chan realtimeproto.PCMAudio, micQueueChunks),
+	stream := &micStream{backend: m.backend, logger: m.backend.logger, chunks: make(chan realtimeproto.PCMAudio, micQueueChunks),
 		done: make(chan struct{})}
 	pointer, release := cDeviceID(id)
 	stream.release = release
@@ -77,6 +78,7 @@ func (m *Microphone) OpenStream(ctx context.Context) (assistant.MicrophoneStream
 
 type micStream struct {
 	backend *Backend
+	logger  *slog.Logger
 	device  *malgo.Device
 	release func()
 	chunks  chan realtimeproto.PCMAudio
@@ -84,11 +86,13 @@ type micStream struct {
 
 	mu        sync.Mutex
 	assembler chunkAssembler
+	dropped   int // 上层跟不上时丢掉、还没记进日志的块数
 	closed    bool
 	closeOnce sync.Once
 }
 
 // receive 在音频线程里被调用：攒成 20 ms 一块送出去（input 指向 C 内存，必须复制）。
+// 上层跟不上时丢掉、计数，下一块送得出去（或麦克风关掉）时记一行一共丢了多少。
 func (s *micStream) receive(input []byte) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -98,9 +102,22 @@ func (s *micStream) receive(input []byte) {
 	for _, chunk := range s.assembler.push(input) {
 		select {
 		case s.chunks <- realtimeproto.PCMAudio{Format: MicrophoneFormat, Data: chunk}:
+			s.reportDroppedLocked("上层又跟上了")
 		default: // 上层跟不上：丢掉，绝不阻塞音频线程
+			s.dropped++
 		}
 	}
+}
+
+// reportDroppedLocked 把攒下的丢块数记一行日志（另起 goroutine 写，不在音频线程里等日志的输出）。调用方持有 s.mu。
+func (s *micStream) reportDroppedLocked(when string) {
+	if s.dropped == 0 {
+		return
+	}
+	chunks := s.dropped
+	s.dropped = 0
+	go s.logger.Warn("🎤 上层跟不上：丢掉了一段麦克风的音频（这段时间说的话服务端听不到）", "chunks", chunks,
+		"duration", time.Duration(chunks)*micChunk, "when", when)
 }
 
 // deviceStopped：设备停了（被拔掉，或我们自己关的）⇒ 关闭 Chunks，上层就知道麦克风没了。
@@ -111,6 +128,7 @@ func (s *micStream) finish() {
 	defer s.mu.Unlock()
 	if !s.closed {
 		s.closed = true
+		s.reportDroppedLocked("麦克风关了")
 		close(s.chunks)
 	}
 }

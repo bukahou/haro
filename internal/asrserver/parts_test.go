@@ -280,10 +280,7 @@ func TestTruncatedUtteranceIsLogged(t *testing.T) {
 	}
 	conn, ctx := dialRealtimeWith(t, Dependencies{Transcriber: transcriber, Timing: timing, Logger: slog.New(logs),
 		NewVoiceDetector: factory})
-	turn := realtimeproto.TurnDetection{Type: "server_vad", SilenceDurationMs: 300}
-	if err := writeClientEvent(ctx, conn, transcriptionUpdate(turn, false)); err != nil {
-		t.Fatal(err)
-	}
+	startSession(t, ctx, conn, realtimeproto.TurnDetection{Type: "server_vad", SilenceDurationMs: 300}, false)
 	sendPattern(t, ctx, conn, [2]int{200, 0}, [2]int{1500, 1}, [2]int{400, 0}) // 一句 1.5 s，只保留 0.5 s（最多 0.75 s）
 	if _, ok := readEvents(t, ctx, conn, 3)[2].(realtimeproto.InputAudioTranscriptionCompleted); !ok {
 		t.Fatal("剩下的部分照样识别")
@@ -304,9 +301,7 @@ func TestSemanticVADStopsMergingAtLimit(t *testing.T) {
 	transcriber := &lengthTranscriber{}
 	conn, ctx := dialRealtimeWith(t, Dependencies{Transcriber: transcriber, Timing: timing, TurnDetector: turnDetector,
 		NewVoiceDetector: semanticFactory(t)})
-	if err := writeClientEvent(ctx, conn, transcriptionUpdate(realtimeproto.TurnDetection{Type: "semantic_vad", Eagerness: "auto"}, false)); err != nil {
-		t.Fatal(err)
-	}
+	startSession(t, ctx, conn, realtimeproto.TurnDetection{Type: "semantic_vad", Eagerness: "auto"}, false)
 	// 0.2s 静音 → 0.6s 说话 → 0.4s 停顿（没说完，等接着说）→ 0.6s 说话（并起来 1.6s，到了上限）→ 0.4s 静音
 	sendPattern(t, ctx, conn, [2]int{200, 0}, [2]int{600, 1}, [2]int{400, 0}, [2]int{600, 1}, [2]int{400, 0})
 	events := readEvents(t, ctx, conn, 3)
@@ -348,10 +343,7 @@ func TestWakeOnlyWaitComesFromTiming(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { conn.CloseNow() })
-	turn := realtimeproto.TurnDetection{Type: "server_vad", SilenceDurationMs: 300}
-	if err := writeClientEvent(ctx, conn, transcriptionUpdate(turn, true)); err != nil {
-		t.Fatal(err)
-	}
+	startSession(t, ctx, conn, realtimeproto.TurnDetection{Type: "server_vad", SilenceDurationMs: 300}, true)
 	sendKeyword(t, ctx, conn)
 	sendPattern(t, ctx, conn, [2]int{300, 0}) // 比注入的 200 ms 长、比默认的 1 s 短
 	events := readEvents(t, ctx, conn, 4)

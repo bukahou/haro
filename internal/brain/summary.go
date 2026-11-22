@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"unicode/utf8"
 )
@@ -42,10 +43,10 @@ func (b *ConversationBook) summarizer() *Agent {
 	return b.summaryAgent
 }
 
-// maybeSummarize 在掉出窗口的对话攒够一批、且这份对话没有正在压缩时，在后台压一次。
+// maybeSummarize 在掉出窗口的对话攒够一批、且这份对话没有正在压缩时，在后台压一次（不写盘的对话不压）。
 func (b *ConversationBook) maybeSummarize(c *Conversation) {
 	agent := b.summarizer()
-	if agent == nil {
+	if agent == nil || c.detached {
 		return
 	}
 	c.mu.Lock()
@@ -68,7 +69,9 @@ func (b *ConversationBook) maybeSummarize(c *Conversation) {
 		c.summarizing = false
 		if err == nil && summary != "" {
 			c.summary = summary
-			c.unsummarized = c.unsummarized[len(batch):] // 压缩期间又掉出来的留到下一批
+			// 按编号去掉压进去的：压缩期间又掉出来的留到下一批；攒得太多时最早的几轮已经被丢掉（trimLocked），按位置去会去错
+			last := batch[len(batch)-1].Seq
+			c.unsummarized = slices.DeleteFunc(c.unsummarized, func(turn ConversationTurn) bool { return turn.Seq <= last })
 		}
 		c.mu.Unlock()
 		if err != nil || summary == "" {

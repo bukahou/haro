@@ -1,6 +1,7 @@
 // Package tools 把大脑能用的工具汇总成一个 Toolbox：内置工具注册在进程内的 MCP 服务上（经内存连接调用），
 // 第三方的是远程 MCP 服务；对模型只有一份工具清单。每个内置工具的参数、结果都是结构体（AddTool），
-// 定义由结构体生成、调用前校验；每个工具标注只读 / 会改数据 / 会破坏，确认闸只看「会破坏」。
+// 定义由结构体生成、调用前校验；每个工具标注只读 / 会改数据 / 会破坏，确认闸只看「会破坏」：
+// 会破坏的工具执行时还要带着主人的确认（brain.Confirmation），工具箱自己核对。
 package tools
 
 import (
@@ -18,7 +19,10 @@ import (
 type Toolbox struct {
 	specs   []brain.ToolSpec
 	callers map[string]toolCaller // 工具名 → 由谁执行（进程内的服务、某个远程服务）
-	servers []*MCPServer          // 关停时要断开的
+	// confirmed：会破坏的工具（RequiresConfirmation）。执行方自己守门：调用时见不到主人对它的确认
+	// （brain.RequireConfirmation）就拒绝，不假设上游已经问过主人
+	confirmed map[string]bool
+	servers   []*MCPServer // 关停时要断开的
 }
 
 // toolCaller 执行一个工具调用（进程内的服务要额外经元数据带上说话人等）。
@@ -29,7 +33,7 @@ type toolCaller interface {
 // NewToolbox 建进程内的工具服务（内置工具），汇总工具清单。起不来、或者工具重名，就失败。ctx 是服务端的运行期。
 // 远程的第三方 MCP 服务现在没有接：要接时在这里按 ServerSpec 连上并 add（重名检查照样生效）。
 func NewToolbox(ctx context.Context, logger *slog.Logger, builtins ...Builtin) (*Toolbox, error) {
-	box := &Toolbox{callers: map[string]toolCaller{}}
+	box := &Toolbox{callers: map[string]toolCaller{}, confirmed: map[string]bool{}}
 	builtin, err := startBuiltinServer(ctx, builtins, logger)
 	if err != nil {
 		return nil, err
@@ -52,9 +56,11 @@ func (b *Toolbox) add(server *MCPServer, caller toolCaller) error {
 		if err != nil {
 			return fmt.Errorf("%s 的工具 %s 参数格式有误: %w", server.name, tool.Name, err)
 		}
-		b.specs = append(b.specs, brain.ToolSpec{Name: tool.Name, Description: tool.Description,
-			Parameters: parameters, RequiresConfirmation: requiresConfirmation(tool.Annotations)})
+		spec := brain.ToolSpec{Name: tool.Name, Description: tool.Description, Parameters: parameters,
+			RequiresConfirmation: requiresConfirmation(tool.Annotations)}
+		b.specs = append(b.specs, spec)
 		b.callers[tool.Name] = caller
+		b.confirmed[tool.Name] = spec.RequiresConfirmation
 	}
 	return nil
 }
@@ -73,11 +79,17 @@ func requiresConfirmation(annotations *mcp.ToolAnnotations) bool {
 // Specs 返回全部工具。
 func (b *Toolbox) Specs() []brain.ToolSpec { return b.specs }
 
-// Call 执行一次调用。
+// Call 执行一次调用。会破坏的工具要 ctx 里带着主人对它的确认（brain.WithConfirmation），没有就不执行、交回
+// brain.ErrNotConfirmed：不管调用来自哪个入口（会话、以后的手机入口、后台代理），都要先问过主人。
 func (b *Toolbox) Call(ctx context.Context, call brain.ToolCall) (string, error) {
 	caller, ok := b.callers[call.Name]
 	if !ok {
 		return "", fmt.Errorf("没有叫 %s 的工具", call.Name)
+	}
+	if b.confirmed[call.Name] {
+		if _, err := brain.RequireConfirmation(ctx, call.Name, ""); err != nil {
+			return "", err
+		}
 	}
 	return caller.call(ctx, call.Name, call.Arguments)
 }

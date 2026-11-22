@@ -451,6 +451,9 @@ func TestSystemPromptListsOnlyOfferedTools(t *testing.T) {
 	k.say("你好")
 	request := model.LastRequest()
 	for _, name := range everyTool {
+		if name == "confirm_action" || name == "cancel_action" { // 提供了也不写进系统提示词：见 TestConfirmationToolsStayOutOfSystemPrompt
+			continue
+		}
 		offered := slices.Contains(request.ToolNames(), name)
 		if strings.Contains(request.System(), name) != offered {
 			t.Errorf("%s：提供了 %v，但系统提示词里出现 %v", name, offered, !offered)
@@ -458,15 +461,32 @@ func TestSystemPromptListsOnlyOfferedTools(t *testing.T) {
 	}
 }
 
-// 只在待确认时才出现的确认、取消：工具里有，但不写进系统提示词（免得提示词跟着变）。
+// 前台的允许名单（覆盖目录里给前台写了 tools:）：系统提示词里的工具介绍按交给前台的清单列，没给它的不出现。
+func TestToolOverviewFollowsFrontAllowList(t *testing.T) {
+	model := braintest.NewModel(t, braintest.Say("好的。"))
+	k := newTalker(t, brain.Components{Front: brain.Agent{Model: model, Instructions: "基础规则。", Tools: []string{"search_notes"}},
+		Synthesizer: fakeSynthesizer{}, Tools: &fakeToolbox{}}, brain.Options{MaxHistoryTurn: 6})
+	k.say("你好")
+	request := model.LastRequest()
+	if names := request.ToolNames(); !slices.Equal(names, []string{"search_notes"}) {
+		t.Fatalf("只交给前台它名单里的工具：%v", names)
+	}
+	if overview := brain.ToolOverview([]brain.ToolSpec{{Name: "search_notes"}}); !strings.Contains(request.System(), overview) ||
+		strings.Contains(request.System(), "delete_note") {
+		t.Errorf("工具介绍只列交给前台的：\n%s", request.System())
+	}
+}
+
+// 确认、取消：有会破坏的工具时一直在工具里（还没有待确认的操作时也在），但不写进系统提示词（用法在它们自己的说明里）。
 func TestConfirmationToolsStayOutOfSystemPrompt(t *testing.T) {
 	model := braintest.NewModel(t, deleteNoteThree, braintest.Say("要删掉 3 号吗？"), braintest.Say("嗯？"))
 	k := newGateTalker(t, model, &fakeToolbox{}, time.Minute)
 	k.owner("把 3 号记事删了")
 	k.owner("你说什么")
-	request := model.LastRequest()
-	if !slices.Contains(request.ToolNames(), "confirm_action") || strings.Contains(request.System(), "confirm_action") {
-		t.Errorf("确认工具应在工具里、不在系统提示词里：%v\n%s", request.ToolNames(), request.System())
+	for i, request := range model.Requests() {
+		if !slices.Contains(request.ToolNames(), "confirm_action") || strings.Contains(request.System(), "confirm_action") {
+			t.Errorf("第 %d 次请求：确认工具应在工具里、不在系统提示词里：%v\n%s", i+1, request.ToolNames(), request.System())
+		}
 	}
 }
 

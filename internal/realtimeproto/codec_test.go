@@ -55,15 +55,20 @@ func TestClientWireShape(t *testing.T) {
 
 func TestServerEventsRoundTrip(t *testing.T) {
 	events := []ServerEvent{
+		SessionUpdated{Session: SessionUpdate{Kind: SessionTranscription, InputFormat: input16k, WakeWord: true,
+			TurnDetection: &TurnDetection{Type: "semantic_vad", Eagerness: "low"}}}, // haro-asr → 服务端：接受了设置
 		InputAudioBufferSpeechStarted{AudioStartMs: 1200, ItemID: "item_1"},
 		InputAudioBufferSpeechStopped{AudioEndMs: 3400, ItemID: "item_1"},
 		InputAudioTranscriptionCompleted{ItemID: "item_1", Transcript: "讲个冷笑话"},
 		InputAudioTranscriptionCompleted{ItemID: "item_2", Transcript: "你是谁", Speaker: "主人", SpeakerChecked: true},
 		InputAudioTranscriptionCompleted{ItemID: "item_3", Transcript: "别理我", SpeakerChecked: true},
+		InputAudioTranscriptionCompleted{ItemID: "item_3", Transcript: "嗯", SpeakerCheckFailed: true}, // 开着声纹、这句算不出来
 		InputAudioTranscriptionCompleted{ItemID: "item_4", Transcript: "哈罗哈罗，在吗", SpeakerChecked: true, SpeakerTentative: "主人",
 			Language: "zh", Wake: true, BargeIn: true, AudioMs: 1500},
 		InputAudioTranscriptionFailed{ItemID: "item_4", Code: CodeTranscriptionFailed, Message: "识别失败"},
 		HaroWakeWordDetected{Keyword: "哈罗哈罗", AudioMs: 900, Score: 0.62, Level: 0.03},
+		HaroWakeWordState{Awake: true},
+		HaroWakeWordState{},
 		HaroNotice{Kind: NoticeResearchDone},
 		ResponseOutputAudioTranscriptDelta{Delta: "为什么数学老师离婚了？"},
 		ResponseOutputAudioDelta{Audio: PCMAudio{Format: AudioFormat{SampleRate: 32000, Channels: 1}, Data: []byte{9, 8, 7, 6}}},
@@ -109,6 +114,64 @@ func TestErrorWireShape(t *testing.T) {
 	}
 }
 
+// 取事件名只读到顶层的 type 为止（整条消息只由各事件自己的解码完整解析一次）：type 后面就算不完整也读得出名字；
+// type 不在最前面时跳过前面的值；没有 type 为空；不是对象、type 不是字符串的报 invalid_event。
+func TestEventTypeReadsOnlyUpToType(t *testing.T) {
+	for data, want := range map[string]string{
+		`{"type":"response.create",`: "response.create", // 后面没读
+		`{"audio":"AAAA","nested":{"type":"x"},"type":"input_audio_buffer.append"}`: "input_audio_buffer.append",
+		`{"audio":"AAAA"}`:        "",
+		`{"type":"a","type":"b"}`: "a", // 和 json.Unmarshal 一样放过重名
+	} {
+		if got, err := EventType([]byte(data)); err != nil || got != want {
+			t.Errorf("EventType(%s) = %q, %v；应为 %q", data, got, err, want)
+		}
+	}
+	for _, data := range []string{`[]`, `"type"`, `{"type":5}`, `{"type":`, ``} {
+		if _, err := EventType([]byte(data)); !hasCode(err, CodeInvalidEvent) {
+			t.Errorf("EventType(%s) 应报 invalid_event：%v", data, err)
+		}
+	}
+	// 整条消息由事件自己的解码完整解析：没有内容的事件也一样，不完整的照样拒绝
+	if _, err := DecodeClientEvent([]byte(`{"type":"response.create",`), input16k); !hasCode(err, CodeInvalidEvent) {
+		t.Errorf("不完整的消息应拒绝：%v", err)
+	}
+}
+
+func hasCode(err error, code ErrorCode) bool {
+	protocolErr, ok := errors.AsType[*ProtocolError](err)
+	return ok && protocolErr.Code == code
+}
+
+// 声纹的三种结果只能是一种：算不出来（speaker_check_failed）时还说比对过、认出了谁，编码和解码都拒绝。
+func TestSpeakerCheckFailedIsExclusive(t *testing.T) {
+	for _, event := range []InputAudioTranscriptionCompleted{
+		{ItemID: "item_1", SpeakerCheckFailed: true, SpeakerChecked: true},
+		{ItemID: "item_1", SpeakerCheckFailed: true, Speaker: "主人"},
+	} {
+		if _, err := EncodeServerEvent(event); err == nil {
+			t.Errorf("矛盾的声纹结果不应编码出去：%+v", event)
+		}
+	}
+	data := []byte(`{"type":"conversation.item.input_audio_transcription.completed","item_id":"item_1","transcript":"嗯",` +
+		`"haro":{"speaker":"主人","speaker_checked":true,"speaker_check_failed":true}}`)
+	if _, err := DecodeServerEvent(data); err == nil {
+		t.Errorf("矛盾的声纹结果应解码失败：%s", data)
+	}
+}
+
+// 对端自己的问题（server_error 类）过一会儿再试可能就好；请求类的码原样再发也一样被拒。没有码的按 server_error。
+func TestErrorCodeServerSide(t *testing.T) {
+	for code, want := range map[ErrorCode]bool{
+		CodeServerError: true, CodeTranscriptionFailed: true, CodeTooManySessions: true, "": true,
+		CodeUnsupportedFeature: false, CodeInvalidEvent: false, CodeUnsupportedAudioFormat: false,
+	} {
+		if got := code.ServerSide(); got != want {
+			t.Errorf("%q.ServerSide() = %v，应为 %v", code, got, want)
+		}
+	}
+}
+
 // 官方实现发的 delta 没有 haro 扩展字段：按官方默认 24 kHz 单声道。
 func TestAudioDeltaWithoutHaroFormat(t *testing.T) {
 	event, err := DecodeServerEvent([]byte(`{"type":"response.output_audio.delta","delta":"AQI="}`))
@@ -147,6 +210,12 @@ func TestDecodeClientEventErrorCodes(t *testing.T) {
 			`"turn_detection":null}}}}`, input16k, CodeUnsupportedAudioFormat},
 		{"不认识的会话种类", `{"type":"session.update","session":{"type":"translation","audio":{"input":{"turn_detection":null}}}}`,
 			input16k, CodeInvalidEvent},
+		// 截断会改写历史：缺字段不能当成 0 去执行；haro 不发回答的 item_id，填了就是要截别的回答
+		{"截断没给 audio_end_ms", `{"type":"conversation.item.truncate","content_index":0}`, input16k, CodeInvalidEvent},
+		{"截断的 audio_end_ms 是 null", `{"type":"conversation.item.truncate","content_index":0,"audio_end_ms":null}`, input16k, CodeInvalidEvent},
+		{"截断的 audio_end_ms 是负数", `{"type":"conversation.item.truncate","content_index":0,"audio_end_ms":-1}`, input16k, CodeInvalidEvent},
+		{"截断带 item_id", `{"type":"conversation.item.truncate","item_id":"item_7","content_index":0,"audio_end_ms":1200}`,
+			input16k, CodeInvalidEvent},
 	}
 	for _, c := range cases {
 		_, err := DecodeClientEvent([]byte(c.data), c.input)
@@ -154,6 +223,17 @@ func TestDecodeClientEventErrorCodes(t *testing.T) {
 		if !ok || protocolErr.Code != c.code {
 			t.Errorf("%s：应返回错误码 %s，得到 %v", c.name, c.code, err)
 		}
+	}
+}
+
+// 截断：audio_end_ms 是 0（还没说出口就被打断）照常收下；编码时负数直接报错，不发出去等对端拒绝。
+func TestItemTruncateAcceptsZeroAndRejectsNegativeOnEncode(t *testing.T) {
+	event, err := DecodeClientEvent([]byte(`{"type":"conversation.item.truncate","content_index":0,"audio_end_ms":0}`), input16k)
+	if err != nil || event != (ConversationItemTruncate{AudioEndMs: 0}) {
+		t.Errorf("audio_end_ms=0 应照常收下：%#v %v", event, err)
+	}
+	if _, err := EncodeClientEvent(ConversationItemTruncate{AudioEndMs: -5}); err == nil {
+		t.Error("负的 audio_end_ms 编码时就应报错")
 	}
 }
 

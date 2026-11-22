@@ -16,7 +16,8 @@ import (
 // ChatModel 根据完整的消息列表（系统提示词 + 历史 + 本轮输入 + 工具往来）流式给出回答。
 type ChatModel interface {
 	// StreamReply 逐段产出可见文字与工具调用；调用方 range 拉取，提前 break 即中止生成。
-	// 最后一段带 Usage 和 Stop（为什么停下）；出错时那一段带知道的那部分用量。
+	// 流只有两种结束：最后一段带 Usage 和 Stop（为什么停下，不是 StopUnknown），或者出错（那一段带知道的那部分用量）。
+	// 连接正常关掉却没收到厂商约定的结束标志，适配层按出错交出，不当成说完。
 	StreamReply(ctx context.Context, request ChatRequest) iter.Seq2[ReplyDelta, error]
 }
 
@@ -48,14 +49,20 @@ func WarmUp(ctx context.Context, model ChatModel) error {
 	return nil
 }
 
-// StopReason 是模型这次为什么停下。
+// StopReason 是模型这次为什么停下。零值是「不知道」：没说为什么停的流不当成说完了。
 type StopReason int
 
 const (
-	StopCompleted StopReason = iota // 说完了，或停下来等工具的结果
-	// StopMaxTokens：输出到了上限，被截断。截断时适配不交出工具调用（参数可能不完整）
+	// StopUnknown：不知道为什么停（流结束了，最后一段却没交出原因）。大脑和 CollectReply 按失败处理（ErrStopUnknown）
+	StopUnknown   StopReason = iota
+	StopCompleted            // 说完了，或停下来等工具的结果
+	// StopMaxTokens：输出到了上限（或上下文满了），被截断。截断时适配不交出工具调用（参数可能不完整）
 	StopMaxTokens
 )
+
+// ErrStopUnknown 表示模型的流结束了，却没说为什么停（StopUnknown），或者给的原因认不出：不当成说完，
+// 说了一半的回答、写了一半的摘要都不能当完整的用。
+var ErrStopUnknown = errors.New("模型没说为什么停下，不当成说完")
 
 // TerminalCamera 是终端经 MCP 提供的摄像头（每条终端连接一个，由连接层注入）。
 type TerminalCamera interface {
@@ -214,7 +221,7 @@ type ReplyDelta struct {
 	Text      string      // 新增的可见文字（可能为空）
 	ToolCalls []ToolCall  // 模型要求调用的工具（可能为空）
 	Usage     *ReplyUsage // 只在最后一段上有
-	Stop      StopReason  // 只在最后一段上有意义
+	Stop      StopReason  // 只在最后一段上有意义（最后一段是 StopUnknown = 没说为什么停）
 }
 
 // ToolSpec 描述一个可以给模型用的工具。
@@ -251,16 +258,22 @@ type ReplyUsage struct {
 	ThinkingChars    int // 思考内容的字数（只统计，不朗读）；用来查「看不见的输出」
 	Requests         int // 这次回答请求了模型几次（调工具时不止一次；add 累加时计数）
 	// Incomplete：请求被打断或出错，用量只知道一部分：OutputTokens 不知道（为 0，不编）；
-	// 知道多少输入取决于厂商（Claude 在流的开头就报了输入）。TokensUnknown：连输入也不知道（还没开始就失败了）
+	// 知道多少输入取决于厂商（Claude 在流的开头就报了输入）。TokensUnknown：连输入也不知道（还没开始就失败了，
+	// 或服务端不报用量）。累加时有一次不知道，合计就不知道
 	Incomplete    bool
 	TokensUnknown bool
 }
 
+// InputKnown 是知不知道输入的 token 数（含缓存读写）；OutputKnown 是知不知道输出的 token 数（请求完整结束才知道）。
+// 不知道的不往外报（回答结束的事件、观测里都不写），不编成 0。
+func (u *ReplyUsage) InputKnown() bool  { return u != nil && !u.TokensUnknown }
+func (u *ReplyUsage) OutputKnown() bool { return u.InputKnown() && !u.Incomplete }
+
 // add 把一次模型请求的用量累加进来：调工具时一次回答要请求模型好几次，每次都要计费，
-// 只记最后一次会让日志里的用量比账单少。
+// 只记最后一次会让日志里的用量比账单少。哪一次不知道（不完整），合计就不知道（不完整）。
 func (u *ReplyUsage) add(request *ReplyUsage) *ReplyUsage {
-	if request == nil {
-		return u
+	if request == nil { // 这次请求没交出用量：不知道
+		request = &ReplyUsage{TokensUnknown: true}
 	}
 	total := ReplyUsage{}
 	if u != nil {
@@ -273,6 +286,7 @@ func (u *ReplyUsage) add(request *ReplyUsage) *ReplyUsage {
 	total.ThinkingChars += request.ThinkingChars
 	total.Requests++
 	total.Incomplete = total.Incomplete || request.Incomplete
+	total.TokensUnknown = total.TokensUnknown || request.TokensUnknown
 	return &total
 }
 

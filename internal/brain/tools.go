@@ -17,7 +17,8 @@ import (
 // toolFailedPrefix 是工具出错时交给模型的结果的开头（后面接错误）。
 const toolFailedPrefix = "工具执行失败："
 
-// DefaultToolTimeout 是单次工具执行最多多久的默认值：Options.ToolTimeout 为零时用（服务端从 HARO_TOOL_TIMEOUT 读）。
+// DefaultToolTimeout 是单次工具执行最多多久的默认值：Options.ToolTimeout 为零时用（服务端没设 HARO_TOOL_TIMEOUT 时就是它，
+// 默认值只写在这里）。
 const DefaultToolTimeout = 10 * time.Second
 
 // toolTimeout 是这次会话里单次工具执行最多多久（所有工具共用，包括远程 MCP）。
@@ -52,7 +53,7 @@ var lookAtCameraSpec = ToolSpec{Name: lookAtCameraTool,
 const CameraFrameCaption = "这是摄像头当前画面。"
 
 // frameRecalledNote 是画面那条消息写进历史时的替身（历史里不存图片）。
-const frameRecalledNote = "（当时看了摄像头画面；画面不保留，现在要看需要重新调用 look_at_camera）"
+const frameRecalledNote = "（当时看了摄像头画面；画面不保留，现在要看需要重新调用 " + lookAtCameraTool + "）"
 
 // directViewNote 是画面直接交给前台看时随画面给的看图规矩。
 var directViewNote = CameraFrameCaption + "看清形状、颜色和上面的字再下判断。" +
@@ -61,19 +62,19 @@ var directViewNote = CameraFrameCaption + "看清形状、颜色和上面的字�
 	"画面里直接看到的比搜到的资料可靠，两者对不上时以画面为准，并说不确定。认东西要联网查时，搜索词用外观特征加上画面里读到的字。"
 
 // toolSpecs 返回会话这一轮提供的工具：会话自己的（看画面、换性格、交给强模型、提高上限）+ 工具箱（内置 + MCP）
-// + 有待确认的操作时的确认、取消。交给哪个代理时再按它的允许名单筛（Agent.offer）。
+// + 有会破坏的工具时的确认、取消（一直带着，见 sessionTool.gate）。交给哪个代理时再按它的允许名单筛（Agent.offer）。
 func (s *Session) toolSpecs() []ToolSpec {
 	specs := s.sessionToolSpecs(false)
 	if s.parts.Tools != nil {
 		specs = append(specs, s.parts.Tools.Specs()...)
 	}
-	return append(specs, s.sessionToolSpecs(true)...) // 确认、取消：有待确认的操作时才有
+	return append(specs, s.sessionToolSpecs(true)...)
 }
 
-// offeredTools 是系统提示词里介绍的工具：这一轮实际提供的，不含只在待确认时才出现的确认、取消（它们来来去去，
-// 写进系统提示词会让提示词跟着变；它们的用法在自己的说明里）。
+// offeredTools 是系统提示词里介绍的工具：这一轮交给前台的（按前台的允许名单筛过），不含确认、取消
+// （只在问过主人之后才用得上，用法写在它们自己的说明里）。
 func (s *Session) offeredTools() []ToolSpec {
-	specs := s.toolSpecs()
+	specs := s.parts.Front.offer(s.toolSpecs())
 	return slices.DeleteFunc(specs, func(spec ToolSpec) bool { return isGateTool(spec.Name) })
 }
 
@@ -211,9 +212,9 @@ func (look cameraLook) historyResult(spokenDirectly bool) string {
 	}
 }
 
-// callTool 执行一次工具调用，返回交给模型的结果文字；出错时把错误也交给模型，让它如实告诉用户。
+// runTool 执行一次工具调用（带说话人、这一轮的收集处和工具的期限），交回工具的结果或错误。
 // record 是这一轮的记录：工具用 OnDelivered 登记的事记在这里。
-func (s *Session) callTool(ctx context.Context, record *turnRecord, call ToolCall) string {
+func (s *Session) runTool(ctx context.Context, record *turnRecord, call ToolCall) (string, error) {
 	ctx, span := tracer.Start(ctx, "brain.tool")
 	defer span.End()
 	ctx, cancel := context.WithTimeout(WithDeliveries(WithSpeaker(ctx, s.currentConversation().Person()), record), s.toolTimeout())
@@ -224,6 +225,12 @@ func (s *Session) callTool(ctx context.Context, record *turnRecord, call ToolCal
 	recordSpanError(span, err)
 	arguments, _ := json.Marshal(call.Arguments)
 	s.logger.Info("调用工具", "tool", call.Name, "arguments", string(arguments), "elapsed", since(started), "err", err)
+	return result, err
+}
+
+// callTool 执行一次工具调用，返回交给模型的结果文字；出错时把错误也交给模型，让它如实告诉用户。
+func (s *Session) callTool(ctx context.Context, record *turnRecord, call ToolCall) string {
+	result, err := s.runTool(ctx, record, call)
 	if err != nil {
 		var spoken SpokenError
 		if errors.As(err, &spoken) { // 例如额度用完：不是暂时的，不提示重试

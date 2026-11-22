@@ -62,8 +62,17 @@ func (b blockingManual) WaitForToggle(ctx context.Context) error {
 	}
 }
 
+// sleepFailure 是休眠请求怎么失败。
+type sleepFailure int
+
+const (
+	sleepNotSent     sleepFailure = iota + 1 // 发不出去（Send 返回错误）
+	sleepNotAnswered                         // 发出去了，语音前端一直不回复
+)
+
 // wakeServer 是替身服务端，只按协议收发事件：收到第 10 块音频时发「唤醒 + 一句话」和这一轮的回答（两句的声音）；
-// 记下会话设置、休眠通知，以及之后收到的全零音频块（半双工静音）。failSleeps 是前几次休眠通知要失败。
+// 收到休眠请求时像语音前端那样回复睡着了。记下会话设置、休眠请求，以及之后收到的全零音频块（半双工静音）。
+// failSleeps 是前几次休眠请求要失败，怎么失败由 failure 决定。
 type wakeServer struct {
 	mu          sync.Mutex
 	update      realtimeproto.SessionUpdate
@@ -71,6 +80,7 @@ type wakeServer struct {
 	silentAfter int
 	sleeps      int
 	failSleeps  int
+	failure     sleepFailure
 	events      chan realtimeproto.ServerEvent
 }
 
@@ -102,8 +112,12 @@ func (s *wakeServer) Send(_ context.Context, event realtimeproto.ClientEvent) er
 		s.sleeps++
 		if s.failSleeps > 0 {
 			s.failSleeps--
-			return errors.New("通知休眠失败")
+			if s.failure == sleepNotSent {
+				return errors.New("休眠请求发不出去")
+			}
+			return nil // 发出去了，但一直没有回复
 		}
+		s.events <- realtimeproto.HaroWakeWordState{Awake: false}
 	}
 	return nil
 }
@@ -125,9 +139,19 @@ func waitForPlayed(t *testing.T, speaker *recordingSpeaker, want string, deadlin
 }
 
 func TestWakeWordConversation(t *testing.T) {
+	// 第一次休眠没成（发不出去 / 语音前端没回复）：过一个对话窗口再试，不能停在「醒着且永不到期」；
+	// 回复睡着了之后才说「我去睡觉了」
+	for _, c := range []struct {
+		name    string
+		failure sleepFailure
+	}{{"休眠请求发不出去", sleepNotSent}, {"语音前端没回复", sleepNotAnswered}} {
+		t.Run(c.name, func(t *testing.T) { runWakeWordConversation(t, c.failure) })
+	}
+}
+
+func runWakeWordConversation(t *testing.T, failure sleepFailure) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	// 第一次通知休眠失败：过一个对话窗口再试（不能停在「醒着且永不到期」）
-	server := &wakeServer{events: make(chan realtimeproto.ServerEvent, 16), failSleeps: 1}
+	server := &wakeServer{events: make(chan realtimeproto.ServerEvent, 16), failSleeps: 1, failure: failure}
 	manual := blockingManual{done: make(chan struct{})}
 	speaker := &recordingSpeaker{}
 	turn := realtimeproto.TurnDetection{Type: "server_vad"}
@@ -137,14 +161,15 @@ func TestWakeWordConversation(t *testing.T) {
 		NoticeTone:  pcm("[叮咚]"),
 		NoticeTones: map[string]realtimeproto.PCMAudio{realtimeproto.NoticeTranscriptionLost: pcm("[断开]")},
 		WakeWord: assistant.WakeWordOptions{Phrase: "哈罗哈罗", IdleTimeout: 150 * time.Millisecond,
-			SleepTone: pcm("[我去睡觉了]")}}, logger)
+			SleepTone: pcm("[我去睡觉了]")},
+		Timing: assistant.Timing{WakeConfirm: 50 * time.Millisecond}}, logger)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	runErr := make(chan error, 1)
 	go func() { runErr <- haro.Run(ctx) }()
 
-	// 唤醒后一口气说完的问题被回答；回答播完、对话窗口结束：先通知休眠，再说一声「我去睡觉了」
+	// 唤醒后一口气说完的问题被回答；回答播完、对话窗口结束：请求休眠，语音前端回复睡着了再说一声「我去睡觉了」
 	deadline := time.Now().Add(3 * time.Second)
 	want := "你旁边有一个杯子。还有键盘。[我去睡觉了]"
 	waitForPlayed(t, speaker, want, deadline, "唤醒后的问题应被回答、休眠时说一声")
@@ -154,7 +179,7 @@ func TestWakeWordConversation(t *testing.T) {
 		t.Errorf("开会话时应要求唤醒门、带上说完的判断方式：%+v", update)
 	}
 	if sleeps != 2 {
-		t.Errorf("第一次通知休眠失败后应再试一次：通知了 %d 次", sleeps)
+		t.Errorf("第一次休眠没成后应再试一次：请求了 %d 次", sleeps)
 	}
 	// 不能打断时（半双工）：从请求回答到播完后的 EchoGuard 期间都应上传静音
 	if silentChunks == 0 {

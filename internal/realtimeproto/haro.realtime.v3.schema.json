@@ -10,14 +10,15 @@
         },
         "item_id": {
           "type": "string",
-          "description": "haro 不填：截最近一次回答"
+          "description": "不填：haro 只截最近一次回答（它不发回答的 item_id），填了就拒绝（invalid_event）"
         },
         "content_index": {
           "type": "integer"
         },
         "audio_end_ms": {
           "type": "integer",
-          "description": "用户听到了回答的前多少毫秒"
+          "description": "用户听到了回答的前多少毫秒（必填；缺了或为负拒绝：invalid_event）",
+          "minimum": 0
         }
       },
       "required": [
@@ -314,6 +315,10 @@
             "speaker_checked": {
               "type": "boolean"
             },
+            "speaker_check_failed": {
+              "type": "boolean",
+              "description": "开着声纹，但这句算不出声纹（这时 speaker_checked 为 false、speaker 为空）：和没开声纹不是一回事"
+            },
             "speaker_tentative": {
               "type": "string",
               "description": "叫醒这句的声纹只过了唤醒的门槛、没确认时，像是谁"
@@ -496,6 +501,23 @@
         "type",
         "keyword",
         "audio_ms"
+      ]
+    },
+    "server.haro.wake_word.state": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "haro.wake_word.state"
+        },
+        "awake": {
+          "type": "boolean",
+          "description": "处理完请求之后醒着（true）还是睡着（false）"
+        }
+      },
+      "required": [
+        "type",
+        "awake"
       ]
     },
     "server.input_audio_buffer.speech_started": {
@@ -687,9 +709,136 @@
         "type",
         "delta"
       ]
+    },
+    "server.session.updated": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "session.updated"
+        },
+        "session": {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "description": "realtime = 对话会话（终端 ↔ 服务端）；transcription = 转写会话（服务端 ↔ haro-asr）"
+            },
+            "audio": {
+              "type": "object",
+              "properties": {
+                "input": {
+                  "type": "object",
+                  "properties": {
+                    "format": {
+                      "type": [
+                        "null",
+                        "object"
+                      ],
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "description": "audio/pcm（16 位有符号小端、单声道）"
+                        },
+                        "rate": {
+                          "type": "integer",
+                          "description": "采样率（Hz）"
+                        }
+                      },
+                      "description": "之后 input_audio_buffer.append 的音频格式；送音频之前必须声明",
+                      "required": [
+                        "type",
+                        "rate"
+                      ]
+                    },
+                    "turn_detection": {
+                      "type": [
+                        "null",
+                        "object"
+                      ],
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "description": "server_vad 或 semantic_vad"
+                        },
+                        "eagerness": {
+                          "type": "string",
+                          "description": "semantic_vad 用：low、medium、high 或 auto"
+                        },
+                        "threshold": {
+                          "type": "number",
+                          "description": "语音概率阈值，0–1"
+                        },
+                        "prefix_padding_ms": {
+                          "type": "integer",
+                          "description": "识别时带上语音开始前的这段音频（毫秒）"
+                        },
+                        "silence_duration_ms": {
+                          "type": "integer",
+                          "description": "静音持续多久算说完（毫秒）"
+                        },
+                        "create_response": {
+                          "type": [
+                            "null",
+                            "boolean"
+                          ],
+                          "description": "判定说完后服务端自己开始回答（默认 true）；false = 等客户端发 response.create"
+                        }
+                      },
+                      "description": "由服务端的 VAD 判断说话开始和结束；null = 这次不改",
+                      "required": [
+                        "type"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "turn_detection"
+                  ]
+                }
+              },
+              "required": [
+                "input"
+              ]
+            },
+            "haro": {
+              "type": [
+                "null",
+                "object"
+              ],
+              "properties": {
+                "wake_word": {
+                  "type": [
+                    "null",
+                    "object"
+                  ],
+                  "properties": {
+                    "enabled": {
+                      "type": "boolean"
+                    }
+                  },
+                  "description": "启用唤醒门：会话从休眠开始，听到唤醒词才处理用户说的话",
+                  "required": [
+                    "enabled"
+                  ]
+                }
+              },
+              "description": "haro 扩展"
+            }
+          },
+          "description": "对端接受之后的会话设置（和 session.update 的 session 同一形状）",
+          "required": [
+            "type",
+            "audio"
+          ]
+        }
+      },
+      "required": [
+        "type",
+        "session"
+      ]
     }
   },
-  "title": "haro.realtime.v2",
+  "title": "haro.realtime.v3",
   "description": "haro 的事件：终端 ↔ 服务端的对话会话、服务端 ↔ haro-asr 的转写会话。OpenAI Realtime 正式版的子集加 haro 扩展。",
   "oneOf": [
     {
@@ -744,6 +893,9 @@
       "$ref": "#/$defs/server.haro.wake_word.detected"
     },
     {
+      "$ref": "#/$defs/server.haro.wake_word.state"
+    },
+    {
       "$ref": "#/$defs/server.input_audio_buffer.speech_started"
     },
     {
@@ -760,6 +912,9 @@
     },
     {
       "$ref": "#/$defs/server.response.output_audio_transcript.delta"
+    },
+    {
+      "$ref": "#/$defs/server.session.updated"
     }
   ]
 }

@@ -79,14 +79,29 @@ func (s *FileState) LoadPersona() (string, error) {
 	return strings.TrimSpace(string(data)), err
 }
 
-// SavePersona 记住当前性格（先写临时文件再改名，写到一半断电也不会留下半个文件）。
+// SavePersona 记住当前性格：写进同一目录下名字不重复的临时文件、落盘（Sync）后改名替换。几台终端同时换性格时
+// 各写各的临时文件，不会互相写坏、改名失败；写到一半断电也不会留下空文件或半个文件。
 func (s *FileState) SavePersona(id string) error {
-	if err := os.MkdirAll(filepath.Dir(s.Path), 0o755); err != nil {
+	dir := filepath.Dir(s.Path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	tmp := s.Path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(id+"\n"), 0o644); err != nil {
+	tmp, err := os.CreateTemp(dir, filepath.Base(s.Path)+".*.tmp")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, s.Path)
+	_, err = tmp.WriteString(id + "\n")
+	if err == nil {
+		err = tmp.Sync()
+	}
+	if closeErr := tmp.Close(); err == nil {
+		err = closeErr
+	}
+	if err == nil {
+		err = os.Rename(tmp.Name(), s.Path)
+	}
+	if err != nil {
+		return errors.Join(err, os.Remove(tmp.Name()))
+	}
+	return nil
 }

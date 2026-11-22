@@ -5,16 +5,20 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"os"
 	"os/signal"
+	"slices"
+	"strings"
 	"syscall"
 	"time"
 	_ "time/tzdata" // 内置时区数据：镜像里没有 /usr/share/zoneinfo 时 TZ（例如 Asia/Tokyo）照样生效（集群里默认是 UTC）
@@ -23,6 +27,7 @@ import (
 	"github.com/bukahou/haro/internal/brainserver"
 	"github.com/bukahou/haro/internal/buildinfo"
 	"github.com/bukahou/haro/internal/config"
+	"github.com/bukahou/haro/internal/endpoint"
 	"github.com/bukahou/haro/internal/llm"
 	"github.com/bukahou/haro/internal/persona"
 	"github.com/bukahou/haro/internal/pricecatalog"
@@ -31,18 +36,23 @@ import (
 	"github.com/bukahou/haro/internal/research"
 	"github.com/bukahou/haro/internal/speech"
 	"github.com/bukahou/haro/internal/spending"
+	"github.com/bukahou/haro/internal/telemetry"
 	"github.com/bukahou/haro/internal/tools"
 	"github.com/bukahou/haro/internal/weather"
 )
 
 func main() {
 	showVersion := flag.Bool("version", false, "打印版本号后退出")
+	versionJSON := flag.Bool("json", false, "和 -version 一起用：输出一行 JSON（program、version、os、arch、go），给 CI 读")
 	flag.Parse()
 	if *showVersion {
-		fmt.Println(buildinfo.Describe("haro-server"))
+		if err := buildinfo.WriteVersion(os.Stdout, "haro-server", *versionJSON); err != nil {
+			fmt.Fprintln(os.Stderr, "打印版本号：", err)
+			os.Exit(1)
+		}
 		return
 	}
-	logger := slog.New(slog.NewTextHandler(os.Stderr, nil)).With("service", "haro-server")
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil)).With("service", telemetry.ServiceServer)
 	slog.SetDefault(logger)
 	if err := run(logger); err != nil && !errors.Is(err, context.Canceled) {
 		logger.Error("haro-server 退出", "err", err)
@@ -58,6 +68,9 @@ func run(logger *slog.Logger) error {
 	for _, note := range settings.RemovedSettingNotes {
 		logger.Warn(note)
 	}
+	zone := config.LocalTimeZone(time.Now())
+	logger.Info("时区：「今天」「这个月」（费用上限什么时候翻篇）、告诉模型的现在时间都按它算（用环境变量 TZ 改）",
+		"zone", zone.Name, "utc_offset", zone.Offset, "TZ", zone.TZ)
 	if err := checkClaudeSettings(settings); err != nil {
 		return err
 	}
@@ -69,7 +82,7 @@ func run(logger *slog.Logger) error {
 	defer stop()
 	// 关停时依次收尾（后开的先关）：会话都结束之后才停后台调查、关数据库，最后发出遥测
 	var shutdown shutdownSteps
-	defer shutdown.run()
+	defer shutdown.run(logger)
 
 	if err := startTelemetry(ctx, settings, &shutdown); err != nil {
 		return err
@@ -90,12 +103,11 @@ func run(logger *slog.Logger) error {
 }
 
 // 关停各步的期限（加起来 10 秒，比 k8s 的宽限期 30 秒短）：停止接新连接、等普通请求 2 秒 → 会话收尾 5 秒 →
-// 后台调查停下 2 秒 → 遥测发出 1 秒。
+// 后台调查停下 2 秒 → 遥测发出 1 秒（telemetry.ShutdownTimeout，终端也用它）。
 const (
-	shutdownRequests       = 2 * time.Second
-	shutdownSessions       = 5 * time.Second
-	shutdownResearch       = 2 * time.Second
-	shutdownTelemetryFlush = 1 * time.Second
+	shutdownRequests = 2 * time.Second
+	shutdownSessions = 5 * time.Second
+	shutdownResearch = 2 * time.Second
 )
 
 // brainHandler 是服务端的全部 HTTP 入口：对话（WebSocket）+ 远程登记声纹（转给 haro-asr）+ 存活 / 就绪检查。
@@ -122,7 +134,7 @@ const (
 
 // readinessChecks 是服务端的就绪检查：识别、合成连得上，云端模型的凭证能用，账本写得进去。
 func readinessChecks(settings config.ServerSettings, claude *llm.ClaudeAPI, ledger spending.Ledger, httpClient *http.Client) ([]readiness.Check, error) {
-	asrReady, err := url.JoinPath(settings.ASRURL, "readyz")
+	asrReady, err := endpoint.Join(settings.ASRURL, "/readyz", nil)
 	if err != nil {
 		return nil, fmt.Errorf("HARO_ASR_URL: %w", err)
 	}
@@ -309,7 +321,7 @@ func connectWebSearch(settings config.ServerSettings, httpClient *http.Client, l
 
 // startResearch 开启后台调查：任务账本、调查用的模型、上限，并在后台开始处理队列。
 func startResearch(ctx context.Context, settings config.ServerSettings, deps services, searcher tools.WebSearcher,
-	logger *slog.Logger) (*research.Runner, func(), error) {
+	logger *slog.Logger) (*research.Runner, func() error, error) {
 	store, err := research.OpenTaskStore(ctx, settings.ResearchDB)
 	if err != nil {
 		return nil, nil, err
@@ -320,15 +332,13 @@ func startResearch(ctx context.Context, settings config.ServerSettings, deps ser
 	// 调查在后台、不急：限流 / 服务端一时出错时让 SDK 重试两次；每次请求不另设期限，受调查自己的总时限管
 	model := deps.meteredCloudModel(settings, cloudModelSpec{model: settings.CloudLLMModel, maxTokens: researchMaxTokens,
 		effort: settings.ResearchEffort, thinking: settings.CloudLLMThinking, retries: 2}, spending.PurposeResearch, logger)
-	limits := research.DefaultLimits
-	limits.Timeout, limits.MaxRounds = settings.ResearchTimeout, settings.ResearchMaxRounds
-	limits.MaxSearches, limits.MaxTokens = settings.ResearchMaxSearches, settings.ResearchMaxTokens
+	limits := researchLimits(settings)
 	meter := spending.NewSearchMeter(deps.guard, deps.ledger, deps.pricing, spending.PurposeResearch, tools.TavilyName)
 	runner := research.NewRunner(store, model, searcher, meter, deps.guard, limits, logger)
 	writer := "（调查模型自己写）"
 	if settings.StrongLLMFor(config.StrongForResearch) { // 搜索和读网页用便宜的模型，结论交给更强的模型写
 		runner.WriteConclusionsWith(deps.meteredCloudModel(settings, cloudModelSpec{model: settings.StrongLLMModel,
-			maxTokens: researchMaxTokens, effort: settings.ResearchEffort, thinking: settings.StrongLLMThinking, retries: 2},
+			maxTokens: researchConclusionMaxTokens, effort: settings.ResearchEffort, thinking: settings.StrongLLMThinking, retries: 2},
 			spending.PurposeResearch, logger))
 		writer = settings.StrongLLMModel
 	}
@@ -339,28 +349,43 @@ func startResearch(ctx context.Context, settings config.ServerSettings, deps ser
 	}()
 	logger.Info("后台调查已开启", "model", settings.CloudLLMModel, "conclusion_writer", writer, "timeout", limits.Timeout,
 		"max_rounds", limits.MaxRounds, "max_searches", limits.MaxSearches, "max_tokens", limits.MaxTokens)
-	stop := func() { // 先等调查的循环退出，再关任务账本：不然它最后一次写任务时库已经关了
+	stop := func() error { // 先等调查的循环退出，再关任务账本：不然它最后一次写任务时库已经关了
 		select {
 		case <-running:
 		case <-time.After(shutdownResearch):
 			logger.Warn("后台调查没在期限内停下：照样关任务账本", "timeout", shutdownResearch)
 		}
-		store.Close()
+		return store.Close()
 	}
 	return runner, stop, nil
 }
 
-// overBudgetMaxTokens：月度上限到了以后，判断主人要不要提高上限的那次小调用的输出上限（只交工具调用，不说话）。
-const overBudgetMaxTokens = 200
-
 // researchMaxTokens 是调查时每次请求的输出上限（结论比聊天长，聊天用 HARO_CLOUD_LLM_MAX_TOKENS）。
 const researchMaxTokens = 1000
+
+// researchConclusionMaxTokens 是更强的模型写结论时的输出上限：它开着思考（思考也算在输出上限里），结论连同来源
+// 经 submit_conclusion 一次交出，按 researchMaxTokens 会写到一半被截断（实测），这次调用白花。只按实际用的计费，
+// 每天的调查额度照样管着。
+const researchConclusionMaxTokens = 4000
+
+// researchLimits 是每个调查任务的上限：配置里设了的用配置的，没设（0）的用程序里的默认值（research.DefaultLimits，默认值只在那里写）。
+func researchLimits(settings config.ServerSettings) research.Limits {
+	limits := research.DefaultLimits
+	limits.Timeout = cmp.Or(settings.ResearchTimeout, limits.Timeout)
+	limits.MaxRounds = cmp.Or(settings.ResearchMaxRounds, limits.MaxRounds)
+	limits.MaxSearches = cmp.Or(settings.ResearchMaxSearches, limits.MaxSearches)
+	limits.MaxTokens = cmp.Or(settings.ResearchMaxTokens, limits.MaxTokens)
+	return limits
+}
 
 // buildSynthesizer 按 HARO_TTS 选择语音合成实现（服务都单独运行，只按 HARO_TTS_URL 连）。
 func buildSynthesizer(settings config.ServerSettings, httpClient *http.Client, logger *slog.Logger) (brain.SpeechSynthesizer, error) {
 	if settings.TTS == config.TTSGPTSoVITS {
 		voice, err := speech.LoadGPTSoVITSVoice(settings.TTSVoiceFile)
 		if err != nil {
+			return nil, err
+		}
+		if err := checkVoiceEmotions(voice, settings.TTSVoiceFile); err != nil {
 			return nil, err
 		}
 		logger.Info("语音合成：GPT-SoVITS", "url", settings.TTSURL, "voice", voice.Name,
@@ -370,6 +395,20 @@ func buildSynthesizer(settings config.ServerSettings, httpClient *http.Client, l
 	}
 	logger.Info("语音合成：Piper", "url", settings.TTSURL)
 	return speech.NewPiperHTTPSynthesizer(settings.TTSURL, settings.TTSTimeout, httpClient), nil
+}
+
+// checkVoiceEmotions 检查声音档案里每段参考录音的名字：要么是平常语气那段（speech.DefaultReference），要么是情绪清单里的
+// （brain.ParseEmotion，清单只在 brain 定义）。拼错的那段永远选不到、那种语气一直念成平常的，起不来比悄悄不生效好。
+func checkVoiceEmotions(voice speech.GPTSoVITSVoice, file string) error {
+	for _, name := range slices.Sorted(maps.Keys(voice.References)) {
+		if name == speech.DefaultReference {
+			continue
+		}
+		if emotion, err := brain.ParseEmotion(name); err != nil || emotion == brain.EmotionDefault {
+			return fmt.Errorf("声音档案 %s 的参考录音 %q 不是情绪清单里的名字，这段录音永远用不上：%v", file, name, err)
+		}
+	}
+	return nil
 }
 
 // buildBrainOptions 读取性格档案；没设 HARO_PERSONAS_DIR 时不分性格。
@@ -387,6 +426,15 @@ func buildBrainOptions(settings config.ServerSettings) (brain.Options, error) {
 	personas, err := persona.LoadCatalog(settings.PersonasDir)
 	if err != nil {
 		return options, err
+	}
+	// 默认性格写错时起不来（不悄悄换成档案里的第一个）
+	if !slices.ContainsFunc(personas, func(p brain.Persona) bool { return p.ID == settings.PersonaDefault }) {
+		ids := make([]string, len(personas))
+		for i, p := range personas {
+			ids[i] = p.ID
+		}
+		return options, fmt.Errorf("HARO_PERSONA_DEFAULT=%q 不在性格档案（%s）里，档案里有：%s", settings.PersonaDefault,
+			settings.PersonasDir, strings.Join(ids, "、"))
 	}
 	options.Personas, options.DefaultPersona = personas, settings.PersonaDefault
 	if settings.PersonaState != "" {

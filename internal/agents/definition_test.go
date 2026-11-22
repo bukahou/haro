@@ -19,17 +19,18 @@ func TestBuiltinDefinitions(t *testing.T) {
 		mode           agents.Mode
 		model, purpose string
 	}{
-		agents.Front:   {agents.ModePrimary, agents.TierBase, "chat"},
-		agents.Strong:  {agents.ModeHandoff, agents.TierStrong, "strong"},
-		agents.Vision:  {agents.ModeSubtask, agents.TierStrong, "vision"},
-		agents.Summary: {agents.ModeSubtask, agents.TierBase, "summary"},
+		agents.Front:      {agents.ModePrimary, agents.TierBase, "chat"},
+		agents.Strong:     {agents.ModeHandoff, agents.TierStrong, "strong"},
+		agents.Vision:     {agents.ModeSubtask, agents.TierStrong, "vision"},
+		agents.Summary:    {agents.ModeSubtask, agents.TierBase, "summary"},
+		agents.OverBudget: {agents.ModeSubtask, agents.TierBase, "chat"},
 	}
 	for name, w := range want {
 		definition, err := catalog.Get(name)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if definition.Mode != w.mode || definition.Model != w.model || definition.Purpose != w.purpose || !definition.Builtin() {
+		if definition.Mode != w.mode || definition.Model != w.model || definition.Purpose != w.purpose || !definition.Builtin {
 			t.Errorf("%s：%+v", name, definition)
 		}
 	}
@@ -77,11 +78,31 @@ func TestOverrideDirectoryReplacesSameName(t *testing.T) {
 		t.Fatal(err)
 	}
 	summary, _ := catalog.Get(agents.Summary)
-	if summary.Title != "我的摘要" || summary.Prompt != "只写一句话的摘要。" || summary.Builtin() {
+	if summary.Title != "我的摘要" || summary.Prompt != "只写一句话的摘要。" || summary.Builtin {
 		t.Errorf("应换成目录里的那份：%+v", summary)
 	}
-	if front, _ := catalog.Get(agents.Front); !front.Builtin() {
+	if front, _ := catalog.Get(agents.Front); !front.Builtin {
 		t.Errorf("没覆盖的应照旧：%+v", front)
+	}
+}
+
+// 是不是程序里带的按读的来源记下，不从来源的写法推：覆盖目录用相对路径、恰好也叫 builtin 时，那里的定义照样算覆盖的。
+func TestBuiltinIsRecordedNotGuessedFromSource(t *testing.T) {
+	work := t.TempDir()
+	if err := os.Mkdir(filepath.Join(work, "builtin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeAgent(t, filepath.Join(work, "builtin"), agents.Summary, summaryOverride)
+	t.Chdir(work)
+	catalog, err := agents.Load("builtin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary, _ := catalog.Get(agents.Summary); summary.Builtin || summary.Title != "我的摘要" {
+		t.Errorf("覆盖目录（相对路径 builtin）里的定义不该算程序里带的：Builtin=%v %s", summary.Builtin, summary.Source)
+	}
+	if front, _ := catalog.Get(agents.Front); !front.Builtin {
+		t.Errorf("没覆盖的仍是程序里带的：%s", front.Source)
 	}
 }
 

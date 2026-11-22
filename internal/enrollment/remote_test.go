@@ -74,6 +74,25 @@ func TestRemoteEnrollmentUploadsClips(t *testing.T) {
 	}
 }
 
+// 不是补录时也写明 append=false：服务端要求写明补录还是覆盖，没写的不按覆盖处理。
+func TestRemoteEnrollmentStatesAppendExplicitly(t *testing.T) {
+	var body map[string]json.RawMessage
+	brain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		_, _ = w.Write([]byte(`{"name":"主人","sentences":3,"speakers":["主人"]}`))
+	}))
+	defer brain.Close()
+	sentences := len(voiceprint.EnrollmentSentences("哈罗哈罗"))
+	err := Run(context.Background(), Options{ServerURL: brain.URL, Name: "主人", WakePhrase: "哈罗哈罗", Seconds: time.Millisecond,
+		Recorder: &fakeRecorder{}, In: strings.NewReader(strings.Repeat("\n", sentences)), Out: &bytes.Buffer{}, Client: brain.Client()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sent := string(body["append"]); sent != "false" {
+		t.Errorf("不是补录时要写明 append=false，发出去的是 %q", sent)
+	}
+}
+
 // 第一句以终端配置的唤醒词开头（换了唤醒词，登记的就是喊新唤醒词的声音）；没给唤醒词不开始录。
 func TestRemoteEnrollmentFirstSentenceUsesWakePhrase(t *testing.T) {
 	brain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

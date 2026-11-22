@@ -60,10 +60,11 @@ type ResponseCreate struct{}
 // ResponseCancel 取消正在生成的回答（被打断、终端退出时发出）。
 type ResponseCancel struct{}
 
-// HaroWakeWordSleep 让语音前端进入休眠：只认唤醒词（haro 扩展；终端在对话窗口结束时发出）。
+// HaroWakeWordSleep 请语音前端进入休眠：只认唤醒词（haro 扩展；终端在对话窗口结束时发出）。
+// 语音前端处理完回 haro.wake_word.state；发出去不等于已经睡了。
 type HaroWakeWordSleep struct{}
 
-// HaroWakeWordWake 让语音前端立即进入唤醒状态（haro 扩展；手动唤醒，例如按回车）。
+// HaroWakeWordWake 请语音前端立即进入唤醒状态（haro 扩展；手动唤醒，例如按回车）。处理完同样回 haro.wake_word.state。
 type HaroWakeWordWake struct{}
 
 // HaroPlaybackStarted 表示终端开始播放回答（haro 扩展，用于打断）：语音前端只听唤醒词，
@@ -89,6 +90,7 @@ type HaroMCPMessage struct {
 
 // ConversationItemTruncate 表示用户只听到了回答的前 AudioEndMs 毫秒（被打断时由终端发出）：
 // 服务端只把听到的部分记进历史。与 Realtime 的 conversation.item.truncate 一致（haro 只截最近一次回答，不带 item_id）。
+// 线上 audio_end_ms 必填、不能是负数，带了 item_id 也拒绝（见 decodeItemTruncate）。
 type ConversationItemTruncate struct {
 	AudioEndMs int64
 }
@@ -119,6 +121,13 @@ func (HaroMCPMessage) clientEvent()           {}
 
 // ——— 服务端 → 终端 ———
 
+// SessionUpdated 表示对端接受了 session.update，Session 是接受之后的设置（照 Realtime 的 session.updated）。
+// 转写会话里 haro-asr 接受第一条 session.update 后先发它，之后才处理音频；不接受时改发带码的 Error 并断开。
+// 对话会话现在不发它。
+type SessionUpdated struct {
+	Session SessionUpdate
+}
+
 // HaroWakeWordDetected 表示听到了唤醒词，语音前端已进入唤醒状态（haro 扩展）。
 type HaroWakeWordDetected struct {
 	Keyword string
@@ -126,6 +135,13 @@ type HaroWakeWordDetected struct {
 	// 唤醒质量：几台终端同时听到时，由质量最高的那台回答
 	Score float64 // 唤醒词的声纹分数（没比对声纹时为 0）
 	Level float64 // 唤醒词那一段的音量（RMS，0–1；离得近的那台大）
+}
+
+// HaroWakeWordState 是语音前端处理完一次 haro.wake_word.sleep / haro.wake_word.wake 之后醒着还是睡着（haro 扩展）。
+// 醒 / 睡只由语音前端（haro-asr 的唤醒门）改：它每处理完一次请求回一个，服务端原样转给终端。
+// 服务端和终端记的醒 / 睡只照这个事件和 haro.wake_word.detected 改，不在发请求时改。
+type HaroWakeWordState struct {
+	Awake bool
 }
 
 // HaroNotice 是服务端给终端的一个提示（haro 扩展）：终端播一声提示音、不说话（服务端还不能主动开口）。
@@ -137,7 +153,8 @@ type HaroNotice struct {
 const (
 	// NoticeResearchDone：后台调查结束了（查完、没查完或失败）。
 	NoticeResearchDone = "research_done"
-	// NoticeTranscriptionLost：服务端和语音识别之间断开了一阵还没重开，这期间说的话听不见。
+	// NoticeTranscriptionLost：服务端和语音识别之间断开了一阵还没重开，这期间说的话听不见；
+	// 或者语音识别拒绝了识别流的设置（不再重开，改好配置之前一直听不见）。
 	NoticeTranscriptionLost = "transcription_lost"
 	// NoticeTranscriptionRestored：语音识别重开了（只在提示过断开之后才发）。
 	NoticeTranscriptionRestored = "transcription_restored"
@@ -170,6 +187,9 @@ type InputAudioTranscriptionCompleted struct {
 	// 没有登记声纹时不比对（SpeakerChecked = false）。
 	Speaker        string
 	SpeakerChecked bool
+	// SpeakerCheckFailed：开着声纹，但这句算不出声纹（SpeakerChecked 为 false、Speaker 为空）。和没开声纹不是一回事，
+	// 收到的一方自己决定怎么处理
+	SpeakerCheckFailed bool
 	// SpeakerTentative：叫醒这句的声纹只过了唤醒的门槛、没确认时，像是谁（Speaker 为空）
 	SpeakerTentative string
 	Language         string // 识别出的语种（例如 zh、ja、en）；不知道时为空
@@ -204,7 +224,9 @@ type Error struct {
 	Message string    // 给人看的说明：措辞会变，不要拿来判断
 }
 
+func (SessionUpdated) Type() string                     { return typeSessionUpdated }
 func (HaroWakeWordDetected) Type() string               { return typeHaroWakeWordDetected }
+func (HaroWakeWordState) Type() string                  { return typeHaroWakeWordState }
 func (HaroNotice) Type() string                         { return typeHaroNotice }
 func (InputAudioBufferSpeechStarted) Type() string      { return typeSpeechStarted }
 func (InputAudioBufferSpeechStopped) Type() string      { return typeSpeechStopped }
@@ -216,7 +238,9 @@ func (ResponseCreated) Type() string                    { return typeResponseCre
 func (ResponseDone) Type() string                       { return typeResponseDone }
 func (Error) Type() string                              { return typeError }
 
+func (SessionUpdated) serverEvent()                     {}
 func (HaroWakeWordDetected) serverEvent()               {}
+func (HaroWakeWordState) serverEvent()                  {}
 func (HaroNotice) serverEvent()                         {}
 func (InputAudioBufferSpeechStarted) serverEvent()      {}
 func (InputAudioBufferSpeechStopped) serverEvent()      {}

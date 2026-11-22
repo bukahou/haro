@@ -27,17 +27,24 @@ haro 是一个家用语音助手：家里每个房间放一台**终端**（麦�
 （例如终端上报现在用的麦克风和音箱）。服务端和 haro-asr 之间的转写会话用同一份定义。见 `internal/realtimeproto`：
 
 - 线上的 JSON 结构只定义一处（`wire.go`），编解码只有一处（`codec.go`）；
-- 由它生成 JSON Schema（`haro.realtime.v2.schema.json`），测试比对两者，结构改了而文件没更新就失败；
+- 由它生成 JSON Schema（`haro.realtime.v3.schema.json`），测试比对两者，结构改了而文件没更新就失败；
 - 错误事件带稳定的错误码（`errors.go`），调用方按码判断，不看说明文字。
-- 握手时用 WebSocket 子协议协商版本（`haro.realtime.v2`）：报了不认识的 haro 版本、或者旧版终端没报版本，服务端拒绝握手，
+- 握手时用 WebSocket 子协议协商版本（`haro.realtime.v3`）：报了不认识的 haro 版本、或者旧版终端没报版本，服务端拒绝握手，
   响应里给错误码和它支持的版本；什么都不报的当普通 Realtime 客户端（只用标准事件）。终端被拒后提示一次，隔几分钟才再试；
 - 两端各自每 10 秒 ping 一次，5 秒内等不到 pong 就断开（`internal/heartbeat`），终端的看守随即重连。
+- 服务端的对话会话、haro-asr 的转写会话同时最多 `realtimeproto.MaxSessions` 条（两边同一个数：每条对话会话在 haro-asr 占一个转写会话），满了新连接在握手前回 503（错误码 `too_many_sessions`）。
+- 照办不了的请求整条拒绝、不悄悄忽略：`session.update` 声明的输入格式不是 16 kHz 单声道，或识别流打开以后再改说完判断、唤醒门；
+  `conversation.item.truncate` 缺 `audio_end_ms`（或为负）、带了 `item_id`（haro 不发回答的 item_id，只截最近一次回答）。
 - 终端的设备能力（现在是「拍一帧」）走 MCP：终端是 MCP 服务端，服务端是 MCP 客户端，消息装在 `haro.mcp.message` 事件里，
   跑在同一条连接上（`internal/mcpbridge`；工具的名字、参数、结果、错误码只在 `internal/terminaltools` 定义一处）。
   模型调用 `look_at_camera` 时，服务端才让终端打开摄像头拍一帧，摄像头平时关着；摄像头插拔时终端增删这个工具，服务端随之给不给模型看画面。
 - 一轮对话由服务端开始：语音前端判定说完时，服务端马上开始回答（先发标准的 `response.created`），识别和准备回答同时进行；
   终端不上传画面、也不发 `response.create`，只负责播放（`create_response` 设成 false 的普通 Realtime 客户端照旧自己请求）。
   说完方式和积极度的取值只在 `realtimeproto` 定义一处，终端启动时和 haro-asr 收到会话设置时都按它查，写错就明确拒绝；
+- 醒 / 睡只由 haro-asr 的唤醒门决定：终端要休眠（对话窗口结束、按回车）或手动唤醒时只发请求（`haro.wake_word.sleep` / `wake`），
+  服务端转给 haro-asr，它处理完回 `haro.wake_word.state`，服务端原样转给终端；听到唤醒词时 haro-asr 自己醒、报 `haro.wake_word.detected`。
+  服务端和终端记的醒 / 睡只照这两个事件改，发请求时不改；终端等不到回复（`assistant.Timing.WakeConfirm`）就当没切成，醒着的话过一个对话窗口再试。
+  识别流断开时服务端记下终端要的状态，重开后告诉新的流，由它回复确认。
   semantic_vad 判定没说完时会把下一段并进同一句，最长并到 30 秒（`asrserver.Timing.MergeLimit`），再长就按说完交出、后面的另成一句。
 
 ## 服务端（`internal/brain` 与周边）
@@ -47,27 +54,34 @@ haro 是一个家用语音助手：家里每个房间放一台**终端**（麦�
 | 接口 | 实现 |
 |---|---|
 | `StreamingRecognizer` | `internal/speech`：按 `HARO_ASR_URL` 连 haro-asr（或其他照 OpenAI Realtime 转写会话的服务） |
-| `ChatModel` | `internal/llm`：Claude API（官方 SDK）、OpenAI 兼容接口（官方 openai-go；本地 Ollama 走它的兼容端点），本地和云端按配置二选一、不自动互相顶替。请求可以「工具照给、这轮不许调用」（提示词缓存不失效）；输出到上限时明确报「被截断」；需要预热的模型另实现 `ModelWarmer`。三个适配跑同一组契约测试（`internal/llm/contract_test.go`） |
-| `SpeechSynthesizer` | `internal/speech`：GPT-SoVITS（边合成边播放）、Piper |
+| `ChatModel` | `internal/llm`：Claude API（官方 SDK）、OpenAI 兼容接口（官方 openai-go；本地 Ollama 走它的兼容端点），本地和云端按配置二选一、不自动互相顶替。请求可以「工具照给、这轮不许调用」（提示词缓存不失效）；输出到上限（或上下文满了）时明确报「被截断」；流要么交代为什么停，要么报错：连接正常关掉却没收到结束标志按连不上算，停下的原因认不出或没交代的不当成说完；需要预热的模型另实现 `ModelWarmer`。三个适配跑同一组契约测试（`internal/llm/contract_test.go`） |
+| `SpeechSynthesizer` | `internal/speech`：GPT-SoVITS（边合成边播放）、Piper。两种实现跑同一组契约测试（`internal/speech/synthesizer_contract_test.go`） |
 | `Toolbox` | `internal/tools`：内置工具 + 第三方 MCP 服务 |
 | `ConversationStore` | `internal/conversationstore`：SQLite（goose 迁移）；每一轮带说话的时间，发给模型时每轮前标日期和时刻 |
 | `Briefer` | 每轮补充给模型的即时情况：现在几号几点、主人家大致在哪（城市级）、额度提醒、后台调查的任务板 |
 
-- **观测**：OpenTelemetry（`HARO_OTLP_ENDPOINT`，OTLP/HTTP）。大模型相关的按语义约定 `gen_ai.*` 记：每次请求一个 span
-  「chat <模型>」（提供方、模型、用量含缓存读写、为什么停）和标准指标 `gen_ai.client.operation.duration`、`gen_ai.client.token.usage`；
+- **观测**：OpenTelemetry（OTLP/HTTP，`internal/telemetry`）。往哪发：标准的 `OTEL_EXPORTER_OTLP_ENDPOINT`（或分信号的）设了时以它为准，
+  否则用 `HARO_OTLP_ENDPOINT`，都没有就只打日志；终端、服务端各报自己的 service.name（`haro-terminal` / `haro-server`），
+  `OTEL_SERVICE_NAME`、`OTEL_RESOURCE_ATTRIBUTES` 可以覆盖；退出时最多等 1 秒把没发出的发出去。大模型相关的按语义约定 `gen_ai.*` 记：每次请求一个 span
+  「chat <模型>」（提供方、模型、用量含缓存读写、为什么停；不知道的不写）和标准指标 `gen_ai.client.operation.duration`、`gen_ai.client.token.usage`；
   一轮回答记成 `invoke_agent`（代理名，交接记成事件），工具调用记成 `execute_tool`。haro 自己的（说完到第一个字、合成、打断、唤醒）用 `haro.` 前缀。
-- **坏了要出声**：服务端和 haro-asr 之间的识别流断了会自己重开（带退避），重开后把「醒着 / 正在播放」重新告诉它；
+- **坏了要出声**：服务端和 haro-asr 之间的识别流断了会自己重开（带退避），重开后把「醒着还是睡着 / 正在播放」重新告诉它；
   说到一半断开时，服务端替丢掉的那句补一个「说完」，这一轮按识别失败结束，终端照常收尾；
   断开超过 10 秒才提示终端一次（`haro.notice` 的 `transcription_lost`，终端播「断开」那一声），重开后再提示一次（`transcription_restored`）。
+  haro-asr 接受识别流的设置后回 `session.updated`，服务端等到它才算打开；不接受的（请求类的错误码，例如要 semantic_vad 而它没配
+  说完判断模型）不再重开，把同一个错误码告诉终端一次、提示 `transcription_lost`。haro-asr 同时进行的转写会话有上限
+  （`asrserver.DefaultLimits`），满了回 `too_many_sessions`，服务端照断开重开那样退避再试。
   存活检查 `/livez` 只看进程；就绪检查 `/readyz` 看识别、合成、模型凭证、账本，结果由后台定期检查（`internal/readiness`）。
+  其中识别那一项探的是 haro-asr 自己的 `/readyz`：它在 1 秒内真的识别完一小段静音才算就绪（识别器卡住时跟着失败）。
 - **对话跟着人走**：开了声纹时，服务端认出是谁在说话，用这个人自己的对话历史；换终端、断线重连、服务端重启都接得上。
+  很短的话常算不出声纹：这次醒着期间（这台终端）认出过谁就沿用他的对话，但不算声纹确认（确认不了危险操作）；还没认出过谁就进全家共用的对话。
   发给模型的只有最近几轮加一段摘要：更早的对话在后台交给代理「摘要」压成一段，放进系统提示词（`internal/brain/summary.go`）；
-  一轮里请求模型带的上下文（模型报的输入 token）到了 `HARO_CONTEXT_COMPACT_TOKENS`，较早的几轮提前压缩。
+  一轮里请求模型带的上下文（模型报的输入 token）到了 `HARO_CONTEXT_COMPACT_TOKENS`，较早的几轮提前压缩（模型服务不报用量时做不到，只按轮数截断，用量日志里写明）。
   完整的对话记录另存一份（对话库的 `transcript` 表，每人每轮一行、按轮次编号，只增不删），留作以后的长期记忆。
 - **代理**（`internal/agents`）：交给模型做的事按「代理」定义——名字、模型档（`base` = 云端模型 / 本地模型，`strong` = 更强的模型；
   具体的模型 ID 和思考写法只在配置里）、系统提示词、能用的工具（允许名单）、步数上限与死循环判定、记账用途。
   每个代理一个 markdown 文件（开头 YAML 是配置，正文是系统提示词；正文用 `{{.名字}}` 引用代码里定义的值，例如情绪标记的列表）。
-  程序里带一套（`internal/agents/builtin/`）：前台（主对话）、强模型（接手）、看画面（子任务）、摘要（子任务）；
+  程序里带一套（`internal/agents/builtin/`）：前台（主对话）、强模型（接手）、看画面（子任务）、摘要（子任务）、额度判断（子任务：月度上限到了以后判断要不要临时提高）；
   `HARO_AGENTS_DIR` 里同名的文件替换程序里带的那份（启动日志写明用了哪份；字段写错、文件名不认识、工具名不认识都起不来）。
   只有部分代理认的配置项写在不认的代理上也起不来：`timeout`（调用一次最多等多久：看画面、摘要）、`max_searches`（看画面最多联网查几次）。
   交出去只有一个入口（`brain.EnterAgent`）：**接手**带着完整的对话历史回答这一轮剩下的部分（主人纠正时交给强模型），
@@ -88,16 +102,22 @@ haro 是一个家用语音助手：家里每个房间放一台**终端**（麦�
 ### 工具
 
 自研工具注册在服务端进程内的 MCP 服务上（参数、结果由结构体定义，调用前校验；每个工具标明只读 / 会改数据 / 会破坏）；第三方服务只接远程 Streamable HTTP。
+会破坏的工具（和提高月度上限）执行时要带着主人的确认（确认闸放进去的 `brain.Confirmation`），工具箱和额度那一层自己核对，见不到就不执行。
+模型能触发的动作就是下表这些（会话自己提供的工具和工具箱里的）；「过确认闸」= 执行前要登记过的声音 + 有时效的确认。
+这张表由测试和代码核对（`internal/docstest`：工具箱和会话工具的名字、要不要过确认闸），加工具、改标注时跟着改。
 
-| 工具 | 说明 |
-|---|---|
-| `save_note` / `search_notes` / `delete_note` / `list_deleted_notes` / `restore_note` | 记事本（SQLite，时间存 UTC 的 Unix 秒）；按编号删，删掉的可以恢复 |
-| `confirm_action` / `cancel_action` | 会破坏的操作（删记事）先存成待确认的操作（有时效），主人算不算同意由模型判断后调用；只在有待确认的操作时提供 |
-| `get_weather` | 天气（Open-Meteo，不用密钥）；家的位置可以配坐标，或按公网 IP 推定。Open-Meteo 查不到时改用日本气象厅（见下） |
-| `look_at_camera` | 看终端摄像头的画面：调用时才经 MCP 让终端拍一帧（终端的工具清单里有「拍一帧」时才提供） |
-| `switch_persona` | 换性格（有两个以上性格时才提供） |
-| `web_search` | 联网搜一次（Tavily 远程 MCP）；设了密钥才提供 |
-| `start_research` / `research_status` / `cancel_research` | 后台调查（见下）；设了搜索密钥才提供 |
+| 工具 | 过确认闸 | 说明 |
+|---|---|---|
+| `save_note` / `search_notes` / `list_deleted_notes` / `restore_note` | | 记事本（SQLite，时间存 UTC 的 Unix 秒）；删掉的可以恢复 |
+| `delete_note` | ✓ | 按编号删记事 |
+| `raise_monthly_cap` | ✓ | 主人口头临时提高这个月的费用上限（每次加 `HARO_MONTHLY_RAISE_YEN`）；设了月度上限才提供 |
+| `confirm_action` / `cancel_action` | | 会破坏的操作（删记事、提高月度上限）先存成待确认的操作（有时效），主人算不算同意由模型判断后调用这两个（它们自己核对声纹、时效、参数，必须是下一轮）；有会破坏的工具时一直提供（工具定义不变，提示词缓存不失效），系统提示词的工具介绍里不列 |
+| `get_weather` | | 天气（Open-Meteo，不用密钥）；家的位置可以配坐标，或按公网 IP 推定。Open-Meteo 查不到时改用日本气象厅（见下） |
+| `look_at_camera` | | 看终端摄像头的画面：调用时才经 MCP 让终端拍一帧（终端的工具清单里有「拍一帧」时才提供） |
+| `switch_persona` | | 换性格（有两个以上性格时才提供） |
+| `ask_stronger_model` | | 主人纠正、或明说要想清楚时，前台模型交给更强的模型重答（`HARO_STRONG_LLM_USE` 有 correction 时才提供） |
+| `web_search` | | 联网搜一次（Tavily 远程 MCP）；设了密钥才提供 |
+| `start_research` / `research_status` / `cancel_research` | | 后台调查（见下）；设了搜索密钥才提供 |
 
 ### 天气的备用来源（`internal/weather`）
 
@@ -127,14 +147,16 @@ Open-Meteo 连不上或报错时，日本境内的地点改查日本气象厅网
 
 大模型和搜索按量计费时：每次调用都记账（token、搜索积分，按单价与汇率折成本地货币），按用途分开记
 （每个代理定义里写自己的用途：前台 `chat`、强模型 `strong`、看画面 `vision`、摘要 `summary`；另有快查 `search`、后台调查 `research`），
-按天、按月封顶。账本写不进时（例如数据卷满了）那笔先留在内存里，之后每次放行前先补写，补写不成就和读不出账本一样不再付费调用
+按天、按月封顶。用到云端模型时每月总上限（`HARO_MONTHLY_YEN`）必填、要大于 0（没有默认的「不限」，漏配时起不来），
+设了月度上限就必须设账本（`HARO_USAGE_DB`：上限按账本合计，只记在内存里时一重启就清零）。
+账本写不进时（例如数据卷满了）那笔先留在内存里，之后每次放行前先补写，补写不成就和读不出账本一样不再付费调用
 （不让上限因为没记上而失效），写进去了自动恢复。超过月度上限后不再回答，念一句固定的话（到上限了、下个月一号恢复）；主人可以口头临时提高这个月的上限
 （`HARO_MONTHLY_RAISE_YEN`，每次加多少），要过确认闸（登记过的声纹 + 有时效的确认）。听懂「要提高」靠一次很小的模型调用
 （不带历史，只给提高上限和确认的工具，模型说的话不念），它不受额度管，按天限次数（`HARO_OVER_BUDGET_DAILY_CALLS`）。
 
 ### 连不上云端时（最低能力）
 
-适配层把连不上（网络错误、等不到开始回答、超时、认证失败、限流、服务端出错）标成带类型的错误。这时不调用任何模型，
+适配层把连不上（网络错误、等不到开始回答、超时、认证失败、限流、服务端出错；流开始之后才发来的错误事件按错误码同样归类）标成带类型的错误。这时不调用任何模型，
 无论主人说什么，都念一句固定的话：连不上 + 现在的时间（中日英各一份）。连不上一次就熔断：之后马上告诉主人，
 不用每句都等超时；30 秒后放一个请求去试，通了就恢复，下一轮由模型顺带交代刚才断过。
 
@@ -165,6 +187,14 @@ Open-Meteo 连不上或报错时，日本境内的地点改查日本气象厅网
 systemd 用户服务从 `~/.config/haro/haro.env` 读取（`deploy/systemd/`）。凭证（云端模型、搜索服务的密钥）只放在环境变量里，没有默认值。
 样例（只有占位值）：服务端 `deploy/server/server.env.example`，终端 `deploy/systemd/terminal.env.example`；
 终端和服务端各读各的，写在同一个 env 文件里也互不影响（已删除的配置项也只查自己那边的）。
+写错的值启动时就报错，不悄悄换成默认值：数值查范围（上限、单价不能是负数；时长、token、轮数要大于 0；
+「0 = 不限 / 关掉」的项在 `config.go` 的注释里写明），配了的目录要读得到，默认性格要在性格档案里，声音档案里的情绪名要在情绪清单里。
+有几项的默认值只写在用它的部件里，配置里不设就用它：工具时限、确认时效（`brain`）、调查的上限（`research.DefaultLimits`）、
+VAD 的门槛和静音时长（haro-asr 的 `asrserver.Timing`）。
+
+**时区**：「今天」「这个月」（每日、每月的费用上限什么时候翻篇）、告诉模型的现在时间、记事显示的时间都按服务端进程的本地时区算，
+存储一律是 UTC。时区不单独做配置项，用标准的环境变量 `TZ`（例如 `Asia/Tokyo`；服务端程序里带着时区数据）：
+不设时按系统的时区，容器里一般是 UTC。服务端、终端启动时都在日志里写出实际用的时区。
 
 云端模型（`HARO_LLM_PROVIDER=cloud`）的接口格式由 `HARO_CLOUD_LLM_API` 选：
 
@@ -185,7 +215,7 @@ systemd 用户服务从 `~/.config/haro/haro.env` 读取（`deploy/systemd/`）�
 
 - `vision`：看摄像头画面。`HARO_STRONG_LLM_VISION_MODE` 选怎么用：
   - `expert`（默认）：**前台始终是云端模型**，它当幕后专家（`internal/vision`）。模型调用 `look_at_camera` 时，
-    画面和主人这一轮的原话交给专家（不带性格和对话记录，输入约 1.6k token）；主人问到画面上看不全的信息时专家自己联网查（最多 2 次）——
+    画面和主人这一轮的原话交给专家（不带性格和对话记录，输入约 1.6k token）；主人问到画面上看不全的信息时专家自己联网查（最多 2 次；没配搜索时提示词里不提、也不给搜索工具）——
     只有它看得到画面，才能按「画面比搜到的资料可靠」取舍。前台拿到专家的判断（文字）后用自己的口吻转述，判断留在历史里；
     专家出错或超时时退回把画面直接交给前台。按 `vision` 用途单独记账。
   - `takeover`：画面要交给前台看时，这一轮剩下的部分交给强模型接手（画面只在本轮输入里，下一轮自然回到前台）
@@ -222,22 +252,20 @@ make version          # 这次构建的版本号
 
 - **版本号** = `v` + 仓库根目录的 `VERSION` + 提交号前 7 位，例如 `v0.5.0-1a2b3c4`。GitHub Release 的标签、
   服务端镜像的标签、程序里的版本（`haro -version`、启动日志）是同一个字符串。`VERSION` 只在阶段性的大改时调。
+  给机器读的用 `-version -json`（一行 JSON：program、version、os、arch、go），CI、安装脚本的测试按它比对。
 - **终端和服务端握手时互报版本**（HTTP 头 `X-Haro-Version`）：版本不同时两边的日志都会提醒升级终端。
-- **合并前的检查**（`.github/workflows/ci.yml`；日常开发在 `dev`，推 `dev` 和开 PR 时跑）：测试、终端三个平台的编译和安装脚本，
-  再试建一次服务端镜像（不推送；和发版用同一份构建步骤 `.github/actions/server-image`）—— Dockerfile、基础镜像的问题合并前就能发现。
-- **合并到 `main` 就发版**（`.github/workflows/release.yml`）：
-  1. 测试 + 终端各平台（列表只在 `ci.yml` 的 `platforms` 一处；现在是 Linux x86_64 / arm64，Mac 版暂停编译）的程序，各在原生机器上编译，用安装脚本装、卸一遍；
-  2. 程序发到 GitHub Release（附 `SHA256SUMS`、`install.sh`、来源证明），设为 latest；`v*` 的 Release 只留最近 20 个；
-  3. 服务端镜像：模型从本仓库的 Release 下载并按 `models.lock` 校验 → 构建 → Trivy 扫描（有可修的 CRITICAL
-     或疑似凭证就不推）→ 推 Docker Hub `bukahou/haro-server`（版本号 + latest）；
-  4. 改部署仓库里的镜像标签（生产环境要人工 SYNC 才会换版本）。
+- **合并前的检查**（`.github/workflows/ci.yml`；日常开发在 `dev`，推 `dev` 和开 PR 时跑）：每一步做什么写在 `ci.yml` 开头的说明里
+  （终端编哪几个平台只在它的 `platforms` 一处）。
+- **合并到 `main` 就发版，几分钟内上线**（部署仓库开着 Argo CD 自动同步，不用人工同步）。发版的每一步只写在
+  `.github/workflows/release.yml` 开头的说明里；只改文档（根目录的 `*.md`、`docs/`）的合并不发版，编进程序的文件（例如代理的提示词）改了照样发版。
+  workflow 里的第三方 action 按提交 SHA 引用，Trivy 的镜像按 digest 引用。
 - **模型的 Release**：原发布方随时可能删文件 ⇒ 模型第一次从原发布方下载、校验后，放进本仓库的 Release
   （`models-v1`，由 `.github/workflows/models.yml` 建：推 `models-v*` 标签，或在 Actions 页面手动运行）；之后构建只从这里下载。
 - **依赖更新**：Dependabot 每周检查 Go 依赖、基础镜像（Dockerfile 里钉了 digest）、GitHub Actions，有新版就开 PR 到 `dev`（`.github/dependabot.yml`）；
   镜像构建时还会打上 Debian 的安全补丁。
 - **安装终端**：`curl -fsSL https://github.com/bukahou/haro/releases/latest/download/install.sh | sh -s -- --server-url http://服务端地址:59130`
   （装到 `~/.local/bin/haro`，配置在 `~/.config/haro/haro.env`，Linux 装成 systemd 用户服务、macOS 装成 LaunchAgent；
-  再跑一次就是升级；`--uninstall` 卸载）。冒烟测试：`scripts/test-install.sh`。
+  再跑一次就是升级；`--uninstall` 卸载，只删安装脚本装的那一份：按安装时记下的 sha256 认）。冒烟测试：`scripts/test-install.sh`。
 
 ## 安全说明
 

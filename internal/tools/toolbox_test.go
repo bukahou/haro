@@ -192,8 +192,14 @@ func TestBuiltinToolsGetSpeakerDeliveriesAndSpokenErrors(t *testing.T) {
 
 func callJSON[Out any](t *testing.T, box *Toolbox, name string, arguments map[string]any) (Out, error) {
 	t.Helper()
+	return callJSONWith[Out](t, context.Background(), box, name, arguments)
+}
+
+// callJSONWith 同 callJSON，调用时用 ctx（例如带着主人的确认）。
+func callJSONWith[Out any](t *testing.T, ctx context.Context, box *Toolbox, name string, arguments map[string]any) (Out, error) {
+	t.Helper()
 	var out Out
-	result, err := box.Call(context.Background(), brain.ToolCall{Name: name, Arguments: arguments})
+	result, err := box.Call(ctx, brain.ToolCall{Name: name, Arguments: arguments})
 	if err != nil {
 		return out, err
 	}
@@ -201,6 +207,48 @@ func callJSON[Out any](t *testing.T, box *Toolbox, name string, arguments map[st
 		t.Fatalf("%s 的结果不是 JSON：%s", name, result)
 	}
 	return out, nil
+}
+
+// confirmedFor 是带着主人对 tool 的确认的 ctx（确认闸执行时就是这样带的）。
+func confirmedFor(tool string) context.Context {
+	return brain.WithConfirmation(context.Background(), brain.Confirmation{ActionID: "act_1", Tool: tool, Person: "主人"})
+}
+
+// 会破坏的工具（delete_note）由工具箱自己守门：绕过会话直接调用、带着别的工具的确认、确认的人没认出来，都不执行
+// （记事还在）；阳性对照：带着主人对它的确认就删掉。不会破坏的工具不用确认。
+func TestDestructiveToolNeedsConfirmation(t *testing.T) {
+	ctx := context.Background()
+	store, err := notes.Open(ctx, filepath.Join(t.TempDir(), "notes.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	box, err := NewToolbox(ctx, quietLogger, NoteTools(store, 10, quietLogger))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer box.Close()
+	saved, err := callJSON[noteOutput](t, box, "save_note", map[string]any{"content": "车停在C3的7号位。"})
+	if err != nil {
+		t.Fatalf("不会破坏的工具不用确认：%v", err)
+	}
+	remove := map[string]any{"ids": []any{saved.Note.ID}}
+	for label, call := range map[string]context.Context{
+		"绕过会话直接调用":  ctx,
+		"带着别的工具的确认": confirmedFor("raise_monthly_cap"),
+		"确认的人没认出来":  brain.WithConfirmation(ctx, brain.Confirmation{ActionID: "act_1", Tool: "delete_note", Person: brain.SharedPerson}),
+	} {
+		if _, err := box.Call(call, brain.ToolCall{Name: "delete_note", Arguments: remove}); !errors.Is(err, brain.ErrNotConfirmed) {
+			t.Errorf("%s：应拒绝执行：%v", label, err)
+		}
+	}
+	if list, _, err := store.List(ctx, 10); err != nil || len(list) != 1 {
+		t.Fatalf("没确认的删除不该执行：%v %v", list, err)
+	}
+	deleted, err := callJSONWith[deleteNotesOutput](t, confirmedFor("delete_note"), box, "delete_note", remove)
+	if err != nil || len(deleted.Deleted) != 1 {
+		t.Errorf("带着主人的确认应能删：%+v %v", deleted, err)
+	}
 }
 
 // 记事本：记、列出（连编号交给模型挑，超过上限时写明一共几条）、按编号删（只有删要确认）、最近删掉的、按编号恢复。
@@ -247,13 +295,15 @@ func TestNoteTools(t *testing.T) {
 		t.Errorf("超过上限：只给最近的，并写明一共几条：%+v", listed)
 	}
 
-	deleted, err := callJSON[deleteNotesOutput](t, box, "delete_note", map[string]any{"ids": []any{ids[0], 999}})
+	confirmed := confirmedFor("delete_note") // 删除要带着主人的确认（见 TestDestructiveToolNeedsConfirmation）
+	deleted, err := callJSONWith[deleteNotesOutput](t, confirmed, box, "delete_note", map[string]any{"ids": []any{ids[0], 999}})
 	if err != nil || len(deleted.Deleted) != 1 || deleted.Deleted[0].Content != "车停在C3的7号位。" ||
 		len(deleted.NotFound) != 1 || deleted.NotFound[0] != 999 {
 		t.Errorf("delete_note：删掉有的、没有的编号写进 not_found：%+v %v", deleted, err)
 	}
-	if _, err := box.Call(ctx, brain.ToolCall{Name: "delete_note", Arguments: map[string]any{"ids": []any{}}}); err == nil {
-		t.Error("ids 为空应报错")
+	if _, err := box.Call(confirmed, brain.ToolCall{Name: "delete_note", Arguments: map[string]any{"ids": []any{}}}); err == nil ||
+		errors.Is(err, brain.ErrNotConfirmed) {
+		t.Errorf("ids 为空应报错：%v", err)
 	}
 	gone, err := callJSON[noteListOutput](t, box, "list_deleted_notes", nil)
 	if err != nil || len(gone.Notes) != 1 || gone.Notes[0].ID != ids[0] || gone.Notes[0].DeletedAt == "" {

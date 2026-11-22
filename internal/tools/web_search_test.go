@@ -9,7 +9,9 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -31,6 +33,9 @@ func fakeTavily(t *testing.T, wantKey string, lastQuery *atomic.Value) (*httptes
 	}
 	mcp.AddTool(server, &mcp.Tool{Name: "tavily_search"}, func(_ context.Context, _ *mcp.CallToolRequest, in searchInput) (*mcp.CallToolResult, any, error) {
 		lastQuery.Store(fmt.Sprintf("%s|%d|%s|%v", in.Query, in.MaxResults, in.SearchDepth, in.IncludeRawContent))
+		if in.Query == badQuery {
+			return nil, nil, errors.New("query is invalid")
+		}
 		body, _ := json.Marshal(map[string]any{"request_id": "x", "images": []any{}, "results": []map[string]any{
 			{"title": "日经平均", "url": "https://example.com/n", "content": strings.Repeat("涨", 5000), "score": 0.9}}})
 		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: string(body)}}}, nil, nil
@@ -62,16 +67,56 @@ func fakeTavily(t *testing.T, wantKey string, lastQuery *atomic.Value) (*httptes
 	})), restart
 }
 
-// countingMeter 记下额度检查与记账；allowErr 非空时拒绝。
-type countingMeter struct {
-	allowErr error
-	recorded int
+// badQuery 是假 Tavily 报「这次调用有错」的搜索词（服务正常回应、说参数不对）。
+const badQuery = "坏的搜索词"
+
+// searchCharge 是记下的一笔搜索。
+type searchCharge struct {
+	credits    int
+	incomplete bool
 }
 
-func (m *countingMeter) AllowSearch(context.Context, int) error { return m.allowErr }
-func (m *countingMeter) RecordSearch(_ context.Context, credits int) error {
-	m.recorded += credits
+// countingMeter 记下额度检查与每一笔记账；allowErr 非空时拒绝。
+type countingMeter struct {
+	mu       sync.Mutex
+	allowErr error
+	charges  []searchCharge
+}
+
+func (m *countingMeter) AllowSearch(context.Context, int) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.allowErr
+}
+
+func (m *countingMeter) RecordSearch(_ context.Context, credits int, incomplete bool) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.charges = append(m.charges, searchCharge{credits: credits, incomplete: incomplete})
 	return nil
+}
+
+func (m *countingMeter) refuse(err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.allowErr = err
+}
+
+// recorded 是记下的积分合计。
+func (m *countingMeter) recorded() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	total := 0
+	for _, charge := range m.charges {
+		total += charge.credits
+	}
+	return total
+}
+
+func (m *countingMeter) all() []searchCharge {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return slices.Clone(m.charges)
 }
 
 func TestTavilyQuickSearch(t *testing.T) {
@@ -81,8 +126,12 @@ func TestTavilyQuickSearch(t *testing.T) {
 	server, _ := fakeTavily(t, "tvly-test", &lastQuery)
 	defer server.Close()
 
-	if _, err := NewTavilySearcher(server.URL, "tvly-wrong", nil, logger).Search(ctx, "x", 3); err == nil {
+	refused := &countingMeter{}
+	if _, err := NewTavilySearcher(server.URL, "tvly-wrong", nil, logger).Search(ctx, "x", 3, refused); err == nil {
 		t.Fatal("密钥不对应连不上")
+	}
+	if got := refused.all(); len(got) != 0 {
+		t.Errorf("连都没连上：请求没发出去，不记账：%+v", got)
 	}
 	searcher := NewTavilySearcher(server.URL, "tvly-test", nil, logger)
 	defer searcher.Close()
@@ -100,16 +149,16 @@ func TestTavilyQuickSearch(t *testing.T) {
 	if got := lastQuery.Load(); got != "日经平均|3|basic|false" {
 		t.Errorf("快查应固定参数（3 条、basic、不带全文）：%v", got)
 	}
-	if meter.recorded != 1 {
-		t.Errorf("一次基础搜索记 1 积分：%d", meter.recorded)
+	if got := meter.all(); !slices.Equal(got, []searchCharge{{credits: 1}}) {
+		t.Errorf("一次基础搜索记 1 积分：%+v", got)
 	}
 
-	meter.allowErr = errors.New("今天的搜索用完了")
-	if _, err := box.Call(ctx, brain.ToolCall{Name: "web_search", Arguments: map[string]any{"query": "x"}}); err == nil || meter.recorded != 1 {
-		t.Errorf("额度不够时不搜、不记账：%v recorded=%d", err, meter.recorded)
+	meter.refuse(errors.New("今天的搜索用完了"))
+	if _, err := box.Call(ctx, brain.ToolCall{Name: "web_search", Arguments: map[string]any{"query": "x"}}); err == nil || meter.recorded() != 1 {
+		t.Errorf("额度不够时不搜、不记账：%v recorded=%d", err, meter.recorded())
 	}
 
-	pages, err := searcher.ReadPages(ctx, []string{"https://example.com/a", "https://example.com/b"}, 2000, "要找的内容")
+	pages, err := searcher.ReadPages(ctx, []string{"https://example.com/a", "https://example.com/b"}, 2000, "要找的内容", meter)
 	var read struct {
 		Pages []struct{ URL, Content, Error string } `json:"pages"`
 	}
@@ -129,6 +178,37 @@ func TestTavilyQuickSearch(t *testing.T) {
 	}
 	if searcher.ReadCredits(1) != 1 || searcher.ReadCredits(5) != 1 || searcher.ReadCredits(6) != 2 {
 		t.Error("抓取每 5 页 1 积分")
+	}
+	if got := meter.all(); len(got) != 2 || got[1] != (searchCharge{credits: 1}) {
+		t.Errorf("读两页记 1 积分：%+v", got)
+	}
+}
+
+// 发出去的每一次请求都记一笔，不管成没成功：会话断了重连再试时两次各记（断掉的那次标不完整），
+// Tavily 说这次调用有错时照记（标不完整、不重试）。
+func TestTavilyRecordsEveryRequestSent(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	var lastQuery atomic.Value
+	server, restart := fakeTavily(t, "tvly-test", &lastQuery)
+	defer server.Close()
+	searcher := NewTavilySearcher(server.URL, "tvly-test", nil, logger)
+	defer searcher.Close()
+	meter := &countingMeter{}
+
+	if _, err := searcher.Search(ctx, "第一次", 3, meter); err != nil {
+		t.Fatal(err)
+	}
+	restart() // Tavily 重启：旧会话没了，这次的第一个请求白发
+	if _, err := searcher.Search(ctx, "重启之后", 3, meter); err != nil {
+		t.Fatalf("会话断了应重连再试一次：%v", err)
+	}
+	if _, err := searcher.Search(ctx, badQuery, 3, meter); err == nil {
+		t.Fatal("Tavily 说参数不对时应报错")
+	}
+	want := []searchCharge{{credits: 1}, {credits: 1, incomplete: true}, {credits: 1}, {credits: 1, incomplete: true}}
+	if got := meter.all(); !slices.Equal(got, want) {
+		t.Errorf("每发出一次请求记一笔（没拿到结果的标不完整）：%+v，应为 %+v", got, want)
 	}
 }
 
@@ -164,11 +244,11 @@ func TestTavilyConnectsLazilyAndReconnects(t *testing.T) {
 	if requests.Load() != 0 {
 		t.Fatal("创建时不应连 Tavily")
 	}
-	if _, err := searcher.Search(ctx, "第一次", 3); err != nil {
+	if _, err := searcher.Search(ctx, "第一次", 3, &countingMeter{}); err != nil {
 		t.Fatalf("第一次用到时应连上并搜到：%v", err)
 	}
 	restart() // Tavily 重启：旧会话没了
-	if _, err := searcher.Search(ctx, "重启之后", 3); err != nil {
+	if _, err := searcher.Search(ctx, "重启之后", 3, &countingMeter{}); err != nil {
 		t.Fatalf("会话断了应重连再试一次：%v", err)
 	}
 	if got := lastQuery.Load(); got != "重启之后|3|basic|false" {

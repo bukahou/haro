@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/pressly/goose/v3"
 	_ "modernc.org/sqlite" // 纯 Go 的 SQLite 驱动：编译进程序，不用装任何软件、不用起数据库服务
@@ -24,8 +25,12 @@ type Options struct {
 	Migrate []goose.ProviderOption
 }
 
-// 文件库统一的设置：另一个连接拿着写锁时最多等 5 秒再报忙；日志用 WAL（读写互不阻塞）。内存库用不着这两项。
-var filePragmas = []string{"busy_timeout(5000)", "journal_mode(WAL)"}
+// BusyTimeout 是文件库里另一个连接拿着写锁时最多等多久再报忙（SQLite 的 busy_timeout）。
+// 调用方等一次写库的期限照它定：再等下去就是库出了问题。
+const BusyTimeout = 5 * time.Second
+
+// 文件库统一的设置：等写锁最多 BusyTimeout；日志用 WAL（读写互不阻塞）。内存库用不着这两项。
+var filePragmas = []string{fmt.Sprintf("busy_timeout(%d)", BusyTimeout.Milliseconds()), "journal_mode(WAL)"}
 
 // Open 打开（没有就建）path 上的 SQLite 库，并把表结构升到最新（migrations 是这个库的迁移文件，见 Migrate）。
 // 目录没有就建；只开一个连接：SQLite 同时只有一个写者，内存库每个连接各是一份库。path 为空 = 只在内存里（进程退出就没了）。

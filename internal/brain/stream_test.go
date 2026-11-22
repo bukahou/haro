@@ -3,8 +3,12 @@ package brain_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"slices"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -96,7 +100,7 @@ func waitOpened(t *testing.T, voice *braintest.Voice, n int) *braintest.Stream {
 	return voice.Stream()
 }
 
-// 识别流断开：按原来的设置自己重开，把会话记着的「醒着 / 正在播放」告诉新的流，之后照常对话。
+// 识别流断开：按原来的设置自己重开，把会话记着的「醒着还是睡着 / 正在播放」告诉新的流，之后照常对话。
 // 断开期间送来的音频丢掉、不逐块回错误；断开很快恢复时不提示终端。
 func TestStreamReopensAfterDisconnect(t *testing.T) {
 	voice := braintest.NewVoice()
@@ -106,6 +110,10 @@ func TestStreamReopensAfterDisconnect(t *testing.T) {
 	turn := realtimeproto.TurnDetection{Type: "server_vad", SilenceDurationMs: 600}
 	first := braintest.Open(t, session, voice, realtimeproto.SessionUpdate{TurnDetection: &turn, WakeWord: true})
 	_ = session.Send(ctx, realtimeproto.HaroWakeWordWake{})
+	if err := first.Emit(realtimeproto.HaroWakeWordState{Awake: true}); err != nil { // 识别服务处理完、回复醒着
+		t.Fatal(err)
+	}
+	braintest.Expect[realtimeproto.HaroWakeWordState](t, session)
 	_ = session.Send(ctx, realtimeproto.HaroPlaybackStarted{})
 
 	voice.FailNextOpen(errors.New("连不上 haro-asr"))
@@ -130,6 +138,12 @@ func TestStreamReopensAfterDisconnect(t *testing.T) {
 	}
 	if got := second.AwakeCalls(); !slices.Equal(got, []bool{true}) {
 		t.Errorf("重开后应恢复醒着：%v", got)
+	}
+	if err := second.Emit(realtimeproto.HaroWakeWordState{Awake: true}); err != nil {
+		t.Fatal(err)
+	}
+	if state := braintest.Expect[realtimeproto.HaroWakeWordState](t, session); !state.Awake {
+		t.Errorf("新的流的回复应转给终端：%+v", state)
 	}
 	if got := second.PlaybackCalls(); len(got) != 0 {
 		t.Errorf("断开期间播放已经停了，重开后不应再说在播放：%v", got)
@@ -244,6 +258,118 @@ func TestStreamOpensLaterWhenRecognizerIsNotReady(t *testing.T) {
 	}
 }
 
+// rejection 是识别服务不接受识别流设置时 OpenStream 返回的错误（码照识别服务回的）。
+func rejection(code realtimeproto.ErrorCode) error {
+	return fmt.Errorf("%w: %w", brain.ErrStreamRejected, &realtimeproto.ProtocolError{Code: code, Message: "转写服务: 做不到"})
+}
+
+// 第一次打开识别流就被拒（例如要 semantic_vad 而 haro-asr 没配说完判断模型）：session.update 回同一个错误码
+// （连接层原样转给终端），不在后台反复重连，提示终端一次「听不见了」；之后送来的音频悄悄丢掉、不逐块回错误。
+func TestStreamRejectedOnFirstOpen(t *testing.T) {
+	voice := braintest.NewVoice()
+	session := newReopenSession(t, voice, brain.ReopenTiming{Delay: time.Millisecond, MaxDelay: 2 * time.Millisecond,
+		LostNoticeAfter: time.Hour})
+	ctx := context.Background()
+	voice.FailNextOpen(rejection(realtimeproto.CodeUnsupportedFeature))
+	turn := realtimeproto.TurnDetection{Type: realtimeproto.TurnSemanticVAD}
+	err := session.Send(ctx, realtimeproto.SessionUpdate{TurnDetection: &turn})
+	if refusal, ok := errors.AsType[*realtimeproto.ProtocolError](err); !ok || refusal.Code != realtimeproto.CodeUnsupportedFeature {
+		t.Fatalf("应把识别服务的错误码回给终端：%v", err)
+	}
+	if notice := braintest.Expect[realtimeproto.HaroNotice](t, session); notice.Kind != realtimeproto.NoticeTranscriptionLost {
+		t.Errorf("应提示终端听不见了：%+v", notice)
+	}
+	time.Sleep(30 * time.Millisecond) // 后台在重连的话，这期间会试好多次
+	if attempts := voice.OpenAttempts(); attempts != 1 {
+		t.Errorf("设置被拒后不应再去连：试了 %d 次", attempts)
+	}
+	chunk := realtimeproto.PCMAudio{Format: testFormat, Data: make([]byte, 640)}
+	if err := session.Send(ctx, realtimeproto.InputAudioBufferAppend{Audio: chunk}); err != nil {
+		t.Errorf("被拒之后送来的音频应悄悄丢掉：%v", err)
+	}
+}
+
+// 识别流断开后重开时被拒（例如 haro-asr 换了配置重启）：把同一个错误码告诉终端（只一次）、提示「听不见了」，
+// 不再重开（不会每圈刷一次错误）。
+func TestStreamRejectedOnReopen(t *testing.T) {
+	voice := braintest.NewVoice()
+	session := newReopenSession(t, voice, brain.ReopenTiming{Delay: time.Millisecond, MaxDelay: 2 * time.Millisecond,
+		LostNoticeAfter: time.Hour})
+	turn := realtimeproto.TurnDetection{Type: realtimeproto.TurnServerVAD}
+	first := braintest.Open(t, session, voice, realtimeproto.SessionUpdate{TurnDetection: &turn})
+	voice.FailNextOpen(rejection(realtimeproto.CodeUnsupportedFeature))
+	_ = first.Close()
+	if refusal := braintest.Expect[realtimeproto.Error](t, session); refusal.Code != realtimeproto.CodeUnsupportedFeature {
+		t.Errorf("应把识别服务的错误码告诉终端：%+v", refusal)
+	}
+	if notice := braintest.Expect[realtimeproto.HaroNotice](t, session); notice.Kind != realtimeproto.NoticeTranscriptionLost {
+		t.Errorf("应提示终端听不见了：%+v", notice)
+	}
+	time.Sleep(30 * time.Millisecond)
+	if attempts := voice.OpenAttempts(); attempts != 2 {
+		t.Errorf("被拒后不应再重开：一共试了 %d 次（第一次打开 + 被拒的那次）", attempts)
+	}
+	select {
+	case event := <-session.Events():
+		t.Errorf("被拒只告诉终端一次，不应再有别的事件：%+v", event)
+	default:
+	}
+}
+
+// 终端送来写错的说完判断：服务端自己就拒绝（invalid_event），不去打开识别流、不等识别服务拒。
+func TestInvalidTurnDetectionRejectedBeforeOpening(t *testing.T) {
+	voice := braintest.NewVoice()
+	session := newStreamSession(t, voice, &fakeModel{}, nil)
+	turn := realtimeproto.TurnDetection{Type: realtimeproto.TurnSemanticVAD, Eagerness: "fast"}
+	err := session.Send(context.Background(), realtimeproto.SessionUpdate{TurnDetection: &turn})
+	if refusal, ok := errors.AsType[*realtimeproto.ProtocolError](err); !ok || refusal.Code != realtimeproto.CodeInvalidEvent {
+		t.Errorf("写错的取值应回 invalid_event：%v", err)
+	}
+	if attempts := voice.OpenAttempts(); attempts != 0 {
+		t.Errorf("写错的设置不应拿去打开识别流：试了 %d 次", attempts)
+	}
+}
+
+// stuckOnce 是第一次打开就卡住的识别服务（接了连接却一直不确认）：第一次等到期限才失败，之后交给 Voice。
+type stuckOnce struct {
+	*braintest.Voice
+	stuck atomic.Bool
+}
+
+func (s *stuckOnce) OpenStream(ctx context.Context, config brain.StreamConfig) (brain.RecognizerStream, error) {
+	if s.stuck.CompareAndSwap(false, true) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	return s.Voice.OpenStream(ctx, config)
+}
+
+// 识别服务卡住时，第一次打开也有期限：session.update 不会一直卡在终端连接的读循环里（那样连终端的心跳回应都读不到）；
+// 到了期限转到后台接着连，连上之后照常对话。
+func TestFirstStreamOpenHasDeadline(t *testing.T) {
+	voice := braintest.NewVoice()
+	parts := brain.Components{Front: brain.Agent{Model: &fakeModel{tokens: []string{"好的。"}}}, Synthesizer: fakeSynthesizer{},
+		Streaming: &stuckOnce{Voice: voice}, NewSegmenter: func() brain.TextSegmenter { return speech.NewSentenceSegmenter(4, 40) }}
+	session := brain.NewSession(parts, brain.Options{MaxHistoryTurn: 6, StreamReopen: brain.ReopenTiming{Delay: time.Millisecond,
+		MaxDelay: 2 * time.Millisecond, LostNoticeAfter: time.Hour, OpenTimeout: 50 * time.Millisecond}}, quiet)
+	t.Cleanup(func() { _ = session.Close() })
+	turn := realtimeproto.TurnDetection{Type: realtimeproto.TurnServerVAD}
+	sent := make(chan error, 1)
+	go func() { sent <- session.Send(context.Background(), realtimeproto.SessionUpdate{TurnDetection: &turn}) }()
+	select {
+	case err := <-sent:
+		if err != nil {
+			t.Fatalf("识别服务卡住时 session.update 不应失败（在后台接着连）：%v", err)
+		}
+	case <-time.After(braintest.EventTimeout):
+		t.Fatal("第一次打开卡住时 session.update 应在期限上返回")
+	}
+	stream := waitOpened(t, voice, 1)
+	if done := braintest.Done(t, braintest.Ask(t, session, stream, braintest.Utterance{Text: "你好"})); done.Status != realtimeproto.StatusCompleted {
+		t.Errorf("后台连上之后应照常对话：%+v", done)
+	}
+}
+
 // 会话结束时不再重开。
 func TestStreamNotReopenedAfterClose(t *testing.T) {
 	voice := braintest.NewVoice()
@@ -309,7 +435,64 @@ func TestUnknownSpeakerIsIgnored(t *testing.T) {
 	}
 }
 
-// 两台终端同时听到唤醒词——只有质量高的那台把唤醒告诉终端，另一台的识别流被送回休眠。
+// warnKeys 记下每条告警级别日志带的属性名（只看级别和属性名，不比对文字）。
+type warnKeys struct {
+	mu   sync.Mutex
+	keys []map[string]bool
+}
+
+func (w *warnKeys) Enabled(context.Context, slog.Level) bool { return true }
+func (w *warnKeys) WithAttrs([]slog.Attr) slog.Handler       { return w }
+func (w *warnKeys) WithGroup(string) slog.Handler            { return w }
+func (w *warnKeys) Handle(_ context.Context, record slog.Record) error {
+	if record.Level < slog.LevelWarn {
+		return nil
+	}
+	keys := map[string]bool{}
+	record.Attrs(func(attr slog.Attr) bool {
+		keys[attr.Key] = true
+		return true
+	})
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.keys = append(w.keys, keys)
+	return nil
+}
+
+// with 是带 key 属性的告警条数。
+func (w *warnKeys) with(key string) int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	count := 0
+	for _, keys := range w.keys {
+		if keys[key] {
+			count++
+		}
+	}
+	return count
+}
+
+// 开着声纹、这句却算不出声纹（第三种结果），这次醒着期间也还没认出过谁：进全家共用的对话、照样回答，记一条明确的警告。
+func TestUncheckableSpeakerIsAnsweredAndLogged(t *testing.T) {
+	voice := braintest.NewVoice()
+	logs := &warnKeys{}
+	session := brain.NewSession(brain.Components{Front: brain.Agent{Model: &fakeModel{tokens: []string{"好的。"}}},
+		Synthesizer: fakeSynthesizer{}, Streaming: voice,
+		NewSegmenter: func() brain.TextSegmenter { return speech.NewSentenceSegmenter(4, 40) }},
+		brain.Options{MaxHistoryTurn: 6}, slog.New(logs))
+	t.Cleanup(func() { _ = session.Close() })
+	stream := braintest.Open(t, session, voice, realtimeproto.SessionUpdate{})
+	done := braintest.Done(t, braintest.Ask(t, session, stream, braintest.Utterance{Text: "你好", CheckFailed: true}))
+	if done.Status != realtimeproto.StatusCompleted {
+		t.Errorf("现在照没比对处理、照样回答：%+v", done)
+	}
+	if logs.with("speaker_check_failed") != 1 {
+		t.Error("算不出声纹的这句应记一条明确的警告")
+	}
+}
+
+// 两台终端同时听到唤醒词——只有质量高的那台把唤醒告诉终端，另一台的识别流被送回休眠：
+// 它处理到休眠之前报的说话不转给终端、不回答；它回复睡着了，转给那台终端（本来就睡着）。
 func TestTwoTerminalsHearingWakeWordOnlyOneAnswers(t *testing.T) {
 	arbiter := brain.NewWakeArbiter(50 * time.Millisecond)
 	open := func() (*brain.Session, *braintest.Stream) {
@@ -320,7 +503,8 @@ func TestTwoTerminalsHearingWakeWordOnlyOneAnswers(t *testing.T) {
 	near, nearStream := open()
 	far, farStream := open()
 
-	_ = farStream.Emit(realtimeproto.HaroWakeWordDetected{Keyword: "哈罗哈罗", Score: 0.30, Level: 0.01})
+	_ = farStream.Emit(realtimeproto.HaroWakeWordDetected{Keyword: "哈罗哈罗", Score: 0.30, Level: 0.01},
+		realtimeproto.InputAudioBufferSpeechStarted{ItemID: "item_1"}, realtimeproto.InputAudioBufferSpeechStopped{ItemID: "item_1"})
 	_ = nearStream.Emit(realtimeproto.HaroWakeWordDetected{Keyword: "哈罗哈罗", Score: 0.55, Level: 0.04})
 
 	braintest.Expect[realtimeproto.HaroWakeWordDetected](t, near)
@@ -332,6 +516,8 @@ func TestTwoTerminalsHearingWakeWordOnlyOneAnswers(t *testing.T) {
 	if got := farStream.AwakeCalls(); !slices.Equal(got, []bool{false}) {
 		t.Errorf("远的那台的识别流应被送回休眠：%v", got)
 	}
+	_ = farStream.Emit(realtimeproto.HaroWakeWordState{Awake: false})
+	expectState(t, far, false, "识别流回复睡着了，应转给远的那台")
 }
 
 // 识别流还没打开（session.update 没带 turn_detection）时收到的音频无处可送：明确拒绝，不在服务端堆积。
@@ -417,5 +603,37 @@ func TestClosingSessionIsNotAStreamDisconnect(t *testing.T) {
 	case <-warned:
 		t.Error("会话正常结束时关掉的流不应当成断开来告警")
 	case <-time.After(100 * time.Millisecond): // 有问题时告警在关流后立刻就打
+	}
+}
+
+// historyMentions 判断模型最近一次收到的历史里有没有出现 text。
+func historyMentions(model *fakeModel, text string) bool {
+	for _, message := range model.history {
+		if strings.Contains(message.Text, text) {
+			return true
+		}
+	}
+	return false
+}
+
+// 醒着期间认出过主人：算不出声纹的那句接主人的对话；对话窗口结束（识别流回复睡着了）以后不再沿用，进全家共用的对话。
+func TestUncheckableSpeakerFollowsLastSpeakerUntilSleep(t *testing.T) {
+	voice := braintest.NewVoice()
+	model := &fakeModel{tokens: []string{"好的。"}}
+	session := newStreamSession(t, voice, model, nil)
+	turn := realtimeproto.TurnDetection{Type: "server_vad"}
+	stream := braintest.Open(t, session, voice, realtimeproto.SessionUpdate{TurnDetection: &turn, WakeWord: true})
+	braintest.Done(t, braintest.Ask(t, session, stream, braintest.Utterance{Wake: true, Text: "我叫小明", Speaker: "主人", SpeakerChecked: true}))
+	braintest.Done(t, braintest.Ask(t, session, stream, braintest.Utterance{Text: "嗯", CheckFailed: true}))
+	if !historyMentions(model, "我叫小明") {
+		t.Error("醒着期间：算不出声纹的这句应沿用主人的对话")
+	}
+	if err := stream.Emit(realtimeproto.HaroWakeWordState{Awake: false}); err != nil {
+		t.Fatal(err)
+	}
+	braintest.Expect[realtimeproto.HaroWakeWordState](t, session)
+	braintest.Done(t, braintest.Ask(t, session, stream, braintest.Utterance{Wake: true, Text: "在吗", CheckFailed: true}))
+	if historyMentions(model, "我叫小明") {
+		t.Error("睡着以后再醒：算不出声纹的这句不应再沿用之前认出的人")
 	}
 }

@@ -36,9 +36,13 @@ func main() {
 	enrollAppend := flag.Bool("append", false, "和 -enroll 一起用：补录（换了麦克风、换了位置时），加进原来的声纹")
 	enrollSeconds := flag.Duration("seconds", 5*time.Second, "和 -enroll 一起用：每句录多久")
 	showVersion := flag.Bool("version", false, "打印版本号后退出")
+	versionJSON := flag.Bool("json", false, "和 -version 一起用：输出一行 JSON（program、version、os、arch、go），给安装脚本、CI 读")
 	flag.Parse()
 	if *showVersion {
-		fmt.Println(buildinfo.Describe("haro"))
+		if err := buildinfo.WriteVersion(os.Stdout, "haro", *versionJSON); err != nil {
+			fmt.Fprintln(os.Stderr, "打印版本号：", err)
+			os.Exit(1)
+		}
 		return
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
@@ -64,11 +68,15 @@ func run(logger *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	shutdownTelemetry, err := telemetry.SetupTelemetry(ctx, settings.OTLPEndpoint)
+	shutdownTelemetry, err := telemetry.Setup(ctx, telemetry.ServiceTerminal, settings.OTLPEndpoint)
 	if err != nil {
 		return err
 	}
-	defer shutdownTelemetry(context.Background())
+	defer func() { // 最多等 telemetry.ShutdownTimeout：采集器连不上时不拖住停止 / 重启
+		if err := shutdownTelemetry(); err != nil {
+			logger.Warn("退出时遥测没发出去", "err", err)
+		}
+	}()
 
 	local, err := platform.OpenLocalDevices(logger)
 	if err != nil {
@@ -87,6 +95,8 @@ func run(logger *slog.Logger) error {
 	options := assistantOptions(settings, sounds)
 	logger.Info("haro 启动", "version", buildinfo.Version, "server", settings.ServerURL,
 		"turn_detection", settings.TurnDetection, "barge_in", options.BargeIn, "camera_backend", settings.CameraBackend)
+	zone := config.LocalTimeZone(time.Now())
+	logger.Info("时区（日志里的时间按它；用环境变量 TZ 改）", "zone", zone.Name, "utc_offset", zone.Offset, "TZ", zone.TZ)
 	for _, note := range settings.RemovedSettingNotes {
 		logger.Warn(note)
 	}

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -98,5 +99,24 @@ func TestRetriesOnceOnTimeout(t *testing.T) {
 	calls.Store(10)
 	if _, err := client.FindPlaces(context.Background(), "bad", "ja", 5); err == nil || calls.Load() != 11 {
 		t.Errorf("服务报 4xx 不重试：%v 请求了 %d 次", err, calls.Load()-10)
+	}
+}
+
+// 配置里的地址自带查询参数（例如付费接口要的 apikey）：请求照样带上它，再加上这次的参数，不拼坏。
+func TestOpenMeteoKeepsQueryInConfiguredURL(t *testing.T) {
+	var got atomic.Value
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got.Store(r.URL.Query())
+		_, _ = w.Write([]byte(`{"current":{"time":"2026-11-21T10:00","temperature_2m":12,"weather_code":0},
+			"daily":{"time":["2026-11-21"],"weather_code":[0],"temperature_2m_max":[15],"temperature_2m_min":[8]}}`))
+	}))
+	t.Cleanup(server.Close)
+	client := NewOpenMeteoClient(server.URL+"/v1/forecast?apikey=K", server.URL, server.Client())
+	if _, err := client.ForecastFor(context.Background(), sapporo, 1); err != nil {
+		t.Fatal(err)
+	}
+	query, _ := got.Load().(url.Values)
+	if query.Get("apikey") != "K" || query.Get("latitude") == "" {
+		t.Errorf("请求应同时带上地址自带的 apikey 和这次的参数：%v", query)
 	}
 }

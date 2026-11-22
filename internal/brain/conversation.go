@@ -42,8 +42,10 @@ type ConversationTurn struct {
 
 // ConversationStore 存取对话（Go interface，实现在 internal/conversationstore）。
 type ConversationStore interface {
-	// LoadConversation 读一个人的对话；没存过时返回 ok=false。
+	// LoadConversation 读一个人的对话；没存过时返回 ok=false，读出错时返回 err（和「没存过」分开）。
 	LoadConversation(person string) (record ConversationRecord, ok bool, err error)
+	// SaveConversation 整份存下一个人的对话，并把编了号的轮次写进完整的对话记录（只增不删）：
+	// 记录里同一编号已经是另一轮时不覆盖它，照样存下这份对话，返回说明哪几轮没写进记录的错误。
 	SaveConversation(record ConversationRecord) error
 }
 
@@ -63,7 +65,9 @@ func NewConversationBook(store ConversationStore, opts Options, logger *slog.Log
 	return &ConversationBook{store: store, opts: opts, logger: logger, byPerson: map[string]*Conversation{}}
 }
 
-// Conversation 返回这个人的对话（没有就建一个：先读存储，读不到就用初始性格开始）。
+// Conversation 返回这个人的对话（没有就建一个：先读存储，没存过就用初始性格开始）。
+// 存储读出错时不当成「没存过」：交出一份只在内存里、不写盘的对话（见 Conversation.detached），不留在对话簿里，
+// 下一轮重读——空对话一旦写盘，就会盖掉存着的摘要和最近几轮。
 func (b *ConversationBook) Conversation(person string) *Conversation {
 	if person == "" {
 		person = SharedPerson
@@ -79,7 +83,11 @@ func (b *ConversationBook) Conversation(person string) *Conversation {
 		record, ok, err := b.store.LoadConversation(person)
 		switch {
 		case err != nil:
-			b.logger.Warn("读取对话失败：从头开始", "person", person, "err", err)
+			b.mu.Unlock()
+			b.logger.Warn("读取对话失败：这一轮不带之前的对话、也不写盘（存着的不会被盖掉），下一轮重读", "person", person, "err", err)
+			conversation.detached = true
+			conversation.persona = b.initialPersona()
+			return conversation
 		case ok:
 			conversation.history = record.History
 			conversation.summary, conversation.unsummarized = record.Summary, record.Unsummarized
@@ -90,10 +98,11 @@ func (b *ConversationBook) Conversation(person string) *Conversation {
 			if record.OpenTurn != nil { // 上次在这一轮中途重启：做过的工具照实接进历史（模型才知道自己做过）
 				b.logger.Warn("上次服务端在一轮中途重启：这一轮照实接进历史", "person", person, "at", record.OpenTurn.At)
 				conversation.history = append(conversation.history, *record.OpenTurn)
-				conversation.trimLocked(b.opts.MaxHistoryTurn, b.summaryAgent != nil) // 持有 b.mu：直接读，不经 summarizer()
 				recovered = true
 			}
-			if conversation.numberTurnsLocked() { // 还没编号的（旧的记录）补上，写盘后进完整的对话记录
+			// 还没编号的（旧的记录）补上，写盘后进完整的对话记录。窗口和攒着等压缩的轮数等记下一轮时再按上限截
+			// （appendTurn）：截掉之前它们都已经编号、写进了完整的对话记录
+			if conversation.numberTurnsLocked() {
 				recovered = true
 			}
 		}
@@ -121,16 +130,16 @@ func (b *ConversationBook) initialPersona() *Persona {
 	return persona
 }
 
-// save 把一份对话写盘（失败只记日志：内存里的对话照常用）。
+// save 把一份对话写盘（出错只记日志：内存里的对话照常用）；不写盘的对话（detached）不写。
 // 同一个人的保存一个接一个：在轮到时才取快照，后取的快照一定后写，旧的不会盖掉新的（摘要和新一轮同时保存时）。
 func (b *ConversationBook) save(conversation *Conversation) {
-	if b.store == nil {
+	if b.store == nil || conversation.detached {
 		return
 	}
 	conversation.saveMu.Lock()
 	defer conversation.saveMu.Unlock()
 	if err := b.store.SaveConversation(conversation.record()); err != nil {
-		b.logger.Warn("保存对话失败", "person", conversation.person, "err", err)
+		b.logger.Warn("保存对话出错", "person", conversation.person, "err", err)
 	}
 }
 
@@ -138,6 +147,9 @@ func (b *ConversationBook) save(conversation *Conversation) {
 type Conversation struct {
 	person string
 	book   *ConversationBook
+	// detached：存储读这个人的对话时出错，这一份只在内存里用：不带之前的对话、不写盘、不压缩，也不留在对话簿里
+	// （下一轮重读）。建好后不再改，不用加锁
+	detached bool
 
 	saveMu sync.Mutex // 同一个人的保存一个接一个（见 ConversationBook.save）
 
@@ -258,7 +270,13 @@ func (c *Conversation) numberTurnsLocked() bool {
 	return numbered
 }
 
-// trimLocked 只留最近 maxTurns 轮；掉出窗口的在写摘要时攒着等压缩，否则丢掉。调用方持有 c.mu（或对话还没交出去）。
+// maxUnsummarizedTurns 是掉出窗口、还没压进摘要的轮次最多攒几轮（它们照常带给模型）。正常时压一次只要几秒，
+// 攒着的不会超过一批多一点；攒到四批说明摘要连着几次没写成（拒答、写得太长、出错），再攒下去每轮带给模型的历史只会越来越长
+// （费用和开口前的等待跟着涨，最后超出模型的上下文）。超出的丢掉最早的几轮：完整的对话记录里都还在。
+const maxUnsummarizedTurns = 4 * summaryBatch
+
+// trimLocked 只留最近 maxTurns 轮；掉出窗口的在写摘要时攒着等压缩（最多 maxUnsummarizedTurns 轮），否则丢掉。
+// 调用方持有 c.mu。
 func (c *Conversation) trimLocked(maxTurns int, summarizing bool) {
 	if maxTurns > 0 && len(c.history) > maxTurns {
 		dropped := c.history[:len(c.history)-maxTurns]
@@ -269,6 +287,12 @@ func (c *Conversation) trimLocked(maxTurns int, summarizing bool) {
 	}
 	if !summarizing {
 		c.unsummarized = nil // 关掉摘要后，以前攒下的不再带
+		return
+	}
+	if excess := len(c.unsummarized) - maxUnsummarizedTurns; excess > 0 {
+		c.book.logger.Warn("摘要一直没写成：攒着的最早几轮不再带给模型（完整的对话记录里都有）", "person", c.person,
+			"dropped_turns", excess, "kept_turns", maxUnsummarizedTurns)
+		c.unsummarized = slices.Clone(c.unsummarized[excess:])
 	}
 }
 
@@ -379,12 +403,4 @@ func (c *Conversation) unexpiredPendingActions(now time.Time) []pendingAction {
 	defer c.mu.Unlock()
 	c.pendingActions = slices.DeleteFunc(c.pendingActions, func(action pendingAction) bool { return now.After(action.ExpiresAt) })
 	return slices.Clone(c.pendingActions)
-}
-
-// hasPendingActions 去掉过期的，看还有没有待确认的操作。
-func (c *Conversation) hasPendingActions(now time.Time) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.pendingActions = slices.DeleteFunc(c.pendingActions, func(action pendingAction) bool { return now.After(action.ExpiresAt) })
-	return len(c.pendingActions) > 0
 }

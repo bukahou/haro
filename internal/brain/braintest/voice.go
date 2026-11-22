@@ -14,10 +14,11 @@ import (
 
 // Voice 是假的流式识别（brain.StreamingRecognizer）：会话打开识别流时交出一条 Stream，测试经 Stream 让「主人说话」。
 type Voice struct {
-	mu      sync.Mutex
-	streams []*Stream
-	configs []brain.StreamConfig
-	fail    error
+	mu       sync.Mutex
+	streams  []*Stream
+	configs  []brain.StreamConfig
+	fail     error
+	attempts int // OpenStream 被调用的次数（含失败的）
 }
 
 // NewVoice 创建假的流式识别。
@@ -34,12 +35,20 @@ func (v *Voice) FailNextOpen(err error) {
 func (v *Voice) OpenStream(_ context.Context, config brain.StreamConfig) (brain.RecognizerStream, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	v.attempts++
 	if v.fail != nil {
 		return nil, v.fail
 	}
 	stream := &Stream{events: make(chan realtimeproto.ServerEvent, 64)}
 	v.streams, v.configs = append(v.streams, stream), append(v.configs, config)
 	return stream, nil
+}
+
+// OpenAttempts 是会话一共试着打开过几次识别流（含失败的）：断开后第一次重开就说明会话已经发现断开了。
+func (v *Voice) OpenAttempts() int {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.attempts
 }
 
 // Stream 是最近打开的一条识别流；还没打开时为 nil。
@@ -76,12 +85,13 @@ var errStreamClosed = errors.New("braintest: 识别流已经关闭")
 type Stream struct {
 	events chan realtimeproto.ServerEvent
 
-	mu       sync.Mutex
-	closed   bool
-	audio    [][]byte
-	awake    []bool
-	playback []bool
-	items    int
+	mu        sync.Mutex
+	closed    bool
+	audio     [][]byte
+	awake     []bool
+	awakeFail error // 下一次 SetAwake 返回的错误（FailNextSetAwake）
+	playback  []bool
+	items     int
 }
 
 // SendAudio 记下音频。
@@ -92,12 +102,21 @@ func (s *Stream) SendAudio(_ context.Context, pcm []byte) error {
 	return nil
 }
 
-// SetAwake 记下唤醒门的开关。
+// SetAwake 记下唤醒门的开关。不回复 haro.wake_word.state：识别服务的回复由测试用 Emit 发出。
 func (s *Stream) SetAwake(_ context.Context, awake bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.awake = append(s.awake, awake)
-	return nil
+	err := s.awakeFail
+	s.awakeFail = nil
+	return err
+}
+
+// FailNextSetAwake 让下一次 SetAwake 返回 err（像发不出去那样；照样记下这次调用）。
+func (s *Stream) FailNextSetAwake(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.awakeFail = err
 }
 
 // SetPlayback 记下终端是否在播放。

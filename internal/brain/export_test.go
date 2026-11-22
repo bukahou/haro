@@ -22,6 +22,9 @@ var (
 	ToolOverview              = toolOverview
 )
 
+// ConversationUnreadableNote 是之前的对话没读出来时给模型的附注。
+var ConversationUnreadableNote = conversationUnreadableNote
+
 // SetTranscriptionWaitTimeoutForTest 临时改「等识别结果」的期限，返回改回去的函数。
 func SetTranscriptionWaitTimeoutForTest(timeout time.Duration) (restore func()) {
 	previous := transcriptionWaitTimeout

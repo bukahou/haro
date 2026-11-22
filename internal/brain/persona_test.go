@@ -104,7 +104,9 @@ func (m *specRecorder) StreamReply(_ context.Context, request brain.ChatRequest)
 	for _, tool := range tools {
 		m.names = append(m.names, tool.Name)
 	}
-	return func(yield func(brain.ReplyDelta, error) bool) { yield(brain.ReplyDelta{Text: "好的。"}, nil) }
+	return func(yield func(brain.ReplyDelta, error) bool) {
+		yield(brain.ReplyDelta{Text: "好的。", Stop: brain.StopCompleted}, nil)
+	}
 }
 
 // promptRecorder 记下最近一次收到的工具名和系统提示词。
@@ -121,5 +123,7 @@ func (m *promptRecorder) StreamReply(_ context.Context, request brain.ChatReques
 		m.tools = append(m.tools, tool.Name)
 	}
 	m.system = braintest.Request{Messages: messages}.System()
-	return func(yield func(brain.ReplyDelta, error) bool) { yield(brain.ReplyDelta{Text: "好的。"}, nil) }
+	return func(yield func(brain.ReplyDelta, error) bool) {
+		yield(brain.ReplyDelta{Text: "好的。", Stop: brain.StopCompleted}, nil)
+	}
 }

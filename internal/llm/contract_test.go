@@ -20,9 +20,11 @@ import (
 type contractStop int
 
 const (
-	contractDone      contractStop = iota // 说完了
-	contractToolUse                       // 停下来等工具结果
-	contractMaxTokens                     // 到了输出上限（工具调用的参数写到一半）
+	contractDone          contractStop = iota // 说完了
+	contractToolUse                           // 停下来等工具结果
+	contractMaxTokens                         // 到了输出上限（工具调用的参数写到一半）
+	contractUnknownReason                     // 停下的原因是厂商新加的、适配认不出
+	contractUnfinished                        // 没推结束标志（停下的原因、结束事件），连接就正常关了
 )
 
 type contractVendor struct {
@@ -38,10 +40,13 @@ type contractVendor struct {
 	forbids   func(body map[string]any) bool // 请求体里声明了这一轮不许调用工具
 	// omitsForbiddenTools：服务端不认「不许调用」的选项，这一轮干脆不带工具（Ollama）
 	omitsForbiddenTools bool
+	// overloaded 是流已经开始（HTTP 回了 200）之后服务端推来的错误事件：过载
+	overloaded string
 }
 
 var contractVendors = []contractVendor{
 	{name: "claude", newServer: llmtest.NewClaudeServer, events: claudeEvents, firstText: 2,
+		overloaded: `{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`,
 		newModel: func(server *llmtest.Server) brain.ChatModel {
 			return NewAnthropicChatModel(AnthropicOptions{API: claudeAPIForTest("test-key", server.URL, server.Client()),
 				Model: "claude-haiku-5-5", MaxTokens: 800})
@@ -52,15 +57,16 @@ var contractVendors = []contractVendor{
 			choice, _ := body["tool_choice"].(map[string]any)
 			return choice["type"] == "none"
 		}},
-	{name: "openai", newServer: llmtest.NewOpenAIServer, events: openAIEvents, firstText: 0,
+	{name: "openai", newServer: llmtest.NewOpenAIServer, events: openAIEvents, firstText: 0, overloaded: openAIOverloaded,
 		newModel: func(server *llmtest.Server) brain.ChatModel {
 			return NewOpenAIChatModel(OpenAIOptions{BaseURL: server.URL, Model: "gpt-test", APIKey: "k", MaxTokens: 800,
 				HTTPClient: server.Client()})
 		},
 		tools: openAITools, toolName: openAIToolName, forbids: openAIForbids},
 	{name: "ollama", newServer: llmtest.NewOpenAIServer, events: openAIEvents, firstText: 0, omitsForbiddenTools: true,
+		overloaded: openAIOverloaded,
 		newModel: func(server *llmtest.Server) brain.ChatModel {
-			return NewOllamaChatModel(server.URL, "qwen3-vl:8b-instruct", 800, OpenAIOptions{HTTPClient: server.Client()})
+			return mustOllama(server.URL, "qwen3-vl:8b-instruct", 800, OpenAIOptions{HTTPClient: server.Client()})
 		},
 		tools: openAITools, toolName: openAIToolName, forbids: openAIForbids},
 }
@@ -77,10 +83,17 @@ func claudeEvents(texts []string, call *brain.ToolCall, stop contractStop) []str
 			fmt.Sprintf(`{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":%q}}`, contractArguments(call, stop)),
 			`{"type":"content_block_stop","index":1}`)
 	}
-	reason := map[contractStop]string{contractDone: "end_turn", contractToolUse: "tool_use", contractMaxTokens: "max_tokens"}[stop]
+	if stop == contractUnfinished {
+		return events
+	}
+	reason := map[contractStop]string{contractDone: "end_turn", contractToolUse: "tool_use", contractMaxTokens: "max_tokens",
+		contractUnknownReason: "brand_new_reason"}[stop]
 	return append(events, fmt.Sprintf(`{"type":"message_delta","delta":{"stop_reason":%q,"stop_sequence":null},"usage":{"output_tokens":20}}`, reason),
 		`{"type":"message_stop"}`)
 }
+
+// openAIOverloaded 是 OpenAI 兼容接口流中途的错误事件（OpenAI 的写法：错误类型是字符串，不带数字状态码）。
+const openAIOverloaded = `{"error":{"message":"Overloaded","type":"server_error","code":null}}`
 
 func openAIEvents(texts []string, call *brain.ToolCall, stop contractStop) []string {
 	var events []string
@@ -91,7 +104,11 @@ func openAIEvents(texts []string, call *brain.ToolCall, stop contractStop) []str
 		events = append(events, fmt.Sprintf(`{"id":"cc","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":%q,"type":"function","function":{"name":%q,"arguments":%q}}]}}]}`,
 			call.ID, call.Name, contractArguments(call, stop)))
 	}
-	reason := map[contractStop]string{contractDone: "stop", contractToolUse: "tool_calls", contractMaxTokens: "length"}[stop]
+	if stop == contractUnfinished {
+		return events
+	}
+	reason := map[contractStop]string{contractDone: "stop", contractToolUse: "tool_calls", contractMaxTokens: "length",
+		contractUnknownReason: "brand_new_reason"}[stop]
 	return append(events, fmt.Sprintf(`{"id":"cc","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":%q}]}`, reason),
 		`{"id":"cc","object":"chat.completion.chunk","choices":[],"usage":{"prompt_tokens":100,"completion_tokens":20,"total_tokens":120}}`)
 }
@@ -207,6 +224,34 @@ func TestContractDisconnect(t *testing.T) {
 		reply := collectContract(t.Context(), vendor.newModel(server), brain.ChatRequest{Messages: contractQuestion}, nil)
 		if reply.err == nil || reply.text() != "从前" || reply.usage == nil || !reply.usage.Incomplete {
 			t.Errorf("中途断开：%+v", reply)
+		}
+	})
+}
+
+// 连接正常关掉却没收到结束标志（Claude：停下的原因和 message_stop；OpenAI 兼容：finish_reason，有没有 [DONE] 都一样）：
+// 报错、算连不上（和中途断开同一类），不当成说完；已经说了的照样交出，用量标不完整。
+func TestContractUnfinishedStreamIsAnError(t *testing.T) {
+	forEachVendor(t, func(t *testing.T, vendor contractVendor) {
+		for _, omitDone := range []bool{false, true} {
+			events := vendor.events([]string{"从前", "有座山"}, nil, contractUnfinished)
+			server := vendor.newServer(t, llmtest.Script{Events: events, OmitDone: omitDone})
+			reply := collectContract(t.Context(), vendor.newModel(server), brain.ChatRequest{Messages: contractQuestion}, nil)
+			if !errors.Is(reply.err, brain.ErrModelUnavailable) || reply.text() != "从前有座山" || reply.usage == nil || !reply.usage.Incomplete {
+				t.Errorf("没收尾（不推 [DONE]：%v）：%+v", omitDone, reply)
+			}
+		}
+	})
+}
+
+// 停下的原因认不出（厂商新加的）：报错、不当成说完，但不算连不上（服务通着）；用量照带。
+func TestContractUnknownStopReasonIsNotCompleted(t *testing.T) {
+	forEachVendor(t, func(t *testing.T, vendor contractVendor) {
+		server := vendor.newServer(t, llmtest.Script{Events: vendor.events([]string{"从前"}, contractCall, contractUnknownReason)})
+		reply := collectContract(t.Context(), vendor.newModel(server),
+			brain.ChatRequest{Messages: contractQuestion, Tools: []brain.ToolSpec{contractWeather}}, nil)
+		if !errors.Is(reply.err, brain.ErrStopUnknown) || errors.Is(reply.err, brain.ErrModelUnavailable) || len(reply.calls) != 0 ||
+			reply.usage == nil || reply.usage.Incomplete {
+			t.Errorf("原因认不出：%+v", reply)
 		}
 	})
 }

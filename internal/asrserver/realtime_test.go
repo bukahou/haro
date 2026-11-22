@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -111,9 +112,7 @@ func TestRealtimeTranscriptionSession(t *testing.T) {
 	conn, ctx := dialRealtime(t, factory, transcriber, nil)
 
 	turn := realtimeproto.TurnDetection{Type: "server_vad", PrefixPaddingMs: 100, SilenceDurationMs: 300}
-	if err := writeClientEvent(ctx, conn, transcriptionUpdate(turn, false)); err != nil {
-		t.Fatal(err)
-	}
+	startSession(t, ctx, conn, turn, false)
 	// 200ms 静音 → 500ms 说话 → 400ms 静音，每 20ms 一块
 	for _, part := range []struct {
 		ms   int
@@ -263,8 +262,7 @@ func TestSemanticVADMergesPauseIntoOneUtterance(t *testing.T) {
 	turnDetector := &scriptedTurnDetector{probabilities: []float64{0.2, 0.9}} // 第一次停顿：没说完；第二次：说完
 	transcriber := &lengthTranscriber{}
 	conn, ctx := dialRealtime(t, semanticFactory(t), transcriber, turnDetector)
-	turn := realtimeproto.TurnDetection{Type: "semantic_vad", Eagerness: "auto"}
-	_ = writeClientEvent(ctx, conn, transcriptionUpdate(turn, false))
+	startSession(t, ctx, conn, realtimeproto.TurnDetection{Type: "semantic_vad", Eagerness: "auto"}, false)
 
 	// 0.2s 静音 → 0.5s 说话 → 0.4s 停顿 → 0.4s 说话 → 0.4s 静音
 	sendPattern(t, ctx, conn, [2]int{200, 0}, [2]int{500, 1}, [2]int{400, 0}, [2]int{400, 1}, [2]int{400, 0})
@@ -293,8 +291,7 @@ func TestSemanticVADMergesPauseIntoOneUtterance(t *testing.T) {
 func TestSemanticVADTimesOutWhenUserStopsTalking(t *testing.T) {
 	turnDetector := &scriptedTurnDetector{probabilities: []float64{0.1}} // 一直判断「没说完」
 	conn, ctx := dialRealtime(t, semanticFactory(t), &lengthTranscriber{}, turnDetector)
-	turn := realtimeproto.TurnDetection{Type: "semantic_vad", Eagerness: "high"} // 最多再等 1s
-	_ = writeClientEvent(ctx, conn, transcriptionUpdate(turn, false))
+	startSession(t, ctx, conn, realtimeproto.TurnDetection{Type: "semantic_vad", Eagerness: "high"}, false) // 最多再等 1s
 
 	sendPattern(t, ctx, conn, [2]int{200, 0}, [2]int{500, 1}, [2]int{600, 0}) // 停顿 0.6s：还没到 1s
 	sendPattern(t, ctx, conn, [2]int{600, 0})                                 // 再静 0.6s：超时
@@ -304,12 +301,24 @@ func TestSemanticVADTimesOutWhenUserStopsTalking(t *testing.T) {
 	}
 }
 
+// 没有说完判断模型时拒绝 semantic_vad：回带码的 error（不发 session.updated），说明里写上要设哪个配置项，
+// 自己也记一条带码的警告。
 func TestSemanticVADRequiresTurnModel(t *testing.T) {
-	conn, ctx := dialRealtime(t, semanticFactory(t), &lengthTranscriber{}, nil)
+	logs := &recordingHandler{}
+	conn, ctx := dialRealtimeWith(t, Dependencies{Transcriber: &lengthTranscriber{}, NewVoiceDetector: semanticFactory(t),
+		Settings: CapabilitySettings{TurnDetector: "TURN_MODEL_SETTING"}, Logger: slog.New(logs)})
 	_ = writeClientEvent(ctx, conn, transcriptionUpdate(realtimeproto.TurnDetection{Type: "semantic_vad"}, false))
 	events := readEvents(t, ctx, conn, 1)
 	if e, ok := events[0].(realtimeproto.Error); !ok || e.Code != realtimeproto.CodeUnsupportedFeature {
 		t.Errorf("没有 Smart Turn 模型时应拒绝 semantic_vad：%v", events)
+	} else if !strings.Contains(e.Message, "TURN_MODEL_SETTING") {
+		t.Errorf("说明里应写上要设哪个配置项：%q", e.Message)
+	}
+	if _, _, err := conn.Read(ctx); websocket.CloseStatus(err) != websocket.StatusPolicyViolation {
+		t.Errorf("拒绝之后应断开：%v", err)
+	}
+	if code, ok := logs.attr(slog.LevelWarn, "code"); !ok || code.String() != string(realtimeproto.CodeUnsupportedFeature) {
+		t.Errorf("拒绝时 haro-asr 自己应记一条带码的警告：%v %v", code, ok)
 	}
 }
 
@@ -368,10 +377,7 @@ func dialWakeSessionWith(t *testing.T, transcriber Transcriber, spotter *fakeSpo
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { conn.CloseNow() })
-	turn := realtimeproto.TurnDetection{Type: "server_vad", SilenceDurationMs: 300}
-	if err := writeClientEvent(ctx, conn, transcriptionUpdate(turn, true)); err != nil {
-		t.Fatal(err)
-	}
+	startSession(t, ctx, conn, realtimeproto.TurnDetection{Type: "server_vad", SilenceDurationMs: 300}, true)
 	return conn, ctx
 }
 
@@ -428,14 +434,23 @@ func TestWakeGateIgnoresSpeechUntilKeyword(t *testing.T) {
 		t.Errorf("送去识别的音频 %s，应包含唤醒词与后面的话", got)
 	}
 
-	// 休眠后再说话：不应上报；再叫唤醒词：重新唤醒
-	_ = wsjson.Write(ctx, conn, map[string]string{"type": "haro.wake_word.sleep"})
+	// 休眠、手动唤醒、再休眠：每次处理完回复现在醒着还是睡着
+	for _, control := range []struct {
+		event string
+		awake bool
+	}{{"haro.wake_word.sleep", false}, {"haro.wake_word.wake", true}, {"haro.wake_word.sleep", false}} {
+		_ = wsjson.Write(ctx, conn, map[string]string{"type": control.event})
+		if state, ok := readEvents(t, ctx, conn, 1)[0].(realtimeproto.HaroWakeWordState); !ok || state.Awake != control.awake {
+			t.Fatalf("%s 之后应回复 awake=%v：%v", control.event, control.awake, state)
+		}
+	}
+	// 睡着后再说话：不应上报；再叫唤醒词：重新唤醒
 	sendPattern(t, ctx, conn, [2]int{500, 1}, [2]int{400, 0})
 	sendKeyword(t, ctx, conn)
 	sendPattern(t, ctx, conn, [2]int{400, 0})
 	events = readEvents(t, ctx, conn, 1)
 	if _, ok := events[0].(realtimeproto.HaroWakeWordDetected); !ok {
-		t.Fatalf("休眠后第一个事件应是再次唤醒：%v", events)
+		t.Fatalf("休眠后说的话不应上报，接下来应是再次唤醒：%v", events)
 	}
 	if spotter.resets.Load() == 0 {
 		t.Error("进入休眠时应重置唤醒词识别")
@@ -518,9 +533,12 @@ func TestSleepDuringPlaybackStaysAsleep(t *testing.T) {
 	}
 	sendPattern(t, ctx, conn, [2]int{500, 1}, [2]int{400, 0}) // 睡着了：这句不应上报
 	sendKeyword(t, ctx, conn)
-	events := readEvents(t, ctx, conn, 1)
-	if _, ok := events[0].(realtimeproto.HaroWakeWordDetected); !ok {
-		t.Fatalf("播放中收到休眠后应一直睡着，第一个事件应是再次唤醒：%v", events)
+	events := readEvents(t, ctx, conn, 2)
+	if state, ok := events[0].(realtimeproto.HaroWakeWordState); !ok || state.Awake {
+		t.Fatalf("播放中收到休眠也应回复睡着了：%v", events)
+	}
+	if _, ok := events[1].(realtimeproto.HaroWakeWordDetected); !ok {
+		t.Fatalf("播放中收到休眠后应一直睡着，接下来应是再次唤醒：%v", events)
 	}
 }
 
@@ -561,9 +579,13 @@ func TestEchoTailAfterPlaybackIsClipped(t *testing.T) {
 }
 
 // switchableEmbedder 返回测试指定的「当前说话人」的向量。
-type switchableEmbedder struct{ current atomic.Value }
+type switchableEmbedder struct {
+	current atomic.Value
+	calls   atomic.Int32 // 算了几次声纹
+}
 
 func (e *switchableEmbedder) Embed([]float32) ([]float32, error) {
+	e.calls.Add(1)
 	return e.current.Load().([]float32), nil
 }
 
@@ -603,6 +625,96 @@ func TestVoiceprintGatesWakeAndLabelsSpeaker(t *testing.T) {
 	}
 }
 
+// 同时进行的转写会话到了上限：新的会话回 too_many_sessions（带码、断开；服务端照断开重开那样退避再试），
+// haro-asr 记一条带码的警告；有会话结束、交还名额之后，新的会话照常开始。
+func TestTranscriptionSessionLimit(t *testing.T) {
+	logs := &recordingHandler{}
+	server := httptest.NewServer(NewHandler(Dependencies{Transcriber: &lengthTranscriber{}, Limits: Limits{MaxSessions: 1},
+		Logger: slog.New(logs), NewVoiceDetector: func(VoiceDetectorConfig) (VoiceDetector, error) { return &energyDetector{}, nil }}))
+	t.Cleanup(server.Close)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	t.Cleanup(cancel)
+	dial := func() *websocket.Conn {
+		conn, _, err := websocket.Dial(ctx, transcriptionURL(t, server.URL), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { conn.CloseNow() })
+		return conn
+	}
+	turn := realtimeproto.TurnDetection{Type: "server_vad"}
+	first := dial()
+	startSession(t, ctx, first, turn, false)
+
+	second := dial()
+	_ = writeClientEvent(ctx, second, transcriptionUpdate(turn, false))
+	if refusal, ok := readEvents(t, ctx, second, 1)[0].(realtimeproto.Error); !ok || refusal.Code != realtimeproto.CodeTooManySessions {
+		t.Fatalf("满了应回 too_many_sessions：%+v", refusal)
+	}
+	if code, ok := logs.attr(slog.LevelWarn, "code"); !ok || code.String() != string(realtimeproto.CodeTooManySessions) {
+		t.Errorf("满了拒绝时应记一条带码的警告：%v %v", code, ok)
+	}
+
+	_ = first.Close(websocket.StatusNormalClosure, "")
+	deadline := time.Now().Add(3 * time.Second) // 服务端那头的会话结束、交还名额要一点时间
+	for {
+		next := dial()
+		_ = writeClientEvent(ctx, next, transcriptionUpdate(turn, false))
+		event := readEvents(t, ctx, next, 1)[0]
+		if _, ok := event.(realtimeproto.SessionUpdated); ok {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("有会话结束之后应能开新的会话：%+v", event)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// 连上之后一直不发 session.update：等到 Limits.SessionUpdateWait 就断开，不一直占着。
+func TestSessionUpdateWait(t *testing.T) {
+	conn, ctx := dialRealtimeWith(t, Dependencies{Transcriber: &lengthTranscriber{}, Limits: Limits{SessionUpdateWait: 50 * time.Millisecond},
+		NewVoiceDetector: func(VoiceDetectorConfig) (VoiceDetector, error) { return &energyDetector{}, nil }})
+	started := time.Now()
+	for {
+		_, data, err := conn.Read(ctx)
+		if err != nil {
+			break
+		}
+		if event, _ := realtimeproto.DecodeServerEvent(data); event != nil {
+			if _, accepted := event.(realtimeproto.SessionUpdated); accepted {
+				t.Fatal("没发 session.update 不应开始会话")
+			}
+		}
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Errorf("一直不发 session.update 时应在期限上断开：等了 %v", elapsed)
+	}
+}
+
+// failingEmbedder 什么都算不出声纹（像句子太短时那样）。
+type failingEmbedder struct{}
+
+func (failingEmbedder) Embed([]float32) ([]float32, error) {
+	return nil, errors.New("语音太短，算不出声纹")
+}
+
+// 开着声纹、这句却算不出声纹：报成第三种结果（speaker_check_failed），不和「没开声纹」混成一个值。
+func TestUncheckableSpeakerIsReported(t *testing.T) {
+	speakers := &SpeakerCheck{Embedder: failingEmbedder{}, Threshold: 0.5,
+		Voiceprints: []voiceprint.Voiceprint{{Name: "主人", Embeddings: [][]float32{{1, 0, 0}}}}}
+	conn, ctx := dialRealtimeWith(t, Dependencies{Transcriber: &fixedTranscriber{text: "几点了"}, Speakers: speakers,
+		NewVoiceDetector: func(VoiceDetectorConfig) (VoiceDetector, error) {
+			return &energyDetector{silenceSamples: 300 * 16}, nil
+		}})
+	startSession(t, ctx, conn, realtimeproto.TurnDetection{Type: "server_vad", SilenceDurationMs: 300}, false)
+	sendPattern(t, ctx, conn, [2]int{200, 0}, [2]int{500, 1}, [2]int{400, 0})
+	completed, ok := readEvents(t, ctx, conn, 3)[2].(realtimeproto.InputAudioTranscriptionCompleted)
+	if !ok || !completed.SpeakerCheckFailed || completed.SpeakerChecked || completed.Speaker != "" {
+		t.Errorf("算不出声纹应报 speaker_check_failed（不算比对过）：%+v", completed)
+	}
+}
+
 // 唤醒时认出来的人，这一句沿用——不让很短的唤醒句重新比对推翻它（真机：唤醒 0.52 认出、唤醒句重比 0.49 判成不认识）。
 func TestWakeUtteranceKeepsWakeSpeaker(t *testing.T) {
 	owner, stranger := []float32{1, 0, 0}, []float32{0, 1, 0}
@@ -622,6 +734,9 @@ func TestWakeUtteranceKeepsWakeSpeaker(t *testing.T) {
 	completed, ok := events[2].(realtimeproto.InputAudioTranscriptionCompleted)
 	if !ok || completed.Speaker != "主人" || !completed.SpeakerChecked {
 		t.Errorf("唤醒句应沿用唤醒时的声纹：%v", events)
+	}
+	if calls := embedder.calls.Load(); calls != 1 {
+		t.Errorf("唤醒时认出来了就不再对整句另算一次声纹：算了 %d 次", calls)
 	}
 }
 
@@ -674,6 +789,24 @@ func transcriptionUpdate(turn realtimeproto.TurnDetection, wakeWord bool) realti
 		InputFormat: realtimeproto.TranscriptionFormat}
 }
 
+// startSession 发出转写会话的第一条 session.update，并要求它被接受：先收到确认（session.updated，带着接受的设置），
+// 之后才有别的事件。
+func startSession(t *testing.T, ctx context.Context, conn *websocket.Conn, turn realtimeproto.TurnDetection, wakeWord bool) {
+	t.Helper()
+	if err := writeClientEvent(ctx, conn, transcriptionUpdate(turn, wakeWord)); err != nil {
+		t.Fatal(err)
+	}
+	events := readEvents(t, ctx, conn, 1)
+	updated, ok := events[0].(realtimeproto.SessionUpdated)
+	if !ok {
+		t.Fatalf("接受设置后第一个事件应是 session.updated：%v", events)
+	}
+	if accepted := updated.Session; accepted.Kind != realtimeproto.SessionTranscription || accepted.TurnDetection == nil ||
+		*accepted.TurnDetection != turn || accepted.WakeWord != wakeWord || accepted.InputFormat != realtimeproto.TranscriptionFormat {
+		t.Errorf("session.updated 应带着接受的设置：%+v", accepted)
+	}
+}
+
 // audioChunk 是一块 16 kHz 的音频。
 func audioChunk(pcm []byte) realtimeproto.InputAudioBufferAppend {
 	return realtimeproto.InputAudioBufferAppend{Audio: realtimeproto.PCMAudio{Format: realtimeproto.TranscriptionFormat, Data: pcm}}
@@ -710,10 +843,7 @@ func TestRealtimeTranscriptionFailureNamesTheItem(t *testing.T) {
 		return &energyDetector{silenceSamples: 300 * 16}, nil
 	}
 	conn, ctx := dialRealtime(t, factory, failingTranscriber{}, nil)
-	turn := realtimeproto.TurnDetection{Type: "server_vad", SilenceDurationMs: 300}
-	if err := writeClientEvent(ctx, conn, transcriptionUpdate(turn, false)); err != nil {
-		t.Fatal(err)
-	}
+	startSession(t, ctx, conn, realtimeproto.TurnDetection{Type: "server_vad", SilenceDurationMs: 300}, false)
 	for _, part := range []struct {
 		ms   int
 		loud bool

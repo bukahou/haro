@@ -1,9 +1,11 @@
 package realtimeproto
 
 import (
+	"bytes"
 	"cmp"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/json/jsontext"
 	"errors"
 	"fmt"
 )
@@ -38,11 +40,13 @@ var clientEvents = map[string]clientCodec{
 }
 
 var serverEvents = map[string]serverCodec{
+	typeSessionUpdated:         {wireSessionUpdated{}, decodeSessionUpdated},
 	typeSpeechStarted:          {wireSpeechStarted{}, decodeSpeechStarted},
 	typeSpeechStopped:          {wireSpeechStopped{}, decodeSpeechStopped},
 	typeTranscriptionCompleted: {wireTranscriptionCompleted{}, decodeTranscriptionCompleted},
 	typeTranscriptionFailed:    {wireTranscriptionFailed{}, decodeTranscriptionFailed},
 	typeHaroWakeWordDetected:   {wireWakeWordDetected{}, decodeWakeWordDetected},
+	typeHaroWakeWordState:      {wireWakeWordState{}, decodeWakeWordState},
 	typeTranscriptDelta:        {wireTranscriptDelta{}, decodeTranscriptDelta},
 	typeAudioDelta:             {wireAudioDelta{}, decodeAudioDelta},
 	typeResponseCreated:        {wireResponseCreated{}, decodeResponseCreated},
@@ -73,7 +77,7 @@ func EncodeServerEvent(event ServerEvent) ([]byte, error) {
 // DecodeClientEvent 把客户端发来的 JSON 解成事件。input 是会话里声明的输入格式（input_audio_buffer.append 用它）。
 // 出错时返回带错误码的 *ProtocolError：解不开 → invalid_event，不认识或不支持的事件 → unsupported_event。
 func DecodeClientEvent(data []byte, input AudioFormat) (ClientEvent, error) {
-	name, err := eventName(data)
+	name, err := EventType(data)
 	if err != nil {
 		return nil, err
 	}
@@ -91,7 +95,7 @@ func DecodeClientEvent(data []byte, input AudioFormat) (ClientEvent, error) {
 // DecodeServerEvent 把服务端发来的 JSON 解成事件。不认识的事件返回 nil, nil：
 // 对端比自己新时多出来的事件忽略即可（Realtime 的约定）。
 func DecodeServerEvent(data []byte) (ServerEvent, error) {
-	name, err := eventName(data)
+	name, err := EventType(data)
 	if err != nil {
 		return nil, err
 	}
@@ -106,12 +110,38 @@ func DecodeServerEvent(data []byte) (ServerEvent, error) {
 	return event, nil
 }
 
-func eventName(data []byte) (string, error) {
-	var head wireTypeOnly
-	if err := json.Unmarshal(data, &head); err != nil {
+// EventType 是一条消息的事件名（type 字段）；不是 JSON 对象、type 不是字符串时返回带 invalid_event 码的错误，
+// 没有 type 时为空。解码和日志（解不开的事件按名字计数）共用。
+//
+// 只读到顶层的 type 为止（编码出来的事件 type 都在最前面，后面的音频不用扫）：整条消息只由各事件自己的解码
+// 完整解析一次，不先为了取事件名整条解一遍。type 不在最前面时，前面的值跳过（只扫不解）。
+func EventType(data []byte) (string, error) {
+	decoder := jsontext.NewDecoder(bytes.NewReader(data), // 和 json.Unmarshal 一样宽松：重名的键、不合法的 UTF-8 都放过
+		jsontext.AllowDuplicateNames(true), jsontext.AllowInvalidUTF8(true))
+	if start, err := decoder.ReadToken(); err != nil || start.Kind() != '{' {
+		return "", ProtocolErrorf(CodeInvalidEvent, "事件要是 JSON 对象")
+	}
+	for decoder.PeekKind() == '"' {
+		name, err := decoder.ReadToken()
+		if err != nil {
+			return "", ProtocolErrorf(CodeInvalidEvent, "解析事件: %v", err)
+		}
+		if name.String() != "type" {
+			if err := decoder.SkipValue(); err != nil {
+				return "", ProtocolErrorf(CodeInvalidEvent, "解析事件: %v", err)
+			}
+			continue
+		}
+		value, err := decoder.ReadToken()
+		if err != nil || value.Kind() != '"' {
+			return "", ProtocolErrorf(CodeInvalidEvent, "事件的 type 要是字符串")
+		}
+		return value.String(), nil
+	}
+	if _, err := decoder.ReadToken(); err != nil { // 没有 type：读到的应是这个对象的结尾
 		return "", ProtocolErrorf(CodeInvalidEvent, "解析事件: %v", err)
 	}
-	return head.Type, nil
+	return "", nil
 }
 
 // withCode 给解码时的错误补上错误码；已经带码的保持原样。
@@ -185,13 +215,28 @@ func decodeAudioAppend(data []byte, input AudioFormat) (ClientEvent, error) {
 }
 
 func (e ConversationItemTruncate) toWire() (any, error) {
-	return wireItemTruncate{Type: typeConversationItemTruncate, AudioEndMs: e.AudioEndMs}, nil
+	if e.AudioEndMs < 0 {
+		return nil, fmt.Errorf("conversation.item.truncate 的 audio_end_ms 不能是负数，收到 %d", e.AudioEndMs)
+	}
+	return wireItemTruncate{Type: typeConversationItemTruncate, AudioEndMs: millisField{ms: e.AudioEndMs, set: true}}, nil
 }
 
+// decodeItemTruncate：截断会改写持久化的历史，参数缺了不能当成零值去执行 —— audio_end_ms 必填、不能是负数；
+// haro 不发回答的 item_id，客户端填了 item_id 就是要截某一条别的回答，照办不了，拒绝。
 func decodeItemTruncate(data []byte, _ AudioFormat) (ClientEvent, error) {
 	var wire wireItemTruncate
-	err := json.Unmarshal(data, &wire)
-	return ConversationItemTruncate{AudioEndMs: wire.AudioEndMs}, err
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return nil, err
+	}
+	switch {
+	case !wire.AudioEndMs.set:
+		return nil, errors.New("缺 audio_end_ms（用户听到了回答的前多少毫秒）")
+	case wire.AudioEndMs.ms < 0:
+		return nil, fmt.Errorf("audio_end_ms 不能是负数，收到 %d", wire.AudioEndMs.ms)
+	case wire.ItemID != "":
+		return nil, fmt.Errorf("haro 只截最近一次回答、不带 item_id（服务端不发回答的 item_id），收到 %q", wire.ItemID)
+	}
+	return ConversationItemTruncate{AudioEndMs: wire.AudioEndMs.ms}, nil
 }
 
 func (e HaroTerminalDevices) toWire() (any, error) {
@@ -235,11 +280,32 @@ func (e HaroWakeWordWake) toWire() (any, error)    { return wireTypeOnly{Type: e
 func (e HaroPlaybackStarted) toWire() (any, error) { return wireTypeOnly{Type: e.Type()}, nil }
 func (e HaroPlaybackStopped) toWire() (any, error) { return wireTypeOnly{Type: e.Type()}, nil }
 
+// typeOnlyClient：没有内容的事件同样完整解析一次（EventType 只读到 type 为止），整条不是合法 JSON 的照样拒绝。
 func typeOnlyClient(event ClientEvent) clientCodec {
-	return clientCodec{wireTypeOnly{}, func([]byte, AudioFormat) (ClientEvent, error) { return event, nil }}
+	return clientCodec{wireTypeOnly{}, func(data []byte, _ AudioFormat) (ClientEvent, error) {
+		var wire wireTypeOnly
+		return event, json.Unmarshal(data, &wire)
+	}}
 }
 
 // ——— 服务端事件 ———
+
+// session.updated 的 session 和 session.update 的同一形状：编解码借用 session.update 的那一份。
+func (e SessionUpdated) toWire() (any, error) {
+	update, err := e.Session.toWire()
+	if err != nil {
+		return nil, err
+	}
+	return wireSessionUpdated{Type: typeSessionUpdated, Session: update.(wireSessionUpdate).Session}, nil
+}
+
+func decodeSessionUpdated(data []byte) (ServerEvent, error) {
+	update, err := decodeSessionUpdate(data, AudioFormat{})
+	if err != nil {
+		return nil, err
+	}
+	return SessionUpdated{Session: update.(SessionUpdate)}, nil
+}
 
 func (e InputAudioBufferSpeechStarted) toWire() (any, error) {
 	return wireSpeechStarted{Type: typeSpeechStarted, AudioStartMs: e.AudioStartMs, ItemID: e.ItemID}, nil
@@ -262,9 +328,12 @@ func decodeSpeechStopped(data []byte) (ServerEvent, error) {
 }
 
 func (e InputAudioTranscriptionCompleted) toWire() (any, error) {
+	if err := checkSpeakerResult(e.SpeakerCheckFailed, e.SpeakerChecked, e.Speaker); err != nil {
+		return nil, err
+	}
 	wire := wireTranscriptionCompleted{Type: typeTranscriptionCompleted, ItemID: e.ItemID, Transcript: e.Transcript}
-	extra := wireTranscriptExtra{Speaker: e.Speaker, Checked: e.SpeakerChecked, Tentative: e.SpeakerTentative,
-		Language: e.Language, Wake: e.Wake, BargeIn: e.BargeIn, AudioMs: e.AudioMs}
+	extra := wireTranscriptExtra{Speaker: e.Speaker, Checked: e.SpeakerChecked, CheckFailed: e.SpeakerCheckFailed,
+		Tentative: e.SpeakerTentative, Language: e.Language, Wake: e.Wake, BargeIn: e.BargeIn, AudioMs: e.AudioMs}
 	if extra != (wireTranscriptExtra{}) {
 		wire.Haro = &extra
 	}
@@ -273,13 +342,27 @@ func (e InputAudioTranscriptionCompleted) toWire() (any, error) {
 
 func decodeTranscriptionCompleted(data []byte) (ServerEvent, error) {
 	var wire wireTranscriptionCompleted
-	err := json.Unmarshal(data, &wire)
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return nil, err
+	}
 	completed := InputAudioTranscriptionCompleted{ItemID: wire.ItemID, Transcript: wire.Transcript}
 	if extra := wire.Haro; extra != nil {
+		if err := checkSpeakerResult(extra.CheckFailed, extra.Checked, extra.Speaker); err != nil {
+			return nil, err
+		}
 		completed.Speaker, completed.SpeakerChecked, completed.SpeakerTentative = extra.Speaker, extra.Checked, extra.Tentative
+		completed.SpeakerCheckFailed = extra.CheckFailed
 		completed.Language, completed.Wake, completed.BargeIn, completed.AudioMs = extra.Language, extra.Wake, extra.BargeIn, extra.AudioMs
 	}
-	return completed, err
+	return completed, nil
+}
+
+// checkSpeakerResult：声纹的三种结果（没比对 / 比对过 / 算不出来）只能是其中一种，算不出来时不会同时比对过、认出了谁。
+func checkSpeakerResult(failed, checked bool, speaker string) error {
+	if failed && (checked || speaker != "") {
+		return errors.New("speaker_check_failed 时 speaker_checked 要是 false、speaker 要为空")
+	}
+	return nil
 }
 
 func (e InputAudioTranscriptionFailed) toWire() (any, error) {
@@ -303,6 +386,16 @@ func decodeWakeWordDetected(data []byte) (ServerEvent, error) {
 	var wire wireWakeWordDetected
 	err := json.Unmarshal(data, &wire)
 	return HaroWakeWordDetected{Keyword: wire.Keyword, AudioMs: wire.AudioMs, Score: wire.Score, Level: wire.Level}, err
+}
+
+func (e HaroWakeWordState) toWire() (any, error) {
+	return wireWakeWordState{Type: typeHaroWakeWordState, Awake: e.Awake}, nil
+}
+
+func decodeWakeWordState(data []byte) (ServerEvent, error) {
+	var wire wireWakeWordState
+	err := json.Unmarshal(data, &wire)
+	return HaroWakeWordState{Awake: wire.Awake}, err
 }
 
 func (e ResponseOutputAudioTranscriptDelta) toWire() (any, error) {

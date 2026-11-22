@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -39,14 +40,15 @@ func TestCloudLLMReadyForAnthropic(t *testing.T) {
 // 天气的备用来源只认 jma / none；家的位置写错照样报错。
 func TestValidateWeather(t *testing.T) {
 	for _, backup := range []string{WeatherBackupJMA, WeatherBackupNone} {
-		if err := (ServerSettings{WeatherBackup: backup}).validateWeather(); err != nil {
+		if err := (ServerSettings{WeatherBackup: backup, WeatherGeocodingLanguage: "ja"}).validateWeather(); err != nil {
 			t.Errorf("%s 应通过：%v", backup, err)
 		}
 	}
-	if err := (ServerSettings{WeatherBackup: "met"}).validateWeather(); err == nil || !strings.Contains(err.Error(), "HARO_WEATHER_BACKUP") {
+	if err := (ServerSettings{WeatherBackup: "met", WeatherGeocodingLanguage: "ja"}).validateWeather(); err == nil ||
+		!strings.Contains(err.Error(), "HARO_WEATHER_BACKUP") {
 		t.Errorf("不认识的备用来源应报错：%v", err)
 	}
-	if err := (ServerSettings{WeatherBackup: WeatherBackupJMA, WeatherHome: "家"}).validateWeather(); err == nil ||
+	if err := (ServerSettings{WeatherBackup: WeatherBackupJMA, WeatherHome: "家", WeatherGeocodingLanguage: "ja"}).validateWeather(); err == nil ||
 		!strings.Contains(err.Error(), "HARO_WEATHER_HOME") {
 		t.Errorf("家的位置写错应报错：%v", err)
 	}
@@ -160,6 +162,19 @@ func TestRemovedSettings(t *testing.T) {
 	if notes, err := checkRemovedSettings(lookup(nil), serverSide); err != nil || len(notes) != 0 {
 		t.Errorf("没写时什么都不说：notes=%v err=%v", notes, err)
 	}
+	// 改了名的（HARO_BRAIN_*）、删掉的旧对话导入（HARO_CONVERSATIONS_DIR）：写着空值只提醒；写着值就是要已删除的行为，起不来，
+	// 报错里写明是哪一项
+	for _, c := range []struct {
+		name string
+		side settingSide
+	}{{"HARO_BRAIN_URL", terminalSide}, {"HARO_BRAIN_LISTEN", serverSide}, {"HARO_CONVERSATIONS_DIR", serverSide}} {
+		if notes, err := checkRemovedSettings(lookup(map[string]string{c.name: ""}), c.side); err != nil || len(notes) != 1 {
+			t.Errorf("%s 写着空值只提醒：notes=%v err=%v", c.name, notes, err)
+		}
+		if _, err := checkRemovedSettings(lookup(map[string]string{c.name: "x"}), c.side); err == nil || !strings.Contains(err.Error(), c.name) {
+			t.Errorf("%s 写着值应起不来并写明：%v", c.name, err)
+		}
+	}
 }
 
 // 分辨率写成「宽x高」；写错时报错（启动失败），不悄悄换成默认值。
@@ -177,7 +192,7 @@ func TestFrameSizeParsing(t *testing.T) {
 
 // 拍照底层只认三个值；写错时启动失败。
 func TestCameraBackendIsValidated(t *testing.T) {
-	settings := TerminalSettings{TurnDetection: "server_vad", ServerURL: "http://127.0.0.1:59130", WakeIdle: time.Minute}
+	settings := terminalSettingsFrom(t, map[string]string{"HARO_TURN_DETECTION": "server_vad"})
 	for _, backend := range []string{CameraBackendAuto, CameraBackendMediaDevices, CameraBackendFFmpeg} {
 		settings.CameraBackend = backend
 		if err := settings.validateTerminal(); err != nil {
@@ -192,6 +207,7 @@ func TestCameraBackendIsValidated(t *testing.T) {
 
 // 提前压缩的门槛：默认 24000；0 = 不看；负数起不来。
 func TestCompactContextTokens(t *testing.T) {
+	clearHaroEnv(t)
 	minimal := map[string]string{"HARO_LLM_PROVIDER": "local", "HARO_TTS": "piper", "HARO_TTS_URL": "http://127.0.0.1:9",
 		"HARO_ASR_URL": "http://127.0.0.1:9", "HARO_TOOLS": "false", "HARO_WEATHER": "false", "HARO_SERVER_LISTEN": "127.0.0.1:0",
 		"HARO_STRONG_LLM_MODEL": "", "HARO_TAVILY_API_KEY": "", "HARO_CONTEXT_COMPACT_TOKENS": "",
@@ -210,6 +226,21 @@ func TestCompactContextTokens(t *testing.T) {
 	t.Setenv("HARO_CONTEXT_COMPACT_TOKENS", "-1")
 	if _, err := LoadBrainSettings(); err == nil || !strings.Contains(err.Error(), "HARO_CONTEXT_COMPACT_TOKENS") {
 		t.Errorf("负数应起不来：%v", err)
+	}
+}
+
+// clearHaroEnv 去掉跑测试那台机器环境里的全部 HARO_* 变量（测试结束后恢复）：读环境变量的测试不受开发机配置的影响
+// （例如开发机上还写着的已删除配置项）。
+func clearHaroEnv(t *testing.T) {
+	t.Helper()
+	for _, entry := range os.Environ() {
+		name, _, _ := strings.Cut(entry, "=")
+		if strings.HasPrefix(name, "HARO_") {
+			t.Setenv(name, "") // 登记测试结束后恢复原值
+			if err := os.Unsetenv(name); err != nil {
+				t.Fatal(err)
+			}
+		}
 	}
 }
 
@@ -274,10 +305,13 @@ func serverSettingsFrom(t *testing.T, values map[string]string) ServerSettings {
 
 // 服务端的配置校验按领域逐项查：基线（本地模型、Piper、不开工具）通过；每改坏一项都起不来，报错写明是哪个变量。
 func TestValidateBrainTable(t *testing.T) {
-	base := serverSettingsFrom(t, map[string]string{"HARO_TTS": TTSPiper, "HARO_TTS_URL": "http://127.0.0.1:5000",
-		"HARO_ASR_URL": "http://127.0.0.1:59126", "HARO_LLM_PROVIDER": LLMLocal, "HARO_TOOLS": "false"})
+	base := localServerSettings(t)
 	if err := base.validateBrain(); err != nil {
 		t.Fatalf("基线应通过：%v", err)
+	}
+	notDir := filepath.Join(t.TempDir(), "profile.md")
+	if err := os.WriteFile(notDir, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
 	}
 	cases := []struct {
 		name   string
@@ -292,12 +326,10 @@ func TestValidateBrainTable(t *testing.T) {
 		{"用云端却没设汇率", func(s *ServerSettings) {
 			s.LLMProvider, s.CloudLLMModel, s.AnthropicAPIKey, s.USDToYen = LLMCloud, "claude-haiku-5-5", "k", 0
 		}, "HARO_USD_JPY"},
-		{"导入旧对话却没有对话库", func(s *ServerSettings) { s.ConversationsDir, s.ConversationsDB = "/tmp/old", "" }, "HARO_CONVERSATIONS_DB"},
 		{"开着工具却没有记事库", func(s *ServerSettings) { s.Tools, s.NotesDB = true, "" }, "HARO_NOTES_DB"},
 		{"记事候选上限为零", func(s *ServerSettings) { s.Tools, s.NotesDB, s.NotesListLimit = true, "/tmp/notes.db", 0 }, "HARO_NOTES_LIST_LIMIT"},
-		{"压缩门槛是负数", func(s *ServerSettings) { s.CompactContextTokens = -1 }, "HARO_CONTEXT_COMPACT_TOKENS"},
-		{"工具时限为零", func(s *ServerSettings) { s.ToolTimeout = 0 }, "HARO_TOOL_TIMEOUT"},
-		{"确认时效为零", func(s *ServerSettings) { s.ConfirmationTimeout = 0 }, "HARO_CONFIRMATION_TIMEOUT"},
+		{"主人资料的目录不存在", func(s *ServerSettings) { s.ProfileDir = filepath.Join(t.TempDir(), "没有这个目录") }, "HARO_PROFILE_DIR"},
+		{"主人资料的目录是个文件", func(s *ServerSettings) { s.ProfileDir = notDir }, "HARO_PROFILE_DIR"},
 		{"没有监听地址", func(s *ServerSettings) { s.ServerListen = "" }, "HARO_SERVER_LISTEN"},
 	}
 	for _, c := range cases {
@@ -306,5 +338,157 @@ func TestValidateBrainTable(t *testing.T) {
 		if err := settings.validateBrain(); err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("%s：应起不来并写明 %s，实际 %v", c.name, c.want, err)
 		}
+	}
+}
+
+// localServerSettings 是只用本地模型、Piper、不开工具的服务端配置（默认值照配置里的写法解析）。
+func localServerSettings(t *testing.T) ServerSettings {
+	return serverSettingsFrom(t, map[string]string{"HARO_TTS": TTSPiper, "HARO_TTS_URL": "http://127.0.0.1:5000",
+		"HARO_ASR_URL": "http://127.0.0.1:59126", "HARO_LLM_PROVIDER": LLMLocal, "HARO_TOOLS": "false"})
+}
+
+// cloudServerSettings 是用云端模型、配齐了费用刹车（月度上限 + 账本）的服务端配置。
+func cloudServerSettings(t *testing.T) ServerSettings {
+	settings := localServerSettings(t)
+	settings.LLMProvider, settings.CloudLLMModel, settings.AnthropicAPIKey, settings.USDToYen = LLMCloud, "claude-haiku-5-5", "k", 150
+	settings.MonthlyYen, settings.UsageDB = 1000, "/tmp/usage.db"
+	return settings
+}
+
+// 费用刹车：用到云端模型时月度上限必须设且大于 0（没有默认的「不限」）；有月度上限就要有账本；能口头提高就得能判断。
+// 只用本地模型（不花钱）时可以不设月度上限。
+func TestSpendingBrakes(t *testing.T) {
+	cloud := cloudServerSettings(t)
+	if err := cloud.validateBrain(); err != nil {
+		t.Fatalf("用云端、配齐了月度上限和账本应通过：%v", err)
+	}
+	if err := localServerSettings(t).validateBrain(); err != nil {
+		t.Errorf("只用本地模型时不设月度上限也行：%v", err)
+	}
+	research := localServerSettings(t)
+	research.Tools, research.NotesDB, research.TavilyAPIKey = true, "/tmp/notes.db", "k"
+	research.CloudLLMModel, research.AnthropicAPIKey, research.USDToYen = "claude-haiku-5-5", "k", 150
+	for _, c := range []struct {
+		name     string
+		settings ServerSettings
+		change   func(*ServerSettings)
+		want     string
+	}{
+		{"用云端却没设月度上限", cloud, func(s *ServerSettings) { s.MonthlyYen = 0 }, "HARO_MONTHLY_YEN"},
+		{"只开后台调查（也用云端）却没设月度上限", research, func(*ServerSettings) {}, "HARO_MONTHLY_YEN"},
+		{"用云端、有上限却没有账本", cloud, func(s *ServerSettings) { s.UsageDB = "" }, "HARO_USAGE_DB"},
+		{"本地模型设了月度上限却没有账本", localServerSettings(t), func(s *ServerSettings) { s.MonthlyYen = 500 }, "HARO_USAGE_DB"},
+		{"能口头提高却一次都不判断", cloud, func(s *ServerSettings) { s.OverBudgetDailyCalls = 0 }, "HARO_OVER_BUDGET_DAILY_CALLS"},
+	} {
+		settings := c.settings
+		c.change(&settings)
+		if err := settings.validateBrain(); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s：应起不来并写明 %s，实际 %v", c.name, c.want, err)
+		}
+	}
+	noRaise := cloud
+	noRaise.MonthlyRaiseYen, noRaise.OverBudgetDailyCalls = 0, 0
+	if err := noRaise.validateBrain(); err != nil {
+		t.Errorf("不让口头提高（HARO_MONTHLY_RAISE_YEN=0）时判断次数是 0 也行：%v", err)
+	}
+}
+
+// 数值配置的范围：上限、单价不能是负数；时长、token、轮数要大于 0。每一项改坏都起不来，报错写明是哪个变量。
+func TestNumericSettingRanges(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		change func(*ServerSettings)
+	}{
+		{"HARO_MONTHLY_YEN", func(s *ServerSettings) { s.MonthlyYen = -1 }},
+		{"HARO_RESEARCH_DAILY_YEN", func(s *ServerSettings) { s.ResearchDailyYen = -1 }},
+		{"HARO_MONTHLY_RAISE_YEN", func(s *ServerSettings) { s.MonthlyRaiseYen = -1 }},
+		{"HARO_OVER_BUDGET_DAILY_CALLS", func(s *ServerSettings) { s.OverBudgetDailyCalls = -1 }},
+		{"HARO_SEARCH_DAILY_CREDITS", func(s *ServerSettings) { s.SearchDailyCredits = -1 }},
+		{"HARO_SEARCH_CREDIT_USD", func(s *ServerSettings) { s.SearchCreditUSD = -0.01 }},
+		{"HARO_USD_JPY", func(s *ServerSettings) { s.USDToYen = -1 }},
+		{"HARO_TTS_TIMEOUT", func(s *ServerSettings) { s.TTSTimeout = 0 }},
+		{"HARO_MAX_SEGMENT_RUNES", func(s *ServerSettings) { s.MaxSegmentRunes = 0 }},
+		{"HARO_FIRST_SEGMENT_MIN_RUNES", func(s *ServerSettings) { s.FirstSegmentMinRunes = -1 }},
+		{"HARO_LOCAL_LLM_TIMEOUT", func(s *ServerSettings) { s.LocalLLMTimeout = 0 }},
+		{"HARO_CLOUD_LLM_TIMEOUT", func(s *ServerSettings) { s.CloudLLMTimeout = 0 }},
+		{"HARO_CLOUD_LLM_MAX_TOKENS", func(s *ServerSettings) { s.CloudMaxTokens = 0 }},
+		{"HARO_STRONG_LLM_TIMEOUT", func(s *ServerSettings) { s.StrongLLMTimeout = -time.Second }},
+		{"HARO_REQUEST_TIMEOUT", func(s *ServerSettings) { s.RequestTimeout = 0 }},
+		{"HARO_MAX_HISTORY_TURN", func(s *ServerSettings) { s.MaxHistoryTurn = 0 }},
+		{"HARO_CONTEXT_COMPACT_TOKENS", func(s *ServerSettings) { s.CompactContextTokens = -1 }},
+		{"HARO_CONFIRMATION_TIMEOUT", func(s *ServerSettings) { s.ConfirmationTimeout = -time.Second }},
+		{"HARO_TOOL_TIMEOUT", func(s *ServerSettings) { s.ToolTimeout = -time.Second }},
+		{"HARO_WAKE_ARBITRATION", func(s *ServerSettings) { s.WakeArbitration = -time.Millisecond }},
+		{"HARO_RESEARCH_TIMEOUT", func(s *ServerSettings) { s.ResearchTimeout = -time.Second }},
+		{"HARO_RESEARCH_MAX_ROUNDS", func(s *ServerSettings) { s.ResearchMaxRounds = -1 }},
+		{"HARO_RESEARCH_MAX_SEARCHES", func(s *ServerSettings) { s.ResearchMaxSearches = -1 }},
+		{"HARO_RESEARCH_MAX_TOKENS", func(s *ServerSettings) { s.ResearchMaxTokens = -1 }},
+	} {
+		settings := cloudServerSettings(t)
+		c.change(&settings)
+		if err := settings.validateBrain(); err == nil || !strings.Contains(err.Error(), c.name) {
+			t.Errorf("%s 超出范围应起不来并写明：%v", c.name, err)
+		}
+	}
+}
+
+// 写明了「0 = 不限 / 关掉 / 用程序里的默认值」的项，写 0 照常启动。
+func TestZeroMeansUnlimitedOffOrDefault(t *testing.T) {
+	for name, change := range map[string]func(*ServerSettings){
+		"HARO_RESEARCH_DAILY_YEN（不限）":            func(s *ServerSettings) { s.ResearchDailyYen = 0 },
+		"HARO_SEARCH_DAILY_CREDITS（不限）":          func(s *ServerSettings) { s.SearchDailyCredits = 0 },
+		"HARO_SEARCH_CREDIT_USD（免费额度内）":          func(s *ServerSettings) { s.SearchCreditUSD = 0 },
+		"HARO_MONTHLY_RAISE_YEN（不能口头提高）":         func(s *ServerSettings) { s.MonthlyRaiseYen = 0 },
+		"HARO_CONTEXT_COMPACT_TOKENS（不看）":        func(s *ServerSettings) { s.CompactContextTokens = 0 },
+		"HARO_WAKE_ARBITRATION（不仲裁）":             func(s *ServerSettings) { s.WakeArbitration = 0 },
+		"HARO_FIRST_SEGMENT_MIN_RUNES（不提前切）":     func(s *ServerSettings) { s.FirstSegmentMinRunes = 0 },
+		"HARO_CONFIRMATION_TIMEOUT（程序里的默认值）":     func(s *ServerSettings) { s.ConfirmationTimeout = 0 },
+		"HARO_TOOL_TIMEOUT（程序里的默认值）":             func(s *ServerSettings) { s.ToolTimeout = 0 },
+		"HARO_RESEARCH_*（程序里的默认值）":               func(s *ServerSettings) { s.ResearchTimeout, s.ResearchMaxRounds = 0, 0 },
+		"HARO_RESEARCH_MAX_SEARCHES、TOKENS（默认值）": func(s *ServerSettings) { s.ResearchMaxSearches, s.ResearchMaxTokens = 0, 0 },
+	} {
+		settings := cloudServerSettings(t)
+		change(&settings)
+		if err := settings.validateBrain(); err != nil {
+			t.Errorf("%s 写 0 应照常启动：%v", name, err)
+		}
+	}
+	// 没有默认值的这几项：不设时就是 0，交给程序里的默认值
+	settings := localServerSettings(t)
+	if settings.ToolTimeout != 0 || settings.ConfirmationTimeout != 0 || settings.ResearchTimeout != 0 || settings.ResearchMaxRounds != 0 ||
+		settings.ResearchMaxSearches != 0 || settings.ResearchMaxTokens != 0 {
+		t.Errorf("工具时限、确认时效、调查的上限不设时应是 0（默认值只在 brain / research 里写）：%+v", settings)
+	}
+}
+
+// 地名库用的语言要是规范写法的小写语言代码（按语言代码表查）。
+func TestWeatherGeocodingLanguage(t *testing.T) {
+	for _, good := range []string{"ja", "en", "zh", "ko"} {
+		settings := localServerSettings(t)
+		settings.WeatherGeocodingLanguage = good
+		if err := settings.validateBrain(); err != nil {
+			t.Errorf("%s 应该可以：%v", good, err)
+		}
+	}
+	for _, bad := range []string{"jp", "JA", "jpn", "zh-TW", "", "日语"} {
+		settings := localServerSettings(t)
+		settings.WeatherGeocodingLanguage = bad
+		if err := settings.validateBrain(); err == nil || !strings.Contains(err.Error(), "HARO_WEATHER_GEOCODING_LANGUAGE") {
+			t.Errorf("%q 应起不来并写明 HARO_WEATHER_GEOCODING_LANGUAGE：%v", bad, err)
+		}
+	}
+}
+
+// 启动日志写的时区：缩写、和 UTC 差多少、环境变量 TZ 的值。
+func TestLocalTimeZone(t *testing.T) {
+	t.Setenv("TZ", "Asia/Tokyo")
+	zone := LocalTimeZone(time.Date(2026, 11, 21, 9, 0, 0, 0, time.FixedZone("JST", 9*3600)))
+	if zone != (TimeZone{Name: "JST", Offset: "+09:00", TZ: "Asia/Tokyo"}) {
+		t.Errorf("东京：%+v", zone)
+	}
+	t.Setenv("TZ", "")
+	zone = LocalTimeZone(time.Date(2026, 11, 21, 0, 0, 0, 0, time.UTC))
+	if zone != (TimeZone{Name: "UTC", Offset: "+00:00"}) {
+		t.Errorf("UTC、没设 TZ：%+v", zone)
 	}
 }
