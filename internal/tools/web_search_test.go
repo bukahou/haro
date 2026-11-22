@@ -33,8 +33,11 @@ func fakeTavily(t *testing.T, wantKey string, lastQuery *atomic.Value) (*httptes
 	}
 	mcp.AddTool(server, &mcp.Tool{Name: "tavily_search"}, func(_ context.Context, _ *mcp.CallToolRequest, in searchInput) (*mcp.CallToolResult, any, error) {
 		lastQuery.Store(fmt.Sprintf("%s|%d|%s|%v", in.Query, in.MaxResults, in.SearchDepth, in.IncludeRawContent))
-		if in.Query == badQuery {
+		switch in.Query {
+		case badQuery:
 			return nil, nil, errors.New("query is invalid")
+		case oddQuery:
+			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: `{"answer":"改版后的格式"}`}}}, nil, nil
 		}
 		body, _ := json.Marshal(map[string]any{"request_id": "x", "images": []any{}, "results": []map[string]any{
 			{"title": "日经平均", "url": "https://example.com/n", "content": strings.Repeat("涨", 5000), "score": 0.9}}})
@@ -46,6 +49,9 @@ func fakeTavily(t *testing.T, wantKey string, lastQuery *atomic.Value) (*httptes
 	}
 	mcp.AddTool(server, &mcp.Tool{Name: "tavily_extract"}, func(_ context.Context, _ *mcp.CallToolRequest, in extractInput) (*mcp.CallToolResult, any, error) {
 		lastQuery.Store("extract:" + in.Query)
+		if slices.Contains(in.URLs, oddURL) {
+			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "不是 JSON"}}}, nil, nil
+		}
 		var results []map[string]any
 		for i, url := range in.URLs {
 			results = append(results, map[string]any{"url": url, "raw_content": strings.Repeat("文", 10000*(i+1))})
@@ -67,8 +73,13 @@ func fakeTavily(t *testing.T, wantKey string, lastQuery *atomic.Value) (*httptes
 	})), restart
 }
 
-// badQuery 是假 Tavily 报「这次调用有错」的搜索词（服务正常回应、说参数不对）。
-const badQuery = "坏的搜索词"
+// badQuery 是假 Tavily 报「这次调用有错」的搜索词（服务正常回应、说参数不对）；oddQuery、oddURL 让它回一个认不出的格式
+// （像服务改版了那样）。
+const (
+	badQuery = "坏的搜索词"
+	oddQuery = "格式变了"
+	oddURL   = "https://odd.example"
+)
 
 // searchCharge 是记下的一笔搜索。
 type searchCharge struct {
@@ -159,19 +170,16 @@ func TestTavilyQuickSearch(t *testing.T) {
 	}
 
 	pages, err := searcher.ReadPages(ctx, []string{"https://example.com/a", "https://example.com/b"}, 2000, "要找的内容", meter)
-	var read struct {
-		Pages []struct{ URL, Content, Error string } `json:"pages"`
+	if err != nil || len(pages) != 3 {
+		t.Fatalf("抓正文：%+v %v", pages, err)
 	}
-	if err != nil || json.Unmarshal([]byte(pages), &read) != nil || len(read.Pages) != 3 {
-		t.Fatalf("抓正文：%.200s %v", pages, err)
-	}
-	for _, page := range read.Pages[:2] {
-		if n := len([]rune(page.Content)); n != 2000+len([]rune("…（后面省略）")) {
+	for _, page := range pages[:2] {
+		if n := len([]rune(page.Content)); n != 2000+len([]rune("…（后面省略）")) || page.Error != "" {
 			t.Errorf("每页单独截到 2000 字：%s %d", page.URL, n)
 		}
 	}
-	if read.Pages[2].Error != "404" {
-		t.Errorf("失败的网页要告诉模型：%+v", read.Pages[2])
+	if pages[2].URL != "https://bad.example" || pages[2].Error != "404" || pages[2].Content != "" {
+		t.Errorf("没读到的网页要带上原因：%+v", pages[2])
 	}
 	if got := lastQuery.Load(); got != "extract:要找的内容" {
 		t.Errorf("读网页要把要找的内容传给 Tavily（按相关度挑段落）：%v", got)
@@ -181,6 +189,37 @@ func TestTavilyQuickSearch(t *testing.T) {
 	}
 	if got := meter.all(); len(got) != 2 || got[1] != (searchCharge{credits: 1}) {
 		t.Errorf("读两页记 1 积分：%+v", got)
+	}
+
+	results, err := searcher.Search(ctx, "日经平均", 5, meter)
+	if err != nil || len(results) != 1 || results[0].Title != "日经平均" || results[0].URL != "https://example.com/n" ||
+		len([]rune(results[0].Snippet)) != 5000 {
+		t.Errorf("搜索结果按条交出（标题、网址、摘要）：%+v %v", results, err)
+	}
+}
+
+// Tavily 的回复认不出（像服务改版了）时报错，不把认不出的内容当成结果；请求发出去了，照样记账。
+func TestTavilyUnexpectedResponseIsAnError(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	var lastQuery atomic.Value
+	server, _ := fakeTavily(t, "tvly-test", &lastQuery)
+	defer server.Close()
+	searcher := NewTavilySearcher(server.URL, "tvly-test", nil, logger)
+	defer searcher.Close()
+	meter := &countingMeter{}
+	if results, err := searcher.Search(ctx, oddQuery, 3, meter); !errors.Is(err, errUnexpectedResponse) || results != nil {
+		t.Errorf("搜索结果认不出时应报错：%+v %v", results, err)
+	}
+	if pages, err := searcher.ReadPages(ctx, []string{oddURL}, 2000, "要找的内容", meter); !errors.Is(err, errUnexpectedResponse) || pages != nil {
+		t.Errorf("读网页的结果认不出时应报错：%+v %v", pages, err)
+	}
+	if got := meter.all(); len(got) != 2 {
+		t.Errorf("请求发出去了就记账：%+v", got)
+	}
+	// 阳性对照：同一个服务回约定的格式时搜得到
+	if results, err := searcher.Search(ctx, "日经平均", 3, meter); err != nil || len(results) != 1 {
+		t.Errorf("约定的格式应搜得到：%+v %v", results, err)
 	}
 }
 

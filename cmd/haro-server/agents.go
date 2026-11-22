@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"github.com/bukahou/haro/internal/brain"
 	"github.com/bukahou/haro/internal/config"
 	"github.com/bukahou/haro/internal/llm"
+	"github.com/bukahou/haro/internal/research"
 	"github.com/bukahou/haro/internal/spending"
 	"github.com/bukahou/haro/internal/vision"
 )
@@ -37,7 +39,7 @@ func loadAgentDefinitions(settings config.ServerSettings, logger *slog.Logger) (
 	return catalog, nil
 }
 
-// agentAssembly 是装配代理要用的东西。
+// agentAssembly 是装配代理要用的东西（对话的代理、后台调查的代理共用一套）。
 type agentAssembly struct {
 	settings config.ServerSettings
 	catalog  agents.Catalog
@@ -47,6 +49,12 @@ type agentAssembly struct {
 	ledger   spending.Ledger
 	guard    *spending.Guard
 	logger   *slog.Logger
+}
+
+// newAgentAssembly 由配置、代理定义和已经连好的外部服务（模型的客户端、费用的账本与额度）得到 agentAssembly。
+func newAgentAssembly(settings config.ServerSettings, catalog agents.Catalog, deps services, logger *slog.Logger) agentAssembly {
+	return agentAssembly{settings: settings, catalog: catalog, claude: deps.claude, client: deps.modelHTTP, pricing: deps.pricing,
+		ledger: deps.ledger, guard: deps.guard, logger: logger}
 }
 
 // conversationAgents 是对话用的代理。
@@ -150,13 +158,55 @@ func (a agentAssembly) build(toolbox brain.Toolbox, expertSearch vision.Search) 
 	return built, nil
 }
 
-// agent 按定义组装一个代理：model 是已经套好额度（和熔断）的模型，正文按 values 填好；定义里的工具名都要认识。
+// researchAgents 按定义装配后台调查的代理：调查（research）一定有；审查（research_review）在 HARO_STRONG_LLM_USE 有 research 时
+// 才有。调查的轮数默认是定义的 max_steps，设了 HARO_RESEARCH_MAX_ROUNDS 时用它。工具名按 research 自己提供的查（不在会话和
+// 工具箱里），正文里的工具名、上限由 research 填。模型不套额度（调查自己每一轮之前查）、不熔断（后台做，不急）。
+func (a agentAssembly) researchAgents(limits research.Limits) (research.Agents, error) {
+	reviewed := a.settings.StrongLLMFor(config.StrongForResearch)
+	definition := a.catalog[agents.Research]
+	model, investigatorModel, err := a.meteredForResearch(definition)
+	if err != nil {
+		return research.Agents{}, err
+	}
+	rounds := cmp.Or(a.settings.ResearchMaxRounds, definition.MaxSteps)
+	investigator, err := a.agentChecked(definition, model, research.InvestigationPromptValues(definition.Tools, rounds, limits, reviewed),
+		unknownNames(definition.Tools, research.InvestigationTools()))
+	if err != nil {
+		return research.Agents{}, err
+	}
+	investigator.MaxSteps = rounds
+	built := research.Agents{Investigator: investigator}
+	reviewerModel := "（不审查）"
+	if reviewed {
+		definition := a.catalog[agents.ResearchReview]
+		model, id, err := a.meteredForResearch(definition)
+		if err != nil {
+			return research.Agents{}, err
+		}
+		reviewer, err := a.agentChecked(definition, model, research.ReviewPromptValues(definition.Tools),
+			unknownNames(definition.Tools, research.ReviewTools()))
+		if err != nil {
+			return research.Agents{}, err
+		}
+		built.Reviewer, reviewerModel = &reviewer, id
+	}
+	a.logger.Info("代理：后台调查", "agent", investigator.Name, "model", investigatorModel, "max_rounds", rounds,
+		"reviewer", reviewerModel, "effort", a.settings.ResearchEffort)
+	return built, nil
+}
+
+// agent 按定义组装一个代理：model 是已经套好额度（和熔断）的模型，正文按 values 填好；定义里的工具名都要是会话或工具箱提供的。
 func (a agentAssembly) agent(definition agents.Definition, model brain.ChatModel, values map[string]any, toolbox brain.Toolbox) (brain.Agent, error) {
+	return a.agentChecked(definition, model, values, brain.UnknownTools(definition.Tools, toolbox))
+}
+
+// agentChecked 同 agent；unknown 是定义的允许名单里认不出的工具名（不为空就起不来）。
+func (a agentAssembly) agentChecked(definition agents.Definition, model brain.ChatModel, values map[string]any, unknown []string) (brain.Agent, error) {
 	instructions, err := definition.RenderPrompt(values)
 	if err != nil {
 		return brain.Agent{}, err
 	}
-	if unknown := brain.UnknownTools(definition.Tools, toolbox); len(unknown) > 0 {
+	if len(unknown) > 0 {
 		return brain.Agent{}, fmt.Errorf("代理 %s（%s）的工具名不认识：%s", definition.Name, definition.Source, strings.Join(unknown, "、"))
 	}
 	return brain.Agent{Name: definition.Title, Model: model, Instructions: instructions, Tools: definition.Tools,
@@ -164,42 +214,67 @@ func (a agentAssembly) agent(definition agents.Definition, model brain.ChatModel
 		Timeout: definition.Timeout}, nil
 }
 
+// unknownNames 是 names 里不在 known 中的名字。
+func unknownNames(names, known []string) []string {
+	var unknown []string
+	for _, name := range names {
+		if !slices.Contains(known, name) {
+			unknown = append(unknown, name)
+		}
+	}
+	return unknown
+}
+
 // metered 是按定义接好的具体模型（模型档换成具体模型，按代理的用途记账；不查额度、不熔断），以及模型 ID（日志用）。
+// 用在对话里等着回答的代理上：力度、等多久按各档的配置，base 档跟着 HARO_LLM_PROVIDER（本地或云端）。
 func (a agentAssembly) metered(definition agents.Definition) (brain.ChatModel, string, error) {
+	return a.meteredAs(definition, false)
+}
+
+// meteredForResearch 同 metered，用在后台调查的代理上：只用云端模型（HARO_LLM_PROVIDER=local 时也是），力度用
+// HARO_RESEARCH_EFFORT；在后台、不急：限流 / 服务端一时出错时让 SDK 重试 researchRetries 次，每次请求不另设期限
+// （受调查自己的时限、审查的 timeout 管）。
+func (a agentAssembly) meteredForResearch(definition agents.Definition) (brain.ChatModel, string, error) {
+	return a.meteredAs(definition, true)
+}
+
+// researchRetries 是后台调查的请求在限流、服务端一时出错、断线时让 SDK 重试几次。
+const researchRetries = 2
+
+// meteredAs 是 metered、meteredForResearch 共用的部分：background 为 true 时按后台调查的做法接（见 meteredForResearch）。
+func (a agentAssembly) meteredAs(definition agents.Definition, background bool) (brain.ChatModel, string, error) {
 	purpose, err := spending.ParsePurpose(definition.Purpose)
 	if err != nil {
 		return nil, "", fmt.Errorf("代理 %s（%s）：%w", definition.Name, definition.Source, err)
 	}
 	s := a.settings
-	maxTokens := definition.MaxOutputTokens
-	if maxTokens == 0 {
-		maxTokens = s.CloudMaxTokens
-	}
+	maxTokens := cmp.Or(definition.MaxOutputTokens, s.CloudMaxTokens)
 	logger := a.logger.With("agent", definition.Title)
-	var model brain.ChatModel
-	var id string
+	var spec cloudModelSpec
 	switch {
 	case definition.Model == agents.TierStrong:
 		if s.StrongLLMModel == "" {
 			return nil, "", fmt.Errorf("代理 %s 用更强的模型，但没设 HARO_STRONG_LLM_MODEL", definition.Name)
 		}
-		id = s.StrongLLMModel
-		model = newCloudChatModel(s, a.claude, cloudModelSpec{model: id, maxTokens: maxTokens, effort: s.StrongLLMEffort,
-			thinking: s.StrongLLMThinking, firstTokenTimeout: s.StrongLLMTimeout, requestTimeout: s.RequestTimeout}, a.client)
-	case s.LLMProvider == config.LLMLocal: // base 档、本地模型
-		id = s.Model
-		local, err := llm.NewOllamaChatModel(s.OllamaURL, id, maxTokens, localModelOptions(s, a.client))
+		spec = cloudModelSpec{model: s.StrongLLMModel, maxTokens: maxTokens, effort: s.StrongLLMEffort,
+			thinking: s.StrongLLMThinking, firstTokenTimeout: s.StrongLLMTimeout, requestTimeout: s.RequestTimeout}
+	case s.LLMProvider == config.LLMLocal && !background: // base 档、本地模型
+		local, err := llm.NewOllamaChatModel(s.OllamaURL, s.Model, maxTokens, localModelOptions(s, a.client))
 		if err != nil {
 			return nil, "", err
 		}
-		model = llm.WithRequestTelemetry(local, llm.ProviderOllama, id)
+		// 每个具体模型都记账（本地模型在价格表里标了不花钱，照样记 token）
+		return spending.NewMeteredChatModel(llm.WithRequestTelemetry(local, llm.ProviderOllama, s.Model), s.Model, purpose,
+			a.pricing, a.ledger, logger), s.Model, nil
 	default: // base 档、云端模型
-		id = s.CloudLLMModel
-		model = newCloudChatModel(s, a.claude, cloudModelSpec{model: id, maxTokens: maxTokens, effort: s.CloudLLMEffort,
-			thinking: s.CloudLLMThinking, firstTokenTimeout: s.CloudLLMTimeout, requestTimeout: s.RequestTimeout}, a.client)
+		spec = cloudModelSpec{model: s.CloudLLMModel, maxTokens: maxTokens, effort: s.CloudLLMEffort,
+			thinking: s.CloudLLMThinking, firstTokenTimeout: s.CloudLLMTimeout, requestTimeout: s.RequestTimeout}
 	}
-	// 每个具体模型都记账（本地模型在价格表里标了不花钱，照样记 token）
-	return spending.NewMeteredChatModel(model, id, purpose, a.pricing, a.ledger, logger), id, nil
+	if background {
+		spec.effort, spec.retries, spec.firstTokenTimeout, spec.requestTimeout = s.ResearchEffort, researchRetries, 0, 0
+	}
+	return spending.NewMeteredChatModel(newCloudChatModel(s, a.claude, spec, a.client), spec.model, purpose, a.pricing, a.ledger, logger),
+		spec.model, nil
 }
 
 // localModelOptions 是本地模型（ollama）的请求参数：等它开始回答按本地的上限（冷启动要先载入模型），不按云端的。

@@ -309,7 +309,7 @@ func (m *AnthropicChatModel) request(request brain.ChatRequest) (anthropic.Messa
 	markToolLoopForCache(converted)     // 断点 ③
 	params.Messages = converted
 	if len(tools) == 0 {
-		// 没有工具的请求，历史里却可能有工具往来（例如后台调查最后写结论）：
+		// 没有工具的请求，历史里却可能有工具往来（例如后台调查到上限后不再给工具、逼模型用已有资料写结论）：
 		// Claude 要求有工具往来的请求带上工具定义，所以按历史里的工具名补上，并声明不许调用
 		tools = toolsSeenIn(messages)
 	}

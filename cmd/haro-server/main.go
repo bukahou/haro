@@ -5,7 +5,6 @@
 package main
 
 import (
-	"cmp"
 	"context"
 	"errors"
 	"flag"
@@ -33,7 +32,6 @@ import (
 	"github.com/bukahou/haro/internal/pricecatalog"
 	"github.com/bukahou/haro/internal/readiness"
 	"github.com/bukahou/haro/internal/realtimeproto"
-	"github.com/bukahou/haro/internal/research"
 	"github.com/bukahou/haro/internal/speech"
 	"github.com/bukahou/haro/internal/spending"
 	"github.com/bukahou/haro/internal/telemetry"
@@ -91,7 +89,7 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	kit, err := buildTooling(ctx, settings, deps, logger, &shutdown)
+	kit, err := buildTooling(ctx, settings, catalog, deps, logger, &shutdown)
 	if err != nil {
 		return err
 	}
@@ -166,7 +164,7 @@ func checkClaudeSettings(settings config.ServerSettings) error {
 			return fmt.Errorf("%s %w", check.name, err)
 		}
 	}
-	// 力度和它实际搭配的思考写法一起查：调查的力度两种都会用到（调查用云端模型的、写结论用更强的模型的）
+	// 力度和它实际搭配的思考写法一起查：调查的力度两种都会用到（调查用云端模型的、审查用更强的模型的）
 	for _, check := range []struct{ name, effort, thinking string }{
 		{"HARO_CLOUD_LLM_EFFORT", settings.CloudLLMEffort, settings.CloudLLMThinking},
 		{"HARO_STRONG_LLM_EFFORT", settings.StrongLLMEffort, settings.StrongLLMThinking},
@@ -317,65 +315,6 @@ func connectWebSearch(settings config.ServerSettings, httpClient *http.Client, l
 	}
 	logger.Info("联网搜索：Tavily（用到时才连，断了自动重连）")
 	return tools.NewTavilySearcher(settings.TavilyMCPURL, settings.TavilyAPIKey, httpClient, logger)
-}
-
-// startResearch 开启后台调查：任务账本、调查用的模型、上限，并在后台开始处理队列。
-func startResearch(ctx context.Context, settings config.ServerSettings, deps services, searcher tools.WebSearcher,
-	logger *slog.Logger) (*research.Runner, func() error, error) {
-	store, err := research.OpenTaskStore(ctx, settings.ResearchDB)
-	if err != nil {
-		return nil, nil, err
-	}
-	if settings.ResearchDB == "" {
-		logger.Warn("没设 HARO_RESEARCH_DB：调查任务只记在内存里，服务端重启后就忘了")
-	}
-	// 调查在后台、不急：限流 / 服务端一时出错时让 SDK 重试两次；每次请求不另设期限，受调查自己的总时限管
-	model := deps.meteredCloudModel(settings, cloudModelSpec{model: settings.CloudLLMModel, maxTokens: researchMaxTokens,
-		effort: settings.ResearchEffort, thinking: settings.CloudLLMThinking, retries: 2}, spending.PurposeResearch, logger)
-	limits := researchLimits(settings)
-	meter := spending.NewSearchMeter(deps.guard, deps.ledger, deps.pricing, spending.PurposeResearch, tools.TavilyName)
-	runner := research.NewRunner(store, model, searcher, meter, deps.guard, limits, logger)
-	writer := "（调查模型自己写）"
-	if settings.StrongLLMFor(config.StrongForResearch) { // 搜索和读网页用便宜的模型，结论交给更强的模型写
-		runner.WriteConclusionsWith(deps.meteredCloudModel(settings, cloudModelSpec{model: settings.StrongLLMModel,
-			maxTokens: researchConclusionMaxTokens, effort: settings.ResearchEffort, thinking: settings.StrongLLMThinking, retries: 2},
-			spending.PurposeResearch, logger))
-		writer = settings.StrongLLMModel
-	}
-	running := make(chan struct{})
-	go func() {
-		defer close(running)
-		runner.Run(ctx) // ctx 随退出信号结束：手上的调查停下（下次启动标成被中断）
-	}()
-	logger.Info("后台调查已开启", "model", settings.CloudLLMModel, "conclusion_writer", writer, "timeout", limits.Timeout,
-		"max_rounds", limits.MaxRounds, "max_searches", limits.MaxSearches, "max_tokens", limits.MaxTokens)
-	stop := func() error { // 先等调查的循环退出，再关任务账本：不然它最后一次写任务时库已经关了
-		select {
-		case <-running:
-		case <-time.After(shutdownResearch):
-			logger.Warn("后台调查没在期限内停下：照样关任务账本", "timeout", shutdownResearch)
-		}
-		return store.Close()
-	}
-	return runner, stop, nil
-}
-
-// researchMaxTokens 是调查时每次请求的输出上限（结论比聊天长，聊天用 HARO_CLOUD_LLM_MAX_TOKENS）。
-const researchMaxTokens = 1000
-
-// researchConclusionMaxTokens 是更强的模型写结论时的输出上限：它开着思考（思考也算在输出上限里），结论连同来源
-// 经 submit_conclusion 一次交出，按 researchMaxTokens 会写到一半被截断（实测），这次调用白花。只按实际用的计费，
-// 每天的调查额度照样管着。
-const researchConclusionMaxTokens = 4000
-
-// researchLimits 是每个调查任务的上限：配置里设了的用配置的，没设（0）的用程序里的默认值（research.DefaultLimits，默认值只在那里写）。
-func researchLimits(settings config.ServerSettings) research.Limits {
-	limits := research.DefaultLimits
-	limits.Timeout = cmp.Or(settings.ResearchTimeout, limits.Timeout)
-	limits.MaxRounds = cmp.Or(settings.ResearchMaxRounds, limits.MaxRounds)
-	limits.MaxSearches = cmp.Or(settings.ResearchMaxSearches, limits.MaxSearches)
-	limits.MaxTokens = cmp.Or(settings.ResearchMaxTokens, limits.MaxTokens)
-	return limits
 }
 
 // buildSynthesizer 按 HARO_TTS 选择语音合成实现（服务都单独运行，只按 HARO_TTS_URL 连）。

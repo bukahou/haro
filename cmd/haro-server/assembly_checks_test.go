@@ -66,14 +66,14 @@ func TestShutdownStepsReportFailures(t *testing.T) {
 	}
 }
 
-// 调查的上限：配置没设（0）的用程序里的默认值（research.DefaultLimits），设了的用配置的。
+// 调查的上限：配置没设（0）的用程序里的默认值（research.DefaultLimits），设了的用配置的（轮数见 TestBuildResearchAgents）。
 func TestResearchLimits(t *testing.T) {
 	if got := researchLimits(config.ServerSettings{}); got != research.DefaultLimits {
 		t.Errorf("都没设时应是 research.DefaultLimits：%+v", got)
 	}
-	got := researchLimits(config.ServerSettings{ResearchTimeout: time.Minute, ResearchMaxRounds: 4, ResearchMaxSearches: 2, ResearchMaxTokens: 1000})
+	got := researchLimits(config.ServerSettings{ResearchTimeout: time.Minute, ResearchMaxSearches: 2, ResearchMaxTokens: 1000})
 	want := research.DefaultLimits
-	want.Timeout, want.MaxRounds, want.MaxSearches, want.MaxTokens = time.Minute, 4, 2, 1000
+	want.Timeout, want.MaxSearches, want.MaxTokens = time.Minute, 2, 1000
 	if got != want {
 		t.Errorf("设了的用配置的：%+v", got)
 	}

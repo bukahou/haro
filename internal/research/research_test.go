@@ -1,7 +1,9 @@
 package research
 
 import (
+	"cmp"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"iter"
@@ -15,7 +17,6 @@ import (
 	"time"
 
 	"github.com/bukahou/haro/internal/brain"
-	"github.com/bukahou/haro/internal/tools"
 )
 
 var quietLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -32,21 +33,22 @@ const (
 )
 
 // scriptedModel 按 replies 依次回答；replies 用完后重复 repeat（nil = 交出 scriptedConclusion）；到上限时
-// （这次请求不给搜索工具）交出 limitConclusion。什么时候往下走由测试决定，不靠时间：
+// （这次请求不给搜索工具）交出 limitConclusion。每一步做什么由测试指定（不看消息的内容），什么时候往下走也由测试决定，不靠时间：
 // gate 不为 nil 时每次回答前等它关上（或被取消）；hang 为 true 时 replies 用完后的搜索阶段请求一直等到被取消；
-// 每次请求开始时往 entered 放一个（测试据此知道调查走到了模型这一步）。
+// 每次请求开始时往 entered 放一个（测试据此知道调查走到了模型这一步）；onRequest 是第几次请求（从 1 数）开始时要做的事。
 type scriptedModel struct {
 	mu        sync.Mutex
 	replies   []brain.ReplyDelta
 	repeat    *brain.ReplyDelta
 	failures  map[int]error // 第几次请求（从 1 数）出错
+	onRequest map[int]func()
 	gate      chan struct{}
 	hang      bool
 	entered   chan struct{}
 	requests  int
-	toolsSeen []bool   // 每次请求有没有给搜索工具（到上限后只给交结论的工具）
-	questions []string // 每次请求查的是哪个问题（系统提示词后面那条）
-	lastMsgs  []brain.ChatMessage
+	toolsSeen []bool                // 每次请求有没有给搜索工具（到上限后只给交结论的工具）
+	questions []string              // 每次请求的任务（系统提示词后面那条：现在的日期和要调查的问题）
+	seen      [][]brain.ChatMessage // 每次请求带的消息
 }
 
 // submit 是用 submit_conclusion 交出结论的回答。
@@ -72,8 +74,8 @@ func (m *scriptedModel) StreamReply(ctx context.Context, request brain.ChatReque
 	m.requests++
 	m.toolsSeen = append(m.toolsSeen, offers(request.Tools, "search_web"))
 	m.questions = append(m.questions, request.Messages[1].Text)
-	m.lastMsgs = request.Messages
-	failure := m.failures[m.requests]
+	m.seen = append(m.seen, slices.Clone(request.Messages))
+	failure, hook := m.failures[m.requests], m.onRequest[m.requests]
 	reply := submit(scriptedConclusion, "https://example.com/a")
 	block := false
 	switch {
@@ -88,6 +90,9 @@ func (m *scriptedModel) StreamReply(ctx context.Context, request brain.ChatReque
 	}
 	gate, entered := m.gate, m.entered
 	m.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
 	return func(yield func(brain.ReplyDelta, error) bool) {
 		if entered != nil {
 			select {
@@ -126,11 +131,19 @@ func (m *scriptedModel) setGate(gate chan struct{}) {
 func (m *scriptedModel) messagesOfLastRequest() []brain.ChatMessage {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.lastMsgs
+	return m.seen[len(m.seen)-1]
+}
+
+// requestMessages 是每次请求带的消息。
+func (m *scriptedModel) requestMessages() [][]brain.ChatMessage {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return slices.Clone(m.seen)
 }
 
 // fakeSearcher 是假的搜索服务：记下搜了几次、读了哪些网址；searchErr 不为 nil 时搜索失败。
-// 每次调用算发出一次请求，用 record 记一笔（失败的标不完整）。
+// 每次调用算发出一次请求，用 record 记一笔（失败的标不完整）。hits 是每次搜索交回的结果（nil = 一条 A）；
+// pages 是网址对应的正文（没有的交回 defaultPage）。
 type fakeSearcher struct {
 	mu         sync.Mutex
 	searches   int
@@ -138,30 +151,45 @@ type fakeSearcher struct {
 	readURLs   []string
 	chargedFor int // 最后一次读网页按几页记账
 	searchErr  error
+	hits       []SearchHit
+	pages      map[string]string
 }
 
-func (f *fakeSearcher) Search(ctx context.Context, _ string, _ int, record tools.SearchRecorder) (string, error) {
+const defaultPage = "A 的详细价格 100 円"
+
+func (f *fakeSearcher) Search(ctx context.Context, _ string, _ int, record Recorder) ([]SearchHit, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.searches++
 	if err := record.RecordSearch(ctx, 1, f.searchErr != nil); err != nil {
-		return "", err
+		return nil, err
 	}
 	if f.searchErr != nil {
-		return "", f.searchErr
+		return nil, f.searchErr
 	}
-	return "Title: A 的价格\nURL: https://example.com/a\nContent: A 100 円", nil
+	if f.hits != nil {
+		return slices.Clone(f.hits), nil
+	}
+	return []SearchHit{{Title: "A 的价格", URL: "https://example.com/a", Snippet: "A 100 円"}}, nil
 }
 
-func (f *fakeSearcher) ReadPages(ctx context.Context, urls []string, _ int, _ string, record tools.SearchRecorder) (string, error) {
+func (f *fakeSearcher) ReadPages(ctx context.Context, urls []string, _ int, _ string, record Recorder) ([]Page, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.reads++
 	f.readURLs = append(f.readURLs, urls...)
 	if err := record.RecordSearch(ctx, 1, false); err != nil {
-		return "", err
+		return nil, err
 	}
-	return "A 的详细价格 100 円", nil
+	pages := make([]Page, len(urls))
+	for i, url := range urls {
+		content, ok := f.pages[url]
+		if !ok {
+			content = defaultPage
+		}
+		pages[i] = Page{URL: url, Content: content}
+	}
+	return pages, nil
 }
 
 func (f *fakeSearcher) SearchCredits() int { return 1 }
@@ -242,10 +270,54 @@ func openTestStore(t *testing.T) TaskStore {
 	return store
 }
 
-func newRig(t *testing.T, model brain.ChatModel, limits Limits) *researchRig {
+// rigSetup 是测试用的调查执行器的设定：零值 = 不审查、默认上限（DefaultLimits）、testRounds 轮。
+type rigSetup struct {
+	reviewer      brain.ChatModel // 审查的模型；nil = 不审查
+	reviewTimeout time.Duration   // 审一次最多多久；0 = 5 秒（只是防止测试卡死）
+	limits        Limits          // 零值 = DefaultLimits
+	rounds        int             // 调查的轮数（调查的代理的 MaxSteps）；0 = testRounds
+	tools         []string        // 调查的代理的允许名单；nil = 全部
+}
+
+// testRounds 是测试里调查的轮数（和程序里带的定义一样）；testPrompt、testReviewPrompt 是占位的系统提示词。
+const (
+	testRounds       = 10
+	testPrompt       = "（测试用的调查提示词）"
+	testReviewPrompt = "（测试用的审查提示词）"
+)
+
+// agents 是按设定组装的两个代理。
+func (setup rigSetup) agents(investigator brain.ChatModel) Agents {
+	agents := Agents{Investigator: brain.Agent{Name: "调查", Model: investigator, Instructions: testPrompt, Tools: setup.tools,
+		MaxSteps: cmp.Or(setup.rounds, testRounds)}}
+	if setup.reviewer != nil {
+		agents.Reviewer = &brain.Agent{Name: "调查审查", Model: setup.reviewer, Instructions: testReviewPrompt, MaxSteps: 1,
+			Timeout: cmp.Or(setup.reviewTimeout, 5*time.Second)}
+	}
+	return agents
+}
+
+func (setup rigSetup) limitsOrDefault() Limits {
+	if setup.limits == (Limits{}) {
+		return DefaultLimits
+	}
+	return setup.limits
+}
+
+// newTestRunner 建调查执行器；建不成就让测试失败。
+func newTestRunner(t *testing.T, store TaskStore, model brain.ChatModel, searcher Searcher, budget *fakeBudget, setup rigSetup) *Runner {
+	t.Helper()
+	runner, err := NewRunner(store, setup.agents(model), searcher, budget, budget, setup.limitsOrDefault(), quietLogger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return runner
+}
+
+func newRig(t *testing.T, model brain.ChatModel, setup rigSetup) *researchRig {
 	t.Helper()
 	rig := &researchRig{store: openTestStore(t), searcher: &fakeSearcher{}, budget: &fakeBudget{}, finished: make(chan Task, 16)}
-	rig.runner = NewRunner(rig.store, model, rig.searcher, rig.budget, rig.budget, limits, quietLogger)
+	rig.runner = newTestRunner(t, rig.store, model, rig.searcher, rig.budget, setup)
 	rig.runner.OnFinished(func(task Task) { rig.finished <- task })
 	return rig
 }
@@ -304,7 +376,7 @@ func TestResearchFindsAnswerAndBriefsOnce(t *testing.T) {
 		call("search_web", map[string]any{"query": "A B 价格"}),
 		call("read_pages", map[string]any{"urls": []any{"https://example.com/a"}}),
 	}, gate: make(chan struct{})}
-	rig := newRig(t, model, DefaultLimits)
+	rig := newRig(t, model, rigSetup{})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	rig.run(ctx)
@@ -333,15 +405,15 @@ func TestResearchFindsAnswerAndBriefsOnce(t *testing.T) {
 		t.Errorf("任务板应只提查完了，不带结论、不靠这一轮说完就算告诉了：%+v", briefing)
 	}
 	// 不在一轮回答里查（没有收集处）：不算告诉了；按编号查到那一个，别人的编号查不到
-	if found, err := rig.runner.lookUpStatus(ctx, "主人", &task.ID); err != nil || len(found.Tasks) != 1 || found.Tasks[0].Conclusion != scriptedConclusion {
+	if found, err := rig.runner.Status(ctx, "主人", &task.ID); err != nil || len(found.Tasks) != 1 || found.Tasks[0].Conclusion != scriptedConclusion {
 		t.Errorf("按编号查：%+v %v", found, err)
 	}
-	if found, err := rig.runner.lookUpStatus(ctx, "别人", &task.ID); err != nil || len(found.Tasks) != 0 || found.Note == "" {
+	if found, err := rig.runner.Status(ctx, "别人", &task.ID); err != nil || len(found.Tasks) != 0 || found.Note == "" {
 		t.Errorf("别人的编号查不到：%+v %v", found, err)
 	}
 	// 一轮回答里取了结论：登记「主人听完才算告诉了」；还没确认听完之前，任务板照样附上
 	var heard deliveries
-	if found, err := rig.runner.lookUpStatus(brain.WithDeliveries(ctx, &heard), "主人", nil); err != nil || len(found.Tasks) != 1 ||
+	if found, err := rig.runner.Status(brain.WithDeliveries(ctx, &heard), "主人", nil); err != nil || len(found.Tasks) != 1 ||
 		found.Tasks[0].Conclusion != scriptedConclusion || len(heard) != 1 {
 		t.Fatalf("取结论：应带上结论，并登记一件听完才算数的事（%d 件）：%+v %v", len(heard), found, err)
 	}
@@ -359,7 +431,7 @@ func TestResearchFindsAnswerAndBriefsOnce(t *testing.T) {
 		t.Errorf("不给别人看：%v", others.Lines)
 	}
 	var again deliveries
-	if _, err := rig.runner.lookUpStatus(brain.WithDeliveries(ctx, &again), "主人", nil); err != nil || len(again) != 0 {
+	if _, err := rig.runner.Status(brain.WithDeliveries(ctx, &again), "主人", nil); err != nil || len(again) != 0 {
 		t.Errorf("已经告诉过的结论再取一次：不用再登记（%d 件，%v）", len(again), err)
 	}
 }
@@ -368,8 +440,8 @@ func TestResearchStopsAtLimitsAndWritesUp(t *testing.T) {
 	search := call("search_web", map[string]any{"query": "没完没了"})
 	model := &scriptedModel{repeat: &search} // 模型一直想搜
 	limits := DefaultLimits
-	limits.MaxSearches, limits.MaxRounds = 2, 4
-	rig := newRig(t, model, limits)
+	limits.MaxSearches = 2
+	rig := newRig(t, model, rigSetup{limits: limits, rounds: 4})
 	done := rig.research(t, "无底洞")
 
 	if done.Status != StatusPartial || done.Conclusion != limitConclusion || done.StopReason == "" {
@@ -389,8 +461,8 @@ func TestResearchStopsAtLimitsAndWritesUp(t *testing.T) {
 func TestResearchTimeLimit(t *testing.T) {
 	model := &scriptedModel{replies: []brain.ReplyDelta{call("search_web", map[string]any{"query": "慢"})}, hang: true}
 	limits := DefaultLimits
-	limits.Timeout, limits.MaxRounds = 50*time.Millisecond, 100
-	rig := newRig(t, model, limits)
+	limits.Timeout = 50 * time.Millisecond
+	rig := newRig(t, model, rigSetup{limits: limits, rounds: 100})
 	done := rig.research(t, "慢慢查")
 	if done.Status != StatusPartial || done.Conclusion != limitConclusion {
 		t.Errorf("到时间上限应收工、用查到的写结论：%+v", done)
@@ -405,9 +477,7 @@ func TestResearchTimeLimit(t *testing.T) {
 func TestResearchBudgetQueueCancelAndRestart(t *testing.T) {
 	search := call("search_web", map[string]any{"query": "慢"})
 	model := &scriptedModel{repeat: &search, gate: make(chan struct{}), entered: make(chan struct{}, 64)} // 闸一直不开：在查的一直在查
-	limits := DefaultLimits
-	limits.MaxPending = 2
-	rig := newRig(t, model, limits)
+	rig := newRig(t, model, rigSetup{})
 	ctx, cancel := context.WithCancel(context.Background())
 	stopped := rig.run(ctx)
 
@@ -420,11 +490,15 @@ func TestResearchBudgetQueueCancelAndRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, ahead, err := rig.runner.Start(ctx, "主人", "第二个")
-	if err != nil || ahead != 1 {
-		t.Fatalf("第二个应排队：%v ahead=%d", err, ahead)
+	var queued []Task // 排在第一个后面的（同时上限是 maxPending）
+	for i := 1; i < maxPending; i++ {
+		task, ahead, err := rig.runner.Start(ctx, "主人", "排队的 "+strconv.Itoa(i))
+		if err != nil || ahead != i {
+			t.Fatalf("第 %d 个应排队：%v ahead=%d", i+1, err, ahead)
+		}
+		queued = append(queued, task)
 	}
-	if _, _, err := rig.runner.Start(ctx, "主人", "第三个"); err == nil {
+	if _, _, err := rig.runner.Start(ctx, "主人", "超出的"); err == nil {
 		t.Error("超过同时上限应拒绝")
 	}
 	if _, err := rig.runner.Cancel(ctx, "别人", first.ID); err == nil {
@@ -436,21 +510,59 @@ func TestResearchBudgetQueueCancelAndRestart(t *testing.T) {
 		t.Fatalf("取消在查的：%+v %v", cancelled, err)
 	}
 
-	// 服务端停掉：第二个在查、没查完；重启后标成被中断，并在任务板上告诉主人（这一轮说完就算告诉了）
+	// 服务端停掉：第二个在查、后面的在排队，都没查完；重启后标成被中断，并在任务板上告诉主人（这一轮说完就算告诉了）
 	waitEntered(t, model.entered) // 第二个在查
 	cancel()
 	<-stopped
-	restarted := NewRunner(rig.store, model, &fakeSearcher{}, rig.budget, rig.budget, limits, quietLogger)
+	restarted := newTestRunner(t, rig.store, model, &fakeSearcher{}, rig.budget, rigSetup{})
 	ctx2, cancel2 := context.WithCancel(context.Background())
 	defer cancel2()
 	go restarted.Run(ctx2)
 	<-restarted.ready // 启动清理做完了
-	interrupted, err := rig.store.Get(ctx2, second.ID)
-	if err != nil || interrupted.Status != StatusInterrupted {
-		t.Fatalf("重启后应标成被中断：%+v %v", interrupted, err)
+	for _, task := range queued {
+		interrupted, err := rig.store.Get(ctx2, task.ID)
+		if err != nil || interrupted.Status != StatusInterrupted {
+			t.Fatalf("重启后应标成被中断：%+v %v", interrupted, err)
+		}
 	}
-	if board := restarted.Brief("主人"); len(board.Lines) != 1 || !strings.Contains(board.Lines[0], second.Question) || board.Delivered == nil {
+	board := restarted.Brief("主人")
+	if len(board.Lines) != len(queued) || !strings.Contains(board.Lines[0], queued[0].Question) || board.Delivered == nil {
 		t.Errorf("任务板应告诉主人被中断了，这一轮说完就算告诉了：%+v", board)
+	}
+}
+
+// 排队的队列满了（排队时取消的任务还占着位置）：这次不派、不建任务（不会建了再记失败、让主人听两次）；队列空出来就又能派。
+func TestStartRefusesWhenQueueIsFullWithoutCreatingTask(t *testing.T) {
+	store := openTestStore(t)
+	runner := newTestRunner(t, store, &scriptedModel{}, &fakeSearcher{}, &fakeBudget{}, rigSetup{})
+	close(runner.ready) // 不跑 Run：队列里的不会被取走
+	ctx := context.Background()
+	for len(runner.queue) < cap(runner.queue) { // 派了又取消：任务都结束了，队列里的位置还占着
+		task, _, err := runner.Start(ctx, "主人", "派了又取消")
+		if err != nil {
+			t.Fatalf("队列还有位置时应能派（队列里 %d 个）：%v", len(runner.queue), err)
+		}
+		if _, err := runner.Cancel(ctx, "主人", task.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, err := store.Recent(ctx, "主人", queueCapacity+10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := runner.Start(ctx, "主人", "放不进去的"); !errors.Is(err, errQueueFull) {
+		t.Fatalf("队列满了应拒绝：%v", err)
+	}
+	after, err := store.Recent(ctx, "主人", queueCapacity+10)
+	if err != nil || len(after) != len(before) {
+		t.Errorf("队列满了不该建任务：之前 %d 个、之后 %d 个（%v）", len(before), len(after), err)
+	}
+	if board := runner.Brief("主人"); len(board.Lines) != 0 {
+		t.Errorf("没派出去的不上任务板（主人已经从工具的报错听到了）：%v", board.Lines)
+	}
+	<-runner.queue // 取走一个（像 Run 跳过一个取消了的）：又能派
+	if _, _, err := runner.Start(ctx, "主人", "空出来之后"); err != nil {
+		t.Errorf("队列空出位置后应能派：%v", err)
 	}
 }
 
@@ -467,7 +579,7 @@ func TestConclusionAndSourcesComeSeparately(t *testing.T) {
 		{"直接写了文字", brain.ReplyDelta{Text: "A 便宜。\n来源：https://a.example/x"}, "A 便宜。\n来源：https://a.example/x", nil},
 	} {
 		model := &scriptedModel{replies: []brain.ReplyDelta{call("search_web", map[string]any{"query": "A B"}), c.final}}
-		done := newRig(t, model, DefaultLimits).research(t, "A 和 B 哪个便宜")
+		done := newRig(t, model, rigSetup{}).research(t, "A 和 B 哪个便宜")
 		if done.Status != StatusDone || done.Conclusion != c.want || !slices.Equal(done.Sources, c.sources) {
 			t.Errorf("%s：%+v", c.name, done)
 		}
@@ -509,7 +621,7 @@ func TestResearchMustSearchBeforeConcluding(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			model := &scriptedModel{replies: c.replies}
-			rig := newRig(t, model, DefaultLimits)
+			rig := newRig(t, model, rigSetup{})
 			rig.searcher.searchErr = c.searchErr
 			done := rig.research(t, "要查的事")
 			searches, _ := rig.searcher.counts()
@@ -538,7 +650,7 @@ func TestResearchModelErrorKeepsWhatWasFound(t *testing.T) {
 		{"什么都没查到就出错：记失败", &scriptedModel{failures: map[int]error{1: unavailable}}, StatusFailed, ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			done := newRig(t, c.model, DefaultLimits).research(t, "要查的事")
+			done := newRig(t, c.model, rigSetup{}).research(t, "要查的事")
 			if done.Status != c.status || done.Conclusion != c.conclusion || done.StopReason == "" {
 				t.Errorf("得到 %+v，应为 %s「%s」", done, c.status, c.conclusion)
 			}
@@ -550,9 +662,7 @@ func TestResearchModelErrorKeepsWhatWasFound(t *testing.T) {
 func TestResearchAtLimitsWithoutMaterialWritesNothing(t *testing.T) {
 	search := call("search_web", map[string]any{"query": "x"})
 	model := &scriptedModel{repeat: &search}
-	limits := DefaultLimits
-	limits.MaxRounds = 2
-	rig := newRig(t, model, limits)
+	rig := newRig(t, model, rigSetup{rounds: 2})
 	rig.searcher.searchErr = errors.New("搜索服务挂了")
 	done := rig.research(t, "要查的事")
 	if done.Status != StatusFailed || done.Conclusion != "" || !strings.Contains(done.StopReason, "搜索服务挂了") {
@@ -573,7 +683,7 @@ func TestResearchAtLimitsWithoutMaterialWritesNothing(t *testing.T) {
 func TestReadPagesTellsWhichURLsWereNotRead(t *testing.T) {
 	urls := []any{"https://example.com/1", "https://example.com/2", "https://example.com/3", "https://example.com/4", "https://example.com/5"}
 	model := &scriptedModel{replies: []brain.ReplyDelta{call("read_pages", map[string]any{"urls": urls})}}
-	rig := newRig(t, model, DefaultLimits)
+	rig := newRig(t, model, rigSetup{})
 	if done := rig.research(t, "要查的事"); done.Status != StatusDone {
 		t.Fatalf("读到的网页算资料，应能交结论：%+v", done)
 	}
@@ -583,19 +693,17 @@ func TestReadPagesTellsWhichURLsWereNotRead(t *testing.T) {
 	if want := []string{"https://example.com/1", "https://example.com/2", "https://example.com/3"}; !slices.Equal(read, want) || chargedFor != maxPagesPerRead {
 		t.Errorf("只读前 %d 个、按 %d 页记账：读了 %v，按 %d 页记账", maxPagesPerRead, maxPagesPerRead, read, chargedFor)
 	}
-	var result string
+	var result readPagesOutput
 	for _, message := range model.messagesOfLastRequest() {
 		if message.Role == brain.RoleTool && message.ToolName == "read_pages" {
-			result = message.Text
+			if err := json.Unmarshal([]byte(message.Text), &result); err != nil {
+				t.Fatalf("读网页交给模型的结果应是 JSON：%v %q", err, message.Text)
+			}
 		}
 	}
-	for _, skipped := range urls[maxPagesPerRead:] {
-		if !strings.Contains(result, skipped.(string)) {
-			t.Errorf("交给模型的结果里应写明没读 %s：%q", skipped, result)
-		}
-	}
-	if strings.Contains(result, "https://example.com/1") {
-		t.Errorf("读了的不该算进没读的：%q", result)
+	if want := []string{"https://example.com/4", "https://example.com/5"}; !slices.Equal(result.NotRead, want) || result.Note == "" ||
+		len(result.Pages) != maxPagesPerRead {
+		t.Errorf("交给模型的结果里应写明没读哪几个（读了的不算）：%+v", result)
 	}
 }
 
@@ -630,11 +738,14 @@ func (s *gatedStore) Create(ctx context.Context, person, question string) (Task,
 func TestStartRespectsPendingLimitUnderConcurrency(t *testing.T) {
 	store := &gatedStore{TaskStore: openTestStore(t), activeCalls: make(chan struct{}, 4), creating: make(chan struct{}),
 		release: make(chan struct{})}
-	limits := DefaultLimits
-	limits.MaxPending = 1
-	runner := NewRunner(store, &scriptedModel{}, &fakeSearcher{}, &fakeBudget{}, &fakeBudget{}, limits, quietLogger)
+	runner := newTestRunner(t, store, &scriptedModel{}, &fakeSearcher{}, &fakeBudget{}, rigSetup{})
 	close(runner.ready) // 不跑任务：只看派任务
 	ctx := context.Background()
+	for i := 1; i < maxPending; i++ { // 先占满到只剩一个名额（直接建在账本里：不经过下面的闸）
+		if _, err := store.TaskStore.Create(ctx, "主人", "已经在排队的 "+strconv.Itoa(i)); err != nil {
+			t.Fatal(err)
+		}
+	}
 	results := make(chan error, 2)
 	go func() { _, _, err := runner.Start(ctx, "主人", "第一个"); results <- err }()
 	<-store.activeCalls
@@ -652,15 +763,15 @@ func TestStartRespectsPendingLimitUnderConcurrency(t *testing.T) {
 		}
 	}
 	active, err := store.TaskStore.Active(ctx)
-	if err != nil || succeeded != 1 || len(active) != 1 {
-		t.Errorf("同时上限是 1：应只派出一个，派出 %d 个、在查或排队的有 %d 个（%v）", succeeded, len(active), err)
+	if err != nil || succeeded != 1 || len(active) != maxPending {
+		t.Errorf("只剩一个名额：应只派出一个，派出 %d 个、在查或排队的有 %d 个（上限 %d，%v）", succeeded, len(active), maxPending, err)
 	}
 }
 
 // 查完通知（让终端响一声）；主人自己取消的不通知。
 func TestResearchNotifiesWhenFinished(t *testing.T) {
 	model := &scriptedModel{replies: []brain.ReplyDelta{call("search_web", map[string]any{"query": "x"})}, entered: make(chan struct{}, 64)}
-	rig := newRig(t, model, DefaultLimits)
+	rig := newRig(t, model, rigSetup{})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	rig.run(ctx)
@@ -694,110 +805,19 @@ func TestResearchNotifiesWhenFinished(t *testing.T) {
 	}
 }
 
-func TestResearchPromptHasToday(t *testing.T) {
-	now := time.Date(2026, 11, 17, 12, 0, 0, 0, time.Local)
-	prompt := researchPrompt(DefaultLimits, now)
-	if !strings.Contains(prompt, now.Format("2006年1月2日")) || !strings.Contains(prompt, brain.WeekdayName(now)) {
-		t.Errorf("调查的提示词要有今天的日期和星期：%.80s", prompt)
-	}
-}
-
-// 派出后告诉主人最长等多久：由搜索阶段的时限加写结论的时间算出（分钟，往上取整）。
-func TestLongestNoteFollowsLimits(t *testing.T) {
-	for _, c := range []struct {
-		timeout time.Duration
-		minutes int
-	}{{3 * time.Minute, 4}, {90 * time.Second, 3}} {
+// 派出后最长要等多久：搜索阶段的时限加写结论的时间；有审查时再加审查一次和复查的时限。
+func TestLongestWaitFollowsLimits(t *testing.T) {
+	for _, timeout := range []time.Duration{3 * time.Minute, 90 * time.Second} {
 		limits := DefaultLimits
-		limits.Timeout = c.timeout
-		runner := NewRunner(openTestStore(t), &scriptedModel{}, &fakeSearcher{}, &fakeBudget{}, &fakeBudget{}, limits, quietLogger)
-		if note := runner.longestNote(); !strings.Contains(note, strconv.Itoa(c.minutes)) {
-			t.Errorf("时限 %v + 写结论 %v：应说约 %d 分钟：%q", c.timeout, writeUpTimeout, c.minutes, note)
+		limits.Timeout = timeout
+		runner := newTestRunner(t, openTestStore(t), &scriptedModel{}, &fakeSearcher{}, &fakeBudget{}, rigSetup{limits: limits})
+		if got := runner.LongestWait(); got != timeout+writeUpTimeout {
+			t.Errorf("时限 %v + 写结论 %v：得到 %v", timeout, writeUpTimeout, got)
 		}
-	}
-}
-
-// writerModel 是写结论的模型：回固定的文字或错误，记下收到的消息。
-type writerModel struct {
-	mu       sync.Mutex
-	text     string
-	err      error
-	calls    int
-	lastMsgs []brain.ChatMessage
-	offered  []string // 最后一次给的工具
-}
-
-func (m *writerModel) StreamReply(_ context.Context, request brain.ChatRequest) iter.Seq2[brain.ReplyDelta, error] {
-	m.mu.Lock()
-	m.calls++
-	m.lastMsgs, m.offered = request.Messages, nil
-	for _, spec := range request.Tools {
-		m.offered = append(m.offered, spec.Name)
-	}
-	text, err := m.text, m.err
-	m.mu.Unlock()
-	return func(yield func(brain.ReplyDelta, error) bool) {
-		if err != nil {
-			yield(brain.ReplyDelta{}, err)
-			return
-		}
-		reply := submit(text, "https://example.com/b")
-		reply.Usage, reply.Stop = &brain.ReplyUsage{PromptTokens: 2000, OutputTokens: 300}, brain.StopCompleted
-		yield(reply, nil)
-	}
-}
-
-// 调查模型搜完，结论交给写结论的模型重写：不带调查模型的草稿、不给工具；写结论的模型出错时用草稿。
-func TestResearchWriterWritesConclusion(t *testing.T) {
-	for _, c := range []struct {
-		name   string
-		writer *writerModel
-		want   string
-	}{
-		{"写结论的模型写成", &writerModel{text: "B 其实更划算。"}, "B 其实更划算。"},
-		{"写结论的模型出错：用草稿", &writerModel{err: errors.New("overloaded")}, scriptedConclusion},
-	} {
-		model := &scriptedModel{replies: []brain.ReplyDelta{call("search_web", map[string]any{"query": "A B 价格"})}}
-		rig := newRig(t, model, DefaultLimits)
-		rig.runner.WriteConclusionsWith(c.writer)
-		done := rig.research(t, "A 和 B 哪个便宜")
-		if done.Status != StatusDone || done.Conclusion != c.want {
-			t.Errorf("%s：%+v", c.name, done)
-		}
-		c.writer.mu.Lock()
-		last := c.writer.lastMsgs[len(c.writer.lastMsgs)-1]
-		for _, message := range c.writer.lastMsgs {
-			if strings.Contains(message.Text, scriptedConclusion) {
-				t.Errorf("%s：交给写结论的模型的资料里不该有调查模型的草稿", c.name)
-			}
-		}
-		if c.writer.calls != 1 || !slices.Equal(c.writer.offered, []string{"submit_conclusion"}) || last.Role != brain.RoleUser {
-			t.Errorf("%s：写结论的模型应被问 1 次、只给交结论的工具、最后一条是交给它的要求：%d 次、工具 %v、最后一条 %+v",
-				c.name, c.writer.calls, c.writer.offered, last)
-		}
-		c.writer.mu.Unlock()
-	}
-}
-
-// 到上限时也由写结论的模型写；它出错时由调查模型写。
-func TestResearchWriterAtLimits(t *testing.T) {
-	for _, c := range []struct {
-		name   string
-		writer *writerModel
-		want   string
-	}{
-		{"写结论的模型写成", &writerModel{text: "查到一半：A 便宜。"}, "查到一半：A 便宜。"},
-		{"写结论的模型出错：调查模型写", &writerModel{err: errors.New("overloaded")}, limitConclusion},
-	} {
-		search := call("search_web", map[string]any{"query": "没完没了"})
-		model := &scriptedModel{repeat: &search}
-		limits := DefaultLimits
-		limits.MaxSearches, limits.MaxRounds = 1, 2
-		rig := newRig(t, model, limits)
-		rig.runner.WriteConclusionsWith(c.writer)
-		done := rig.research(t, "无底洞")
-		if done.Status != StatusPartial || done.Conclusion != c.want {
-			t.Errorf("%s：%+v", c.name, done)
+		reviewed := newTestRunner(t, openTestStore(t), &scriptedModel{}, &fakeSearcher{}, &fakeBudget{},
+			rigSetup{limits: limits, reviewer: &reviewerModel{}, reviewTimeout: time.Minute})
+		if got, want := reviewed.LongestWait(), timeout+writeUpTimeout+time.Minute+recheckTimeout; got != want {
+			t.Errorf("有审查时再加审查和复查的时限：得到 %v，应为 %v", got, want)
 		}
 	}
 }
@@ -960,7 +980,7 @@ func newFaultyRig(t *testing.T, model brain.ChatModel, store *faultyStore) *rese
 	t.Helper()
 	store.TaskStore = openTestStore(t)
 	rig := &researchRig{store: store, searcher: &fakeSearcher{}, budget: &fakeBudget{}, finished: make(chan Task, 16)}
-	rig.runner = NewRunner(store, model, rig.searcher, rig.budget, rig.budget, DefaultLimits, quietLogger)
+	rig.runner = newTestRunner(t, store, model, rig.searcher, rig.budget, rigSetup{})
 	rig.runner.OnFinished(func(task Task) { rig.finished <- task })
 	return rig
 }

@@ -296,7 +296,7 @@ func (g *Guard) Brief(string) brain.Briefing {
 		}}
 }
 
-// SearchMeter 按用途给搜索查额度、记账（实现 tools.SearchMeter）：快查用 PurposeSearch，后台调查用 PurposeResearch。
+// SearchMeter 按用途给搜索查额度、记账（实现 tools.SearchMeter、research.Meter）：快查用 PurposeSearch，后台调查用 PurposeResearch。
 type SearchMeter struct {
 	guard   *Guard
 	ledger  Ledger
@@ -320,7 +320,7 @@ func (m *SearchMeter) AllowSearch(ctx context.Context, credits int) error {
 	return m.guard.AllowSearch(ctx, credits)
 }
 
-// RecordSearch 记一笔发出去的搜索请求（实现 tools.SearchRecorder）：没拿到结果的标不完整，积分照记（服务商可能已经扣了）。
+// RecordSearch 记一笔发出去的搜索请求（实现 tools.SearchRecorder、research.Recorder）：没拿到结果的标不完整，积分照记（服务商可能已经扣了）。
 // 不跟着调用方取消：请求被打断时，已经发出去的照样要记；期限另算（recordTimeout）。
 func (m *SearchMeter) RecordSearch(ctx context.Context, credits int, incomplete bool) error {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
