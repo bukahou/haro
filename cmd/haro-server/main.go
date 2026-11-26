@@ -107,6 +107,7 @@ const (
 	shutdownSessions  = 5 * time.Second
 	shutdownResearch  = 2 * time.Second
 	shutdownReminders = 2 * time.Second
+	shutdownMemory    = 2 * time.Second
 )
 
 // brainHandler 是服务端的全部 HTTP 入口：对话（WebSocket）+ 远程登记声纹（要读的句子和登记都转给 haro-asr）+ 存活 / 就绪检查。
@@ -133,8 +134,9 @@ const (
 	readinessTimeout  = 5 * time.Second
 )
 
-// readinessChecks 是服务端的就绪检查：识别、合成连得上，云端模型的凭证能用，账本写得进去。
-func readinessChecks(settings config.ServerSettings, claude *llm.ClaudeAPI, ledger spending.Ledger, httpClient *http.Client) ([]readiness.Check, error) {
+// readinessChecks 是服务端的就绪检查：识别、合成连得上，云端模型的凭证能用，账本写得进去，嵌入服务能用（配了的话）。
+func readinessChecks(settings config.ServerSettings, deps services) ([]readiness.Check, error) {
+	claude, ledger, httpClient := deps.claude, deps.ledger, deps.httpClient
 	asrReady, err := endpoint.Join(settings.ASRURL, "/readyz", nil)
 	if err != nil {
 		return nil, fmt.Errorf("HARO_ASR_URL: %w", err)
@@ -147,6 +149,12 @@ func readinessChecks(settings config.ServerSettings, claude *llm.ClaudeAPI, ledg
 	if claude != nil && settings.UsesCloudLLM() {
 		checks = append(checks, readiness.Check{Name: "llm", Probe: func(ctx context.Context) error {
 			return claude.CheckCredentials(ctx, settings.CloudLLMModel)
+		}})
+	}
+	if deps.embedder != nil { // 嵌入服务：真的嵌入一小段（服务在集群里，不花钱）
+		checks = append(checks, readiness.Check{Name: "embedding", Probe: func(ctx context.Context) error {
+			_, err := deps.embedder.EmbedQuery(ctx, "ping")
+			return err
 		}})
 	}
 	return checks, nil

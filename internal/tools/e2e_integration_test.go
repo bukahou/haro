@@ -20,6 +20,7 @@ import (
 	"github.com/bukahou/haro/internal/brain"
 	"github.com/bukahou/haro/internal/brain/braintest"
 	"github.com/bukahou/haro/internal/llm"
+	"github.com/bukahou/haro/internal/memory"
 	"github.com/bukahou/haro/internal/notes"
 	"github.com/bukahou/haro/internal/realtimeproto"
 	"github.com/bukahou/haro/internal/speech"
@@ -42,8 +43,8 @@ func TestConversationLive(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	// 与正式运行一致：记事本内置
-	builtins := []Builtin{NoteTools(store, 200, logger)}
+	// 与正式运行一致：长期记忆内置（这里不按意思找：不用嵌入服务）
+	builtins := []Builtin{MemoryTools(memory.NewKeeper(store, nil, nil, 200, logger), time.Local, logger)}
 	box, err := NewToolbox(ctx, logger, builtins...)
 	if err != nil {
 		t.Fatal(err)

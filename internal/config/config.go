@@ -167,9 +167,17 @@ type ServerSettings struct {
 
 	// 工具（见 docs/architecture.md）：自研工具内置在服务端里，MCP 只接第三方服务
 	Tools   bool   `env:"HARO_TOOLS" envDefault:"true"`
-	NotesDB string `env:"HARO_NOTES_DB"` // 记事本存储：SQLite 文件路径（服务端直接连）
-	// 找记事时交给模型挑的最多条数（新的在前）；超过时结果里写明一共几条、只给了几条
+	NotesDB string `env:"HARO_NOTES_DB"` // 记事与记忆（v10：记事已并进记忆）、提醒的存储：SQLite 文件路径（服务端直接连）
+	// 列出记忆、没法按意思找时交给模型挑的最多条数（新的在前）；超过时结果里写明一共几条、只给了几条
 	NotesListLimit int `env:"HARO_NOTES_LIST_LIMIT" envDefault:"200"`
+	// 长期记忆按意思找（v10）：OpenAI 兼容的嵌入接口的根（集群里是 Text Embeddings Inference，例如 http://host/v1）。
+	// 不设 = 不按意思找（照样能记、列、忘、恢复；「查」只给最近记的，以前的对话查不了）。环境相关：没有默认值
+	EmbeddingURL    string `env:"HARO_EMBEDDING_URL"`
+	EmbeddingModel  string `env:"HARO_EMBEDDING_MODEL" envDefault:"intfloat/multilingual-e5-small"`
+	EmbeddingAPIKey string `env:"HARO_EMBEDDING_API_KEY"` // 云端的嵌入服务才要（凭证：无默认值，只来自环境变量）
+	// 模型要求的前缀：e5 系列问句加「query: 」、被检索的内容加「passage: 」；换了不要求前缀的模型时设成空
+	EmbeddingQueryPrefix    string `env:"HARO_EMBEDDING_QUERY_PREFIX" envDefault:"query: "`
+	EmbeddingDocumentPrefix string `env:"HARO_EMBEDDING_DOCUMENT_PREFIX" envDefault:"passage: "`
 	// 联网搜索：Tavily 官方远程 MCP。密钥不设 = 不提供联网搜索（凭证：无默认值，只来自环境变量）
 	TavilyAPIKey string `env:"HARO_TAVILY_API_KEY"`
 	TavilyMCPURL string `env:"HARO_TAVILY_MCP_URL" envDefault:"https://mcp.tavily.com/mcp/"`
@@ -421,7 +429,15 @@ func (settings ServerSettings) validateStorage() error {
 		return fmt.Errorf("HARO_TOOLS=true 时必须设 HARO_NOTES_DB（或设 HARO_TOOLS=false）")
 	}
 	if settings.Tools && settings.NotesListLimit <= 0 {
-		return fmt.Errorf("HARO_NOTES_LIST_LIMIT 要大于 0（找记事时交给模型挑的最多条数），现在是 %d", settings.NotesListLimit)
+		return fmt.Errorf("HARO_NOTES_LIST_LIMIT 要大于 0（列出记忆时交给模型的最多条数），现在是 %d", settings.NotesListLimit)
+	}
+	if settings.EmbeddingURL != "" {
+		if err := requireHTTPURL("HARO_EMBEDDING_URL", settings.EmbeddingURL, "嵌入服务的地址"); err != nil {
+			return err
+		}
+		if settings.EmbeddingModel == "" {
+			return fmt.Errorf("设了 HARO_EMBEDDING_URL 就要有 HARO_EMBEDDING_MODEL（存向量时记下是哪个模型算的）")
+		}
 	}
 	return optionalDir("HARO_PROFILE_DIR", settings.ProfileDir)
 }

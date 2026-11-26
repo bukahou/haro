@@ -154,3 +154,55 @@ func TestTranscriptMigrationNumbersExistingTurns(t *testing.T) {
 		t.Errorf("迁移后读出来的轮次应带编号、编到第 4 轮：%+v %v", record, err)
 	}
 }
+
+// 完整记录的向量：没有向量的轮次要算；算过的不再要；这一轮的文字后来变了（被打断）就重算；换了模型都重算；
+// 按编号取回主人说的和 haro 答的（系统附注不算主人说的）。外键：不存在的轮次存不进向量。
+func TestTranscriptVectors(t *testing.T) {
+	ctx := context.Background()
+	store, _ := openTestStore(t)
+	note := brain.ChatMessage{Role: brain.RoleUser, Text: "【现在的情况】到点提醒 #1", Synthetic: true}
+	reminder := brain.ConversationTurn{Seq: 3, At: time.Unix(1_700_000_003, 0),
+		Messages: []brain.ChatMessage{note, {Role: brain.RoleAssistant, Text: "该喝水了。"}}}
+	record := brain.ConversationRecord{Person: "主人", TurnCount: 3, UpdatedAt: time.Now(),
+		History: []brain.ConversationTurn{numberedTurn(1, "关西学院哪个学部有名", "法学部和经济学部"), numberedTurn(2, "二", "答二"), reminder}}
+	if err := store.SaveConversation(record); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := store.UnindexedTurns(ctx, "e5", 10)
+	if err != nil || len(pending) != 3 {
+		t.Fatalf("三轮都要算：%+v %v", pending, err)
+	}
+	if pending[0].Said != "关西学院哪个学部有名" || pending[0].Answered != "法学部和经济学部" || pending[2].Said != "" ||
+		pending[2].Text() != "haro：该喝水了。" {
+		t.Errorf("主人说的、haro 答的（系统附注不算）：%+v", pending)
+	}
+	for _, turn := range pending {
+		if err := store.SaveTurnVector(ctx, turn.Person, turn.Seq, "e5", turn.Digest(), []float32{float32(turn.Seq)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if pending, _ := store.UnindexedTurns(ctx, "e5", 10); len(pending) != 0 {
+		t.Fatalf("算过的不再要：%+v", pending)
+	}
+	record.History[1] = numberedTurn(2, "二", "答二（听到的部分）") // 第 2 轮被打断，改成听到的部分
+	if err := store.SaveConversation(record); err != nil {
+		t.Fatal(err)
+	}
+	if pending, _ := store.UnindexedTurns(ctx, "e5", 10); len(pending) != 1 || pending[0].Seq != 2 {
+		t.Fatalf("文字变了的那一轮要重算：%+v", pending)
+	}
+	if pending, _ := store.UnindexedTurns(ctx, "bge", 10); len(pending) != 3 {
+		t.Errorf("换了模型都要重算：%+v", pending)
+	}
+	vectors, err := store.TurnVectors(ctx, "e5")
+	if err != nil || len(vectors) != 3 || vectors[0].Vector[0] != 1 {
+		t.Errorf("向量：%+v %v", vectors, err)
+	}
+	turns, err := store.TranscriptTurns(ctx, "主人", []int64{2, 9, 1})
+	if err != nil || len(turns) != 2 || turns[0].Seq != 2 || turns[1].Answered != "法学部和经济学部" || turns[1].At.IsZero() {
+		t.Errorf("按编号取：%+v %v", turns, err)
+	}
+	if err := store.SaveTurnVector(ctx, "主人", 99, "e5", "x", []float32{1}); err == nil {
+		t.Error("不存在的轮次不该存进向量（外键）")
+	}
+}

@@ -3,9 +3,11 @@ package notes
 import (
 	"context"
 	"database/sql"
+	"io/fs"
 	"path/filepath"
 	"slices"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/bukahou/haro/internal/sqliteschema"
@@ -43,13 +45,13 @@ func TestOpenSQLiteKeepsPreMigrationDB(t *testing.T) {
 	if err != nil {
 		t.Fatalf("打开迁移之前建的库：%v", err)
 	}
-	if list, total, err := store.List(ctx, 10); err != nil || total != 1 || list[0].ID != 1 || list[0].Content != "车停在 C3" {
+	if list, total, err := store.List(ctx, "", 10); err != nil || total != 1 || list[0].ID != 1 || list[0].Content != "车停在 C3" {
 		t.Errorf("原来的记录应都在：%+v total=%d %v", list, total, err)
 	}
-	if deleted, err := store.Deleted(ctx, 10); err != nil || len(deleted) != 1 || deleted[0].ID != 2 {
+	if deleted, err := store.Deleted(ctx, "", 10); err != nil || len(deleted) != 1 || deleted[0].ID != 2 {
 		t.Errorf("删掉的也应在：%+v %v", deleted, err)
 	}
-	if saved, err := store.Save(ctx, "新的一条"); err != nil || saved.ID != 3 {
+	if saved, err := store.Save(ctx, NewNote{Content: "新的一条", Source: SourceOwner}); err != nil || saved.ID != 3 {
 		t.Errorf("新记录的编号应接着排：%+v %v", saved, err)
 	}
 	store.Close()
@@ -59,10 +61,10 @@ func TestOpenSQLiteKeepsPreMigrationDB(t *testing.T) {
 		t.Fatalf("再打开：%v", err)
 	}
 	defer store.Close()
-	if version := schemaVersion(t, store.db); version != 2 {
-		t.Errorf("应升到第 2 版：%d", version)
+	if version := schemaVersion(t, store.db); version != 3 {
+		t.Errorf("应升到最新的第 3 版：%d", version)
 	}
-	if _, total, err := store.List(ctx, 10); err != nil || total != 2 {
+	if _, total, err := store.List(ctx, "", 10); err != nil || total != 2 {
 		t.Errorf("再打开后记录照旧：total=%d %v", total, err)
 	}
 }
@@ -72,7 +74,12 @@ func openFirstVersion(t *testing.T, rows [][3]any) string {
 	t.Helper()
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "notes.db")
-	db, err := sqliteschema.Open(ctx, path, migrationFiles, sqliteschema.Options{}) // 只有 SQL 写的第 1 版
+	first, err := fs.ReadFile(migrationFiles, "migrations/00001_notes.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	only := fstest.MapFS{"migrations/00001_notes.sql": {Data: first}} // 只有第 1 版的迁移文件
+	db, err := sqliteschema.Open(ctx, path, only, sqliteschema.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,11 +111,11 @@ func TestUnixTimeMigrationKeepsEveryNote(t *testing.T) {
 		t.Fatalf("迁移：%v", err)
 	}
 	defer store.Close()
-	if version := schemaVersion(t, store.db); version != 2 {
-		t.Errorf("应升到第 2 版：%d", version)
+	if version := schemaVersion(t, store.db); version != 3 {
+		t.Errorf("应升到最新的第 3 版：%d", version)
 	}
 
-	list, total, err := store.List(ctx, 10)
+	list, total, err := store.List(ctx, "", 10)
 	if err != nil || total != 3 {
 		t.Fatalf("没删的三条都应在：total=%d %v", total, err)
 	}
@@ -129,7 +136,7 @@ func TestUnixTimeMigrationKeepsEveryNote(t *testing.T) {
 			t.Errorf("记录 %d 的时刻：%v，应为 %v（UTC）", note.ID, note.CreatedAt, wantCreated[note.ID])
 		}
 	}
-	deleted, err := store.Deleted(ctx, 10)
+	deleted, err := store.Deleted(ctx, "", 10)
 	if err != nil || len(deleted) != 2 || deleted[0].ID != 5 || deleted[1].ID != 4 {
 		t.Fatalf("删掉的两条都应在，最近删的在前：%+v %v", deleted, err)
 	}
@@ -153,10 +160,10 @@ func TestUnixTimeMigrationKeepsEveryNote(t *testing.T) {
 	if !slices.Equal(kinds, []string{"integer"}) {
 		t.Errorf("时间应存成整数（Unix 秒）：%v", kinds)
 	}
-	if saved, err := store.Save(ctx, "迁移后记的"); err != nil || saved.ID != 6 {
+	if saved, err := store.Save(ctx, NewNote{Content: "迁移后记的", Source: SourceOwner}); err != nil || saved.ID != 6 {
 		t.Errorf("新记录的编号应接着排：%+v %v", saved, err)
 	}
-	if restored, err := store.Restore(ctx, 4); err != nil || !restored.DeletedAt.IsZero() {
+	if restored, err := store.Restore(ctx, "", 4); err != nil || !restored.DeletedAt.IsZero() {
 		t.Errorf("迁移后照样能恢复：%+v %v", restored, err)
 	}
 }
@@ -178,7 +185,7 @@ func TestUnixTimeMigrationKeepsUsedIDs(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	if saved, err := store.Save(ctx, "迁移后记的"); err != nil || saved.ID != 3 {
+	if saved, err := store.Save(ctx, NewNote{Content: "迁移后记的", Source: SourceOwner}); err != nil || saved.ID != 3 {
 		t.Errorf("用过的编号 2 不应重用：%+v %v", saved, err)
 	}
 }
@@ -216,5 +223,26 @@ func TestUnixTimeMigrationFailsOnUnreadableTime(t *testing.T) {
 				t.Errorf("原来的时间文本应原样保留：%q %q", created, deleted.String)
 			}
 		})
+	}
+}
+
+// 迁移 3（记事并进记忆）：之前记的每一条都在，算全家共用、主人让记的、不常驻；之后可以按人记、存向量。
+func TestMemoryMigrationKeepsOldNotesAsShared(t *testing.T) {
+	ctx := context.Background()
+	path := openFirstVersion(t, [][3]any{{"车停在C3", "2026-11-01T10:00:00+09:00", nil}})
+	store, err := OpenSQLite(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	list, _, err := store.List(ctx, "主人", 10)
+	if err != nil || len(list) != 1 {
+		t.Fatalf("旧记事应看得到：%+v %v", list, err)
+	}
+	if old := list[0]; old.Person != "" || old.Source != SourceOwner || old.Resident {
+		t.Errorf("旧记事应是全家共用、主人让记的、不常驻：%+v", old)
+	}
+	if err := store.SaveVector(ctx, list[0].ID, "m", []float32{1, 0}); err != nil {
+		t.Fatalf("迁移后应能存向量：%v", err)
 	}
 }
