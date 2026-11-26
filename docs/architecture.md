@@ -120,10 +120,10 @@ haro 是一个家用语音助手：家里每个房间放一台**终端**（麦�
 
 | 工具 | 过确认闸 | 说明 |
 |---|---|---|
-| `save_note` / `search_notes` / `list_deleted_notes` / `restore_note` | | 记事本（SQLite，时间存 UTC 的 Unix 秒）；删掉的可以恢复 |
-| `delete_note` | ✓ | 按编号删记事 |
+| `remember` / `recall` / `list_memories` / `restore_memory` | | 长期记忆（见下；记事已并进来）：记住、按意思找（记住的事 + 以前的对话）、列出、恢复；记住和恢复只认声纹认出的这句 |
+| `forget` | ✓ | 按编号忘掉（软删除，可以恢复） |
 | `raise_monthly_cap` | ✓ | 主人口头临时提高这个月的费用上限（每次加 `HARO_MONTHLY_RAISE_YEN`）；设了月度上限才提供 |
-| `confirm_action` / `cancel_action` | | 会破坏的操作（删记事、提高月度上限）先存成待确认的操作（有时效），主人算不算同意由模型判断后调用这两个（它们自己核对声纹、时效、参数，必须是下一轮）；有会破坏的工具时一直提供（工具定义不变，提示词缓存不失效），系统提示词的工具介绍里不列 |
+| `confirm_action` / `cancel_action` | | 会破坏的操作（忘掉记忆、取消提醒、提高月度上限）先存成待确认的操作（有时效），主人算不算同意由模型判断后调用这两个（它们自己核对声纹、时效、参数，必须是下一轮）；有会破坏的工具时一直提供（工具定义不变，提示词缓存不失效），系统提示词的工具介绍里不列 |
 | `get_weather` | | 天气（Open-Meteo，不用密钥）；家的位置可以配坐标，或按公网 IP 推定。Open-Meteo 查不到时改用日本气象厅（见下） |
 | `look_at_camera` | | 看终端摄像头的画面：调用时才经 MCP 让终端拍一帧（终端的工具清单里有「拍一帧」时才提供） |
 | `switch_persona` | | 换性格（有两个以上性格时才提供） |
@@ -148,6 +148,24 @@ Open-Meteo 连不上或报错时，日本境内的地点改查日本气象厅网
 - 数据出处：天气 [Open-Meteo](https://open-meteo.com/)；备用 [気象庁](https://www.jma.go.jp/)（気象庁ホームページ）；
   地址反查 [国土地理院](https://www.gsi.go.jp/)。冒烟测试：`go test -tags integration -run Live ./internal/weather/`
 
+### 长期记忆（`internal/memory`）
+
+v10（2026-11-22 裁定）：记住的事和以前的对话都能按意思找回（「我车停哪了」「上次我们聊过的那个大学」）。
+
+- **记事并进记忆**：记事库（`internal/notes`，`HARO_NOTES_DB`）的每一条标明记给谁（声纹认出的名字；空 = 全家共用，之前记的都算）、
+  来源（`owner` 主人让记的 / `model` 模型觉得该记的，由模型判断）、要不要常驻。一个人只看得到、只改得了自己的和全家共用的。
+- **由模型调工具写**（`remember` / `forget`）；只有声纹认出的这句能记、恢复，忘掉过确认闸。不记住址、健康、证件、密码一类（写在工具说明里）。
+- **常驻记忆**（称呼、忌口这类）每轮附在情况说明里（不进系统提示词，提示词缓存不受影响）：新的在前，最多 15 条、一共 400 字。
+- **按意思找**（`recall`）：嵌入模型把文字变成向量（`internal/embedding`：OpenAI 兼容的嵌入接口，`HARO_EMBEDDING_*`；集群里是
+  Text Embeddings Inference 跑 `intfloat/multilingual-e5-small`，e5 要的「query: / passage: 」前缀是配置项）。
+  向量存在 SQLite（记事库的 `note_vectors`、对话库的 `transcript_vectors`），检索在服务端内存里逐条算余弦相似度（`memory.Index`）：
+  家里的规模一次几毫秒，不加依赖、不改构建。⚠️ 对话超过约 10 万轮、或一次检索超过 50 ms 时换 PostgreSQL + pgvector（只换 `Index` 后面的实现）。
+  一次给模型最像的记住的事 5 条、以前的对话 3 轮，相关不相关由模型判断。
+- **后台补向量**：启动时载入库里的向量；之后每隔 20 秒（记住新的一条时马上）把没算过的记事和对话轮次算上，
+  这一轮的文字后来变了（被打断、改成听到的部分）的重算；已有的对话记录也补上。嵌入服务连不上时照样记，向量之后补；就绪检查里有 `embedding`。
+- 没设 `HARO_EMBEDDING_URL` 时照样能记、列、忘、恢复，常驻也照常；「查」只给最近记的，以前的对话查不了（启动日志写明）。
+- 指标：`haro.memory.embed.duration`、`haro.memory.recall.duration`、`haro.memory.index.entries`。
+
 ### 提醒（`internal/reminders`）
 
 「十分钟后叫我」「明早七点提醒我吃药」「每周一提醒倒垃圾」：
@@ -155,7 +173,7 @@ Open-Meteo 连不上或报错时，日本境内的地点改查日本气象厅网
 - 时间由模型算好交来：`after_seconds`（多少秒以后）或 `at`（RFC 3339，带时区偏移）二选一，重复的加 `rrule`（RFC 5545，
   例如 `FREQ=DAILY`；解析和推算用 rrule-go）。代码只校验（在将来、最远一年、重复的两次之间至少 5 分钟、每人在用的最多 50 条）和推算，
   不理解「明早」「每周一」这样的话。时间存 UTC，按服务端的时区（`TZ`）推算钟点、给模型看。
-- 存在记事库的同一个文件里（`reminders` 表；表结构的版本记在自己的 `goose_db_version_reminders` 表，和记事本的迁移互不影响）；
+- 存在记事库的同一个文件里（`reminders` 表；表结构的版本记在自己的 `goose_db_version_reminders` 表，和记事的迁移互不影响）；
   提醒按人记，只能查、取消、恢复自己的。
 - 到点时调度（`reminders.Scheduler`，服务端里一个循环：睡到最近一次到点，有变化时被叫醒）把定提醒时存下的那句话交给
   这个人最近说话的那台终端（`brain.NoticeHub.Announce`；他在哪台都没说过话时交给最近连上的那一台）：不经模型直接合成，
@@ -239,7 +257,7 @@ systemd 用户服务从 `~/.config/haro/haro.env` 读取（`deploy/systemd/`）�
 轮数是代理定义 `research` 的 `max_steps`）、
 VAD 的门槛和静音时长（haro-asr 的 `asrserver.Timing`）。
 
-**时区**：「今天」「这个月」（每日、每月的费用上限什么时候翻篇）、告诉模型的现在时间、记事显示的时间都按服务端进程的本地时区算，
+**时区**：「今天」「这个月」（每日、每月的费用上限什么时候翻篇）、告诉模型的现在时间、记忆和提醒显示的时间都按服务端进程的本地时区算，
 存储一律是 UTC。时区不单独做配置项，用标准的环境变量 `TZ`（例如 `Asia/Tokyo`；服务端程序里带着时区数据）：
 不设时按系统的时区，容器里一般是 UTC。服务端、终端启动时都在日志里写出实际用的时区。
 

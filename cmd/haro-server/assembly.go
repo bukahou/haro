@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"time"
 
 	"github.com/bukahou/haro/internal/agents"
 	"github.com/bukahou/haro/internal/brain"
@@ -14,6 +15,7 @@ import (
 	"github.com/bukahou/haro/internal/buildinfo"
 	"github.com/bukahou/haro/internal/config"
 	"github.com/bukahou/haro/internal/conversationstore"
+	"github.com/bukahou/haro/internal/embedding"
 	"github.com/bukahou/haro/internal/graceful"
 	"github.com/bukahou/haro/internal/llm"
 	"github.com/bukahou/haro/internal/notes"
@@ -78,6 +80,9 @@ type services struct {
 	ledger     spending.Ledger
 	guard      *spending.Guard
 	pricing    spending.Pricing
+	// conversations 是对话库（没设 HARO_CONVERSATIONS_DB 时为 nil：对话只在内存里）：大脑存对话，长期记忆从完整记录里按意思找
+	conversations *conversationstore.SQLiteStore
+	embedder      *embedding.Client // 嵌入服务（没设 HARO_EMBEDDING_URL 时为 nil：长期记忆不按意思找）
 }
 
 // connectServices 准备外部服务（语音合成、识别、模型的客户端）和费用的刹车：先有刹车，再接搜索、后台调查。
@@ -115,6 +120,16 @@ func connectServices(ctx context.Context, settings config.ServerSettings, logger
 		MonthlyRaiseYen: settings.MonthlyRaiseYen}, logger)
 	logger.Info("费用上限", "research_daily_yen", settings.ResearchDailyYen, "monthly_yen", settings.MonthlyYen,
 		"search_daily_credits", settings.SearchDailyCredits)
+	if deps.conversations, err = openConversationStore(ctx, settings, shutdown); err != nil {
+		return deps, err
+	}
+	if settings.EmbeddingURL != "" {
+		deps.embedder = embedding.NewClient(embedding.Options{BaseURL: settings.EmbeddingURL, Model: settings.EmbeddingModel,
+			APIKey: settings.EmbeddingAPIKey, QueryPrefix: settings.EmbeddingQueryPrefix, DocumentPrefix: settings.EmbeddingDocumentPrefix})
+		logger.Info("长期记忆按意思找：嵌入服务", "url", settings.EmbeddingURL, "model", settings.EmbeddingModel)
+	} else {
+		logger.Warn("没设 HARO_EMBEDDING_URL：长期记忆不按意思找（照样能记、列、忘、恢复；查只给最近记的，以前的对话查不了）")
+	}
 	deps.pricing, err = loadPricing(ctx, settings, deps.httpClient, logger)
 	return deps, err
 }
@@ -127,7 +142,7 @@ type tooling struct {
 	expertSearch vision.Search    // 看画面的专家联网查：和主对话的快查同一套搜索与额度；不能查时为 nil
 }
 
-// buildTooling 准备工具：自研工具内置（记事本、提醒直接连数据库；天气；联网搜索与后台调查），MCP 只接第三方（现在还没有）。
+// buildTooling 准备工具：自研工具内置（长期记忆（记事已并进来）、提醒直接连数据库；天气；联网搜索与后台调查），MCP 只接第三方（现在还没有）。
 // catalog 是代理定义（后台调查的代理按它装配）。
 func buildTooling(ctx context.Context, settings config.ServerSettings, catalog agents.Catalog, deps services, logger *slog.Logger,
 	shutdown *shutdownSteps) (tooling, error) {
@@ -140,7 +155,10 @@ func buildTooling(ctx context.Context, settings config.ServerSettings, catalog a
 		return kit, err
 	}
 	shutdown.add("记事库", store.Close)
-	builtins := []tools.Builtin{tools.NoteTools(store, settings.NotesListLimit, logger)}
+	keeper, stopMemory := startMemory(ctx, settings, store, deps, logger)
+	shutdown.add("长期记忆", stopMemory)
+	builtins := []tools.Builtin{tools.MemoryTools(keeper, time.Local, logger)}
+	kit.briefers = append(kit.briefers, keeper) // 常驻记忆：每轮附在情况说明里
 	scheduler, stopReminders, err := startReminders(ctx, settings, kit.notices, logger)
 	if err != nil {
 		return kit, err
@@ -214,9 +232,9 @@ func assembleBrain(ctx context.Context, settings config.ServerSettings, catalog 
 		components.OverBudget = built.overBudget
 		logger.Info("月度上限到了以后可以口头临时提高", "raise_yen", settings.MonthlyRaiseYen, "daily_checks", settings.OverBudgetDailyCalls)
 	}
-	store, err := openConversationStore(ctx, settings, shutdown)
-	if err != nil {
-		return components, options, err
+	var store brain.ConversationStore // 没设对话库时是 nil 接口（不是装着 nil 指针的接口）
+	if deps.conversations != nil {
+		store = deps.conversations
 	}
 	components.Conversations = brain.NewConversationBook(store, options, logger) // 所有终端连接共用：换终端、重连、服务端重启都接得上
 	if built.summary != nil {                                                    // 滚动摘要：代理「摘要」，按它自己的用途记账
@@ -235,7 +253,7 @@ func assembleBrain(ctx context.Context, settings config.ServerSettings, catalog 
 }
 
 // openConversationStore 打开对话库（没设 HARO_CONVERSATIONS_DB 时为 nil：对话只在内存里）；打不开就不启动（不带着空历史开始）。
-func openConversationStore(ctx context.Context, settings config.ServerSettings, shutdown *shutdownSteps) (brain.ConversationStore, error) {
+func openConversationStore(ctx context.Context, settings config.ServerSettings, shutdown *shutdownSteps) (*conversationstore.SQLiteStore, error) {
 	if settings.ConversationsDB == "" {
 		return nil, nil
 	}
@@ -261,7 +279,7 @@ func serve(ctx context.Context, settings config.ServerSettings, components brain
 	if err != nil {
 		return err
 	}
-	checks, err := readinessChecks(settings, deps.claude, deps.ledger, deps.httpClient)
+	checks, err := readinessChecks(settings, deps)
 	if err != nil {
 		return err
 	}

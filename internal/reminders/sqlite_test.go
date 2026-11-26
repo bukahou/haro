@@ -45,7 +45,7 @@ func TestSharesFileWithNotes(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := noteStore.Save(ctx, "买牛奶"); err != nil {
+		if _, err := noteStore.Save(ctx, notes.NewNote{Content: "买牛奶", Source: notes.SourceOwner}); err != nil {
 			t.Fatal(err)
 		}
 		add(t, reminderStore, "主人", "该喝水了", base)

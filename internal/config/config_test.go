@@ -328,6 +328,8 @@ func TestValidateBrainTable(t *testing.T) {
 		}, "HARO_USD_JPY"},
 		{"开着工具却没有记事库", func(s *ServerSettings) { s.Tools, s.NotesDB = true, "" }, "HARO_NOTES_DB"},
 		{"记事候选上限为零", func(s *ServerSettings) { s.Tools, s.NotesDB, s.NotesListLimit = true, "/tmp/notes.db", 0 }, "HARO_NOTES_LIST_LIMIT"},
+		{"嵌入服务的地址不是网址", func(s *ServerSettings) { s.EmbeddingURL = "haro-embedding:80" }, "HARO_EMBEDDING_URL"},
+		{"设了嵌入服务却没有模型名", func(s *ServerSettings) { s.EmbeddingURL, s.EmbeddingModel = "http://127.0.0.1:8080/v1", "" }, "HARO_EMBEDDING_MODEL"},
 		{"主人资料的目录不存在", func(s *ServerSettings) { s.ProfileDir = filepath.Join(t.TempDir(), "没有这个目录") }, "HARO_PROFILE_DIR"},
 		{"主人资料的目录是个文件", func(s *ServerSettings) { s.ProfileDir = notDir }, "HARO_PROFILE_DIR"},
 		{"没有监听地址", func(s *ServerSettings) { s.ServerListen = "" }, "HARO_SERVER_LISTEN"},

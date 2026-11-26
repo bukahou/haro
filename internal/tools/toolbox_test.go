@@ -18,6 +18,7 @@ import (
 
 	"github.com/bukahou/haro/internal/brain"
 	"github.com/bukahou/haro/internal/buildinfo"
+	"github.com/bukahou/haro/internal/memory"
 	"github.com/bukahou/haro/internal/notes"
 )
 
@@ -214,58 +215,66 @@ func confirmedFor(tool string) context.Context {
 	return brain.WithConfirmation(context.Background(), brain.Confirmation{ActionID: "act_1", Tool: tool, Person: "主人"})
 }
 
-// 会破坏的工具（delete_note）由工具箱自己守门：绕过会话直接调用、带着别的工具的确认、确认的人没认出来，都不执行
-// （记事还在）；阳性对照：带着主人对它的确认就删掉。不会破坏的工具不用确认。
-func TestDestructiveToolNeedsConfirmation(t *testing.T) {
-	ctx := context.Background()
-	store, err := notes.Open(ctx, filepath.Join(t.TempDir(), "notes.db"))
+// openMemory 建一个只在内存里的长期记忆（不按意思找：工具的测试不用嵌入服务）。
+func openMemory(t *testing.T) (*memory.Keeper, notes.Repository) {
+	t.Helper()
+	store, err := notes.Open(context.Background(), filepath.Join(t.TempDir(), "notes.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
-	box, err := NewToolbox(ctx, quietLogger, NoteTools(store, 10, quietLogger))
+	t.Cleanup(func() { _ = store.Close() })
+	return memory.NewKeeper(store, nil, nil, 2, quietLogger), store
+}
+
+// owner 是主人（声纹认出）在说话的一轮。
+func owner(ctx context.Context) context.Context {
+	return brain.WithVoiceVerified(brain.WithSpeaker(ctx, "主人"), true)
+}
+
+// 会破坏的工具（forget）由工具箱自己守门：绕过会话直接调用、带着别的工具的确认、确认的人没认出来，都不执行
+// （记忆还在）；阳性对照：带着主人对它的确认就忘掉。不会破坏的工具不用确认。
+func TestDestructiveToolNeedsConfirmation(t *testing.T) {
+	ctx := context.Background()
+	keeper, store := openMemory(t)
+	box, err := NewToolbox(ctx, quietLogger, MemoryTools(keeper, time.UTC, quietLogger))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer box.Close()
-	saved, err := callJSON[noteOutput](t, box, "save_note", map[string]any{"content": "车停在C3的7号位。"})
+	saved, err := callJSONWith[memoryOutput](t, owner(ctx), box, RememberTool, map[string]any{"content": "车停在C3的7号位。", "source": "owner"})
 	if err != nil {
 		t.Fatalf("不会破坏的工具不用确认：%v", err)
 	}
-	remove := map[string]any{"ids": []any{saved.Note.ID}}
+	forget := map[string]any{"ids": []any{saved.Memory.ID}}
 	for label, call := range map[string]context.Context{
-		"绕过会话直接调用":  ctx,
-		"带着别的工具的确认": confirmedFor("raise_monthly_cap"),
-		"确认的人没认出来":  brain.WithConfirmation(ctx, brain.Confirmation{ActionID: "act_1", Tool: "delete_note", Person: brain.SharedPerson}),
+		"绕过会话直接调用":  owner(ctx),
+		"带着别的工具的确认": brain.WithSpeaker(confirmedFor("raise_monthly_cap"), "主人"),
+		"确认的人没认出来":  brain.WithConfirmation(ctx, brain.Confirmation{ActionID: "act_1", Tool: ForgetTool, Person: brain.SharedPerson}),
 	} {
-		if _, err := box.Call(call, brain.ToolCall{Name: "delete_note", Arguments: remove}); !errors.Is(err, brain.ErrNotConfirmed) {
+		if _, err := box.Call(call, brain.ToolCall{Name: ForgetTool, Arguments: forget}); !errors.Is(err, brain.ErrNotConfirmed) {
 			t.Errorf("%s：应拒绝执行：%v", label, err)
 		}
 	}
-	if list, _, err := store.List(ctx, 10); err != nil || len(list) != 1 {
-		t.Fatalf("没确认的删除不该执行：%v %v", list, err)
+	if list, _, err := store.List(ctx, "主人", 10); err != nil || len(list) != 1 {
+		t.Fatalf("没确认的忘掉不该执行：%v %v", list, err)
 	}
-	deleted, err := callJSONWith[deleteNotesOutput](t, confirmedFor("delete_note"), box, "delete_note", remove)
-	if err != nil || len(deleted.Deleted) != 1 {
-		t.Errorf("带着主人的确认应能删：%+v %v", deleted, err)
+	forgotten, err := callJSONWith[forgetOutput](t, brain.WithSpeaker(confirmedFor(ForgetTool), "主人"), box, ForgetTool, forget)
+	if err != nil || len(forgotten.Forgotten) != 1 {
+		t.Errorf("带着主人的确认应能忘掉：%+v %v", forgotten, err)
 	}
 }
 
-// 记事本：记、列出（连编号交给模型挑，超过上限时写明一共几条）、按编号删（只有删要确认）、最近删掉的、按编号恢复。
-func TestNoteTools(t *testing.T) {
+// 长期记忆的五个工具：记住（只认声纹认出的这句，来源必须是认得的）、按意思找（没配嵌入服务时给最近的并写明）、
+// 列出（超过上限时写明一共几条）、按编号忘掉（只有它要确认；没有的写进 not_found）、恢复（只认声纹认出的这句）；只看得到自己的。
+func TestMemoryTools(t *testing.T) {
 	ctx := context.Background()
-	store, err := notes.Open(ctx, filepath.Join(t.TempDir(), "notes.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	box, err := NewToolbox(ctx, quietLogger, NoteTools(store, 2, quietLogger))
+	keeper, _ := openMemory(t)
+	box, err := NewToolbox(ctx, quietLogger, MemoryTools(keeper, time.UTC, quietLogger))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer box.Close()
-	want := map[string]bool{"save_note": false, "search_notes": false, "delete_note": true,
-		"list_deleted_notes": false, "restore_note": false}
+	want := map[string]bool{RememberTool: false, RecallTool: false, ListMemoriesTool: false, ForgetTool: true, RestoreMemoryTool: false}
 	if got := confirmations(box); len(got) != len(want) {
 		t.Fatalf("工具清单：%v", got)
 	} else {
@@ -275,47 +284,51 @@ func TestNoteTools(t *testing.T) {
 			}
 		}
 	}
-
+	remember := map[string]any{"content": "不吃香菜", "source": "model", "resident": true}
+	if _, err := callJSONWith[memoryOutput](t, brain.WithSpeaker(ctx, "主人"), box, RememberTool, remember); err == nil ||
+		!strings.Contains(err.Error(), "没认出") {
+		t.Fatalf("声纹没认出时不能记：%v", err)
+	}
+	if _, err := callJSONWith[memoryOutput](t, owner(ctx), box, RememberTool, map[string]any{"content": "随便", "source": "guess"}); err == nil {
+		t.Error("不认得的来源应报错")
+	}
 	var ids []int64
-	for _, content := range []string{"车停在C3的7号位。", "钥匙在玄关的抽屉里。"} {
-		saved, err := callJSON[noteOutput](t, box, "save_note", map[string]any{"content": content})
-		if err != nil || saved.Note.ID == 0 || saved.Note.Content != content {
-			t.Fatalf("save_note：%+v %v", saved, err)
+	for _, args := range []map[string]any{remember, {"content": "车停在C3的7号位。", "source": "owner"}, {"content": "第三条", "source": "owner"}} {
+		saved, err := callJSONWith[memoryOutput](t, owner(ctx), box, RememberTool, args)
+		if err != nil || saved.Memory.ID == 0 {
+			t.Fatalf("remember：%+v %v", saved, err)
 		}
-		ids = append(ids, saved.Note.ID)
+		ids = append(ids, saved.Memory.ID)
 	}
-	listed, err := callJSON[noteListOutput](t, box, "search_notes", nil)
-	if err != nil || listed.Total != 2 || len(listed.Notes) != 2 || listed.Note != "" || listed.Notes[0].ID != ids[1] {
-		t.Fatalf("search_notes：全部连编号给出，新的在前：%+v %v", listed, err)
+	if listed, err := callJSONWith[memoryListOutput](t, owner(ctx), box, ListMemoriesTool, nil); err != nil || listed.Total != 3 ||
+		len(listed.Memories) != 2 || listed.Note == "" || listed.Memories[0].ID != ids[2] {
+		t.Errorf("超过上限：只给最近的（新的在前），并写明一共几条：%+v %v", listed, err)
 	}
-	if _, err := callJSON[noteOutput](t, box, "save_note", map[string]any{"content": "第三条"}); err != nil {
-		t.Fatal(err)
+	other := brain.WithVoiceVerified(brain.WithSpeaker(ctx, "老大"), true)
+	if listed, _ := callJSONWith[memoryListOutput](t, other, box, ListMemoriesTool, nil); listed.Total != 0 {
+		t.Errorf("只看得到自己的：%+v", listed)
 	}
-	if listed, _ := callJSON[noteListOutput](t, box, "search_notes", nil); listed.Total != 3 || len(listed.Notes) != 2 || listed.Note == "" {
-		t.Errorf("超过上限：只给最近的，并写明一共几条：%+v", listed)
+	recalled, err := callJSONWith[recallOutput](t, owner(ctx), box, RecallTool, map[string]any{"query": "主人有什么忌口"})
+	if err != nil || len(recalled.Memories) == 0 || recalled.Note == "" || len(recalled.Conversations) != 0 {
+		t.Errorf("没配嵌入服务：给最近的并写明，对话查不了：%+v %v", recalled, err)
 	}
-
-	confirmed := confirmedFor("delete_note") // 删除要带着主人的确认（见 TestDestructiveToolNeedsConfirmation）
-	deleted, err := callJSONWith[deleteNotesOutput](t, confirmed, box, "delete_note", map[string]any{"ids": []any{ids[0], 999}})
-	if err != nil || len(deleted.Deleted) != 1 || deleted.Deleted[0].Content != "车停在C3的7号位。" ||
-		len(deleted.NotFound) != 1 || deleted.NotFound[0] != 999 {
-		t.Errorf("delete_note：删掉有的、没有的编号写进 not_found：%+v %v", deleted, err)
+	forgotten, err := callJSONWith[forgetOutput](t, brain.WithSpeaker(confirmedFor(ForgetTool), "主人"), box, ForgetTool,
+		map[string]any{"ids": []any{ids[1], 999}})
+	if err != nil || len(forgotten.Forgotten) != 1 || len(forgotten.NotFound) != 1 || forgotten.NotFound[0] != 999 {
+		t.Errorf("forget：忘掉有的、没有的写进 not_found：%+v %v", forgotten, err)
 	}
-	if _, err := box.Call(confirmed, brain.ToolCall{Name: "delete_note", Arguments: map[string]any{"ids": []any{}}}); err == nil ||
-		errors.Is(err, brain.ErrNotConfirmed) {
-		t.Errorf("ids 为空应报错：%v", err)
+	gone, err := callJSONWith[memoryListOutput](t, owner(ctx), box, ListMemoriesTool, map[string]any{"include_forgotten": true})
+	if err != nil || len(gone.Forgotten) != 1 || gone.Forgotten[0].ID != ids[1] || gone.Forgotten[0].ForgottenAt == "" {
+		t.Errorf("列出最近忘掉的：%+v %v", gone, err)
 	}
-	gone, err := callJSON[noteListOutput](t, box, "list_deleted_notes", nil)
-	if err != nil || len(gone.Notes) != 1 || gone.Notes[0].ID != ids[0] || gone.Notes[0].DeletedAt == "" {
-		t.Errorf("list_deleted_notes：%+v %v", gone, err)
+	restore := map[string]any{"id": ids[1]}
+	if _, err := callJSONWith[memoryOutput](t, brain.WithSpeaker(ctx, "主人"), box, RestoreMemoryTool, restore); err == nil {
+		t.Error("声纹没认出时不能恢复")
 	}
-	if restored, err := callJSON[noteOutput](t, box, "restore_note", map[string]any{"id": ids[0]}); err != nil || restored.Note.ID != ids[0] {
-		t.Errorf("restore_note：%+v %v", restored, err)
+	if restored, err := callJSONWith[memoryOutput](t, owner(ctx), box, RestoreMemoryTool, restore); err != nil || restored.Memory.ID != ids[1] {
+		t.Errorf("恢复：%+v %v", restored, err)
 	}
-	if _, err := box.Call(ctx, brain.ToolCall{Name: "restore_note", Arguments: map[string]any{"id": ids[0]}}); err == nil {
-		t.Error("恢复没删掉的应报错")
-	}
-	if _, err := box.Call(ctx, brain.ToolCall{Name: "save_note", Arguments: map[string]any{"content": 3}}); err == nil {
-		t.Error("参数类型不对应报错")
+	if _, err := box.Call(owner(ctx), brain.ToolCall{Name: RestoreMemoryTool, Arguments: restore}); err == nil {
+		t.Error("没忘掉的恢复不了")
 	}
 }
