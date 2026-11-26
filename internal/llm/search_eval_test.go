@@ -121,7 +121,21 @@ type searchRun struct {
 	Error       string    `json:"error,omitempty"`  // 评测这边出的错（例如等不到答完）
 	FirstTextMs int64     `json:"first_text_ms"`    // 交出识别结果后多久出第一句（0 = 没出）
 	DoneMs      int64     `json:"done_ms"`
+	Effort      string    `json:"effort,omitempty"`   // 前台模型的回答力度
+	Thinking    string    `json:"thinking,omitempty"` // 前台模型的思考写法
 	Usage       runUsage  `json:"usage"`
+}
+
+// label 是报告里这次回答归到哪一组：做法 + 力度（思考不是关着时再加上思考写法）；没记力度的（旧的结果）只用做法。
+func (r searchRun) label() string {
+	if r.Effort == "" {
+		return r.Arm
+	}
+	label := r.Arm + "·" + r.Effort
+	if r.Thinking != "" && r.Thinking != ThinkingDisabled {
+		label += "·" + r.Thinking
+	}
+	return label
 }
 
 // failed 是这次没能正常答完（评测出错，或会话报了失败）。
@@ -430,7 +444,8 @@ func askSearchCase(t *testing.T, environment searchEnv, arm searchArm, testCase 
 	utterance := braintest.Utterance{Text: testCase.Question, Speaker: environment.speaker, SpeakerChecked: environment.speaker != ""}
 	braintest.Speak(t, session, stream, utterance)
 	braintest.Expect[realtimeproto.ResponseCreated](t, session)
-	run := searchRun{Case: testCase.ID, Arm: arm.name, Question: testCase.Question, AskedAt: time.Now()}
+	run := searchRun{Case: testCase.ID, Arm: arm.name, Question: testCase.Question, AskedAt: time.Now(),
+		Effort: settings.CloudLLMEffort, Thinking: settings.CloudLLMThinking}
 	braintest.Recognized(t, stream, utterance)
 	answer, done, first, elapsed, err := collectSearchAnswer(session, run.AskedAt, searchAnswerTimeout)
 	run.Answer, run.FirstTextMs, run.DoneMs = answer, first.Milliseconds(), elapsed.Milliseconds()
@@ -964,23 +979,50 @@ type armTotals struct {
 	searches, reads, credits                  int
 }
 
+// searchLabels 是报告里的分组（见 searchRun.label），按做法（甲乙丙）、再按力度从低到高排；另交出每组属于哪种做法。
+func searchLabels(runs []searchRun) ([]string, map[string]string) {
+	armOf := map[string]string{}
+	effortOf := map[string]string{}
+	for _, run := range runs {
+		armOf[run.label()], effortOf[run.label()] = run.Arm, run.Effort
+	}
+	labels := make([]string, 0, len(armOf))
+	for label := range armOf {
+		labels = append(labels, label)
+	}
+	armRank := func(arm string) int { return slices.Index([]string{armCurrent, armAnthropic, armTavilyUp}, arm) }
+	effortRank := func(effort string) int {
+		return slices.Index([]string{"", "low", "medium", "high", "xhigh", "max"}, effort)
+	}
+	slices.SortFunc(labels, func(a, b string) int {
+		return cmp.Or(cmp.Compare(armRank(armOf[a]), armRank(armOf[b])), cmp.Compare(effortRank(effortOf[a]), effortRank(effortOf[b])),
+			strings.Compare(a, b))
+	})
+	return labels, armOf
+}
+
+// firstLabelOf 是排好的分组里第一个属于 arm 的（没有时是空串）。
+func firstLabelOf(labels []string, armOf map[string]string, arm string) string {
+	for _, label := range labels {
+		if armOf[label] == arm {
+			return label
+		}
+	}
+	return ""
+}
+
 // searchEvalReport 是 Markdown 报告：汇总、按事先定的标准比较、逐题一览、明细（评审的判断只是初判）。
 func searchEvalReport(cases map[string]searchCase, runs []searchRun, verdicts []searchVerdict, runName, judgeModel string, judgeUSD float64) string {
 	var report strings.Builder
 	fmt.Fprintf(&report, "# 搜索质量对比 %s\n\n回答：`%s`；判分：%s（初判，最后以人看为准；判分花了 $%.3f）\n\n",
 		time.Now().Format("2006-01-02 15:04"), runName, judgeModel, judgeUSD)
-	var armOrder []string
-	for _, name := range []string{armCurrent, armAnthropic, armTavilyUp} {
-		if slices.ContainsFunc(runs, func(run searchRun) bool { return run.Arm == name }) {
-			armOrder = append(armOrder, name)
-		}
-	}
+	armOrder, armOf := searchLabels(runs)
 	totals := map[string]*armTotals{}
 	for _, name := range armOrder {
 		totals[name] = &armTotals{}
 	}
 	for i, run := range runs {
-		sum, verdict := totals[run.Arm], verdicts[i]
+		sum, verdict := totals[run.label()], verdicts[i]
 		sum.answers++
 		sum.score += verdict.score()
 		switch {
@@ -1020,16 +1062,18 @@ func searchEvalReport(cases map[string]searchCase, runs []searchRun, verdicts []
 	}
 	report.WriteString("\n")
 	for _, name := range armOrder {
-		fmt.Fprintf(&report, "- %s：%s\n", name, searchArmNotes[name])
+		fmt.Fprintf(&report, "- %s：%s\n", name, searchArmNotes[armOf[name]])
 	}
-	if base, ok := totals[armCurrent]; ok {
-		report.WriteString("\n事先定的标准：答对分比甲多 4 分以上算明显（部分对算半题），差 1–3 分算打平；答错单独比。\n\n")
+	if baseName := firstLabelOf(armOrder, armOf, armCurrent); baseName != "" { // 甲里力度最低的那组当对照
+		base := totals[baseName]
+		fmt.Fprintf(&report, "\n事先定的标准：答对分比对照（%s）多 4 分以上算明显（部分对算半题），差 1–3 分算打平；答错单独比。\n\n", baseName)
 		for _, name := range armOrder {
-			if name == armCurrent {
+			if name == baseName {
 				continue
 			}
 			sum := totals[name]
-			fmt.Fprintf(&report, "- %s 比甲：答对分 %+.1f，答错 %+d，失败 %+d\n", name, sum.score-base.score, sum.wrong-base.wrong, sum.failed-base.failed)
+			fmt.Fprintf(&report, "- %s 比 %s：答对分 %+.1f，答错 %+d，失败 %+d\n", name, baseName, sum.score-base.score, sum.wrong-base.wrong,
+				sum.failed-base.failed)
 		}
 	}
 
@@ -1046,7 +1090,7 @@ func searchEvalReport(cases map[string]searchCase, runs []searchRun, verdicts []
 		for _, name := range armOrder {
 			cell := "—"
 			for i, run := range runs {
-				if run.Case == id && run.Arm == name {
+				if run.Case == id && run.label() == name {
 					cell = verdicts[i].mark()
 				}
 			}
@@ -1061,7 +1105,7 @@ func searchEvalReport(cases map[string]searchCase, runs []searchRun, verdicts []
 		fmt.Fprintf(&report, "\n### %s %s\n\n参考答案：%s\n\n判分标准：%s\n\n", id, testCase.Question, oneLine(testCase.Reference, 600), testCase.Tolerance)
 		for _, name := range armOrder {
 			for i, run := range runs {
-				if run.Case != id || run.Arm != name {
+				if run.Case != id || run.label() != name {
 					continue
 				}
 				verdict := verdicts[i]
