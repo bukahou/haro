@@ -163,6 +163,15 @@ func MustCounter(meter metric.Meter, name, description string) metric.Int64Count
 	return counter
 }
 
+// MustGauge 创建一个记「现在是多少」的仪表（只在启动时调用）。unit 照 UCUM 写，例如 s。
+func MustGauge(meter metric.Meter, name, description, unit string) metric.Float64Gauge {
+	gauge, err := meter.Float64Gauge(name, metric.WithUnit(unit), metric.WithDescription(description))
+	if err != nil {
+		panic(err)
+	}
+	return gauge
+}
+
 // MustLatencyHistogram 创建一个单位为秒的延迟直方图。
 // 在 Setup 之前创建也可以：全局 MeterProvider 会在设置后自动接管。
 func MustLatencyHistogram(meter metric.Meter, name, description string) metric.Float64Histogram {

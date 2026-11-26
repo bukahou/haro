@@ -26,7 +26,7 @@ type serverCodec struct {
 }
 
 var clientEvents = map[string]clientCodec{
-	typeSessionUpdate:            {wireSessionUpdate{}, decodeSessionUpdate},
+	typeSessionUpdate:            {wireSessionUpdate{}, decodeClientSessionUpdate},
 	typeInputAudioBufferAppend:   {wireAudioAppend{}, decodeAudioAppend},
 	typeConversationItemTruncate: {wireItemTruncate{}, decodeItemTruncate},
 	typeResponseCreate:           typeOnlyClient(ResponseCreate{}),
@@ -164,10 +164,23 @@ func (e SessionUpdate) toWire() (any, error) {
 		wire.Session.Audio.Input.Format = &wireAudioFormat{Type: "audio/pcm", Rate: e.InputFormat.SampleRate}
 	}
 	wire.Session.Audio.Input.TurnDetection = e.TurnDetection
-	if e.WakeWord {
-		wire.Session.Haro = &wireHaroSession{WakeWord: &wireEnabled{Enabled: true}}
+	if e.WakeWord || len(e.WakePhrases) > 0 {
+		wire.Session.Haro = &wireHaroSession{WakeWord: &wireWakeWordSetting{Enabled: e.WakeWord, Phrases: e.WakePhrases}}
 	}
 	return wire, nil
+}
+
+// decodeClientSessionUpdate：客户端发来的 session.update。唤醒词只由语音前端的关键词文件定，客户端带了就拒绝
+// （照办不了，不能默默忽略）。
+func decodeClientSessionUpdate(data []byte, input AudioFormat) (ClientEvent, error) {
+	event, err := decodeSessionUpdate(data, input)
+	if err != nil {
+		return nil, err
+	}
+	if len(event.(SessionUpdate).WakePhrases) > 0 {
+		return nil, errors.New("session.update 不能指定唤醒词（haro.wake_word.phrases 只出现在 session.updated 里：唤醒词由语音前端的关键词文件定）")
+	}
+	return event, nil
 }
 
 func decodeSessionUpdate(data []byte, _ AudioFormat) (ClientEvent, error) {
@@ -191,6 +204,7 @@ func decodeSessionUpdate(data []byte, _ AudioFormat) (ClientEvent, error) {
 	}
 	if haro := wire.Session.Haro; haro != nil && haro.WakeWord != nil {
 		update.WakeWord = haro.WakeWord.Enabled
+		update.WakePhrases = haro.WakeWord.Phrases
 	}
 	return update, nil
 }
@@ -433,12 +447,22 @@ func decodeAudioDelta(data []byte) (ServerEvent, error) {
 func (e ResponseCreated) toWire() (any, error) {
 	wire := wireResponseCreated{Type: typeResponseCreated}
 	wire.Response.Status = StatusInProgress
+	if e.Unprompted != "" {
+		wire.Haro = &wireResponseCreatedExt{Unprompted: e.Unprompted}
+	}
 	return wire, nil
 }
 
 func decodeResponseCreated(data []byte) (ServerEvent, error) {
 	var wire wireResponseCreated
-	return ResponseCreated{}, json.Unmarshal(data, &wire)
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return nil, err
+	}
+	created := ResponseCreated{}
+	if wire.Haro != nil {
+		created.Unprompted = wire.Haro.Unprompted
+	}
+	return created, nil
 }
 
 func (e ResponseDone) toWire() (any, error) {
@@ -449,6 +473,9 @@ func (e ResponseDone) toWire() (any, error) {
 	if e.Usage != nil {
 		wire.Response.Usage = &wireUsage{InputTokens: e.Usage.InputTokens, OutputTokens: e.Usage.OutputTokens}
 	}
+	if e.EndConversation {
+		wire.Haro = &wireResponseDoneExt{EndConversation: true}
+	}
 	return wire, nil
 }
 
@@ -457,7 +484,7 @@ func decodeResponseDone(data []byte) (ServerEvent, error) {
 	if err := json.Unmarshal(data, &wire); err != nil {
 		return nil, err
 	}
-	done := ResponseDone{Status: wire.Response.Status}
+	done := ResponseDone{Status: wire.Response.Status, EndConversation: wire.Haro != nil && wire.Haro.EndConversation}
 	if wire.Response.StatusDetails != nil {
 		done.Reason = wire.Response.StatusDetails.Reason
 	}

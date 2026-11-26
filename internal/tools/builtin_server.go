@@ -21,9 +21,10 @@ type Builtin func(server *mcp.Server)
 // 调用内置工具时放进请求元数据（_meta）的键，键名只在这里定义。过了 MCP 这层，context 里的值带不过去：
 // 说话人直接带；「主人听完才算数的事」（brain.Deliveries）是回调，只带这次调用的编号，进程内按编号找回。
 const (
-	metaSpeaker = "haro/speaker"
-	metaCall    = "haro/call"
-	metaSpoken  = "haro/spoken" // 结果里：这个错误可以直接念给主人（brain.SpokenError），值是那句话的键和要填的值
+	metaSpeaker  = "haro/speaker"
+	metaVerified = "haro/voice_verified" // 这一轮的话是不是声纹认出的登记过的人说的（只许本人做的事据此决定，例如定提醒）
+	metaCall     = "haro/call"
+	metaSpoken   = "haro/spoken" // 结果里：这个错误可以直接念给主人（brain.SpokenError），值是那句话的键和要填的值
 )
 
 // AddTool 注册一个内置工具：参数 In、结果 Out 都是结构体，工具定义由它们生成，调用前按定义校验参数
@@ -138,13 +139,16 @@ func startBuiltinServer(ctx context.Context, builtins []Builtin, logger *slog.Lo
 	return b, nil
 }
 
-// restoreContext 在服务这一侧把元数据还原成工具要的 context：说话人、这一轮的收集处。
+// restoreContext 在服务这一侧把元数据还原成工具要的 context：说话人、声纹认没认出、这一轮的收集处。
 func (b *builtinServer) restoreContext(next mcp.MethodHandler) mcp.MethodHandler {
 	return func(ctx context.Context, method string, request mcp.Request) (mcp.Result, error) {
 		if call, ok := request.(*mcp.CallToolRequest); ok && call.Params != nil {
 			meta := call.Params.GetMeta()
 			if speaker, ok := meta[metaSpeaker].(string); ok {
 				ctx = brain.WithSpeaker(ctx, speaker)
+			}
+			if verified, ok := meta[metaVerified].(bool); ok {
+				ctx = brain.WithVoiceVerified(ctx, verified)
 			}
 			if id, ok := meta[metaCall].(string); ok {
 				if deliveries, ok := b.calls.Load(id); ok {
@@ -156,9 +160,9 @@ func (b *builtinServer) restoreContext(next mcp.MethodHandler) mcp.MethodHandler
 	}
 }
 
-// call 调用一个内置工具：把 ctx 里的说话人和收集处经元数据带过去。
+// call 调用一个内置工具：把 ctx 里的说话人、声纹认没认出和收集处经元数据带过去。
 func (b *builtinServer) call(ctx context.Context, name string, arguments map[string]any) (string, error) {
-	meta := mcp.Meta{metaSpeaker: brain.SpeakerFrom(ctx)}
+	meta := mcp.Meta{metaSpeaker: brain.SpeakerFrom(ctx), metaVerified: brain.VoiceVerifiedFrom(ctx)}
 	if deliveries := brain.DeliveriesFrom(ctx); deliveries != nil {
 		id := strconv.FormatInt(b.nextID.Add(1), 10)
 		b.calls.Store(id, deliveries)

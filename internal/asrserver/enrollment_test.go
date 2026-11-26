@@ -172,3 +172,23 @@ func TestEnrollmentWithoutVoiceprints(t *testing.T) {
 		t.Errorf("没开声纹时应返回 503：%d", response.StatusCode)
 	}
 }
+
+// 登记要读的句子按关键词文件里的唤醒词生成：第一句以第一个唤醒词开头；没有唤醒词时 503。
+func TestEnrollmentScriptStartsWithWakePhrase(t *testing.T) {
+	handler := NewHandler(Dependencies{WakePhrases: []string{"哈罗哈罗", "嘿 haro"}, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, realtimeproto.EnrollmentScriptPath, nil))
+	var script realtimeproto.EnrollmentScript
+	if err := json.Unmarshal(recorder.Body.Bytes(), &script); err != nil || recorder.Code != http.StatusOK {
+		t.Fatalf("取登记句子：%d %v %s", recorder.Code, err, recorder.Body)
+	}
+	if len(script.Sentences) < minEnrollmentClips || !strings.HasPrefix(script.Sentences[0], "哈罗哈罗") {
+		t.Errorf("第一句应以唤醒词开头、至少 %d 句：%q", minEnrollmentClips, script.Sentences)
+	}
+	empty := NewHandler(Dependencies{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	recorder = httptest.NewRecorder()
+	empty.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, realtimeproto.EnrollmentScriptPath, nil))
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Errorf("没有唤醒词时应 503：%d", recorder.Code)
+	}
+}

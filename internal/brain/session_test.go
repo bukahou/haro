@@ -432,3 +432,42 @@ func TestHistoryWindowComesFromTheBook(t *testing.T) {
 		t.Errorf("窗口应按对话簿的 1 轮：请求里有 %d 句主人的话", owner)
 	}
 }
+
+// 模型判断主人要结束对话、调用 end_conversation：这一轮的 response.done 带上「说完就睡」，终端播完就休眠。
+// 不用唤醒门的终端没有休眠可言，不提供这个工具。
+func TestEndConversationMarksResponseDone(t *testing.T) {
+	model := braintest.NewModel(t, braintest.Call("end_conversation", map[string]any{}), braintest.Say("好，我先休息了，有事再叫我。"))
+	voice := braintest.NewVoice()
+	parts := brain.Components{Front: withTestSteps(brain.Agent{Model: model}), Synthesizer: fakeSynthesizer{}, Streaming: voice,
+		NewSegmenter: func() brain.TextSegmenter { return speech.NewSentenceSegmenter(4, 40) }}
+	session := brain.NewSession(parts, brain.Options{MaxHistoryTurn: 6}, quiet)
+	t.Cleanup(func() { _ = session.Close() })
+	turn := realtimeproto.TurnDetection{Type: "server_vad"}
+	stream := braintest.Open(t, session, voice, realtimeproto.SessionUpdate{TurnDetection: &turn, WakeWord: true})
+	if err := stream.Emit(realtimeproto.HaroWakeWordState{Awake: true}); err != nil {
+		t.Fatal(err)
+	}
+	braintest.Expect[realtimeproto.HaroWakeWordState](t, session)
+	done := braintest.Done(t, braintest.Ask(t, session, stream, braintest.Utterance{Text: "好了，你先休息吧"}))
+	if done.Status != realtimeproto.StatusCompleted || !done.EndConversation {
+		t.Fatalf("应带上说完就睡：%+v", done)
+	}
+	offered := false
+	for _, tool := range model.LastRequest().Tools {
+		offered = offered || tool.Name == "end_conversation"
+	}
+	if !offered {
+		t.Error("用唤醒门的终端应提供 end_conversation")
+	}
+
+	plain := braintest.NewModel(t, braintest.Say("好的。"))
+	k := newTalker(t, brain.Components{Front: brain.Agent{Model: plain}, Synthesizer: fakeSynthesizer{}}, brain.Options{MaxHistoryTurn: 6})
+	if done := braintest.Done(t, k.ask("你好")); done.EndConversation {
+		t.Errorf("没调用就不带：%+v", done)
+	}
+	for _, tool := range plain.LastRequest().Tools {
+		if tool.Name == "end_conversation" {
+			t.Error("不用唤醒门时不该提供 end_conversation")
+		}
+	}
+}

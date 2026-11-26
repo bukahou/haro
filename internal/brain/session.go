@@ -86,6 +86,7 @@ type Session struct {
 	streamConfig    *StreamConfig                // 打开识别流用的设置；nil = 还没打开过（断开后按它重开）
 	pendingJobs     map[string]*transcriptionJob // 已判定说完、等待识别结果的语音段（按 item_id）
 	lastWakeKeyword string                       // 最近一次听到的唤醒词（配置里的原文，告诉模型开头可能带着它）
+	wakePhrases     []string                     // 识别流报的唤醒词（haro-asr 的关键词文件）：上次告诉终端的，变了才再说
 	language        string                       // 主人最近一句话识别出的语种（固定的话按它选语言）
 	// awake 照识别流报的记（醒 / 睡只由识别流的唤醒门改：haro.wake_word.detected、haro.wake_word.state）；
 	// 识别流断开期间记终端要的，重开后告诉新的流、由它回复确认。
@@ -108,7 +109,12 @@ type Session struct {
 	// pendingDelivered：上一轮说完了，这一轮附上的情况（任务板的结论、额度提醒）等确认主人听完才算告诉了——
 	// 下一轮回答开始时还没收到截断就调用；播放中被打断就丢掉（之后再附上）。声音在终端播完要比服务端发完晚得多
 	pendingDelivered []func()
-	noSpeaker        bool // 终端说现在没有音箱：不合成语音，只发文字
+	// pendingInterrupted：同一轮附上的情况在播放中被打断时要通知的（Briefing.Interrupted），和 pendingDelivered 一起清
+	pendingInterrupted []func()
+	noSpeaker          bool // 终端说现在没有音箱：不合成语音，只发文字
+	// announcements：排着等服务端自己开口的话（到点的提醒）；只在没在答、没在播、主人没在说时开口（announce.go）
+	announcements []Announcement
+	announcing    bool // 正在自己开口（这时判定说完的那句先留着，开口结束、终端播完再回答）
 }
 
 // errNoStream：识别流还没打开（session.update 没带 turn_detection）或已断开，音频无处可送。
@@ -163,6 +169,7 @@ func (s *Session) Close() error {
 			_ = stream.Close()
 		}
 		s.endLifetime()
+		s.dropAnnouncements()
 	})
 	s.responses.Wait() // 等进行中的那一轮收尾（被取消后照 3.4 的规则写进历史）：关停时之后才关数据库
 	return nil
@@ -178,7 +185,16 @@ func (s *Session) Send(ctx context.Context, event realtimeproto.ClientEvent) err
 		s.mu.Lock()
 		s.playing = playing
 		stream := s.stream
+		var pendingErr error
+		if !playing && s.autoRespond {
+			pendingErr = s.startPendingResponseLocked() // 终端播完了：留着的那句（主人在开口时说完的）先回答
+		}
+		s.startAnnouncementLocked() // 排着的话可以说了（有要回答的那句时它挡着，等回答完）
 		s.mu.Unlock()
+		if pendingErr != nil {
+			s.logger.Warn("终端播完后没能开始回答留着的那句", "err", pendingErr)
+			s.emit(realtimeproto.ErrorEventFor("", pendingErr))
+		}
 		if stream == nil { // 识别流还没打开或正在重开：重开后按记下的状态告诉新的流
 			return nil
 		}

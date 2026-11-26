@@ -18,7 +18,7 @@ import (
 )
 
 // EnrollmentSentences 是登记时要读的话（给人朗读的文本）：第一句以唤醒词开头（唤醒时比对的就是喊唤醒词的声音），
-// 其余是日常说话。wakePhrase 是终端配置的唤醒词（HARO_WAKE_PHRASE）。终端的 haro -enroll 用。
+// 其余是日常说话。wakePhrase 是 haro-asr 关键词文件里的唤醒词；haro-asr 经登记句子的接口交给终端的 haro -enroll。
 func EnrollmentSentences(wakePhrase string) []string {
 	return []string{
 		wakePhrase + "，今天天气怎么样？帮我看看外面会不会下雨。",

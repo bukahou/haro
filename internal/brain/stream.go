@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -80,6 +81,25 @@ func (s *Session) runStream(stream RecognizerStream) {
 	}
 }
 
+// wakePhrasesReported 是识别流报了它认的唤醒词（haro-asr 的关键词文件：唤醒词只写在那一处）。和上次告诉终端的不一样时，
+// 用 session.updated 告诉终端（日志里的提示用它）。没开唤醒门、或识别服务没报时不发。
+func (s *Session) wakePhrasesReported(phrases []string) {
+	s.mu.Lock()
+	config := s.streamConfig
+	changed := config != nil && config.WakeWord && len(phrases) > 0 && !slices.Equal(phrases, s.wakePhrases)
+	if changed {
+		s.wakePhrases = slices.Clone(phrases)
+	}
+	s.mu.Unlock()
+	if !changed {
+		return
+	}
+	turn := config.TurnDetection
+	s.logger.Info("识别流认的唤醒词：告诉终端", "phrases", phrases)
+	s.emit(realtimeproto.SessionUpdated{Session: realtimeproto.SessionUpdate{TurnDetection: &turn, WakeWord: true,
+		WakePhrases: slices.Clone(phrases)}})
+}
+
 // takeJob 取出（并去掉）等这句话识别结果的任务；没有时返回 nil。
 func (s *Session) takeJob(item string) *transcriptionJob {
 	s.mu.Lock()
@@ -141,6 +161,8 @@ func (s *Session) asleepLocked() bool {
 func (s *Session) pumpStreamEvents(stream RecognizerStream) {
 	for event := range stream.Events() {
 		switch e := event.(type) {
+		case realtimeproto.SessionUpdated: // 识别流打开（或重开）时转写服务确认了设置
+			s.wakePhrasesReported(e.Session.WakePhrases)
 		case realtimeproto.HaroWakeWordDetected:
 			if !s.winWake(stream, e) {
 				continue
@@ -155,6 +177,7 @@ func (s *Session) pumpStreamEvents(stream RecognizerStream) {
 			if !e.Awake {
 				s.speech = nil     // 识别流睡着时丢掉说到一半的那句，不会再有「说完」
 				s.lastSpeaker = "" // 对话窗口结束：下次醒来重新认人
+				s.startAnnouncementLocked()
 			}
 			s.mu.Unlock()
 			s.emit(e)
@@ -206,6 +229,9 @@ func (s *Session) pumpStreamEvents(stream RecognizerStream) {
 	s.mu.Lock()
 	speech := s.speech
 	s.speech = nil
+	if speech == nil {
+		s.startAnnouncementLocked() // 没有说到一半的那句：排着的话可以说了（有的话下面补的「说完」先回答它）
+	}
 	s.mu.Unlock()
 	select {
 	case <-s.closed:
@@ -244,13 +270,28 @@ func (s *Session) speechStopped(e realtimeproto.InputAudioBufferSpeechStopped) {
 	s.mu.Lock()
 	var err error
 	if s.autoRespond {
-		err = s.startResponseLocked()
+		err = s.startPendingResponseLocked()
 	}
 	s.mu.Unlock()
 	if err != nil {
 		s.logger.Warn("判定说完时没能开始回答", "item", e.ItemID, "err", err)
 		s.emit(realtimeproto.ErrorEventFor("", err))
 	}
+}
+
+// startPendingResponseLocked 开始回答判定说完、还没回答的那句（s.transcription）。服务端正在自己开口、或终端还在播的时候
+// 先不开始，留着这句：开口结束、终端报播完时再来（回答事件里没有回答编号，新的回答不能混进还在播的那一段）。
+// 平时说完的时候终端早就播完了；只有主人刚好在服务端开口的那一刻说完时才会等。调用方持有 s.mu。
+func (s *Session) startPendingResponseLocked() error {
+	if s.transcription == nil {
+		return nil
+	}
+	if s.announcing || s.playing {
+		s.logger.Info("服务端在开口或终端还在播：这句等播完再回答", "item", s.transcription.item,
+			"announcing", s.announcing, "playing", s.playing)
+		return nil
+	}
+	return s.startResponseLocked()
 }
 
 // ReopenTiming 是打开识别流、意外断开后重开的节奏（Options.StreamReopen；零值 = DefaultReopenTiming）。

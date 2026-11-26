@@ -26,7 +26,8 @@ type Timing struct {
 	// 真机上试过 2 s，显得迟钝；1 s 足够开口
 	WakeOnlyWait time.Duration
 	// WakeKeywordWindow：唤醒词识别报告时刻之前的这一段一定包含整个唤醒词，也是算唤醒词声纹用的那一段。
-	// 实测「哈罗哈罗」约 1 s，报告延迟约 0.3 s；换更长的唤醒词要跟着加长
+	// 实测「哈罗哈罗」约 1 s，报告延迟约 0.3 s。按现在的唤醒词真机定的，不从唤醒词的字推算（推算要按语言数音节）：
+	// 换关键词文件里的唤醒词时要重新实测（和 brain 的 unverifiedShortUtterance 一起）
 	WakeKeywordWindow time.Duration
 	// MinWakeWindow：算唤醒词声纹至少要这么长的声音（刚播完时避开回声，剩下不够这么长就不避）。定值：
 	// 实测唤醒词那 1.5 s 的声纹相似度只有整句的一半左右，再短更不稳

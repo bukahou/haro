@@ -40,11 +40,14 @@ type Dependencies struct {
 	NewVoiceDetector  VoiceDetectorFactory
 	TurnDetector      TurnDetector
 	NewKeywordSpotter KeywordSpotterFactory // 为 nil 时不支持唤醒词（haro.wake_word）
-	Speakers          *SpeakerCheck         // 为 nil 或没有登记声纹时不比对
-	Timing            Timing                // 时长与门槛；零值 = DefaultTiming
-	Limits            Limits                // 转写会话的数量和等待上限；零值的字段 = DefaultLimits 的
-	Settings          CapabilitySettings    // 打开各项能力要设的配置项（拒绝时写进说明）；可以为空
-	Logger            *slog.Logger
+	// WakePhrases 是关键词文件里的唤醒词（显示名）：开着唤醒门的转写会话在 session.updated 里报给服务端，
+	// 声纹登记要读的第一句用第一个。唤醒词只在关键词文件里写一处
+	WakePhrases []string
+	Speakers    *SpeakerCheck      // 为 nil 或没有登记声纹时不比对
+	Timing      Timing             // 时长与门槛；零值 = DefaultTiming
+	Limits      Limits             // 转写会话的数量和等待上限；零值的字段 = DefaultLimits 的
+	Settings    CapabilitySettings // 打开各项能力要设的配置项（拒绝时写进说明）；可以为空
+	Logger      *slog.Logger
 }
 
 // Limits 是转写会话入口的上限：先限量，再做事。
@@ -91,6 +94,9 @@ func NewHandler(deps Dependencies) http.Handler {
 	})
 	mux.HandleFunc(realtimeproto.VoiceprintRoute, func(w http.ResponseWriter, r *http.Request) {
 		handleEnrollment(w, r, deps.Speakers) // 远程登记声纹
+	})
+	mux.HandleFunc(realtimeproto.EnrollmentScriptRoute, func(w http.ResponseWriter, _ *http.Request) {
+		handleEnrollmentScript(w, deps.WakePhrases) // 登记要读的句子（第一句以唤醒词开头）
 	})
 	// 存活只看进程能不能响应；就绪要在期限内真的识别完一小段静音（readiness.go）
 	mux.HandleFunc("GET /livez", readiness.Alive)

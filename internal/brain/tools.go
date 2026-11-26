@@ -217,7 +217,8 @@ func (look cameraLook) historyResult(spokenDirectly bool) string {
 func (s *Session) runTool(ctx context.Context, record *turnRecord, call ToolCall) (string, error) {
 	ctx, span := tracer.Start(ctx, "brain.tool")
 	defer span.End()
-	ctx, cancel := context.WithTimeout(WithDeliveries(WithSpeaker(ctx, s.currentConversation().Person()), record), s.toolTimeout())
+	ctx, cancel := context.WithTimeout(WithDeliveries(WithVoiceVerified(WithSpeaker(ctx, s.currentConversation().Person()),
+		record.voiceVerified), record), s.toolTimeout())
 	defer cancel()
 	started := time.Now()
 	result, err := s.parts.Tools.Call(ctx, call)

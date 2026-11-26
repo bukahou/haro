@@ -122,6 +122,9 @@ type Briefing struct {
 	// Delivered 在这一轮说完、主人也听完了（播放没被打断）之后调用：这些情况算是告诉主人了（任务板上失败的调查、
 	// 额度提醒，下一轮不再附上）。被打断、出错时不调用，下一轮照样附上。nil = 不用确认（时间、位置这类每轮重新算的）
 	Delivered func()
+	// Interrupted 在附上这些情况的那一轮被主人打断时调用（生成时或播放时；出错不算）。Delivered 和它最多调用一个。
+	// 用来限制被打断后再附上几次（BriefingCuts）。可以为 nil
+	Interrupted func()
 }
 
 // Deliveries 收集「主人听完这一轮才算数」的事（见 OnDelivered）；会话里是这一轮的记录。
@@ -310,7 +313,8 @@ type RecognizerStream interface {
 	// SetPlayback 告诉语音前端终端在不在播放回答（打断用）：true = 只听唤醒词（听到即打断），false = 恢复。
 	SetPlayback(ctx context.Context, playing bool) error
 	// Events 发出 InputAudioBufferSpeechStarted / SpeechStopped / InputAudioTranscriptionCompleted /
-	// HaroWakeWordDetected / Error；连接断开时关闭。
+	// HaroWakeWordDetected / Error；连接断开时关闭。打开时转写服务确认设置的 SessionUpdated（带着它认的唤醒词）
+	// 排在最前面（实现可以不发：会话就不知道唤醒词，终端的提示里不写具体是哪个词）。
 	Events() <-chan realtimeproto.ServerEvent
 	Close() error
 }
@@ -328,4 +332,18 @@ func SpeakerFrom(ctx context.Context) string {
 		return person
 	}
 	return SharedPerson
+}
+
+type voiceVerifiedKey struct{}
+
+// WithVoiceVerified 记下这一轮的话是不是声纹认出的登记过的人说的（算不出声纹、沿用上一句的人时不算）：
+// 只许本人做的事（例如定提醒）据此决定做不做。
+func WithVoiceVerified(ctx context.Context, verified bool) context.Context {
+	return context.WithValue(ctx, voiceVerifiedKey{}, verified)
+}
+
+// VoiceVerifiedFrom 取出这一轮的话是不是声纹认出的登记过的人说的；没记过（不是在会话里调用）时为 false。
+func VoiceVerifiedFrom(ctx context.Context) bool {
+	verified, _ := ctx.Value(voiceVerifiedKey{}).(bool)
+	return verified
 }

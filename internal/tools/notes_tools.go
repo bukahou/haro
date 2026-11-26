@@ -21,7 +21,8 @@ func NoteTools(store notes.Repository, listLimit int, logger *slog.Logger) Built
 	logger = logger.With("tool", "notes")
 	return func(server *mcp.Server) {
 		AddTool(server, &mcp.Tool{Name: "save_note", Annotations: Changes,
-			Description: "把主人要求记下的事情保存到记事本。记下来不等于会提醒：记完只说「记下了」，不要说「到时候提醒你」。"},
+			Description: "把主人要求记下的事情保存到记事本。记下来不等于会提醒：要到点说出来的事用定提醒的工具，不是记事；" +
+				"记完只说「记下了」，不要说「到时候提醒你」。"},
 			func(ctx context.Context, in saveNoteInput) (noteOutput, error) {
 				note, err := store.Save(ctx, in.Content)
 				logger.Info("记一条", "id", note.ID, "err", err)

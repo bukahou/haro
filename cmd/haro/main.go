@@ -154,7 +154,7 @@ func enroll(logger *slog.Logger, name string, appendMode bool, seconds time.Dura
 		return err
 	}
 	fmt.Printf("🎤 麦克风：%s（%s）\n服务端：%s\n", microphone.Name, microphone.Reason, settings.ServerURL)
-	return enrollment.Run(ctx, enrollment.Options{ServerURL: settings.ServerURL, Name: name, WakePhrase: settings.WakePhrase,
+	return enrollment.Run(ctx, enrollment.Options{ServerURL: settings.ServerURL, Name: name,
 		Append: appendMode, Seconds: seconds, Recorder: local.OpenRecorder(microphone.ID), In: os.Stdin, Out: os.Stdout,
 		Client: &http.Client{Timeout: 60 * time.Second}})
 }
@@ -164,12 +164,13 @@ func assistantOptions(settings config.TerminalSettings, sounds tones.Tones) assi
 	return assistant.Options{
 		TurnDetection: settings.TurnDetectionSettings(), // create_response 不填 = 服务端判定说完时自己开始回答
 		EchoGuard:     settings.EchoGuard,
-		WakeWord:      assistant.WakeWordOptions{Phrase: settings.WakePhrase, IdleTimeout: settings.WakeIdle, SleepTone: sounds.Sleep},
+		WakeWord:      assistant.WakeWordOptions{IdleTimeout: settings.WakeIdle, SleepTone: sounds.Sleep},
 		BargeIn:       settings.BargeIn,
 		NoticeTone:    sounds.Notice,
 		NoticeTones: map[string]realtimeproto.PCMAudio{ // 服务端那边听不见了：和服务端断开时同样的两声
 			realtimeproto.NoticeTranscriptionLost:     sounds.Offline,
 			realtimeproto.NoticeTranscriptionRestored: sounds.Online,
+			realtimeproto.NoticeReminder:              sounds.Reminder, // 到点的提醒没能说出来（服务端的语音合成用不了）
 		},
 	}
 }

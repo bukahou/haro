@@ -13,6 +13,7 @@ import (
 
 // unverifiedShortUtterance 是「叫醒的短句」最长多长：声纹只过了唤醒的门槛、没确认时，这么短的话受限回答，
 // 更长的不回答。唤醒词「哈罗哈罗」说出来约 1.2–1.5 秒，留出叫完之后的一点停顿。
+// 这是按现在的唤醒词真机定的时长，不从唤醒词的字推算（推算要按语言数音节）：换 haro-asr 关键词文件里的唤醒词时要重新实测。
 const unverifiedShortUtterance = 2500 * time.Millisecond
 
 const (

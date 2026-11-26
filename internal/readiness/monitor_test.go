@@ -81,3 +81,48 @@ func TestHTTPProbes(t *testing.T) {
 		t.Error("连不上应算出错")
 	}
 }
+
+// levelCounter 记各级别的日志条数。
+type levelCounter struct {
+	counts map[slog.Level]int
+}
+
+func (c *levelCounter) Enabled(context.Context, slog.Level) bool { return true }
+func (c *levelCounter) Handle(_ context.Context, record slog.Record) error {
+	c.counts[record.Level]++
+	return nil
+}
+func (c *levelCounter) WithAttrs([]slog.Attr) slog.Handler { return c }
+func (c *levelCounter) WithGroup(string) slog.Handler      { return c }
+
+// 启动后第一轮就出错（一起启动的依赖晚一两秒才开始监听）：只记 INFO，下一轮好了也不算出过错；
+// 第二轮还出错才记 WARN。就绪的结果照实（第一轮就是 503）。
+func TestStartupFailureIsNotAWarning(t *testing.T) {
+	counter := &levelCounter{counts: map[slog.Level]int{}}
+	var asrErr = errors.New("connection refused")
+	monitor := NewMonitor([]Check{{Name: "asr", Probe: func(context.Context) error { return asrErr }}},
+		time.Hour, time.Second, slog.New(counter))
+	monitor.checkAll(context.Background())
+	if report := monitor.Report(); report.Ready {
+		t.Fatal("第一轮出错就不算就绪（照实）")
+	}
+	if counter.counts[slog.LevelWarn] != 0 || counter.counts[slog.LevelInfo] != 1 {
+		t.Fatalf("启动后第一轮出错只记 INFO：%v", counter.counts)
+	}
+	asrErr = nil
+	monitor.checkAll(context.Background())
+	if counter.counts[slog.LevelWarn] != 0 || !monitor.Report().Ready {
+		t.Fatalf("第二轮好了：不记 WARN、就绪：%v", counter.counts)
+	}
+
+	// 阳性对照：启动后第一、二轮都出错，第二轮记 WARN
+	counter.counts = map[slog.Level]int{}
+	asrErr = errors.New("connection refused")
+	stuck := NewMonitor([]Check{{Name: "asr", Probe: func(context.Context) error { return asrErr }}},
+		time.Hour, time.Second, slog.New(counter))
+	stuck.checkAll(context.Background())
+	stuck.checkAll(context.Background())
+	if counter.counts[slog.LevelWarn] != 1 {
+		t.Errorf("第二轮还出错应记 WARN：%v", counter.counts)
+	}
+}

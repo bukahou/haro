@@ -16,7 +16,7 @@ import (
 func TestWakeStateChangesOnlyOnReply(t *testing.T) {
 	ctx := context.Background()
 	brain := &scriptedBrain{events: make(chan realtimeproto.ServerEvent, 16)}
-	a := NewAssistant(Dependencies{Brain: brain}, Options{WakeWord: WakeWordOptions{Phrase: "哈罗哈罗"}},
+	a := NewAssistant(Dependencies{Brain: brain}, Options{WakeWord: WakeWordOptions{}},
 		slog.New(slog.NewTextHandler(io.Discard, nil)))
 	window := &conversationWindow{idle: time.Minute}
 	defer window.close()
@@ -54,7 +54,7 @@ func TestWakeStateDuringPlaybackIsKeptForTheMainLoop(t *testing.T) {
 	brain.events <- realtimeproto.HaroWakeWordState{Awake: false}
 	brain.events <- realtimeproto.ResponseDone{Status: realtimeproto.StatusCompleted}
 	close(sink.release)
-	if err := a.playResponse(context.Background(), noSpan(), "item_1", time.Now()); err != nil {
+	if _, err := a.playResponse(context.Background(), noSpan(), "item_1", time.Now()); err != nil {
 		t.Fatalf("正常播完应返回 nil，得到 %v", err)
 	}
 	select {
@@ -64,5 +64,21 @@ func TestWakeStateDuringPlaybackIsKeptForTheMainLoop(t *testing.T) {
 		}
 	default:
 		t.Fatal("播放期间收到的醒 / 睡回复被丢掉了")
+	}
+}
+
+// 唤醒词由服务端告诉（session.updated，来自 haro-asr 的关键词文件）：收到之前提示里不写具体的词，收到之后照它提示。
+func TestWakeHintUsesPhrasesFromServer(t *testing.T) {
+	a := NewAssistant(Dependencies{Brain: &scriptedBrain{events: make(chan realtimeproto.ServerEvent, 1)}},
+		Options{WakeWord: WakeWordOptions{}}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if got := a.wakeHint(); got != "叫唤醒词唤醒" {
+		t.Errorf("还不知道唤醒词时：%q", got)
+	}
+	window := &conversationWindow{idle: time.Minute}
+	defer window.close()
+	a.handleWakeEvent(context.Background(), window, realtimeproto.SessionUpdated{Session: realtimeproto.SessionUpdate{
+		WakeWord: true, WakePhrases: []string{"哈罗哈罗", "小助手"}}})
+	if got := a.wakeHint(); got != "叫「哈罗哈罗」或「小助手」唤醒" {
+		t.Errorf("收到唤醒词以后：%q", got)
 	}
 }

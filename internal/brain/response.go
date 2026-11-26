@@ -61,14 +61,11 @@ func (s *Session) speakerFor(job *transcriptionJob) string {
 // runResponse 执行一次回答：开始时发 response.created，结束时恰好发出一个 response.done。
 func (s *Session) runResponse(ctx context.Context, job *transcriptionJob) {
 	s.emit(realtimeproto.ResponseCreated{})
-	s.mu.Lock()
-	heard := s.pendingDelivered // 上一轮说完后一直没收到截断：主人听完了
-	s.pendingDelivered = nil
-	s.spoken, s.truncateAtMs, s.answeredInResponse, s.responseItem = nil, -1, false, job.item // 新的回答：重新记播出的句子
-	s.mu.Unlock()
-	for _, delivered := range heard { // 在这一轮附上情况之前：告诉过的不再附上
-		delivered()
+	item := ""
+	if job != nil {
+		item = job.item
 	}
+	s.beginResponse(item)
 	defer func() {
 		s.mu.Lock()
 		s.cancelResponse()
@@ -76,6 +73,7 @@ func (s *Session) runResponse(ctx context.Context, job *transcriptionJob) {
 		// 回答已经记进历史之后才收到截断（打断发生在生成刚结束的一瞬间）：回头改
 		changed := s.playbackCutLocked()
 		conversation := s.conversation
+		s.startAnnouncementLocked() // 答完了：排着要开口的话等终端播完再说（终端还在播时 playing 挡着）
 		s.mu.Unlock()
 		if changed {
 			conversation.persist()
@@ -83,6 +81,19 @@ func (s *Session) runResponse(ctx context.Context, job *transcriptionJob) {
 	}()
 	done := s.respond(ctx, job)
 	s.emit(done)
+}
+
+// beginResponse 开始新的一次回答（或开口）：上一次说完后一直没收到截断 = 主人听完了，那一轮附上的情况算告诉了；
+// 重新记这次播出的句子。item 是回答的那句话的编号（开口时为空）。
+func (s *Session) beginResponse(item string) {
+	s.mu.Lock()
+	heard := s.pendingDelivered
+	s.pendingDelivered, s.pendingInterrupted = nil, nil
+	s.spoken, s.truncateAtMs, s.answeredInResponse, s.responseItem = nil, -1, false, item
+	s.mu.Unlock()
+	for _, delivered := range heard { // 在这一轮附上情况之前：告诉过的不再附上
+		delivered()
+	}
 }
 
 func (s *Session) respond(ctx context.Context, job *transcriptionJob) (done realtimeproto.ResponseDone) {
@@ -169,7 +180,8 @@ func (s *Session) finishAnswer(ctx context.Context, record *turnRecord, answer s
 		s.closeTurn(record, turnFailed)
 		return s.failed(realtimeproto.ReasonGenerationFailed, "生成回答", err)
 	}
-	ending, done := turnCompleted, realtimeproto.ResponseDone{Status: realtimeproto.StatusCompleted}
+	ending, done := turnCompleted, realtimeproto.ResponseDone{Status: realtimeproto.StatusCompleted,
+		EndConversation: record.endConversation} // 主人要结束对话：终端播完就休眠
 	if record.truncated { // 到了输出上限：照「没说完」告诉终端（OpenAI Realtime 同样的状态和原因）
 		ending, done = turnTruncated, realtimeproto.ResponseDone{Status: realtimeproto.StatusIncomplete, Reason: realtimeproto.ReasonMaxOutputTokens}
 	}
@@ -433,6 +445,9 @@ func (s *Session) generateSentences(ctx context.Context, history []ChatMessage, 
 				result = s.confirmAction(ctx, record, call)
 			case cancelActionTool:
 				result = s.cancelAction(call)
+			case endConversationTool:
+				record.endConversation = true
+				result = endConversationResult
 			case lookAtCameraTool:
 				in, err := DecodeArguments[lookAtCameraInput](call.Arguments)
 				if err != nil { // 参数不对也照样看：问题只是帮专家看准，主人的原话照样交过去

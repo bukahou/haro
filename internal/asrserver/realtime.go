@@ -223,8 +223,12 @@ func (s *transcriptionSession) close() {
 // accepted 是这个会话接受之后的设置（session.updated 里回给对端）。
 func (s *transcriptionSession) accepted() realtimeproto.SessionUpdate {
 	turn := s.turnDetection
-	return realtimeproto.SessionUpdate{Kind: realtimeproto.SessionTranscription, TurnDetection: &turn,
+	accepted := realtimeproto.SessionUpdate{Kind: realtimeproto.SessionTranscription, TurnDetection: &turn,
 		WakeWord: s.wake.enabled, InputFormat: realtimeproto.TranscriptionFormat}
+	if s.wake.enabled { // 开着唤醒门：告诉服务端认的是哪几个唤醒词（服务端转给终端）
+		accepted.WakePhrases = s.deps.WakePhrases
+	}
+	return accepted
 }
 
 func (s *transcriptionSession) run(ctx context.Context) error {

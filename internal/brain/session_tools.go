@@ -23,6 +23,7 @@ var sessionTools = []sessionTool{
 	}},
 	{name: switchPersonaTool, offer: func(s *Session) (ToolSpec, bool) { return switchPersonaSpec(s.opts.Personas) }},
 	{name: askStrongerTool, offer: func(s *Session) (ToolSpec, bool) { return askStrongerSpec, s.parts.Handoff.corrections() }},
+	{name: endConversationTool, offer: func(s *Session) (ToolSpec, bool) { return endConversationSpec, s.usesWakeWord() }},
 	// 平时也能口头提高上限（照样过确认闸）
 	{name: RaiseMonthlyCapTool, offer: func(s *Session) (ToolSpec, bool) { return raiseMonthlyCapSpec, s.parts.MonthlyCap != nil }},
 	{name: confirmActionTool, gate: true, offer: func(*Session) (ToolSpec, bool) { return confirmActionSpec, true }},

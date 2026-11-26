@@ -58,10 +58,12 @@ func (c *RealtimeTranscriptionClient) OpenStream(ctx context.Context, config bra
 		conn.CloseNow()
 		return nil, fmt.Errorf("发送 session.update: %w", err)
 	}
-	if err := stream.awaitSessionUpdated(ctx); err != nil {
+	accepted, err := stream.awaitSessionUpdated(ctx)
+	if err != nil {
 		conn.CloseNow()
 		return nil, err
 	}
+	stream.events <- accepted // 确认原样交给会话（带着转写服务认的唤醒词）：排在之后所有事件前面
 	streamCtx, cancel := context.WithCancel(context.Background())
 	stream.cancel = cancel
 	go stream.readEvents(streamCtx)
@@ -69,30 +71,30 @@ func (c *RealtimeTranscriptionClient) OpenStream(ctx context.Context, config bra
 	return stream, nil
 }
 
-// awaitSessionUpdated 读到转写服务对 session.update 的答复：session.updated = 接受；error = 不接受。
-// 不认识的事件跳过（别的实现可能先发 session.created）；确认之前发来别的事件算对端不守协议。
-func (s *realtimeTranscriptionStream) awaitSessionUpdated(ctx context.Context) error {
+// awaitSessionUpdated 读到转写服务对 session.update 的答复：session.updated = 接受（交回它，带着转写服务认的唤醒词）；
+// error = 不接受。不认识的事件跳过（别的实现可能先发 session.created）；确认之前发来别的事件算对端不守协议。
+func (s *realtimeTranscriptionStream) awaitSessionUpdated(ctx context.Context) (realtimeproto.SessionUpdated, error) {
 	for {
 		_, data, err := s.conn.Read(ctx)
 		if err != nil {
-			return fmt.Errorf("等转写服务确认 session.update: %w", err)
+			return realtimeproto.SessionUpdated{}, fmt.Errorf("等转写服务确认 session.update: %w", err)
 		}
 		event, err := realtimeproto.DecodeServerEvent(data)
 		if err != nil {
-			return fmt.Errorf("转写服务对 session.update 的答复解不开: %w", err)
+			return realtimeproto.SessionUpdated{}, fmt.Errorf("转写服务对 session.update 的答复解不开: %w", err)
 		}
 		switch reply := event.(type) {
 		case nil:
 		case realtimeproto.SessionUpdated:
-			return nil
+			return reply, nil
 		case realtimeproto.Error:
 			refusal := &realtimeproto.ProtocolError{Code: reply.Code, Message: "转写服务: " + reply.Message}
 			if reply.Code.ServerSide() { // 它自己的问题（例如出错、忙不过来）：过一会儿再连可能就好了
-				return refusal
+				return realtimeproto.SessionUpdated{}, refusal
 			}
-			return fmt.Errorf("%w: %w", brain.ErrStreamRejected, refusal)
+			return realtimeproto.SessionUpdated{}, fmt.Errorf("%w: %w", brain.ErrStreamRejected, refusal)
 		default:
-			return fmt.Errorf("转写服务在确认 session.update 之前发来了 %s", event.Type())
+			return realtimeproto.SessionUpdated{}, fmt.Errorf("转写服务在确认 session.update 之前发来了 %s", event.Type())
 		}
 	}
 }
