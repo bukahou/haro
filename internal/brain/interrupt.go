@@ -59,9 +59,13 @@ func (s *Session) playbackCutLocked() bool {
 	if s.truncateAtMs < 0 {
 		return false
 	}
-	if s.pendingDelivered != nil {
-		s.pendingDelivered = nil
+	if len(s.pendingDelivered) > 0 || len(s.pendingInterrupted) > 0 {
+		cut := s.pendingInterrupted
+		s.pendingDelivered, s.pendingInterrupted = nil, nil
 		s.logger.Info("播放中被打断：这一轮附上的情况没听完，之后再附上", "item", s.responseItem, "played_ms", s.truncateAtMs)
+		for _, interrupted := range cut { // 只记个数（BriefingCuts），不回头调用会话
+			interrupted()
+		}
 	}
 	return s.truncateLastAnswerLocked()
 }

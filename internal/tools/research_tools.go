@@ -44,7 +44,8 @@ func ResearchTools(desk ResearchDesk) Builtin {
 			})
 		AddTool(server, &mcp.Tool{Name: research.StatusTool, Annotations: ReadOnly,
 			Description: "看后台调查的进度和结论：给 id 看那一个；不给就列出最近的几个（带编号）。" +
-				"主人问「查得怎么样了」「上次让你查的那个结果是什么」时用；情况说明里说有调查查完了、还没告诉主人时，也先用它取结论再讲。"},
+				"主人问「查得怎么样了」「上次让你查的那个结果是什么」、或者说要听查完的调查的结论时用。" +
+				"讲结论先说一两句要点，主人要细节再展开，不要一口气把整段念完。"},
 			func(ctx context.Context, in researchStatusInput) (research.StatusReport, error) {
 				return desk.Status(ctx, brain.SpeakerFrom(ctx), in.ID)
 			})
@@ -70,7 +71,7 @@ func longestWaitNote(longest time.Duration) string {
 }
 
 type startResearchInput struct {
-	Question string `json:"question" jsonschema:"要调查的问题，用主人说话的语言写完整、具体（包含主人关心的点）"`
+	Question string `json:"question" jsonschema:"要调查的问题，用主人说话的语言写完整、具体（包含主人关心的点）；照主人的意思写，不要加主人没说的条件（住在哪、截止日期这类自己推测的不要加）"`
 }
 
 type startResearchOutput struct {

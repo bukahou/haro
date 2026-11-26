@@ -69,16 +69,19 @@ func (r *Runner) markReported(ids []int64) {
 	defer cancel()
 	if err := r.store.MarkReported(ctx, ids...); err != nil {
 		r.logger.Warn("标记调查已汇报失败：之后会再说一次", "tasks", ids, "err", err)
+		return
 	}
+	r.cuts.Forget(ids)
 }
 
 // boardUnreadableNote 是任务板这一轮没读出来时给模型的附注（不知道有没有查完的调查，不能当成没有）。
 const boardUnreadableNote = "后台调查的任务板这一轮没读出来（存储出错）：不知道有没有查完的调查，不用主动提；" +
 	"主人问起时照实说，可以用 " + StatusTool + " 再查一次。"
 
-// Brief 实现 brain.Briefer：任务板。在查的列出来；查完还没告诉的，让模型这一轮先用 research_status 取结论讲给主人
-// （结论不放在这里：取了、主人也听完了才标已汇报，见 Status）；没完成的，原因短，直接附上，主人听完这一轮就算告诉了。
-// 读不出来时记警告，告诉模型这一轮不知道调查的情况。
+// Brief 实现 brain.Briefer：任务板。在查的列出来；查完还没告诉的，让模型先回答主人这次说的话，再用一句话告诉他查完了、
+// 问要不要听（他要听再用 research_status 取结论讲；2026-11-26 用户裁定，原来是先念结论）；没完成的，原因短，直接附上。
+// 主人听完这一轮就算告诉了（Delivered）；附上的那一轮被打断，最多再附上一次（brain.BriefingCuts），之后当告诉过了——
+// 结论随时能用 research_status 问。读不出来时记警告，告诉模型这一轮不知道调查的情况。
 func (r *Runner) Brief(person string) brain.Briefing {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -88,30 +91,44 @@ func (r *Runner) Brief(person string) brain.Briefing {
 		return brain.Briefing{Lines: []string{boardUnreadableNote}}
 	}
 	var lines []string
-	var told []int64
+	var told, givenUp []int64
 	for _, task := range board {
 		if !task.Status.Finished() {
 			lines = append(lines, fmt.Sprintf("后台调查 #%d「%s」%s（派出 %s 了），不用主动提。",
 				task.ID, task.Question, task.Status.Label(), since(task.CreatedAt)))
 			continue
 		}
+		if r.cuts.Exhausted(task.ID) { // 附上的那几轮都被打断了：当告诉过了，不再附上（结论随时能问）
+			givenUp = append(givenUp, task.ID)
+			continue
+		}
+		var line string
 		switch task.Status {
 		case StatusDone, StatusPartial:
 			note := ""
 			if task.Status == StatusPartial {
 				note = "（可能不全：" + task.StopReason + "）"
 			}
-			lines = append(lines, fmt.Sprintf("后台调查 #%d「%s」查完了%s，还没告诉主人。这一轮先调用 %s（id 填 %d）取结论讲给主人"+
-				"（按需要的长短说，讲清楚为止），再回答他这次说的话。", task.ID, task.Question, note, StatusTool, task.ID))
+			line = fmt.Sprintf("后台调查 #%d「%s」查完了%s，还没告诉主人。先回答主人这次说的话，最后用一句话告诉他这个调查查完了、"+
+				"问他要不要听结论；他要听再调用 %s（id 填 %d）取结论讲。", task.ID, task.Question, note, StatusTool, task.ID)
 		default:
-			told = append(told, task.ID)
-			lines = append(lines, fmt.Sprintf("后台调查 #%d「%s」没完成（%s：%s）。这一轮顺便告诉主人一声。",
-				task.ID, task.Question, task.Status.Label(), task.StopReason))
+			line = fmt.Sprintf("后台调查 #%d「%s」没完成（%s：%s）。先回答主人这次说的话，再顺便告诉他一声。",
+				task.ID, task.Question, task.Status.Label(), task.StopReason)
 		}
+		if r.cuts.Count(task.ID) > 0 {
+			line += brain.CutNote
+		}
+		told = append(told, task.ID)
+		lines = append(lines, line)
+	}
+	if len(givenUp) > 0 {
+		r.logger.Info("调查结束的通知附上了几次都被打断：当告诉过了", "tasks", givenUp)
+		r.markReported(givenUp)
 	}
 	briefing := brain.Briefing{Lines: lines}
 	if len(told) > 0 {
 		briefing.Delivered = func() { r.markReported(told) }
+		briefing.Interrupted = func() { r.cuts.Add(told) }
 	}
 	return briefing
 }

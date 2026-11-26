@@ -67,6 +67,8 @@ type Runner struct {
 	mu       sync.Mutex
 	cancels  map[int64]context.CancelFunc // 在查的任务 → 取消它
 	finished func(Task)                   // 任务结束（查完 / 没查完 / 失败）时调用；主人取消的不调用
+
+	cuts brain.BriefingCuts // 任务板附上「查完了」的那一轮被主人打断了几次：被打断后最多再附上一次
 }
 
 // OnFinished 设置任务结束时的回调（例如让主人最近说话的那台终端响一声）；随时可以设置。

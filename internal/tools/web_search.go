@@ -237,7 +237,9 @@ func WebSearchTools(searcher WebSearcher, meter SearchMeter, logger *slog.Logger
 	return func(server *mcp.Server) {
 		AddTextTool(server, &mcp.Tool{Name: WebSearchTool, Annotations: ReadOnly,
 			Description: "联网搜索一次，查实时或最新的事实（新闻、价格、比分、营业时间、某件事的最新进展等）。" +
-				"你不确定、或者信息可能过时的时候用它，不要凭记忆回答。搜一次就能答的问题用它。"},
+				"你不确定、或者信息可能过时的时候用它，不要凭记忆回答。搜一次就能答的问题用它。" +
+				"主人的话是语音识别出来的，地名、人名可能被写成读音相近的字：搜不到时换成读音相近的写法再搜一次。" +
+				"没搜到想要的，就简短说没查到，再给一个下一步（例如派后台调查），不要长篇猜测。"},
 			func(ctx context.Context, in webSearchInput) (string, error) {
 				if strings.TrimSpace(in.Query) == "" {
 					return "", errors.New("query 不能为空")

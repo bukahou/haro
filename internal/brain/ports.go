@@ -122,6 +122,9 @@ type Briefing struct {
 	// Delivered 在这一轮说完、主人也听完了（播放没被打断）之后调用：这些情况算是告诉主人了（任务板上失败的调查、
 	// 额度提醒，下一轮不再附上）。被打断、出错时不调用，下一轮照样附上。nil = 不用确认（时间、位置这类每轮重新算的）
 	Delivered func()
+	// Interrupted 在附上这些情况的那一轮被主人打断时调用（生成时或播放时；出错不算）。Delivered 和它最多调用一个。
+	// 用来限制被打断后再附上几次（BriefingCuts）。可以为 nil
+	Interrupted func()
 }
 
 // Deliveries 收集「主人听完这一轮才算数」的事（见 OnDelivered）；会话里是这一轮的记录。

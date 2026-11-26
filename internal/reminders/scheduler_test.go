@@ -199,9 +199,34 @@ func TestUndeliveredReminderCatchesUpOrIsMissed(t *testing.T) {
 	if other := s.Brief("老大"); len(other.Lines) != 0 {
 		t.Errorf("只告诉定的那个人：%+v", other)
 	}
-	briefing.Delivered()
+	briefing.Interrupted() // 附上的那一轮被打断：再附上一次，说明上次被打断了
+	again := s.Brief("主人")
+	if len(again.Lines) != 1 || !strings.Contains(again.Lines[0], brain.CutNote) {
+		t.Fatalf("被打断后再附上一次：%+v", again)
+	}
+	again.Delivered()
 	if again := s.Brief("主人"); len(again.Lines) != 0 {
 		t.Errorf("听完就算告诉了：%+v", again)
+	}
+}
+
+// 附上「错过了」的那一轮一直被打断：再附上一次以后就当告诉过了。
+func TestMissedBriefingGivesUpAfterRepeatedCuts(t *testing.T) {
+	s, announcer, now := newScheduler(t)
+	ctx := context.Background()
+	announcer.online = false
+	if _, err := s.Set(ctx, "主人", Request{Text: "该吃药了。", After: time.Minute}); err != nil {
+		t.Fatal(err)
+	}
+	now.advance(CatchUpWindow + 2*time.Minute)
+	s.handleDue(ctx)
+	s.Brief("主人").Interrupted()
+	s.Brief("主人").Interrupted()
+	if left := s.Brief("主人"); len(left.Lines) != 0 {
+		t.Fatalf("被打断两次就不再附上：%+v", left)
+	}
+	if missed, _ := s.store.Unannounced(ctx, "主人"); len(missed) != 0 {
+		t.Errorf("当告诉过了：%+v", missed)
 	}
 }
 

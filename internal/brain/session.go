@@ -109,7 +109,9 @@ type Session struct {
 	// pendingDelivered：上一轮说完了，这一轮附上的情况（任务板的结论、额度提醒）等确认主人听完才算告诉了——
 	// 下一轮回答开始时还没收到截断就调用；播放中被打断就丢掉（之后再附上）。声音在终端播完要比服务端发完晚得多
 	pendingDelivered []func()
-	noSpeaker        bool // 终端说现在没有音箱：不合成语音，只发文字
+	// pendingInterrupted：同一轮附上的情况在播放中被打断时要通知的（Briefing.Interrupted），和 pendingDelivered 一起清
+	pendingInterrupted []func()
+	noSpeaker          bool // 终端说现在没有音箱：不合成语音，只发文字
 	// announcements：排着等服务端自己开口的话（到点的提醒）；只在没在答、没在播、主人没在说时开口（announce.go）
 	announcements []Announcement
 }

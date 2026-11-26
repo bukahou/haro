@@ -47,6 +47,8 @@ type Monitor struct {
 
 	mu      sync.Mutex
 	results []Result
+	// starting：每一项还在启动（还没好过、也还没连着出错两轮）。启动时这一段出错只记 INFO（见 checkAll）
+	starting []bool
 }
 
 // NewMonitor 创建就绪检查：每 interval 检查一轮，每项最多等 timeout。调用 Run 之后才开始检查。
@@ -55,7 +57,11 @@ func NewMonitor(checks []Check, interval, timeout time.Duration, logger *slog.Lo
 	for i, check := range checks {
 		results[i] = Result{Name: check.Name, Error: errNotCheckedYet.Error()}
 	}
-	return &Monitor{checks: checks, interval: interval, timeout: timeout, logger: logger, results: results}
+	starting := make([]bool, len(checks))
+	for i := range starting {
+		starting[i] = true
+	}
+	return &Monitor{checks: checks, interval: interval, timeout: timeout, logger: logger, results: results, starting: starting}
 }
 
 // Run 马上检查一轮，之后每 interval 一轮，直到 ctx 结束。
@@ -73,6 +79,8 @@ func (m *Monitor) Run(ctx context.Context) {
 }
 
 // checkAll 并发跑一轮全部检查；状态变化时（正常 ↔ 出错）记一条日志，不每轮都记。
+// 启动后第一轮出错只记 INFO（「启动中」）：一起启动的依赖（同一个 Pod 里的 haro-asr）常常晚一两秒才开始监听；
+// 第二轮还出错才记 WARN。就绪的结果照实（/readyz 照样 503），只是日志不在启动时误报。
 func (m *Monitor) checkAll(ctx context.Context) {
 	var wg sync.WaitGroup
 	for i, check := range m.checks {
@@ -98,10 +106,21 @@ func (m *Monitor) record(i int, err error) {
 	previous := m.results[i]
 	m.results[i] = result
 	m.mu.Unlock()
+	first := previous.CheckedAt.IsZero()
+	m.mu.Lock()
+	starting := m.starting[i] // 这一项还在启动（还没好过、也还没连着出错两轮）
+	if result.OK || !first {
+		m.starting[i] = false
+	}
+	m.mu.Unlock()
 	switch {
-	case !result.OK && (previous.OK || previous.CheckedAt.IsZero()):
+	case !result.OK && first: // 启动后第一轮
+		m.logger.Info("就绪检查：启动中，这一项还没好（下一轮还不好才算出错）", "check", result.Name, "err", result.Error)
+	case !result.OK && (previous.OK || starting):
 		m.logger.Warn("就绪检查：出错", "check", result.Name, "err", result.Error)
-	case result.OK && !previous.OK && !previous.CheckedAt.IsZero():
+	case result.OK && starting && !first:
+		m.logger.Info("就绪检查：启动完成", "check", result.Name)
+	case result.OK && !previous.OK && !first:
 		m.logger.Info("就绪检查：恢复正常", "check", result.Name)
 	}
 }

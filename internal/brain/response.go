@@ -88,7 +88,7 @@ func (s *Session) runResponse(ctx context.Context, job *transcriptionJob) {
 func (s *Session) beginResponse(item string) {
 	s.mu.Lock()
 	heard := s.pendingDelivered
-	s.pendingDelivered = nil
+	s.pendingDelivered, s.pendingInterrupted = nil, nil
 	s.spoken, s.truncateAtMs, s.answeredInResponse, s.responseItem = nil, -1, false, item
 	s.mu.Unlock()
 	for _, delivered := range heard { // 在这一轮附上情况之前：告诉过的不再附上

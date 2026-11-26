@@ -40,6 +40,8 @@ type Scheduler struct {
 	mu       sync.Mutex
 	inFlight map[int64]time.Time // 已经交出去、还没有结果的提醒 → 交出去的是哪一次到点
 	waiting  map[int64]bool      // 到点了、交不出去（没有在线的终端）的提醒：之后说出来算补说；日志只记第一次
+
+	cuts brain.BriefingCuts // 附上「错过了」的那一轮被主人打断了几次：被打断后最多再附上一次
 }
 
 // SchedulerOptions 是调度的可调部分；零值的字段用默认值。
@@ -356,6 +358,7 @@ func (s *Scheduler) nextAfter(reminder Reminder, occurrence, now time.Time) time
 }
 
 // Brief 实现 brain.Briefer：这个人错过了的提醒，附在这一轮的情况说明里；他听完这一轮才标成已告诉。
+// 附上的那一轮被打断，最多再附上一次（brain.BriefingCuts），之后当告诉过了。
 func (s *Scheduler) Brief(person string) brain.Briefing {
 	ctx, cancel := context.WithTimeout(context.Background(), storeTimeout)
 	defer cancel()
@@ -364,23 +367,40 @@ func (s *Scheduler) Brief(person string) brain.Briefing {
 		s.logger.Warn("读错过的提醒失败：这一轮不提", "person", person, "err", err)
 		return brain.Briefing{}
 	}
-	if len(missed) == 0 {
-		return brain.Briefing{}
-	}
-	lines := make([]string, 0, len(missed))
-	ids := make([]int64, 0, len(missed))
+	var lines []string
+	var ids, givenUp []int64
 	for _, reminder := range missed {
-		lines = append(lines, fmt.Sprintf("提醒 #%d「%s」本该在 %s 说，那时没有在线的终端，没能说出来。这一轮顺便告诉主人一声。",
-			reminder.ID, reminder.Text, reminder.MissedAt.In(s.location).Format("1月2日 15:04")))
+		if s.cuts.Exhausted(reminder.ID) {
+			givenUp = append(givenUp, reminder.ID)
+			continue
+		}
+		line := fmt.Sprintf("提醒 #%d「%s」本该在 %s 说，那时没有在线的终端，没能说出来。先回答主人这次说的话，再顺便告诉他一声。",
+			reminder.ID, reminder.Text, reminder.MissedAt.In(s.location).Format("1月2日 15:04"))
+		if s.cuts.Count(reminder.ID) > 0 {
+			line += brain.CutNote
+		}
+		lines = append(lines, line)
 		ids = append(ids, reminder.ID)
 	}
-	return brain.Briefing{Lines: lines, Delivered: func() {
-		ctx, cancel := context.WithTimeout(context.Background(), storeTimeout)
-		defer cancel()
-		if err := s.store.MissTold(ctx, ids...); err != nil {
-			s.logger.Warn("标记错过的提醒已告诉失败：之后会再说一次", "ids", ids, "err", err)
-		}
-	}}
+	if len(givenUp) > 0 {
+		s.logger.Info("错过的提醒附上了几次都被打断：当告诉过了", "ids", givenUp)
+		s.missTold(givenUp)
+	}
+	if len(lines) == 0 {
+		return brain.Briefing{}
+	}
+	return brain.Briefing{Lines: lines, Delivered: func() { s.missTold(ids) }, Interrupted: func() { s.cuts.Add(ids) }}
+}
+
+// missTold 记下这几条错过的提醒已经告诉主人了。
+func (s *Scheduler) missTold(ids []int64) {
+	ctx, cancel := context.WithTimeout(context.Background(), storeTimeout)
+	defer cancel()
+	if err := s.store.MissTold(ctx, ids...); err != nil {
+		s.logger.Warn("标记错过的提醒已告诉失败：之后会再说一次", "ids", ids, "err", err)
+		return
+	}
+	s.cuts.Forget(ids)
 }
 
 func formatNext(next time.Time, location *time.Location) string {

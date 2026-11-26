@@ -50,6 +50,8 @@ type turnRecord struct {
 	// delivered：要「主人听完这一轮才算告诉了」的事——附上的情况的确认（任务板、额度提醒）和工具登记的（OnDelivered）；
 	// 只在说完、播放没被打断时调用
 	delivered []func()
+	// interrupted：这一轮附上的情况被打断时要通知的（Briefing.Interrupted）
+	interrupted []func()
 }
 
 // toolRound 是模型一次要求调用工具：调用前说的话、要求的调用、各自的结果。
@@ -182,12 +184,20 @@ func (s *Session) closeTurn(record *turnRecord, ending turnEnding) bool {
 		s.logger.Info("问确认时被打断：撤掉这一轮存下的待确认操作", "dropped", dropped)
 	}
 	s.rememberTurn(record.startedAt, record.messages(ending, answer), record.contextTokens)
-	if ending == turnCompleted && len(record.delivered) > 0 { // 被打断、出错时不算告诉了，下一轮再附上
+	cut := ending == turnInterrupted
+	if ending == turnCompleted && (len(record.delivered) > 0 || len(record.interrupted) > 0) { // 被打断、出错时不算告诉了，下一轮再附上
 		s.mu.Lock()
 		if s.truncateAtMs < 0 { // 说完了，还要等主人听完（见 pendingDelivered）
-			s.pendingDelivered = record.delivered
+			s.pendingDelivered, s.pendingInterrupted = record.delivered, record.interrupted
+		} else { // 生成完之前就被打断在播放里了
+			cut = true
 		}
 		s.mu.Unlock()
+	}
+	if cut {
+		for _, interrupted := range record.interrupted {
+			interrupted()
+		}
 	}
 	if ending != turnCompleted {
 		s.logger.Info("这一轮没说完：照实记进历史", "item", item, "ending", endingLabel(ending),

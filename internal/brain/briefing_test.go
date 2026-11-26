@@ -17,10 +17,11 @@ type staticBriefer struct{ lines []string }
 
 func (b staticBriefer) Brief(string) brain.Briefing { return brain.Briefing{Lines: b.lines} }
 
-// reportBriefer 附上一条要「说完才算告诉了」的情况，记下确认了几次。
+// reportBriefer 附上一条要「说完才算告诉了」的情况，记下确认了几次、被打断了几次。
 type reportBriefer struct {
-	mu        sync.Mutex
-	delivered int
+	mu          sync.Mutex
+	delivered   int
+	interrupted int
 }
 
 func (b *reportBriefer) Brief(string) brain.Briefing {
@@ -28,6 +29,10 @@ func (b *reportBriefer) Brief(string) brain.Briefing {
 		b.mu.Lock()
 		defer b.mu.Unlock()
 		b.delivered++
+	}, Interrupted: func() {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		b.interrupted++
 	}}
 }
 
@@ -35,6 +40,12 @@ func (b *reportBriefer) count() int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.delivered
+}
+
+func (b *reportBriefer) cuts() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.interrupted
 }
 
 // 附上的情况：这一轮说完、主人也听完了（下一轮开始时还没收到截断）才确认告诉了；
@@ -51,6 +62,9 @@ func TestBriefingDeliveredOnlyWhenHeard(t *testing.T) {
 	braintest.Done(t, k.ask("有什么事吗"))
 	if got := briefer.count(); got != 0 {
 		t.Fatalf("被打断、出错的轮次不应确认：%d", got)
+	}
+	if got := briefer.cuts(); got != 1 {
+		t.Fatalf("生成时被打断的那一轮应通知被打断一次（出错的不算）：%d", got)
 	}
 	k.say("有什么事吗")
 	if got := briefer.count(); got != 0 {
@@ -74,6 +88,9 @@ func TestBriefingNotDeliveredWhenPlaybackCut(t *testing.T) {
 	k.say("哈罗哈罗")
 	if got := briefer.count(); got != 0 {
 		t.Errorf("上一轮播放中被打断：不应确认（%d）", got)
+	}
+	if got := briefer.cuts(); got != 1 {
+		t.Errorf("上一轮播放中被打断：应通知被打断一次（%d）", got)
 	}
 }
 

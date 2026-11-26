@@ -398,11 +398,12 @@ func TestResearchFindsAnswerAndBriefsOnce(t *testing.T) {
 	if searches, reads := rig.searcher.counts(); searches != 1 || reads != 1 || rig.budget.recorded() != 2 {
 		t.Errorf("搜索 %d、读 %d、记账 %d 积分", searches, reads, rig.budget.recorded())
 	}
-	// 任务板只提这个任务查完了、让模型去取：结论不放在任务板上（模型不取就讲不出来）；也不靠这一轮说完就算告诉了
+	// 任务板只提这个任务查完了：让模型先回答主人这句、再一句话问要不要听（结论不放在任务板上，要听再取）；
+	// 主人听完这一轮就算告诉了
 	briefing := rig.runner.Brief("主人")
 	if len(briefing.Lines) != 1 || !strings.Contains(briefing.Lines[0], question) || strings.Contains(briefing.Lines[0], scriptedConclusion) ||
-		briefing.Delivered != nil {
-		t.Errorf("任务板应只提查完了，不带结论、不靠这一轮说完就算告诉了：%+v", briefing)
+		!strings.Contains(briefing.Lines[0], "先回答主人这次说的话") || briefing.Delivered == nil {
+		t.Errorf("任务板应只提查完了、先回答这句再问要不要听，听完就算告诉了：%+v", briefing)
 	}
 	// 不在一轮回答里查（没有收集处）：不算告诉了；按编号查到那一个，别人的编号查不到
 	if found, err := rig.runner.Status(ctx, "主人", &task.ID); err != nil || len(found.Tasks) != 1 || found.Tasks[0].Conclusion != scriptedConclusion {
@@ -411,7 +412,7 @@ func TestResearchFindsAnswerAndBriefsOnce(t *testing.T) {
 	if found, err := rig.runner.Status(ctx, "别人", &task.ID); err != nil || len(found.Tasks) != 0 || found.Note == "" {
 		t.Errorf("别人的编号查不到：%+v %v", found, err)
 	}
-	// 一轮回答里取了结论：登记「主人听完才算告诉了」；还没确认听完之前，任务板照样附上
+	// 主人要听、一轮回答里取了结论：同样登记「主人听完才算告诉了」；还没确认听完之前，任务板照样附上
 	var heard deliveries
 	if found, err := rig.runner.Status(brain.WithDeliveries(ctx, &heard), "主人", nil); err != nil || len(found.Tasks) != 1 ||
 		found.Tasks[0].Conclusion != scriptedConclusion || len(heard) != 1 {
@@ -433,6 +434,35 @@ func TestResearchFindsAnswerAndBriefsOnce(t *testing.T) {
 	var again deliveries
 	if _, err := rig.runner.Status(brain.WithDeliveries(ctx, &again), "主人", nil); err != nil || len(again) != 0 {
 		t.Errorf("已经告诉过的结论再取一次：不用再登记（%d 件，%v）", len(again), err)
+	}
+}
+
+// 附上「查完了」的那一轮被主人打断：下一轮再附上一次（说明上次被打断了，由模型看历史判断要不要再说）；
+// 又被打断就当告诉过了，不再附上（结论随时能问），任务标成已告诉。
+func TestBoardNoticeIsRepeatedOnceAfterInterruption(t *testing.T) {
+	model := &scriptedModel{replies: []brain.ReplyDelta{call("search_web", map[string]any{"query": "A B 价格"})}}
+	rig := newRig(t, model, rigSetup{})
+	task := rig.research(t, "A 和 B 哪个便宜")
+	ctx := context.Background()
+
+	first := rig.runner.Brief("主人")
+	if len(first.Lines) != 1 || strings.Contains(first.Lines[0], brain.CutNote) || first.Interrupted == nil {
+		t.Fatalf("第一次附上：%+v", first)
+	}
+	first.Interrupted()
+	second := rig.runner.Brief("主人")
+	if len(second.Lines) != 1 || !strings.Contains(second.Lines[0], brain.CutNote) {
+		t.Fatalf("被打断后再附上一次，并说明上次被打断了：%+v", second)
+	}
+	second.Interrupted()
+	if third := rig.runner.Brief("主人"); len(third.Lines) != 0 {
+		t.Fatalf("又被打断就不再附上：%+v", third)
+	}
+	if reported, err := rig.store.Get(ctx, task.ID); err != nil || !reported.Reported {
+		t.Errorf("当告诉过了：应标成已告诉：%+v %v", reported, err)
+	}
+	if found, err := rig.runner.Status(ctx, "主人", &task.ID); err != nil || found.Tasks[0].Conclusion == "" {
+		t.Errorf("结论照样能问：%+v %v", found, err)
 	}
 }
 

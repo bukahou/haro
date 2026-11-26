@@ -174,6 +174,9 @@ func (s *Session) briefing(conversation *Conversation, record *turnRecord) strin
 		if briefing.Delivered != nil {
 			record.delivered = append(record.delivered, briefing.Delivered)
 		}
+		if briefing.Interrupted != nil {
+			record.interrupted = append(record.interrupted, briefing.Interrupted)
+		}
 	}
 	if len(lines) == 0 {
 		return ""
