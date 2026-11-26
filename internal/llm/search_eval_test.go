@@ -18,6 +18,8 @@
 //
 // 跑一次要花钱：HARO_EVAL_DRY_RUN=1 只看要回答多少次；HARO_EVAL_BUDGET_USD（默认 3）是一遍的上限，超了就停。
 // HARO_EVAL_CASES、HARO_EVAL_ARMS（逗号分隔）只跑其中几题、几种做法；HARO_EVAL_SPEAKER 是声纹认出的人（主人资料按人取）；
+// HARO_EVAL_LOCAL_URL（OpenAI 兼容服务的地址，例如本机 llama.cpp 的 http://127.0.0.1:8081/v1）+ HARO_EVAL_LOCAL_MODEL（名字）让甲、丙的前台换成本机模型
+// （HARO_EVAL_LOCAL_NO_THINK=1 时请求里关掉它的思考）；
 // HARO_EVAL_SERVER_FILTERING=1 让乙先用代码筛结果（新版搜索的默认做法；Haiku 5.5 用它时多数把搜索参数写错，所以默认不用）。
 //
 //	HARO_ANTHROPIC_API_KEY=… HARO_TAVILY_API_KEY=… HARO_CLOUD_LLM_MODEL=… HARO_PROFILE_DIR=… HARO_PERSONAS_DIR=… HARO_WEATHER_HOME=ip \
@@ -27,10 +29,12 @@ package llm
 
 import (
 	"bufio"
+	"bytes"
 	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"iter"
 	"log/slog"
 	"net/http"
@@ -121,13 +125,18 @@ type searchRun struct {
 	Error       string    `json:"error,omitempty"`  // 评测这边出的错（例如等不到答完）
 	FirstTextMs int64     `json:"first_text_ms"`    // 交出识别结果后多久出第一句（0 = 没出）
 	DoneMs      int64     `json:"done_ms"`
-	Effort      string    `json:"effort,omitempty"`   // 前台模型的回答力度
+	Model       string    `json:"model,omitempty"`    // 前台模型
+	Effort      string    `json:"effort,omitempty"`   // 前台模型的回答力度（Claude）
 	Thinking    string    `json:"thinking,omitempty"` // 前台模型的思考写法
 	Usage       runUsage  `json:"usage"`
 }
 
-// label 是报告里这次回答归到哪一组：做法 + 力度（思考不是关着时再加上思考写法）；没记力度的（旧的结果）只用做法。
+// label 是报告里这次回答归到哪一组：做法 + 力度（思考不是关着时再加上思考写法）；前台是本机模型时是做法 + 模型名；
+// 没记力度的（旧的结果）只用做法。
 func (r searchRun) label() string {
+	if r.Model != "" && !strings.HasPrefix(r.Model, "claude-") { // 本机模型：做法 + 模型名
+		return r.Arm + "·" + r.Model
+	}
 	if r.Effort == "" {
 		return r.Arm
 	}
@@ -196,6 +205,8 @@ type searchEnv struct {
 	briefers     []brain.Briefer
 	home         weather.Place
 	pricing      spending.Pricing // USDToYen = 1：LLMYen 算出来就是美元
+	frontModel   string           // 前台模型（Claude 的模型 ID，或本机模型的名字）
+	localURL     string           // 本机 OpenAI 兼容服务的地址（HARO_EVAL_LOCAL_URL）；空 = 前台用 Claude
 	speaker      string
 	logger       *slog.Logger
 }
@@ -326,8 +337,13 @@ func prepareSearchEnv(t *testing.T, ctx context.Context, settings config.ServerS
 		t.Fatal(err)
 	}
 	environment.pricing = spending.Pricing{USDToYen: 1, Models: map[string]spending.TokenPrice{settings.CloudLLMModel: price}}
-	t.Logf("前台：%s（思考 %s、力度 %s、输出上限 %d、最多 %d 步）；性格 %d 个（默认 %s）；主人资料 %t；家 %s %s %s；说话的人 %q",
-		settings.CloudLLMModel, settings.CloudLLMThinking, settings.CloudLLMEffort, frontMaxTokens(settings, front), front.MaxSteps,
+	environment.frontModel, environment.localURL = settings.CloudLLMModel, os.Getenv("HARO_EVAL_LOCAL_URL")
+	if environment.localURL != "" {
+		environment.frontModel = cmp.Or(os.Getenv("HARO_EVAL_LOCAL_MODEL"), "local")
+		environment.pricing.Models[environment.frontModel] = spending.TokenPrice{Free: true}
+	}
+	t.Logf("前台：%s（Claude 时：思考 %s、力度 %s；输出上限 %d、最多 %d 步）；性格 %d 个（默认 %s）；主人资料 %t；家 %s %s %s；说话的人 %q",
+		environment.frontModel, settings.CloudLLMThinking, settings.CloudLLMEffort, frontMaxTokens(settings, front), front.MaxSteps,
 		len(environment.personas), settings.PersonaDefault, environment.profiles != nil,
 		environment.home.Name, environment.home.Region, environment.home.Country, environment.speaker)
 	return environment
@@ -346,6 +362,19 @@ func buildSearchArms(t *testing.T, names []string, environment searchEnv, api *C
 		return NewAnthropicChatModel(AnthropicOptions{API: api, Model: settings.CloudLLMModel, MaxTokens: maxTokens,
 			Effort: settings.CloudLLMEffort, Thinking: settings.CloudLLMThinking, MaxRetries: 2})
 	}
+	// toolFront 是甲、丙的前台：设了 HARO_EVAL_LOCAL_URL 时是本机的 OpenAI 兼容服务（例如 llama.cpp），否则是 Claude
+	toolFront := func() brain.ChatModel {
+		maxTokens := frontMaxTokens(settings, environment.front)
+		if environment.localURL != "" {
+			client := http.DefaultClient
+			if os.Getenv("HARO_EVAL_LOCAL_NO_THINK") != "" {
+				client = &http.Client{Transport: noThinkTransport{base: http.DefaultTransport}}
+			}
+			return NewOpenAIChatModel(OpenAIOptions{BaseURL: environment.localURL, Model: environment.frontModel, MaxTokens: maxTokens,
+				MaxRetries: 2, HTTPClient: client})
+		}
+		return front(maxTokens)
+	}
 	var arms []searchArm
 	for _, name := range names {
 		switch name {
@@ -354,8 +383,7 @@ func buildSearchArms(t *testing.T, names []string, environment searchEnv, api *C
 			searcher := tools.NewTavilySearcher(settings.TavilyMCPURL, tavilyKey, nil, logger)
 			t.Cleanup(func() { _ = searcher.Close() })
 			arms = append(arms, searchArm{name: name, meter: meter, tools: tools.WebSearchTools(searcher, meter, logger),
-				model: &meteredFront{ChatModel: front(frontMaxTokens(settings, environment.front)), model: settings.CloudLLMModel,
-					pricing: environment.pricing}})
+				model: &meteredFront{ChatModel: toolFront(), model: environment.frontModel, pricing: environment.pricing}})
 		case armTavilyUp:
 			meter := &creditMeter{}
 			searcher := tools.NewTavilySearcherWith(settings.TavilyMCPURL, tavilyKey, tavilyUpOptions, nil, logger)
@@ -365,9 +393,11 @@ func buildSearchArms(t *testing.T, names []string, environment searchEnv, api *C
 				t.Fatal(err)
 			}
 			arms = append(arms, searchArm{name: name, meter: meter, tools: builtin,
-				model: &meteredFront{ChatModel: front(frontMaxTokens(settings, environment.front)), model: settings.CloudLLMModel,
-					pricing: environment.pricing}})
+				model: &meteredFront{ChatModel: toolFront(), model: environment.frontModel, pricing: environment.pricing}})
 		case armAnthropic:
+			if environment.localURL != "" {
+				t.Fatal("乙是 Claude 的服务端工具，前台换成本机模型时不能跑：HARO_EVAL_ARMS 里去掉乙")
+			}
 			filtering := os.Getenv("HARO_EVAL_SERVER_FILTERING") != ""
 			maxTokens := frontMaxTokens(settings, environment.front)
 			if filtering {
@@ -383,6 +413,32 @@ func buildSearchArms(t *testing.T, names []string, environment searchEnv, api *C
 		}
 	}
 	return arms
+}
+
+// noThinkTransport 给发往本机模型的每个请求加上 chat_template_kwargs.enable_thinking = false（llama.cpp 等按 Qwen
+// 一类聊天模板关掉思考的写法），比较时和线上思考关着的 Haiku 对齐。只在评测里用。
+type noThinkTransport struct{ base http.RoundTripper }
+
+func (n noThinkTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	if request.Body == nil || request.Method != http.MethodPost {
+		return n.base.RoundTrip(request)
+	}
+	body, err := io.ReadAll(request.Body)
+	_ = request.Body.Close()
+	if err != nil {
+		return nil, err
+	}
+	var payload map[string]any
+	if json.Unmarshal(body, &payload) == nil {
+		payload["chat_template_kwargs"] = map[string]any{"enable_thinking": false}
+		if rewritten, err := json.Marshal(payload); err == nil {
+			body = rewritten
+		}
+	}
+	clone := request.Clone(request.Context())
+	clone.Body, clone.ContentLength = io.NopCloser(bytes.NewReader(body)), int64(len(body))
+	clone.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(body)), nil }
+	return n.base.RoundTrip(clone)
 }
 
 // serverSearchTools 是乙给模型的服务端工具：搜索带上家所在的城市（让结果按地区来），读网页不另外压字数。
@@ -445,7 +501,10 @@ func askSearchCase(t *testing.T, environment searchEnv, arm searchArm, testCase 
 	braintest.Speak(t, session, stream, utterance)
 	braintest.Expect[realtimeproto.ResponseCreated](t, session)
 	run := searchRun{Case: testCase.ID, Arm: arm.name, Question: testCase.Question, AskedAt: time.Now(),
-		Effort: settings.CloudLLMEffort, Thinking: settings.CloudLLMThinking}
+		Model: environment.frontModel}
+	if environment.localURL == "" {
+		run.Effort, run.Thinking = settings.CloudLLMEffort, settings.CloudLLMThinking
+	}
 	braintest.Recognized(t, stream, utterance)
 	answer, done, first, elapsed, err := collectSearchAnswer(session, run.AskedAt, searchAnswerTimeout)
 	run.Answer, run.FirstTextMs, run.DoneMs = answer, first.Milliseconds(), elapsed.Milliseconds()
