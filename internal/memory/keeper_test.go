@@ -291,3 +291,27 @@ func TestRunIndexesWhenPoked(t *testing.T) {
 		t.Fatal("ctx 结束后应退出")
 	}
 }
+
+// slowEmbedder 算问句的向量时一直不回（嵌入服务卡住），直到 ctx 结束。
+type slowEmbedder struct{ scriptedEmbedder }
+
+func (e *slowEmbedder) EmbedQuery(ctx context.Context, _ string) ([]float32, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// 查的时候嵌入服务卡住：最多等 queryEmbedTimeout，就只给最近记的（主人在等回答，不能一直等）。
+func TestRecallDoesNotWaitForStuckEmbedder(t *testing.T) {
+	ctx := context.Background()
+	embedder := &slowEmbedder{scriptedEmbedder{vectors: embeddings}}
+	keeper := NewKeeper(openNotes(t), embedder, nil, 20, quiet)
+	if _, err := keeper.Remember(ctx, "主人", "不吃香菜", notes.SourceModel, false); err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	recollection, err := keeper.Recall(ctx, "主人", "我有什么忌口")
+	if elapsed := time.Since(started); err != nil || recollection.ByMeaning || len(recollection.Notes) != 1 ||
+		elapsed > queryEmbedTimeout+time.Second {
+		t.Fatalf("卡住时等 %v 左右就只给最近记的：%+v %v（等了 %v）", queryEmbedTimeout, recollection, err, elapsed)
+	}
+}

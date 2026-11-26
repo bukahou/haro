@@ -53,6 +53,9 @@ const (
 	maxContentRunes = 500
 	// syncEmbedTimeout：记住时当场算向量最多等这么久，等不到就交给后台补（主人不用等）。定值
 	syncEmbedTimeout = 3 * time.Second
+	// queryEmbedTimeout：查的时候算问句的向量最多等这么久（这一轮主人在等回答）；等不到就只给最近记的。定值：
+	// 集群里的服务嵌入一句短话一般几十毫秒
+	queryEmbedTimeout = 3 * time.Second
 	// indexInterval：后台多久看一次有没有没算过向量的（新的对话轮次）；记住新的一条时马上看。刚说的话本来就在最近几轮里，
 	// 晚十几秒能按意思找到不影响；定值
 	indexInterval = 20 * time.Second
@@ -257,6 +260,8 @@ func (k *Keeper) Brief(person string) brain.Briefing {
 const storeTimeout = 2 * time.Second
 
 func (k *Keeper) embedQuery(ctx context.Context, query string) ([]float32, error) {
+	ctx, cancel := context.WithTimeout(ctx, queryEmbedTimeout)
+	defer cancel()
 	started := time.Now()
 	vector, err := k.embedder.EmbedQuery(ctx, query)
 	embedDuration.Record(ctx, time.Since(started).Seconds())
