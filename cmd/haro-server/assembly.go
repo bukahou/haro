@@ -123,11 +123,11 @@ func connectServices(ctx context.Context, settings config.ServerSettings, logger
 type tooling struct {
 	toolbox      brain.Toolbox    // 没开工具时为 nil
 	briefers     []brain.Briefer  // 每轮补充给模型的即时情况：现在几号几点、额度提醒、主人家大致在哪、任务板
-	notices      *brain.NoticeHub // 给终端的提示（后台调查查完了让终端响一声）
+	notices      *brain.NoticeHub // 给终端的提示（后台调查查完了让终端响一声）和服务端自己开口（到点的提醒）
 	expertSearch vision.Search    // 看画面的专家联网查：和主对话的快查同一套搜索与额度；不能查时为 nil
 }
 
-// buildTooling 准备工具：自研工具内置（记事本直接连数据库；天气；联网搜索与后台调查），MCP 只接第三方（现在还没有）。
+// buildTooling 准备工具：自研工具内置（记事本、提醒直接连数据库；天气；联网搜索与后台调查），MCP 只接第三方（现在还没有）。
 // catalog 是代理定义（后台调查的代理按它装配）。
 func buildTooling(ctx context.Context, settings config.ServerSettings, catalog agents.Catalog, deps services, logger *slog.Logger,
 	shutdown *shutdownSteps) (tooling, error) {
@@ -141,7 +141,14 @@ func buildTooling(ctx context.Context, settings config.ServerSettings, catalog a
 	}
 	shutdown.add("记事库", store.Close)
 	builtins := []tools.Builtin{tools.NoteTools(store, settings.NotesListLimit, logger)}
-	if settings.Weather { // 天气：Open-Meteo 为主，日本气象厅备用；都不用密钥
+	scheduler, stopReminders, err := startReminders(ctx, settings, kit.notices, logger)
+	if err != nil {
+		return kit, err
+	}
+	shutdown.add("提醒", stopReminders)
+	builtins = append(builtins, tools.ReminderTools(scheduler, logger))
+	kit.briefers = append(kit.briefers, scheduler) // 错过的提醒：主人下次开口时告诉他
+	if settings.Weather {                          // 天气：Open-Meteo 为主，日本气象厅备用；都不用密钥
 		weatherHTTP := weather.NewHTTPClient() // 连接等得短：连不上就早点交给备用
 		home := weatherHome(ctx, settings, weatherHTTP, logger)
 		openMeteo := weather.NewOpenMeteoClient(settings.WeatherForecastURL, settings.WeatherGeocodingURL, weatherHTTP)

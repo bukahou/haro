@@ -16,7 +16,7 @@ func TestEmbeddedTonesParse(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, tone := range map[string]realtimeproto.PCMAudio{"offline": builtin.Offline, "online": builtin.Online,
-		"sleep": builtin.Sleep, "notice": builtin.Notice} {
+		"sleep": builtin.Sleep, "notice": builtin.Notice, "reminder": builtin.Reminder} {
 		if d := tone.Duration(); d < 500*time.Millisecond || d > 5*time.Second {
 			t.Errorf("%s：%v %v", name, tone.Format, d)
 		}

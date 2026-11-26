@@ -17,7 +17,7 @@ haro 是一个家用语音助手：家里每个房间放一台**终端**（麦�
 
 | 程序 | 作用 | 编译 |
 |---|---|---|
-| `cmd/haro` | 终端。`haro -enroll <名字>` 登记声纹（录音经服务端登记） | cgo（音频库 miniaudio 随源码编译，不用装系统库）；摄像头在 macOS 上要 ffmpeg（Linux 不用） |
+| `cmd/haro` | 终端。`haro -enroll <名字>` 登记声纹（要读的句子和录音都经服务端交给 haro-asr） | cgo（音频库 miniaudio 随源码编译，不用装系统库）；摄像头在 macOS 上要 ffmpeg（Linux 不用） |
 | `cmd/haro-server` | 服务端 | 纯 Go |
 | `cmd/haro-asr` | 本地语音识别服务（流式转写，协议照 OpenAI Realtime 的转写会话）。单独运行：集群里和服务端是同一个 Pod 的两个容器，开发机上各一个 systemd 用户单元；服务端按 `HARO_ASR_URL` 连它 | cgo（sherpa-onnx） |
 
@@ -27,9 +27,9 @@ haro 是一个家用语音助手：家里每个房间放一台**终端**（麦�
 （例如终端上报现在用的麦克风和音箱）。服务端和 haro-asr 之间的转写会话用同一份定义。见 `internal/realtimeproto`：
 
 - 线上的 JSON 结构只定义一处（`wire.go`），编解码只有一处（`codec.go`）；
-- 由它生成 JSON Schema（`haro.realtime.v3.schema.json`），测试比对两者，结构改了而文件没更新就失败；
+- 由它生成 JSON Schema（`haro.realtime.v4.schema.json`），测试比对两者，结构改了而文件没更新就失败；
 - 错误事件带稳定的错误码（`errors.go`），调用方按码判断，不看说明文字。
-- 握手时用 WebSocket 子协议协商版本（`haro.realtime.v3`）：报了不认识的 haro 版本、或者旧版终端没报版本，服务端拒绝握手，
+- 握手时用 WebSocket 子协议协商版本（`haro.realtime.v4`）：报了不认识的 haro 版本、或者旧版终端没报版本，服务端拒绝握手，
   响应里给错误码和它支持的版本；什么都不报的当普通 Realtime 客户端（只用标准事件）。终端被拒后提示一次，隔几分钟才再试；
 - 两端各自每 10 秒 ping 一次，5 秒内等不到 pong 就断开（`internal/heartbeat`），终端的看守随即重连。
 - 服务端的对话会话、haro-asr 的转写会话同时最多 `realtimeproto.MaxSessions` 条（两边同一个数：每条对话会话在 haro-asr 占一个转写会话），满了新连接在握手前回 503（错误码 `too_many_sessions`）。
@@ -45,6 +45,14 @@ haro 是一个家用语音助手：家里每个房间放一台**终端**（麦�
   服务端转给 haro-asr，它处理完回 `haro.wake_word.state`，服务端原样转给终端；听到唤醒词时 haro-asr 自己醒、报 `haro.wake_word.detected`。
   服务端和终端记的醒 / 睡只照这两个事件改，发请求时不改；终端等不到回复（`assistant.Timing.WakeConfirm`）就当没切成，醒着的话过一个对话窗口再试。
   识别流断开时服务端记下终端要的状态，重开后告诉新的流，由它回复确认。
+- 唤醒词只写在 haro-asr 的关键词文件一处：haro-asr 在转写会话的 `session.updated` 里报出（`haro.wake_word.phrases`），
+  服务端用对话会话的 `session.updated` 转给终端（变了才再发），终端日志里的唤醒提示照它写；客户端的 `session.update` 带唤醒词就拒绝。
+  声纹登记要读的句子也由 haro-asr 按它生成（`GET /v1/voiceprint-enrollment/sentences`，服务端转发）。
+- 服务端会自己开口（v4）：到点的提醒不等主人说话，服务端发带 `haro.unprompted`（缘由，例如 `reminder`）的 `response.created`，
+  接着照普通回答发文字、声音和 `response.done`。只在这台终端没在播、服务端没在答、主人没在说的时候开口（回答事件里没有回答编号，
+  声音不能混在一起），所以终端不管能不能打断都报「开始播放 / 播完了」（`haro.playback.started` / `stopped`）。
+  终端在主循环里照播回答的方式播（可以喊唤醒词打断），播完醒着等一个对话窗口，主人可以不叫唤醒词直接接话。
+- 模型判断主人要结束这次对话时（`end_conversation`），`response.done` 带 `haro.end_conversation`：终端播完就请语音前端休眠，被打断就不睡。
   semantic_vad 判定没说完时会把下一段并进同一句，最长并到 30 秒（`asrserver.Timing.MergeLimit`），再长就按说完交出、后面的另成一句。
 
 ## 服务端（`internal/brain` 与周边）
@@ -58,7 +66,7 @@ haro 是一个家用语音助手：家里每个房间放一台**终端**（麦�
 | `SpeechSynthesizer` | `internal/speech`：GPT-SoVITS（边合成边播放）、Piper。两种实现跑同一组契约测试（`internal/speech/synthesizer_contract_test.go`） |
 | `Toolbox` | `internal/tools`：内置工具 + 第三方 MCP 服务 |
 | `ConversationStore` | `internal/conversationstore`：SQLite（goose 迁移）；每一轮带说话的时间，发给模型时每轮前标日期和时刻 |
-| `Briefer` | 每轮补充给模型的即时情况：现在几号几点、主人家大致在哪（城市级）、额度提醒、后台调查的任务板 |
+| `Briefer` | 每轮补充给模型的即时情况：现在几号几点、主人家大致在哪（城市级）、额度提醒、后台调查的任务板、错过的提醒 |
 
 - **观测**：OpenTelemetry（OTLP/HTTP，`internal/telemetry`）。往哪发：标准的 `OTEL_EXPORTER_OTLP_ENDPOINT`（或分信号的）设了时以它为准，
   否则用 `HARO_OTLP_ENDPOINT`，都没有就只打日志；终端、服务端各报自己的 service.name（`haro-terminal` / `haro-server`），
@@ -117,6 +125,9 @@ haro 是一个家用语音助手：家里每个房间放一台**终端**（麦�
 | `look_at_camera` | | 看终端摄像头的画面：调用时才经 MCP 让终端拍一帧（终端的工具清单里有「拍一帧」时才提供） |
 | `switch_persona` | | 换性格（有两个以上性格时才提供） |
 | `ask_stronger_model` | | 主人纠正、或明说要想清楚时，前台模型交给更强的模型重答（`HARO_STRONG_LLM_USE` 有 correction 时才提供） |
+| `end_conversation` | | 模型判断主人要结束这次对话时调用：这一轮说完，终端播完就休眠（用唤醒门的终端才提供） |
+| `set_reminder` / `list_reminders` / `restore_reminder` | | 提醒（见下）：定、查、恢复；定和恢复只认声纹认出的这句 |
+| `cancel_reminder` | ✓ | 按编号取消提醒（可以恢复） |
 | `web_search` | | 联网搜一次（Tavily 远程 MCP）；设了密钥才提供 |
 | `start_research` / `research_status` / `cancel_research` | | 后台调查（见下）；设了搜索密钥才提供 |
 
@@ -132,6 +143,24 @@ Open-Meteo 连不上或报错时，日本境内的地点改查日本气象厅网
 - 连接（TCP、TLS 握手）各最多等 1.5 秒，建立不起来不重试，尽快交给备用；连上后卡住才重试一次。
 - 数据出处：天气 [Open-Meteo](https://open-meteo.com/)；备用 [気象庁](https://www.jma.go.jp/)（気象庁ホームページ）；
   地址反查 [国土地理院](https://www.gsi.go.jp/)。冒烟测试：`go test -tags integration -run Live ./internal/weather/`
+
+### 提醒（`internal/reminders`）
+
+「十分钟后叫我」「明早七点提醒我吃药」「每周一提醒倒垃圾」：
+
+- 时间由模型算好交来：`after_seconds`（多少秒以后）或 `at`（RFC 3339，带时区偏移）二选一，重复的加 `rrule`（RFC 5545，
+  例如 `FREQ=DAILY`；解析和推算用 rrule-go）。代码只校验（在将来、最远一年、重复的两次之间至少 5 分钟、每人在用的最多 50 条）和推算，
+  不理解「明早」「每周一」这样的话。时间存 UTC，按服务端的时区（`TZ`）推算钟点、给模型看。
+- 存在记事库的同一个文件里（`reminders` 表；表结构的版本记在自己的 `goose_db_version_reminders` 表，和记事本的迁移互不影响）；
+  提醒按人记，只能查、取消、恢复自己的。
+- 到点时调度（`reminders.Scheduler`，服务端里一个循环：睡到最近一次到点，有变化时被叫醒）把定提醒时存下的那句话交给
+  这个人最近说话的那台终端（`brain.NoticeHub.Announce`；他在哪台都没说过话时交给最近连上的那一台）：不经模型直接合成，
+  云端模型连不上照样说；合成用不了时终端播提醒的提示音（`reminder.wav`）。说出的话记进他的对话历史（标明是到点提醒），
+  主人接着说「再过十分钟提醒我」时模型知道刚才提醒了什么。
+- 到点时没有在线的终端（服务端重启、终端断线）：到点后 30 分钟以内终端连上就补说（`reminders.CatchUpWindow`），
+  更晚的记成错过，主人下次开口时附在情况说明里告诉他（听完那一轮才算告诉了）。
+- 指标：`haro.reminders.next_due`（最近一次到点的时间）、`haro.reminders.spoken`（说出来的，标明是不是改播了提示音、是不是晚了补说的）、
+  `haro.reminders.missed`（错过的）。
 
 ### 后台调查（`internal/research`）
 
@@ -191,7 +220,7 @@ Open-Meteo 连不上或报错时，日本境内的地点改查日本气象厅网
   驱动遇到要不到的会悄悄换），能出就明确要它，出不了就要宽度够的里面最小的，同一个分辨率帧率高的优先；`HARO_FRAME_WIDTH`（默认 1280）是送给模型的**最大**宽度，
   画面更窄就原样送、不放大。启动时日志记下向摄像头要了什么（「📷 向摄像头要画面」）和实际送给模型多大（「📷 送给模型的画面」）。
 - 提示音（`assets/tones`：内置的不含人声；可以用 `HARO_TONES_DIR` 换成自己录的）：服务端断开 / 恢复、
-  对话窗口结束去休眠（窗口默认 40 秒）、服务端的提示（例如后台调查查完了）。
+  对话窗口结束去休眠（窗口默认 40 秒）、服务端的提示（例如后台调查查完了）、到点的提醒没能说出来（服务端的语音合成用不了）。
 
 ## 配置
 

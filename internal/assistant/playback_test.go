@@ -99,7 +99,7 @@ func TestBargeInWhileGenerating(t *testing.T) {
 	brain.events <- chunk
 	brain.events <- realtimeproto.HaroWakeWordDetected{Keyword: "哈罗哈罗"}
 
-	err := a.playResponse(context.Background(), noSpan(), "item_1", time.Now())
+	_, err := a.playResponse(context.Background(), noSpan(), "item_1", time.Now())
 	if !errors.Is(err, errInterrupted) {
 		t.Fatalf("应返回被打断，得到 %v", err)
 	}
@@ -133,7 +133,7 @@ func TestBargeInWhileDraining(t *testing.T) {
 		time.Sleep(50 * time.Millisecond) // 让它先进入「等播完」
 		brain.events <- realtimeproto.HaroWakeWordDetected{Keyword: "哈罗哈罗"}
 	}()
-	err := a.playResponse(context.Background(), noSpan(), "item_1", time.Now())
+	_, err := a.playResponse(context.Background(), noSpan(), "item_1", time.Now())
 	if !errors.Is(err, errInterrupted) || !sink.wasAborted() {
 		t.Fatalf("播放尾巴里也应能打断：err=%v aborted=%v", err, sink.wasAborted())
 	}
@@ -149,7 +149,10 @@ func TestPlaysToTheEnd(t *testing.T) {
 	brain.events <- chunk
 	brain.events <- realtimeproto.ResponseDone{Status: realtimeproto.StatusCompleted}
 	returned := make(chan error, 1)
-	go func() { returned <- a.playResponse(context.Background(), noSpan(), "item_1", time.Now()) }()
+	go func() {
+		_, err := a.playResponse(context.Background(), noSpan(), "item_1", time.Now())
+		returned <- err
+	}()
 	select {
 	case <-returned:
 		t.Fatal("还没播完就返回了")
@@ -180,7 +183,7 @@ func TestCancelConfirmWaitComesFromTiming(t *testing.T) {
 	brain.events <- chunk
 	brain.events <- realtimeproto.HaroWakeWordDetected{Keyword: "哈罗哈罗"}
 	started := time.Now()
-	if err := a.playResponse(context.Background(), noSpan(), "item_1", time.Now()); !errors.Is(err, errInterrupted) {
+	if _, err := a.playResponse(context.Background(), noSpan(), "item_1", time.Now()); !errors.Is(err, errInterrupted) {
 		t.Fatalf("应被打断：%v", err)
 	}
 	if waited := time.Since(started); waited >= DefaultTiming.CancelConfirm {
@@ -218,7 +221,7 @@ func TestPlaybackSpanEndsWhenStopped(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	brain.events <- chunk
 	returned := make(chan error, 1)
-	go func() { returned <- a.playResponse(ctx, noSpan(), "item_1", time.Now()) }()
+	go func() { _, err := a.playResponse(ctx, noSpan(), "item_1", time.Now()); returned <- err }()
 	<-sink.opened
 	cancel()
 	if err := <-returned; !errors.Is(err, context.Canceled) {
@@ -239,13 +242,13 @@ func TestPlaybackSpanEndsOnceWhenFinishedOrInterrupted(t *testing.T) {
 	close(sink.release)
 	brain.events <- chunk
 	brain.events <- realtimeproto.ResponseDone{Status: realtimeproto.StatusCompleted}
-	if err := newBargeInAssistant(brain, sink).playResponse(context.Background(), noSpan(), "item_1", time.Now()); err != nil {
+	if _, err := newBargeInAssistant(brain, sink).playResponse(context.Background(), noSpan(), "item_1", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	brain, sink = &scriptedBrain{events: make(chan realtimeproto.ServerEvent, 16)}, newSlowSink()
 	brain.events <- chunk
 	brain.events <- realtimeproto.HaroWakeWordDetected{Keyword: "哈罗哈罗"}
-	if err := newBargeInAssistant(brain, sink).playResponse(context.Background(), noSpan(), "item_2", time.Now()); !errors.Is(err, errInterrupted) {
+	if _, err := newBargeInAssistant(brain, sink).playResponse(context.Background(), noSpan(), "item_2", time.Now()); !errors.Is(err, errInterrupted) {
 		t.Fatalf("应被打断：%v", err)
 	}
 	if n := ended(); n != 2 {

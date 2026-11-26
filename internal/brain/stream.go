@@ -177,6 +177,7 @@ func (s *Session) pumpStreamEvents(stream RecognizerStream) {
 			if !e.Awake {
 				s.speech = nil     // 识别流睡着时丢掉说到一半的那句，不会再有「说完」
 				s.lastSpeaker = "" // 对话窗口结束：下次醒来重新认人
+				s.startAnnouncementLocked()
 			}
 			s.mu.Unlock()
 			s.emit(e)
@@ -228,6 +229,9 @@ func (s *Session) pumpStreamEvents(stream RecognizerStream) {
 	s.mu.Lock()
 	speech := s.speech
 	s.speech = nil
+	if speech == nil {
+		s.startAnnouncementLocked() // 没有说到一半的那句：排着的话可以说了（有的话下面补的「说完」先回答它）
+	}
 	s.mu.Unlock()
 	select {
 	case <-s.closed:

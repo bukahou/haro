@@ -66,6 +66,9 @@ type Assistant struct {
 	heldNotices []realtimeproto.HaroNotice
 	// wakePhrases：服务端告诉的唤醒词（haro-asr 的关键词文件里的）；还没收到时为空，提示里不写具体的词。只在主循环里读写
 	wakePhrases []string
+	// endConversation：刚播完的这一轮，服务端说主人要结束对话（response.done 的 end_conversation）：主循环请语音前端休眠。
+	// 只在主循环里读写
+	endConversation bool
 }
 
 // eventBacklog：留给主循环之后再处理的事件最多这么多（打断后等取消确认期间收到的、留到这一轮答完再响的提示），

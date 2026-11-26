@@ -54,7 +54,7 @@ func TestWakeStateDuringPlaybackIsKeptForTheMainLoop(t *testing.T) {
 	brain.events <- realtimeproto.HaroWakeWordState{Awake: false}
 	brain.events <- realtimeproto.ResponseDone{Status: realtimeproto.StatusCompleted}
 	close(sink.release)
-	if err := a.playResponse(context.Background(), noSpan(), "item_1", time.Now()); err != nil {
+	if _, err := a.playResponse(context.Background(), noSpan(), "item_1", time.Now()); err != nil {
 		t.Fatalf("正常播完应返回 nil，得到 %v", err)
 	}
 	select {

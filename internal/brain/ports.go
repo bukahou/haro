@@ -330,3 +330,17 @@ func SpeakerFrom(ctx context.Context) string {
 	}
 	return SharedPerson
 }
+
+type voiceVerifiedKey struct{}
+
+// WithVoiceVerified 记下这一轮的话是不是声纹认出的登记过的人说的（算不出声纹、沿用上一句的人时不算）：
+// 只许本人做的事（例如定提醒）据此决定做不做。
+func WithVoiceVerified(ctx context.Context, verified bool) context.Context {
+	return context.WithValue(ctx, voiceVerifiedKey{}, verified)
+}
+
+// VoiceVerifiedFrom 取出这一轮的话是不是声纹认出的登记过的人说的；没记过（不是在会话里调用）时为 false。
+func VoiceVerifiedFrom(ctx context.Context) bool {
+	verified, _ := ctx.Value(voiceVerifiedKey{}).(bool)
+	return verified
+}

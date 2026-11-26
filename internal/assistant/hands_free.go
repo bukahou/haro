@@ -32,29 +32,30 @@ func (a *Assistant) respondHandsFree(ctx context.Context, item string, speechEnd
 	endpointDelay.Record(ctx, delay.Seconds())
 	a.logger.Info("⏱ 判定说完", "item", item, "endpoint_delay", delay.Round(time.Millisecond))
 
-	err := a.playResponse(ctx, span, item, speechEnd)
+	done, err := a.playResponse(ctx, span, item, speechEnd)
 	if errors.Is(err, errInterrupted) {
 		return true
 	}
 	if err != nil && ctx.Err() == nil {
 		a.logger.Error("本轮对话失败", "err", err)
 	}
+	a.endConversation = err == nil && done.EndConversation // 主人要结束这次对话：播完了，由主循环请语音前端休眠
 	return false
 }
 
 // suppressEcho 在终端出声（回答、醒着时的提示音）之前调用：出声期间不能听主人说话，
 // 否则会把自己的声音当成主人说的（没有回声消除）。
-//   - 可以打断时：麦克风照常上传，告诉语音前端「正在播放」，它只听唤醒词；
+//   - 可以打断时：麦克风照常上传，语音前端只听唤醒词；
 //   - 不能打断时（半双工）：上传静音。
 //
+// 不管能不能打断都告诉服务端「开始播放 / 播完了」：服务端据此等终端播完才自己开口（到点的提醒），声音不会混在一起。
 // 返回的 resume 在出声结束后调用：settle 为 true 时先等 EchoGuard（音箱里的余音散掉）再恢复收听。
 func (a *Assistant) suppressEcho(ctx context.Context) (resume func(settle bool)) {
-	if a.opts.BargeIn {
-		if err := a.deps.Brain.Send(ctx, realtimeproto.HaroPlaybackStarted{}); err != nil {
-			a.logger.Error("通知开始播放失败", "err", err)
-		}
-	} else {
+	if !a.opts.BargeIn {
 		a.uplink.setMuted(true)
+	}
+	if err := a.deps.Brain.Send(ctx, realtimeproto.HaroPlaybackStarted{}); err != nil {
+		a.logger.Error("通知开始播放失败", "err", err)
 	}
 	return func(settle bool) {
 		if settle {
@@ -63,13 +64,43 @@ func (a *Assistant) suppressEcho(ctx context.Context) (resume func(settle bool))
 			case <-ctx.Done():
 			}
 		}
-		if a.opts.BargeIn {
-			if err := a.deps.Brain.Send(context.WithoutCancel(ctx), realtimeproto.HaroPlaybackStopped{}); err != nil {
-				a.logger.Error("通知播放结束失败", "err", err)
-			}
-		} else {
+		if err := a.deps.Brain.Send(context.WithoutCancel(ctx), realtimeproto.HaroPlaybackStopped{}); err != nil {
+			a.logger.Error("通知播放结束失败", "err", err)
+		}
+		if !a.opts.BargeIn {
 			a.uplink.setMuted(false)
 		}
+	}
+}
+
+// playUnprompted 播服务端自己开口说的话（到点的提醒；reason 是缘由）：照播回答的方式（防回声、可以喊唤醒词打断），
+// 只是没有「主人说完」，不记延迟。播完以后醒着等一个对话窗口：提醒说完可以不叫唤醒词直接接话（例如「十分钟后再提醒我」，
+// 2026-11-26 用户裁定 b）；被打断时已经醒了，等主人接着说。只在主循环里调用。
+func (a *Assistant) playUnprompted(ctx context.Context, window *conversationWindow, reason string) {
+	a.busy.Store(true)
+	interrupted := false
+	func() {
+		resume := a.suppressEcho(ctx)
+		defer func() { resume(!interrupted) }()
+		ctx, span := tracer.Start(ctx, "haro.unprompted")
+		defer span.End()
+		span.SetAttributes(attribute.String("haro.unprompted.reason", reason))
+		a.logger.Info("🔔 服务端自己开口", "reason", reason)
+		_, err := a.playResponse(ctx, span, reason, time.Time{})
+		interrupted = errors.Is(err, errInterrupted)
+		if err != nil && !interrupted && ctx.Err() == nil {
+			a.logger.Error("服务端开口的那句没播成", "reason", reason, "err", err)
+		}
+	}()
+	a.busy.Store(false)
+	switch {
+	case interrupted:
+		window.wake()
+		a.logger.Info("👂 打断了，请说")
+	case window.awake:
+		window.restart() // 本来就醒着：从播完开始重新计时
+	default:
+		a.requestWakeState(ctx, window, true, "提醒说完，可以直接接话")
 	}
 }
 

@@ -105,7 +105,16 @@ func (a *Assistant) handleWakeEvent(ctx context.Context, window *conversationWin
 				a.logger.Info("👂 打断了，请说")
 				return
 			}
+			if a.endConversation { // 主人要结束这次对话（模型判断的）：播完就休眠，不等对话窗口
+				a.endConversation = false
+				a.requestWakeState(ctx, window, false, "主人说先到这里")
+				return
+			}
 			window.restart() // 从回答播完开始重新计时
+		}
+	case realtimeproto.ResponseCreated:
+		if e.Unprompted != "" { // 服务端自己开口（到点的提醒）：它只在终端没在播、没在答时这样开口
+			a.playUnprompted(ctx, window, e.Unprompted)
 		}
 	case realtimeproto.HaroNotice:
 		if e.Kind == realtimeproto.NoticeTranscriptionLost {

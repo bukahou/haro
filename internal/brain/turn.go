@@ -28,8 +28,10 @@ type turnRecord struct {
 	startedAt time.Time // 主人这句话的时间（历史里每一轮标的时间）
 	// voiceVerified：这句话的声纹认出了登记过的人（确认闸只让这样的人发起、确认会破坏的操作）
 	voiceVerified bool
-	question      string      // 主人的原话（不含每轮附带的情况说明）
-	rounds        []toolRound // 调用了工具的那几段（按顺序）
+	// endConversation：模型调用了 end_conversation（主人要结束这次对话）：这一轮说完，终端播完就休眠
+	endConversation bool
+	question        string      // 主人的原话（不含每轮附带的情况说明）
+	rounds          []toolRound // 调用了工具的那几段（按顺序）
 	// final 是最后一段（不再调用工具时）说的话。段号：第 i 段工具往来是第 i 段，最后一段的段号 = 工具往来的段数
 	// （和说出口的句子上的段号对上：被打断时只算最后一段里听到的）
 	final strings.Builder

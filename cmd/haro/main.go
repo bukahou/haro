@@ -170,6 +170,7 @@ func assistantOptions(settings config.TerminalSettings, sounds tones.Tones) assi
 		NoticeTones: map[string]realtimeproto.PCMAudio{ // 服务端那边听不见了：和服务端断开时同样的两声
 			realtimeproto.NoticeTranscriptionLost:     sounds.Offline,
 			realtimeproto.NoticeTranscriptionRestored: sounds.Online,
+			realtimeproto.NoticeReminder:              sounds.Reminder, // 到点的提醒没能说出来（服务端的语音合成用不了）
 		},
 	}
 }

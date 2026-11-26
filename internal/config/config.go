@@ -249,7 +249,7 @@ type TerminalSettings struct {
 	AudioSource  string `env:"HARO_AUDIO_SOURCE"`  // 空 = 自动：跟系统默认，但跳过蓝牙麦克风
 	AudioSink    string `env:"HARO_AUDIO_SINK"`    // 空 = 跟系统默认（蓝牙重连后自动接回）
 	CameraDevice string `env:"HARO_CAMERA_DEVICE"` // 空 = 自动找；none = 不用摄像头
-	// 终端的提示音：目录里放 offline.wav、online.wav、sleep.wav、notice.wav（16 bit PCM，缺哪个就用内置的）；不设 = 内置的不含人声的提示音。
+	// 终端的提示音：目录里放 offline.wav、online.wav、sleep.wav、notice.wav、reminder.wav（16 bit PCM，缺哪个就用内置的）；不设 = 内置的不含人声的提示音。
 	// 设了就必须是读得到的目录（挂载没成、名字拼错时起不来，不悄悄全用内置的）
 	TonesDir string `env:"HARO_TONES_DIR"`
 	// 拍照用哪套底层：auto / mediadevices / ffmpeg

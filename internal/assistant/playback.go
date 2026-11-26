@@ -16,11 +16,14 @@ import (
 // errInterrupted 表示这次回答被用户用唤醒词打断了。
 var errInterrupted = errors.New("回答被打断")
 
-// playResponse 消费服务端的事件，直到回答结束、声音播完：日志记文字，音频交给播放器。
+// playResponse 消费服务端的事件，直到回答结束、声音播完：日志记文字，音频交给播放器。交回这次回答的 response.done
+// （被打断、出错时是零值）。committedAt 是主人说完的时刻（记「说完 → 第一个字」的延迟）；服务端自己开口时没有「说完」，
+// 传零值，不记延迟。
 //
 // 音频在这里直接写进播放流（AudioStream.Write 只排进队列、不等播出），等播完放在后台：
 // 等播完的这段时间里照常处理事件，「唤醒（打断）」不用排在播放后面。
-func (a *Assistant) playResponse(ctx context.Context, turnSpan trace.Span, item string, committedAt time.Time) error {
+func (a *Assistant) playResponse(ctx context.Context, turnSpan trace.Span, item string,
+	committedAt time.Time) (realtimeproto.ResponseDone, error) {
 	var (
 		player   *player
 		answer   strings.Builder
@@ -38,11 +41,11 @@ func (a *Assistant) playResponse(ctx context.Context, turnSpan trace.Span, item 
 			if done == nil {
 				_ = a.deps.Brain.Send(context.WithoutCancel(ctx), realtimeproto.ResponseCancel{})
 			}
-			return ctx.Err()
+			return realtimeproto.ResponseDone{}, ctx.Err()
 		case err := <-finished:
 			player.end()
 			player = nil
-			return a.finishResponse(turnSpan, *done, err, answer.String(), committedAt)
+			return *done, a.finishResponse(turnSpan, *done, err, answer.String(), committedAt)
 		case event := <-a.deps.Brain.Events():
 			switch e := event.(type) {
 			case realtimeproto.HaroNotice, realtimeproto.HaroWakeWordState, realtimeproto.SessionUpdated:
@@ -56,7 +59,7 @@ func (a *Assistant) playResponse(ctx context.Context, turnSpan trace.Span, item 
 				if a.opts.BargeIn {
 					err := a.interrupt(ctx, turnSpan, player, item, done != nil, answer.String())
 					player = nil
-					return err
+					return realtimeproto.ResponseDone{}, err
 				}
 			case realtimeproto.InputAudioTranscriptionCompleted:
 				if e.SpeakerChecked { // 声纹：日志里看得到是谁说的
@@ -72,14 +75,16 @@ func (a *Assistant) playResponse(ctx context.Context, turnSpan trace.Span, item 
 					stream, err := a.deps.Speaker.OpenStream(ctx, e.Audio.Format)
 					if err != nil {
 						span.End()
-						return fail(turnSpan, "打开播放流", err)
+						return realtimeproto.ResponseDone{}, fail(turnSpan, "打开播放流", err)
 					}
 					player = startPlayer(stream, span)
-					firstAudio := time.Since(committedAt)
 					turnSpan.AddEvent("first_audio")
-					turnSpan.SetAttributes(attribute.Float64("haro.turn.time_to_first_audio", firstAudio.Seconds()))
-					timeToFirstAudio.Record(ctx, firstAudio.Seconds())
-					a.logger.Info("⏱ 说完 → 第一个字", "item", item, "elapsed", firstAudio.Round(time.Millisecond))
+					if !committedAt.IsZero() { // 服务端自己开口时没有「说完」：不记延迟
+						firstAudio := time.Since(committedAt)
+						turnSpan.SetAttributes(attribute.Float64("haro.turn.time_to_first_audio", firstAudio.Seconds()))
+						timeToFirstAudio.Record(ctx, firstAudio.Seconds())
+						a.logger.Info("⏱ 说完 → 第一个字", "item", item, "elapsed", firstAudio.Round(time.Millisecond))
+					}
 				}
 				player.write(e.Audio.Data)
 			case realtimeproto.Error:
@@ -87,7 +92,7 @@ func (a *Assistant) playResponse(ctx context.Context, turnSpan trace.Span, item 
 			case realtimeproto.ResponseDone:
 				done = &e
 				if player == nil { // 没有声音（失败、空识别等）
-					return a.finishResponse(turnSpan, e, nil, answer.String(), committedAt)
+					return e, a.finishResponse(turnSpan, e, nil, answer.String(), committedAt)
 				}
 				finished = player.finish()
 			}
@@ -106,7 +111,11 @@ func (a *Assistant) finishResponse(turnSpan trace.Span, done realtimeproto.Respo
 	turnSpan.SetAttributes(attribute.String("haro.response.status", string(done.Status)))
 	switch done.Status {
 	case realtimeproto.StatusCompleted:
-		a.logger.Info("本轮完成", "total", time.Since(committedAt).Round(time.Millisecond))
+		if committedAt.IsZero() {
+			a.logger.Info("本轮完成")
+		} else {
+			a.logger.Info("本轮完成", "total", time.Since(committedAt).Round(time.Millisecond))
+		}
 		return nil
 	case realtimeproto.StatusFailed:
 		return fail(turnSpan, "服务端", errors.New(string(done.Reason)))

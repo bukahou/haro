@@ -103,9 +103,10 @@ func run(logger *slog.Logger) error {
 // 关停各步的期限（加起来 10 秒，比 k8s 的宽限期 30 秒短）：停止接新连接、等普通请求 2 秒 → 会话收尾 5 秒 →
 // 后台调查停下 2 秒 → 遥测发出 1 秒（telemetry.ShutdownTimeout，终端也用它）。
 const (
-	shutdownRequests = 2 * time.Second
-	shutdownSessions = 5 * time.Second
-	shutdownResearch = 2 * time.Second
+	shutdownRequests  = 2 * time.Second
+	shutdownSessions  = 5 * time.Second
+	shutdownResearch  = 2 * time.Second
+	shutdownReminders = 2 * time.Second
 )
 
 // brainHandler 是服务端的全部 HTTP 入口：对话（WebSocket）+ 远程登记声纹（要读的句子和登记都转给 haro-asr）+ 存活 / 就绪检查。

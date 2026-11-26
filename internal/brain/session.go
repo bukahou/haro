@@ -110,6 +110,8 @@ type Session struct {
 	// 下一轮回答开始时还没收到截断就调用；播放中被打断就丢掉（之后再附上）。声音在终端播完要比服务端发完晚得多
 	pendingDelivered []func()
 	noSpeaker        bool // 终端说现在没有音箱：不合成语音，只发文字
+	// announcements：排着等服务端自己开口的话（到点的提醒）；只在没在答、没在播、主人没在说时开口（announce.go）
+	announcements []Announcement
 }
 
 // errNoStream：识别流还没打开（session.update 没带 turn_detection）或已断开，音频无处可送。
@@ -164,6 +166,7 @@ func (s *Session) Close() error {
 			_ = stream.Close()
 		}
 		s.endLifetime()
+		s.dropAnnouncements()
 	})
 	s.responses.Wait() // 等进行中的那一轮收尾（被取消后照 3.4 的规则写进历史）：关停时之后才关数据库
 	return nil
@@ -179,6 +182,7 @@ func (s *Session) Send(ctx context.Context, event realtimeproto.ClientEvent) err
 		s.mu.Lock()
 		s.playing = playing
 		stream := s.stream
+		s.startAnnouncementLocked() // 终端播完了：排着的话可以说了
 		s.mu.Unlock()
 		if stream == nil { // 识别流还没打开或正在重开：重开后按记下的状态告诉新的流
 			return nil

@@ -200,6 +200,7 @@ func TestNoticeWhileAwakeAnnouncesPlayback(t *testing.T) {
 }
 
 // 不能打断时（半双工）：醒着播提示音期间上传静音，播完、等余音散掉后恢复；睡着时照常上传。
+// 播放开始 / 播完照样告诉服务端（它据此等终端播完才自己开口）。
 func TestNoticeWhileAwakeMutesUpload(t *testing.T) {
 	server, speaker := startNoticeAssistant(t, false)
 	log := server.log
@@ -223,8 +224,10 @@ func TestNoticeWhileAwakeMutesUpload(t *testing.T) {
 	speaker.release <- struct{}{}
 	log.waitFor(t, toneDrained, 2)
 	server.waitForAudio(t, "提示音播完、余音散掉后恢复上传", 1, loudChunks)
-	if entries := log.snapshot(); slices.Contains(entries, "haro.playback.started") {
-		t.Errorf("不能打断时不发播放开始 / 结束：%v", entries)
+	entries := log.waitFor(t, "haro.playback.stopped", 1)
+	if indexOf(entries, "haro.playback.started", 1) > indexOf(entries, toneOpened, 2) ||
+		indexOf(entries, "haro.playback.stopped", 1) < indexOf(entries, toneDrained, 2) {
+		t.Errorf("不能打断时也要报播放开始 / 播完（包住醒着时那一声）：%v", entries)
 	}
 }
 
