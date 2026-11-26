@@ -214,3 +214,29 @@ func TestNoticeHubReportsTerminalJoined(t *testing.T) {
 		t.Fatal("终端连上时应通知")
 	}
 }
+
+// 主人刚好在服务端开口的那一刻说完：这句先留着（不报「已有进行中的回答」、不丢），开口结束、终端报播完以后再回答——
+// 新的回答不能混进还在播的那一段。平时（没在开口、终端没在播）说完就马上回答。
+func TestUtteranceDuringAnnouncementWaitsForPlayback(t *testing.T) {
+	s := newAnnounceSession(t, NewNoticeHub(), textSynth{})
+	job := &transcriptionJob{item: "item_1", done: make(chan struct{}), err: errors.New("识别失败（测试用：这一轮马上结束）")}
+	close(job.done)
+	s.mu.Lock()
+	s.autoRespond = true
+	s.announcing = true
+	s.transcription = job
+	if err := s.startPendingResponseLocked(); err != nil || s.cancelResponse != nil {
+		t.Fatalf("开口时不开始回答：%v", err)
+	}
+	s.announcing, s.playing = false, true // 开口结束了，终端还在播
+	if err := s.startPendingResponseLocked(); err != nil || s.cancelResponse != nil {
+		t.Fatalf("终端还在播时不开始回答：%v", err)
+	}
+	s.mu.Unlock()
+	if err := s.Send(context.Background(), realtimeproto.HaroPlaybackStopped{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := nextEvent(t, s).(realtimeproto.ResponseCreated); !ok {
+		t.Fatal("终端播完后应开始回答留着的那句")
+	}
+}

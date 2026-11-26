@@ -75,6 +75,7 @@ func (s *Session) startAnnouncementLocked() {
 	s.announcements = s.announcements[1:]
 	ctx, cancel := context.WithCancel(s.lifetime)
 	s.cancelResponse = cancel
+	s.announcing = true
 	s.responses.Add(1)
 	go func() {
 		defer s.responses.Done()
@@ -124,7 +125,7 @@ func (s *Session) runAnnouncement(ctx context.Context, announcement Announcement
 	}
 	s.mu.Lock()
 	s.cancelResponse()
-	s.cancelResponse = nil
+	s.cancelResponse, s.announcing = nil, false
 	changed := s.playbackCutLocked() // 已经记进历史之后才收到截断：回头改
 	s.mu.Unlock()
 	if changed {
@@ -135,8 +136,16 @@ func (s *Session) runAnnouncement(ctx context.Context, announcement Announcement
 		announcement.Done(outcome)
 	}
 	s.mu.Lock()
-	s.startAnnouncementLocked() // 还有排着的就接着说
+	var pendingErr error
+	if s.autoRespond {
+		pendingErr = s.startPendingResponseLocked() // 开口时主人说完的那句（终端播完才真的开始）
+	}
+	s.startAnnouncementLocked() // 还有排着的就接着说（有要回答的那句时它挡着）
 	s.mu.Unlock()
+	if pendingErr != nil {
+		s.logger.Warn("开口结束后没能开始回答留着的那句", "err", pendingErr)
+		s.emit(realtimeproto.ErrorEventFor("", pendingErr))
+	}
 }
 
 // dropAnnouncements 会话关闭时：排着还没说的都算没能说（由调度那边之后再试）。

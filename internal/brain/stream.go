@@ -270,13 +270,28 @@ func (s *Session) speechStopped(e realtimeproto.InputAudioBufferSpeechStopped) {
 	s.mu.Lock()
 	var err error
 	if s.autoRespond {
-		err = s.startResponseLocked()
+		err = s.startPendingResponseLocked()
 	}
 	s.mu.Unlock()
 	if err != nil {
 		s.logger.Warn("判定说完时没能开始回答", "item", e.ItemID, "err", err)
 		s.emit(realtimeproto.ErrorEventFor("", err))
 	}
+}
+
+// startPendingResponseLocked 开始回答判定说完、还没回答的那句（s.transcription）。服务端正在自己开口、或终端还在播的时候
+// 先不开始，留着这句：开口结束、终端报播完时再来（回答事件里没有回答编号，新的回答不能混进还在播的那一段）。
+// 平时说完的时候终端早就播完了；只有主人刚好在服务端开口的那一刻说完时才会等。调用方持有 s.mu。
+func (s *Session) startPendingResponseLocked() error {
+	if s.transcription == nil {
+		return nil
+	}
+	if s.announcing || s.playing {
+		s.logger.Info("服务端在开口或终端还在播：这句等播完再回答", "item", s.transcription.item,
+			"announcing", s.announcing, "playing", s.playing)
+		return nil
+	}
+	return s.startResponseLocked()
 }
 
 // ReopenTiming 是打开识别流、意外断开后重开的节奏（Options.StreamReopen；零值 = DefaultReopenTiming）。

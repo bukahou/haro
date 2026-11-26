@@ -32,7 +32,7 @@ func ResearchTools(desk ResearchDesk) Builtin {
 				if err != nil {
 					return startResearchOutput{}, err
 				}
-				// 告诉模型怎么跟主人说：它不能主动开口，查好了终端只会响一声（不说明的话，模型会答应盯着、一有消息就说）
+				// 告诉模型怎么跟主人说：调查查好了终端只会响一声、不会自己说结论（不说明的话，模型会答应盯着、一有消息就说）
 				out := startResearchOutput{ID: task.ID, Ahead: ahead,
 					HowToTell: "照实告诉主人：查好了终端会「叮」一声，到时叫醒你问就行（你不会自己说结论）；不要说会盯着、守着。"}
 				if ahead > 0 {

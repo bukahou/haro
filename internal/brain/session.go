@@ -114,6 +114,7 @@ type Session struct {
 	noSpeaker          bool // 终端说现在没有音箱：不合成语音，只发文字
 	// announcements：排着等服务端自己开口的话（到点的提醒）；只在没在答、没在播、主人没在说时开口（announce.go）
 	announcements []Announcement
+	announcing    bool // 正在自己开口（这时判定说完的那句先留着，开口结束、终端播完再回答）
 }
 
 // errNoStream：识别流还没打开（session.update 没带 turn_detection）或已断开，音频无处可送。
@@ -184,8 +185,16 @@ func (s *Session) Send(ctx context.Context, event realtimeproto.ClientEvent) err
 		s.mu.Lock()
 		s.playing = playing
 		stream := s.stream
-		s.startAnnouncementLocked() // 终端播完了：排着的话可以说了
+		var pendingErr error
+		if !playing && s.autoRespond {
+			pendingErr = s.startPendingResponseLocked() // 终端播完了：留着的那句（主人在开口时说完的）先回答
+		}
+		s.startAnnouncementLocked() // 排着的话可以说了（有要回答的那句时它挡着，等回答完）
 		s.mu.Unlock()
+		if pendingErr != nil {
+			s.logger.Warn("终端播完后没能开始回答留着的那句", "err", pendingErr)
+			s.emit(realtimeproto.ErrorEventFor("", pendingErr))
+		}
 		if stream == nil { // 识别流还没打开或正在重开：重开后按记下的状态告诉新的流
 			return nil
 		}
