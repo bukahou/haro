@@ -298,6 +298,8 @@ Sonnet 5.5 只认 `between_tools`（两次工具调用之间会返回几句进�
 看画面的专家：`go test -tags integration -run LiveExpert -v ./internal/vision/`（用法见该测试开头）；
 认不认得出纠正：`go test -tags integration -run LiveAskStronger -v ./internal/brain/`。
 看图小评测（花钱，默认不跑；样本放在仓库外）：`internal/llm/vision_eval_test.go`（`-tags eval`，先用 `HARO_EVAL_DRY_RUN=1` 看要花多少）。
+搜索质量对比（花钱，默认不跑；题目和参考答案放在仓库外）：`internal/llm/search_eval_test.go`（`-tags eval`）：同一批题由现在的设置、
+Anthropic 服务端搜索、Tavily 高级档各答一遍（真的会话，提示词照线上），先 `TestSearchEvalRun` 跑、填好参考答案再 `TestSearchEvalJudge` 判。
 
 模型文件（识别、VAD、说完判断、唤醒词、声纹）不在仓库里，路径都由配置指定；服务端镜像里已经带着
 （清单、来源与许可证：`deploy/server/models.lock`、`deploy/server/MODELS.md`；本机下载：`scripts/fetch-models.sh ~/.local/share/haro`）。
