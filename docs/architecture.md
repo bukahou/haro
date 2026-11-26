@@ -132,6 +132,7 @@ haro 是一个家用语音助手：家里每个房间放一台**终端**（麦�
 | `set_reminder` / `list_reminders` / `restore_reminder` | | 提醒（见下）：定、查、恢复；定和恢复只认声纹认出的这句 |
 | `cancel_reminder` | ✓ | 按编号取消提醒（可以恢复） |
 | `web_search` | | 联网搜一次（Tavily 远程 MCP）；设了密钥才提供 |
+| `read_web_pages` | | 读搜索结果里的网页正文（一次最多 3 页、每页约 2000 字，按 focus 给相关段落）；和搜索共用每天的积分，设了密钥才提供 |
 | `start_research` / `research_status` / `cancel_research` | | 后台调查（见下）；设了搜索密钥才提供 |
 
 ### 天气的备用来源（`internal/weather`）
