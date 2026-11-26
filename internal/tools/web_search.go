@@ -68,23 +68,56 @@ const TavilyName = "tavily"
 // 只用 tavily_search / tavily_extract 两个工具；crawl / map / research 不用（贵、慢，调查流程由服务端自己控制）。
 // 第一次用到时才连；会话断了（Tavily 重启、网络断过）丢掉旧的，当次重连再试一次，之后用到时照样重连。
 type TavilySearcher struct {
-	spec   ServerSpec
-	logger *slog.Logger
+	spec    ServerSpec
+	options TavilyOptions
+	logger  *slog.Logger
 
 	mu     sync.Mutex
 	server *MCPServer // nil = 还没连上，或者断了
 }
 
-// Tavily 的积分规则（官方文档）：基础搜索 1 积分；基础抓取每 5 个网页 1 积分。
+// TavilyOptions 是 Tavily 的档位。零值是线上在用的：基础档、不偏向哪个国家。
+type TavilyOptions struct {
+	// Advanced：搜索和读网页都用高级档（相关度更高、读网页能读表格和嵌入内容；慢一些、积分翻倍）
+	Advanced bool
+	// Country：偏向这个国家的结果（Tavily 的写法：英文小写国名，例如 "japan"；只是加权，不是过滤）；空 = 不偏向
+	Country string
+}
+
+// Tavily 的积分规则（官方文档）：搜索一次基础档 1 积分、高级档 2 积分；
+// 读网页每 5 个网页基础档 1 积分、高级档 2 积分（读不到的不算，这里按请求的页数记，宁可记多）。
 const (
-	tavilySearchCredits  = 1
-	tavilyPagesPerCredit = 5
+	tavilyBasicCredits    = 1
+	tavilyAdvancedCredits = 2
+	tavilyPagesPerCharge  = 5
 )
 
 // NewTavilySearcher 准备经 Tavily 远程 MCP 搜索（这时不连）；密钥放在 Authorization 请求头里（不放网址，免得进日志）。
+// 用线上的档位（TavilyOptions 的零值）。
 func NewTavilySearcher(endpoint, apiKey string, client *http.Client, logger *slog.Logger) *TavilySearcher {
-	return &TavilySearcher{logger: logger, spec: ServerSpec{Name: TavilyName, URL: endpoint, Client: client,
+	return NewTavilySearcherWith(endpoint, apiKey, TavilyOptions{}, client, logger)
+}
+
+// NewTavilySearcherWith 同 NewTavilySearcher，按 options 的档位搜（比较不同档位时用）。
+func NewTavilySearcherWith(endpoint, apiKey string, options TavilyOptions, client *http.Client, logger *slog.Logger) *TavilySearcher {
+	return &TavilySearcher{logger: logger, options: options, spec: ServerSpec{Name: TavilyName, URL: endpoint, Client: client,
 		Headers: map[string]string{"Authorization": "Bearer " + apiKey}}}
+}
+
+// depth 是 Tavily 的 search_depth / extract_depth。
+func (t *TavilySearcher) depth() string {
+	if t.options.Advanced {
+		return "advanced"
+	}
+	return "basic"
+}
+
+// creditsPerCharge 是搜索一次（或读每 5 个网页）的积分。
+func (t *TavilySearcher) creditsPerCharge() int {
+	if t.options.Advanced {
+		return tavilyAdvancedCredits
+	}
+	return tavilyBasicCredits
 }
 
 // connected 返回连着的会话；还没连就连上（并核对要用的两个工具都在）。
@@ -145,11 +178,13 @@ func (t *TavilySearcher) call(ctx context.Context, name string, arguments map[st
 	})
 }
 
-// Search 基础深度、不带网页全文（快）。Tavily 的回复认不出（不是约定的 JSON、没有 results）时报错。
+// Search 按档位搜、不带网页全文（快）。Tavily 的回复认不出（不是约定的 JSON、没有 results）时报错。
 func (t *TavilySearcher) Search(ctx context.Context, query string, maxResults int, record SearchRecorder) ([]SearchResult, error) {
-	text, err := t.call(ctx, "tavily_search", map[string]any{
-		"query": query, "max_results": maxResults, "search_depth": "basic", "include_raw_content": false},
-		t.SearchCredits(), record)
+	arguments := map[string]any{"query": query, "max_results": maxResults, "search_depth": t.depth(), "include_raw_content": false}
+	if t.options.Country != "" {
+		arguments["country"] = t.options.Country
+	}
+	text, err := t.call(ctx, "tavily_search", arguments, t.SearchCredits(), record)
 	if err != nil {
 		return nil, err
 	}
@@ -170,11 +205,11 @@ func (t *TavilySearcher) Search(ctx context.Context, query string, maxResults in
 	return results, nil
 }
 
-// ReadPages 基础深度抓正文，每页单独截到 maxRunesPerPage 字（不会因为第一页太长把后面的挤掉）；没读到的那页带上原因。
+// ReadPages 按档位抓正文，每页单独截到 maxRunesPerPage 字（不会因为第一页太长把后面的挤掉）；没读到的那页带上原因。
 // focus 交给 Tavily 的 query 参数，按相关度挑段落（2026-11-17 实测：21 页的考场空席 PDF，只取开头 2,000 字只看得到一个考场）。
 // Tavily 的回复认不出时报错。
 func (t *TavilySearcher) ReadPages(ctx context.Context, urls []string, maxRunesPerPage int, focus string, record SearchRecorder) ([]PageContent, error) {
-	arguments := map[string]any{"urls": urls, "extract_depth": "basic"}
+	arguments := map[string]any{"urls": urls, "extract_depth": t.depth()}
 	if focus != "" {
 		arguments["query"] = focus
 	}
@@ -205,10 +240,10 @@ func (t *TavilySearcher) ReadPages(ctx context.Context, urls []string, maxRunesP
 	return pages, nil
 }
 
-func (t *TavilySearcher) SearchCredits() int { return tavilySearchCredits }
+func (t *TavilySearcher) SearchCredits() int { return t.creditsPerCharge() }
 
 func (t *TavilySearcher) ReadCredits(pages int) int {
-	return (pages + tavilyPagesPerCredit - 1) / tavilyPagesPerCredit
+	return (pages + tavilyPagesPerCharge - 1) / tavilyPagesPerCharge * t.creditsPerCharge()
 }
 
 // Close 断开。
@@ -223,20 +258,46 @@ func (t *TavilySearcher) Close() error {
 	return err
 }
 
-// 快查（R1）：一次搜索、最多 3 条，当场回答。结果截到这个长度（够模型回答，又不至于每轮都贵）。
-const (
-	quickSearchResults  = 3
-	quickSearchMaxRunes = 3000
-)
+// WebSearchLimits 是快查和读网页给模型多少：搜一次几条、搜索结果截到多少字、读网页每页多少字（读得越多这一轮越贵、越慢）。
+type WebSearchLimits struct {
+	Results     int // 搜一次最多几条
+	ResultRunes int // 一次搜索的结果（编成 JSON 后）最多多少字
+	PageRunes   int // 读网页每页最多多少字（有 focus 时优先给相关的段落）
+}
+
+// DefaultWebSearchLimits 是线上在用的：快查（R1）一次最多 3 条、截到 3000 字（够模型回答，又不至于每轮都贵）；
+// 读网页每页 2000 字（和后台调查同一个数：之后每一轮都要带着它）。
+func DefaultWebSearchLimits() WebSearchLimits {
+	return WebSearchLimits{Results: 3, ResultRunes: 3000, PageRunes: 2000}
+}
+
+func (l WebSearchLimits) validate() error {
+	if l.Results <= 0 || l.ResultRunes <= 0 || l.PageRunes <= 0 {
+		return fmt.Errorf("快查与读网页的上限都要大于 0：%+v", l)
+	}
+	return nil
+}
 
 // WebSearchTool 是主对话里快查工具的名字（别的工具的说明里提到它时引用这里）。
 const WebSearchTool = "web_search"
 
 // WebSearchTools 是主对话里的快查（web_search）和读网页（read_web_pages，web_read.go）：先查额度，发出去的请求都记账
-// （见 QuickSearch）；两个工具共用每天的搜索积分。
+// （见 QuickSearch）；两个工具共用每天的搜索积分。上限用 DefaultWebSearchLimits。
 func WebSearchTools(searcher WebSearcher, meter SearchMeter, logger *slog.Logger) Builtin {
+	return webSearchTools(searcher, meter, DefaultWebSearchLimits(), logger)
+}
+
+// WebSearchToolsWithLimits 同 WebSearchTools，按 limits 给（比较不同上限时用）；上限不合法时报错。
+func WebSearchToolsWithLimits(searcher WebSearcher, meter SearchMeter, limits WebSearchLimits, logger *slog.Logger) (Builtin, error) {
+	if err := limits.validate(); err != nil {
+		return nil, err
+	}
+	return webSearchTools(searcher, meter, limits, logger), nil
+}
+
+func webSearchTools(searcher WebSearcher, meter SearchMeter, limits WebSearchLimits, logger *slog.Logger) Builtin {
 	return func(server *mcp.Server) {
-		webReadTool(server, searcher, meter, logger)
+		webReadTool(server, searcher, meter, limits.PageRunes, logger)
 		AddTextTool(server, &mcp.Tool{Name: WebSearchTool, Annotations: ReadOnly,
 			Description: "联网搜索一次，查实时或最新的事实（新闻、价格、比分、营业时间、某件事的最新进展等）。" +
 				"你不确定、或者信息可能过时的时候用它，不要凭记忆回答。搜一次就能答的问题用它。" +
@@ -247,7 +308,7 @@ func WebSearchTools(searcher WebSearcher, meter SearchMeter, logger *slog.Logger
 				if strings.TrimSpace(in.Query) == "" {
 					return "", errors.New("query 不能为空")
 				}
-				return QuickSearch(ctx, searcher, meter, in.Query, logger)
+				return quickSearchWith(ctx, searcher, meter, in.Query, limits, logger)
 			})
 	}
 }
@@ -256,14 +317,20 @@ type webSearchInput struct {
 	Query string `json:"query" jsonschema:"搜索词，简洁具体，例如「日经平均 今日 終値」"`
 }
 
-// QuickSearch 是一次快查（最多 quickSearchResults 条、编成 JSON 后截到 quickSearchMaxRunes 字）：先查额度再搜；
+// QuickSearch 是一次快查（按 DefaultWebSearchLimits：最多几条、编成 JSON 后截到多少字）：先查额度再搜；
 // 发出去的每次请求不管成没成功都记账（搜索那一层记，见 WebSearcher）。
 // 主对话的 web_search 和看画面的专家都用它，额度算在同一处。
 func QuickSearch(ctx context.Context, searcher WebSearcher, meter SearchMeter, query string, logger *slog.Logger) (string, error) {
+	return quickSearchWith(ctx, searcher, meter, query, DefaultWebSearchLimits(), logger)
+}
+
+// quickSearchWith 同 QuickSearch，按 limits 的条数与字数。
+func quickSearchWith(ctx context.Context, searcher WebSearcher, meter SearchMeter, query string, limits WebSearchLimits,
+	logger *slog.Logger) (string, error) {
 	if err := meter.AllowSearch(ctx, searcher.SearchCredits()); err != nil {
 		return "", err
 	}
-	results, err := searcher.Search(ctx, query, quickSearchResults, meter)
+	results, err := searcher.Search(ctx, query, limits.Results, meter)
 	if err != nil {
 		logger.Info("联网搜索", "query", query, "err", err)
 		return "", err
@@ -274,7 +341,7 @@ func QuickSearch(ctx context.Context, searcher WebSearcher, meter SearchMeter, q
 	}
 	text := string(data)
 	logger.Info("联网搜索", "query", query, "results", len(results), "chars", utf8.RuneCountInString(text))
-	return truncateRunes(text, quickSearchMaxRunes), nil
+	return truncateRunes(text, limits.ResultRunes), nil
 }
 
 // quickSearchOutput 是快查交给模型的结果。

@@ -30,9 +30,14 @@ func fakeTavily(t *testing.T, wantKey string, lastQuery *atomic.Value) (*httptes
 		MaxResults        int    `json:"max_results"`
 		SearchDepth       string `json:"search_depth"`
 		IncludeRawContent bool   `json:"include_raw_content"`
+		Country           string `json:"country,omitempty"`
 	}
 	mcp.AddTool(server, &mcp.Tool{Name: "tavily_search"}, func(_ context.Context, _ *mcp.CallToolRequest, in searchInput) (*mcp.CallToolResult, any, error) {
-		lastQuery.Store(fmt.Sprintf("%s|%d|%s|%v", in.Query, in.MaxResults, in.SearchDepth, in.IncludeRawContent))
+		recorded := fmt.Sprintf("%s|%d|%s|%v", in.Query, in.MaxResults, in.SearchDepth, in.IncludeRawContent)
+		if in.Country != "" {
+			recorded += "|" + in.Country
+		}
+		lastQuery.Store(recorded)
 		switch in.Query {
 		case badQuery:
 			return nil, nil, errors.New("query is invalid")
@@ -44,11 +49,16 @@ func fakeTavily(t *testing.T, wantKey string, lastQuery *atomic.Value) (*httptes
 		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: string(body)}}}, nil, nil
 	})
 	type extractInput struct {
-		URLs  []string `json:"urls"`
-		Query string   `json:"query"`
+		URLs         []string `json:"urls"`
+		Query        string   `json:"query"`
+		ExtractDepth string   `json:"extract_depth"`
 	}
 	mcp.AddTool(server, &mcp.Tool{Name: "tavily_extract"}, func(_ context.Context, _ *mcp.CallToolRequest, in extractInput) (*mcp.CallToolResult, any, error) {
-		lastQuery.Store("extract:" + in.Query)
+		recorded := "extract:" + in.Query
+		if in.ExtractDepth != "basic" {
+			recorded += "|" + in.ExtractDepth
+		}
+		lastQuery.Store(recorded)
 		if slices.Contains(in.URLs, oddURL) {
 			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "不是 JSON"}}}, nil, nil
 		}
@@ -195,6 +205,43 @@ func TestTavilyQuickSearch(t *testing.T) {
 	if err != nil || len(results) != 1 || results[0].Title != "日经平均" || results[0].URL != "https://example.com/n" ||
 		len([]rune(results[0].Snippet)) != 5000 {
 		t.Errorf("搜索结果按条交出（标题、网址、摘要）：%+v %v", results, err)
+	}
+}
+
+// 高级档：搜索和读网页都用 advanced、偏向指定的国家；积分按高级档记（搜索一次 2 积分，读网页每 5 页 2 积分）。
+func TestTavilyAdvancedOptions(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	var lastQuery atomic.Value
+	server, _ := fakeTavily(t, "tvly-test", &lastQuery)
+	defer server.Close()
+	searcher := NewTavilySearcherWith(server.URL, "tvly-test", TavilyOptions{Advanced: true, Country: "japan"}, nil, logger)
+	defer searcher.Close()
+	meter := &countingMeter{}
+
+	if _, err := searcher.Search(ctx, "日经平均", 5, meter); err != nil {
+		t.Fatal(err)
+	}
+	if got := lastQuery.Load(); got != "日经平均|5|advanced|false|japan" {
+		t.Errorf("高级档搜索要带 advanced 和国家：%v", got)
+	}
+	if _, err := searcher.ReadPages(ctx, []string{"https://example.com/a"}, 4000, "要找的内容", meter); err != nil {
+		t.Fatal(err)
+	}
+	if got := lastQuery.Load(); got != "extract:要找的内容|advanced" {
+		t.Errorf("高级档读网页要带 advanced：%v", got)
+	}
+	if got := meter.all(); !slices.Equal(got, []searchCharge{{credits: 2}, {credits: 2}}) {
+		t.Errorf("高级档搜索一次、读一页各记 2 积分：%+v", got)
+	}
+	if searcher.SearchCredits() != 2 || searcher.ReadCredits(5) != 2 || searcher.ReadCredits(6) != 4 {
+		t.Error("高级档：搜索 2 积分，读网页每 5 页 2 积分")
+	}
+	// 阳性对照：零值的档位照旧是基础档、不带国家
+	basic := NewTavilySearcher(server.URL, "tvly-test", nil, logger)
+	defer basic.Close()
+	if _, err := basic.Search(ctx, "日经平均", 3, meter); err != nil || lastQuery.Load() != "日经平均|3|basic|false" {
+		t.Errorf("零值的档位应是基础档、不带国家：%v %v", lastQuery.Load(), err)
 	}
 }
 
