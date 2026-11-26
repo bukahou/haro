@@ -23,10 +23,15 @@ func (f *fakeService) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var request struct {
-		Model string   `json:"model"`
-		Input []string `json:"input"`
+		Model          string   `json:"model"`
+		Input          []string `json:"input"`
+		EncodingFormat string   `json:"encoding_format"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&request)
+	if request.EncodingFormat != "float" { // 要写明要浮点数
+		http.Error(w, "encoding_format 应为 float", http.StatusBadRequest)
+		return
+	}
 	f.inputs = append(f.inputs, request.Input...)
 	type item struct {
 		Object    string    `json:"object"`

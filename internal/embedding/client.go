@@ -78,7 +78,8 @@ func (c *Client) embed(ctx context.Context, prefix string, texts []string) ([][]
 	ctx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 	response, err := c.client.Embeddings.New(ctx, openai.EmbeddingNewParams{Model: c.opts.Model,
-		Input: openai.EmbeddingNewParamsInputUnion{OfArrayOfStrings: inputs}})
+		Input:          openai.EmbeddingNewParamsInputUnion{OfArrayOfStrings: inputs},
+		EncodingFormat: openai.EmbeddingNewParamsEncodingFormatFloat}) // 写明要浮点数（各家的默认值不一定一样）
 	if err != nil {
 		return nil, fmt.Errorf("嵌入服务（%s）: %w", c.opts.BaseURL, err)
 	}
