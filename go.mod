@@ -18,6 +18,7 @@ require (
 	github.com/pion/mediadevices v0.10.1
 	github.com/pressly/goose/v3 v3.30.1
 	github.com/rivo/uniseg v0.4.7
+	github.com/teambition/rrule-go v1.8.2
 	github.com/yalue/onnxruntime_go v1.32.1
 	go.opentelemetry.io/otel v1.47.0
 	go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp v1.47.0
@@ -59,7 +60,6 @@ require (
 	github.com/segmentio/encoding v0.5.4 // indirect
 	github.com/sethvargo/go-retry v0.5.0 // indirect
 	github.com/standard-webhooks/standard-webhooks/libraries v0.0.1 // indirect
-	github.com/teambition/rrule-go v1.8.2 // indirect
 	github.com/tidwall/gjson v1.20.1 // indirect
 	github.com/tidwall/match v1.1.1 // indirect
 	github.com/tidwall/pretty v1.2.1 // indirect
