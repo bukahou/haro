@@ -207,9 +207,10 @@ func (t *TavilySearcher) Search(ctx context.Context, query string, maxResults in
 
 // ReadPages 按档位抓正文，每页单独截到 maxRunesPerPage 字（不会因为第一页太长把后面的挤掉）；没读到的那页带上原因。
 // focus 交给 Tavily 的 query 参数，按相关度挑段落（2026-11-17 实测：21 页的考场空席 PDF，只取开头 2,000 字只看得到一个考场）。
-// Tavily 的回复认不出时报错。
+// 要纯文本（format = text）：Markdown 里每个链接都带着地址，表格一样的页面（时刻表里每个分钟数都是链接）字数大半被地址占掉，
+// 截到上限时有用的内容还没出现；模型要用的网址来自搜索结果，不需要页面里的链接。Tavily 的回复认不出时报错。
 func (t *TavilySearcher) ReadPages(ctx context.Context, urls []string, maxRunesPerPage int, focus string, record SearchRecorder) ([]PageContent, error) {
-	arguments := map[string]any{"urls": urls, "extract_depth": t.depth()}
+	arguments := map[string]any{"urls": urls, "extract_depth": t.depth(), "format": "text"}
 	if focus != "" {
 		arguments["query"] = focus
 	}
@@ -300,10 +301,11 @@ func webSearchTools(searcher WebSearcher, meter SearchMeter, limits WebSearchLim
 		webReadTool(server, searcher, meter, limits.PageRunes, logger)
 		AddTextTool(server, &mcp.Tool{Name: WebSearchTool, Annotations: ReadOnly,
 			Description: "联网搜索一次，查实时或最新的事实（新闻、价格、比分、营业时间、某件事的最新进展等）。" +
-				"你不确定、或者信息可能过时的时候用它，不要凭记忆回答。搜一次就能答的问题用它。" +
+				"你不确定、或者信息可能过时的时候用它，不要凭记忆回答。搜一两次、读一两页就能答的具体事实当场查；要比较、汇总很多来源的才派后台调查。" +
 				"主人的话是语音识别出来的，地名、人名可能被写成读音相近的字：搜不到时换成读音相近的写法再搜一次。" +
-				"摘要里没有具体内容（时刻、价格、营业时间）时，用 " + ReadWebPagesTool + " 读结果里的页面。" +
-				"没搜到想要的，就简短说没查到，再给一个下一步（例如派后台调查），不要长篇猜测。"},
+				"摘要里没有要的具体内容（时刻、价格、营业时间、步骤）时，这一轮就接着用 " + ReadWebPagesTool + " 读结果里最相关的页面，" +
+				"不要先问主人要不要读；结果和问题不相关时，换个说法再搜一次。" +
+				"读了、换了说法还是没有，再简短说没查到，给一个下一步（例如派后台调查），不要长篇猜测。"},
 			func(ctx context.Context, in webSearchInput) (string, error) {
 				if strings.TrimSpace(in.Query) == "" {
 					return "", errors.New("query 不能为空")

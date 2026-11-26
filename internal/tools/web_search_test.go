@@ -52,11 +52,15 @@ func fakeTavily(t *testing.T, wantKey string, lastQuery *atomic.Value) (*httptes
 		URLs         []string `json:"urls"`
 		Query        string   `json:"query"`
 		ExtractDepth string   `json:"extract_depth"`
+		Format       string   `json:"format,omitempty"`
 	}
 	mcp.AddTool(server, &mcp.Tool{Name: "tavily_extract"}, func(_ context.Context, _ *mcp.CallToolRequest, in extractInput) (*mcp.CallToolResult, any, error) {
 		recorded := "extract:" + in.Query
 		if in.ExtractDepth != "basic" {
 			recorded += "|" + in.ExtractDepth
+		}
+		if in.Format != "text" { // 要的不是纯文本时记下来（断言里出现就说明没要纯文本）
+			recorded += "|format=" + in.Format
 		}
 		lastQuery.Store(recorded)
 		if slices.Contains(in.URLs, oddURL) {
