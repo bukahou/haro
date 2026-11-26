@@ -20,16 +20,23 @@ type Limits struct {
 	Timeout     time.Duration // 搜索阶段最多多久（默认 3 分钟）
 	MaxSearches int           // 最多搜几次（默认 5；没搜成的也算一次）
 	MaxTokens   int           // 累计 token 上限（默认 8 万）
+	// WriteUpTimeout 是到上限后写结论最多多久（不算在搜索阶段里）：一次不带搜索工具的请求。默认 45 秒按不开思考定
+	// （一般几秒就完）；开着思考时一次请求要的时间长得多，按实测放宽
+	WriteUpTimeout time.Duration
+	// RecheckTimeout 是审查提出疑点后复查最多多久：默认 1 分钟按不开思考定（调查的模型一轮几秒、搜一次一两秒，
+	// 四轮一分钟够用）；开着思考时按实测放宽
+	RecheckTimeout time.Duration
 }
 
-// DefaultLimits 是 R2 裁定的默认值（服务端没设 HARO_RESEARCH_TIMEOUT、HARO_RESEARCH_MAX_SEARCHES、HARO_RESEARCH_MAX_TOKENS 时
-// 用它，默认值只写在这里）。
-var DefaultLimits = Limits{Timeout: 3 * time.Minute, MaxSearches: 5, MaxTokens: 80_000}
+// DefaultLimits 是默认值（R2 裁定；服务端没设 HARO_RESEARCH_* 时用它，默认值只写在这里）。
+var DefaultLimits = Limits{Timeout: 3 * time.Minute, MaxSearches: 5, MaxTokens: 80_000,
+	WriteUpTimeout: 45 * time.Second, RecheckTimeout: time.Minute}
 
 // check 检查上限：都要大于 0（配置里没设的，装配处已经换成默认值）。
 func (l Limits) check() error {
-	if l.Timeout <= 0 || l.MaxSearches <= 0 || l.MaxTokens <= 0 {
-		return fmt.Errorf("调查的上限都要大于 0：时限 %v、搜索 %d 次、%d token", l.Timeout, l.MaxSearches, l.MaxTokens)
+	if l.Timeout <= 0 || l.MaxSearches <= 0 || l.MaxTokens <= 0 || l.WriteUpTimeout <= 0 || l.RecheckTimeout <= 0 {
+		return fmt.Errorf("调查的上限都要大于 0：时限 %v、搜索 %d 次、%d token、写结论 %v、复查 %v",
+			l.Timeout, l.MaxSearches, l.MaxTokens, l.WriteUpTimeout, l.RecheckTimeout)
 	}
 	return nil
 }
@@ -98,9 +105,9 @@ func NewRunner(store TaskStore, agents Agents, searcher Searcher, meter Meter, b
 // LongestWait 是派出后最长要等多久：搜索阶段的时限加上到上限后写结论的时间；有审查时再加审查一次和复查的时限
 // （到时限就用已经查到的资料收尾）。
 func (r *Runner) LongestWait() time.Duration {
-	longest := r.limits.Timeout + writeUpTimeout
+	longest := r.limits.Timeout + r.limits.WriteUpTimeout
 	if r.agents.Reviewer != nil {
-		longest += r.agents.Reviewer.Timeout + recheckTimeout
+		longest += r.agents.Reviewer.Timeout + r.limits.RecheckTimeout
 	}
 	return longest
 }

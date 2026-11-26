@@ -192,7 +192,13 @@ v10（2026-11-22 裁定）：记住的事和以前的对话都能按意思找回
   交草稿（结论和来源网址分开交）；调查时按网址记下拿到的资料（读到的正文优先，没读正文的用搜索结果的标题和摘要）。
   系统提示词逐字不变，现在的日期放在任务的消息里。
 - 任务由程序强制上限：时间、轮数、搜索次数、token，先到先停；到上限后不再给搜索工具，用已有资料写结论（标明没查完）。
-  时限、搜索次数、token 在 `HARO_RESEARCH_*`（不设时用 `research.DefaultLimits`），轮数默认是代理定义的 `max_steps`（设了 `HARO_RESEARCH_MAX_ROUNDS` 时用它）。
+  时限、搜索次数、token、写结论和复查的时限在 `HARO_RESEARCH_*`（不设时用 `research.DefaultLimits`），轮数默认是代理定义的 `max_steps`
+  （设了 `HARO_RESEARCH_MAX_ROUNDS` 时用它）。
+- 两个调查代理的模型参数可以和对话分开设：思考写法 `HARO_RESEARCH_THINKING`（不设时各用各的模型平常的写法）、力度 `HARO_RESEARCH_EFFORT`、
+  每次输出上限 `HARO_RESEARCH_MAX_OUTPUT_TOKENS`（不设时用代理定义的 `max_output_tokens`）；审查用哪个模型 `HARO_RESEARCH_REVIEWER`
+  （`strong` 更强的模型，`base` 云端模型）、审一次多久 `HARO_RESEARCH_REVIEW_TIMEOUT`（不设时用定义的 `timeout`）。
+  开着思考时，每一步回答里的思考块跟着回答带到下一步（`brain.ProviderReplay`，内容只有 Claude 的适配层看得懂：
+  `llm/anthropic_replay.go`）；思考块只在它之前的内容一字不差时才收，所以只在调查任务之内带，到上限写结论那一次换了工具清单，不带。
 - 审查（`HARO_STRONG_LLM_USE` 有 `research` 时）：草稿交给代理「调查审查」（`research_review.md`，更强的模型）核对，只给它问题、草稿、
   草稿列出的来源的摘录和现在的日期，不给调查过程（每个来源的摘录和调查时每页看到的一样长，总长有上限；列了却没拿到内容的写明）。
   它用 `submit_review` 交回：通过，或逐条疑点（哪句话、没依据 / 和资料矛盾 / 不准确、依据说的是什么）；只审一次，不改结论。
@@ -264,7 +270,7 @@ VAD 的门槛和静音时长（haro-asr 的 `asrserver.Timing`）。
 云端模型（`HARO_LLM_PROVIDER=cloud`）的接口格式由 `HARO_CLOUD_LLM_API` 选：
 
 - `anthropic`（默认）：Claude API（官方 Go SDK `anthropic-sdk-go`）。`HARO_CLOUD_LLM_MODEL` 例如 `claude-haiku-5-5`；
-  思考关掉求快，回答力度用 `HARO_CLOUD_LLM_EFFORT`（聊天、摘要）/ `HARO_RESEARCH_EFFORT`（后台调查：查资料和审查）；
+  对话的思考关掉求快，回答力度用 `HARO_CLOUD_LLM_EFFORT`（聊天、摘要）/ `HARO_RESEARCH_EFFORT`（后台调查：查资料和审查，思考另见上文「后台调查」）；
   开着提示词缓存，缓存读写按模型价格目录里的单价分开记账。
   凭证：`HARO_ANTHROPIC_API_KEY`；不填时只认配齐的 Workload Identity Federation（`ANTHROPIC_FEDERATION_RULE_ID`、
   `ANTHROPIC_ORGANIZATION_ID`、`ANTHROPIC_IDENTITY_TOKEN_FILE`：在 Kubernetes 里用服务账号令牌换短期令牌，不放长期密钥，
@@ -292,7 +298,7 @@ VAD 的门槛和静音时长（haro-asr 的 `asrserver.Timing`）。
 
 接手时它出错或等太久（`HARO_STRONG_LLM_TIMEOUT`）由前台的模型接着回答。单价同样来自模型价格目录（目录里没有它就起不来）。
 Claude 各模型「关掉思考」的写法不同：`HARO_CLOUD_LLM_THINKING` / `HARO_STRONG_LLM_THINKING`，Haiku 5.5 用 `disabled`，
-Sonnet 5.5 只认 `between_tools`（两次工具调用之间会返回几句进度说明，haro 不回传；实测后续请求照样被接受）。
+Sonnet 5.5 只认 `between_tools`（两次工具调用之间会返回几句进度说明，对话里不回传；实测后续请求照样被接受）。
 
 真实接口的冒烟测试（花钱，默认不跑）：`HARO_ANTHROPIC_API_KEY=… go test -tags integration -run AnthropicLive -v ./internal/llm/`；
 看画面的专家：`go test -tags integration -run LiveExpert -v ./internal/vision/`（用法见该测试开头）；

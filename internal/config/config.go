@@ -131,7 +131,8 @@ type ServerSettings struct {
 
 	// 更强的模型（可选）：按规则把几类请求交给它，其余仍用 HARO_CLOUD_LLM_MODEL；接口（HARO_CLOUD_LLM_API）与凭证和云端模型相同。
 	// 空 = 不分，全部用云端模型。用在哪些地方（逗号分隔）：vision = 看摄像头画面；correction = 主人纠正、或明说要想清楚时由前台模型交给它重答；
-	// research = 审查后台调查的结论（云端模型查资料、写草稿，它只核对、提出疑点，疑点退回云端模型复查；不设就不审查）。
+	// research = 审查后台调查的结论（云端模型查资料、写草稿，它只核对、提出疑点，疑点退回云端模型复查；不设就不审查；
+	// HARO_RESEARCH_REVIEWER=base 时改由云端模型审查）。
 	// 思考写法同 HARO_CLOUD_LLM_THINKING（默认按 Sonnet 5.5）；接手回答时它出错或等太久由云端模型接手，审查出错时用草稿
 	StrongLLMModel    string        `env:"HARO_STRONG_LLM_MODEL"`
 	StrongLLMUse      []string      `env:"HARO_STRONG_LLM_USE" envDefault:"vision,correction,research" envSeparator:","`
@@ -181,13 +182,25 @@ type ServerSettings struct {
 	// 联网搜索：Tavily 官方远程 MCP。密钥不设 = 不提供联网搜索（凭证：无默认值，只来自环境变量）
 	TavilyAPIKey string `env:"HARO_TAVILY_API_KEY"`
 	TavilyMCPURL string `env:"HARO_TAVILY_MCP_URL" envDefault:"https://mcp.tavily.com/mcp/"`
-	// 后台调查（有搜索时才有，只用云端模型）：任务账本、每个任务的上限。四个上限不能是负数，不设（0）= 程序里的默认值：
-	// 时限、搜索次数、token 在 research.DefaultLimits，轮数是代理定义 research（internal/agents/builtin/research.md）的 max_steps
-	ResearchDB          string        `env:"HARO_RESEARCH_DB"`           // 任务账本（SQLite）；空 = 只在内存里
-	ResearchTimeout     time.Duration `env:"HARO_RESEARCH_TIMEOUT"`      // 搜索阶段最多多久
-	ResearchMaxRounds   int           `env:"HARO_RESEARCH_MAX_ROUNDS"`   // 搜索阶段最多请求模型几轮（搜一次、读一次各占一轮）
-	ResearchMaxSearches int           `env:"HARO_RESEARCH_MAX_SEARCHES"` // 最多搜几次
-	ResearchMaxTokens   int           `env:"HARO_RESEARCH_MAX_TOKENS"`   // 累计 token 上限
+	// 后台调查（有搜索时才有，只用云端模型）：任务账本、每个任务的上限。上限不能是负数，不设（0）= 程序里的默认值：
+	// 时限、搜索次数、token 在 research.DefaultLimits，轮数是代理定义 research（internal/agents/builtin/research.md）的 max_steps，
+	// 每次输出上限是两个代理定义的 max_output_tokens，审查的时限是代理定义 research_review 的 timeout
+	ResearchDB             string        `env:"HARO_RESEARCH_DB"`              // 任务账本（SQLite）；空 = 只在内存里
+	ResearchTimeout        time.Duration `env:"HARO_RESEARCH_TIMEOUT"`         // 搜索阶段最多多久
+	ResearchMaxRounds      int           `env:"HARO_RESEARCH_MAX_ROUNDS"`      // 搜索阶段最多请求模型几轮（搜一次、读一次各占一轮）
+	ResearchMaxSearches    int           `env:"HARO_RESEARCH_MAX_SEARCHES"`    // 最多搜几次
+	ResearchMaxTokens      int           `env:"HARO_RESEARCH_MAX_TOKENS"`      // 累计 token 上限
+	ResearchWriteUpTimeout time.Duration `env:"HARO_RESEARCH_WRITEUP_TIMEOUT"` // 到上限后写结论最多多久
+	ResearchRecheckTimeout time.Duration `env:"HARO_RESEARCH_RECHECK_TIMEOUT"` // 审查提出疑点后复查最多多久
+	ResearchReviewTimeout  time.Duration `env:"HARO_RESEARCH_REVIEW_TIMEOUT"`  // 审一次最多多久
+	// 两个调查代理每次请求最多输出多少 token（开着思考时思考也算在里面）
+	ResearchMaxOutputTokens int `env:"HARO_RESEARCH_MAX_OUTPUT_TOKENS"`
+	// 两个调查代理的思考写法（取值同 HARO_CLOUD_LLM_THINKING）；空 = 各用各的模型平常的写法
+	// （调查用 HARO_CLOUD_LLM_THINKING，审查用它那个模型的）。力度是 HARO_RESEARCH_EFFORT
+	ResearchThinking string `env:"HARO_RESEARCH_THINKING"`
+	// 审查用哪个模型：strong = 更强的模型（HARO_STRONG_LLM_MODEL），base = 云端模型（HARO_CLOUD_LLM_MODEL）。
+	// 有没有审查看 HARO_STRONG_LLM_USE 有没有 research（见 ResearchReviewed）
+	ResearchReviewer string `env:"HARO_RESEARCH_REVIEWER" envDefault:"strong"`
 	// 天气：Open-Meteo 公开接口，不用密钥。家的位置：「纬度,经度」（只放在配置里，不进代码），
 	// 或 "ip"（按家里的公网 IP 推定，城市级）；不设 = 查天气时必须说地名
 	Weather             bool   `env:"HARO_WEATHER" envDefault:"true"`
@@ -450,12 +463,20 @@ func (settings ServerSettings) validateConversation() error {
 		notNegative("HARO_WAKE_ARBITRATION", settings.WakeArbitration))
 }
 
-// validateResearch 检查后台调查的上限（0 = 程序里的默认值）。
+// validateResearch 检查后台调查的上限（0 = 程序里的默认值）和审查用哪个模型（思考写法这类厂商的取值由适配层检查）。
 func (settings ServerSettings) validateResearch() error {
+	var reviewer error
+	if settings.ResearchReviewer != ReviewerStrong && settings.ResearchReviewer != ReviewerBase {
+		reviewer = fmt.Errorf("HARO_RESEARCH_REVIEWER 只能是 %s 或 %s，现在是 %q", ReviewerStrong, ReviewerBase, settings.ResearchReviewer)
+	}
 	return errors.Join(notNegative("HARO_RESEARCH_TIMEOUT", settings.ResearchTimeout),
 		notNegative("HARO_RESEARCH_MAX_ROUNDS", settings.ResearchMaxRounds),
 		notNegative("HARO_RESEARCH_MAX_SEARCHES", settings.ResearchMaxSearches),
-		notNegative("HARO_RESEARCH_MAX_TOKENS", settings.ResearchMaxTokens))
+		notNegative("HARO_RESEARCH_MAX_TOKENS", settings.ResearchMaxTokens),
+		notNegative("HARO_RESEARCH_WRITEUP_TIMEOUT", settings.ResearchWriteUpTimeout),
+		notNegative("HARO_RESEARCH_RECHECK_TIMEOUT", settings.ResearchRecheckTimeout),
+		notNegative("HARO_RESEARCH_REVIEW_TIMEOUT", settings.ResearchReviewTimeout),
+		notNegative("HARO_RESEARCH_MAX_OUTPUT_TOKENS", settings.ResearchMaxOutputTokens), reviewer)
 }
 
 // validateListen 检查服务端的监听地址。
@@ -611,6 +632,20 @@ func (s ServerSettings) VisionTakeover() bool {
 // StrongLLMFor 判断更强的模型是否用在 use（StrongForVision 等）上。
 func (s ServerSettings) StrongLLMFor(use string) bool {
 	return s.StrongLLMModel != "" && slices.Contains(s.StrongLLMUse, use)
+}
+
+// 审查后台调查用的模型（HARO_RESEARCH_REVIEWER）。
+const (
+	ReviewerStrong = "strong" // 更强的模型（HARO_STRONG_LLM_MODEL）
+	ReviewerBase   = "base"   // 云端模型（HARO_CLOUD_LLM_MODEL）
+)
+
+// ResearchReviewed 判断后台调查有没有审查：HARO_STRONG_LLM_USE 有 research；审查用更强的模型时还要设了它。
+func (s ServerSettings) ResearchReviewed() bool {
+	if !slices.Contains(s.StrongLLMUse, StrongForResearch) {
+		return false
+	}
+	return s.ResearchReviewer == ReviewerBase || s.StrongLLMModel != ""
 }
 
 // validateStrongLLM 检查更强的模型的配置（回答力度、思考写法这类厂商的取值由各自的适配层检查，见 llm 包）。

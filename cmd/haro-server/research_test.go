@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +15,7 @@ import (
 	"github.com/bukahou/haro/internal/agents"
 	"github.com/bukahou/haro/internal/brain"
 	"github.com/bukahou/haro/internal/config"
+	"github.com/bukahou/haro/internal/llm"
 	"github.com/bukahou/haro/internal/research"
 	"github.com/bukahou/haro/internal/spending"
 	"github.com/bukahou/haro/internal/tools"
@@ -94,6 +96,74 @@ func TestResearchAgentsRejectBadDefinitions(t *testing.T) {
 		if (err == nil) != c.ok {
 			t.Errorf("%s：起得来应为 %v，实际错误 %v", label, c.ok, err)
 		}
+	}
+}
+
+// 调查的两个代理按 HARO_RESEARCH_* 发请求：思考写法、每次输出上限、力度两个都用；审查改用云端模型、审一次的时限按设的。
+// 阳性对照：都不设时和原来一样（调查按云端模型的思考写法、定义的输出上限；审查用更强的模型和它的思考写法、定义的上限和时限）。
+func TestResearchAgentsFollowResearchSettings(t *testing.T) {
+	var mu sync.Mutex
+	var bodies []map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		bodies = append(bodies, body)
+		mu.Unlock()
+		http.Error(w, `{"type":"error","error":{"type":"invalid_request_error","message":"bad request"}}`, http.StatusBadRequest)
+	}))
+	defer server.Close()
+	requestsOf := func(settings config.ServerSettings) (research.Agents, []map[string]any) {
+		t.Helper()
+		mu.Lock()
+		bodies = nil
+		mu.Unlock()
+		assembly := testAssembly(t, settings, nil)
+		claude, err := llm.NewClaudeAPI("k", server.URL, server.Client())
+		if err != nil {
+			t.Fatal(err)
+		}
+		assembly.claude = claude
+		built, err := assembly.researchAgents(research.DefaultLimits)
+		if err != nil || built.Reviewer == nil {
+			t.Fatalf("%+v %v", built, err)
+		}
+		request := brain.ChatRequest{Messages: []brain.ChatMessage{{Role: brain.RoleUser, Text: "要调查的问题"}}}
+		for _, model := range []brain.ChatModel{built.Investigator.Model, built.Reviewer.Model} {
+			if _, err := brain.CollectReply(t.Context(), model, request); err == nil {
+				t.Fatal("假服务回 400：请求应失败")
+			}
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		return built, slices.Clone(bodies)
+	}
+	describe := func(body map[string]any) string {
+		thinking, _ := body["thinking"].(map[string]any)
+		output, _ := body["output_config"].(map[string]any)
+		return fmt.Sprintf("%v %v %v %v", body["model"], thinking["type"], output["effort"], body["max_tokens"])
+	}
+	settings := cloudSettings([]string{config.StrongForResearch}, config.VisionByExpert)
+	settings.CloudLLMAPI, settings.AnthropicAPIKey, settings.CloudLLMURL = config.CloudAPIAnthropic, "k", server.URL
+	settings.CloudLLMThinking, settings.StrongLLMThinking, settings.ResearchEffort = "disabled", "between_tools", "medium"
+	settings.ResearchReviewer = config.ReviewerStrong
+
+	built, sent := requestsOf(settings)
+	if len(sent) != 2 || describe(sent[0]) != "base-model disabled medium 1000" || describe(sent[1]) != "strong-model between_tools medium 4000" ||
+		built.Reviewer.Timeout != time.Minute {
+		t.Errorf("都不设时照原来的：%v %v，审查时限 %v", describe(sent[0]), describe(sent[1]), built.Reviewer.Timeout)
+	}
+
+	settings.ResearchThinking, settings.ResearchEffort, settings.ResearchMaxOutputTokens = "adaptive", "xhigh", 16000
+	settings.ResearchReviewer, settings.ResearchReviewTimeout = config.ReviewerBase, 5*time.Minute
+	built, sent = requestsOf(settings)
+	for i, body := range sent {
+		if describe(body) != "base-model adaptive xhigh 16000" {
+			t.Errorf("第 %d 个代理应按 HARO_RESEARCH_* 发：%s", i+1, describe(body))
+		}
+	}
+	if len(sent) != 2 || built.Reviewer.Timeout != 5*time.Minute {
+		t.Errorf("审查的时限应是 HARO_RESEARCH_REVIEW_TIMEOUT：%v（%d 次请求）", built.Reviewer.Timeout, len(sent))
 	}
 }
 

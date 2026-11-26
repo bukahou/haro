@@ -13,10 +13,6 @@ import (
 // 调查的过程：调查的模型决定搜什么、读哪几页，查够了交结论草稿；到上限就不再给搜索工具，逼它用已有资料写。
 // 草稿交出去之前要不要审查、审查之后怎么办，见 review.go。
 
-// writeUpTimeout 是到上限后写结论最多等多久（不算在搜索阶段里）：一次不带搜索工具、输出不长的请求，一般几秒就完；
-// 也算进告诉主人的最长等待（LongestWait）。是请求要的时间，不是部署时要调的参数，不开放成配置。
-const writeUpTimeout = 45 * time.Second
-
 // investigationReport 是一次调查的经过和结果。
 type investigationReport struct {
 	status          Status
@@ -155,17 +151,19 @@ search:
 // 模型这一步说的话（和调用）接在消息后面；交出结论的那次调用还没回结果，由调用方回（reply、answerCalls）。
 func (q *inquiry) step(ctx context.Context, offer []brain.ToolSpec, searchCap int) (draft conclusionDraft, concluded bool, err error) {
 	q.steps++
-	text, calls, tokens, err := askModel(ctx, q.r.agents.Investigator.Model, q.messages, offer)
+	reply, tokens, err := askModel(ctx, q.r.agents.Investigator.Model, q.messages, offer)
 	q.report.tokens += tokens
 	if err != nil {
 		return conclusionDraft{}, false, err
 	}
+	text, calls := reply.Text, reply.ToolCalls
 	for i := range calls {
 		if calls[i].ID == "" {
 			calls[i].ID = fmt.Sprintf("r%d-%d", q.steps, i)
 		}
 	}
-	q.messages = append(q.messages, brain.ChatMessage{Role: brain.RoleAssistant, Text: text, ToolCalls: calls})
+	// 开着思考时这次的思考跟着回答带到下一步（搜索和复查给的工具清单不变，见 brain.ProviderReplay）
+	q.messages = append(q.messages, brain.ChatMessage{Role: brain.RoleAssistant, Text: text, ToolCalls: calls, Replay: reply.Replay})
 	if hasLookup(calls) {
 		for _, call := range calls {
 			result := conclusionNotTaken
@@ -189,20 +187,22 @@ func (q *inquiry) step(ctx context.Context, offer []brain.ToolSpec, searchCap in
 	return draft, true, nil
 }
 
-// writeUp 到上限后让调查的模型用已有的资料写结论：不再给搜索工具，只给 submit_conclusion；写结论的时间单算（writeUpTimeout）。
+// writeUp 到上限后让调查的模型用已有的资料写结论：不再给搜索工具，只给 submit_conclusion；写结论的时间单算（Limits.WriteUpTimeout）。
 // 没用工具、直接写了文字的整段当结论。
 func (q *inquiry) writeUp(ctx context.Context, stop string) (conclusionDraft, error) {
 	q.messages = append(q.messages, brain.ChatMessage{Role: brain.RoleUser,
 		Text: "调查到此为止（" + stop + "）。不要再搜索，根据上面已经查到的资料写结论，用 " + submitConclusionTool +
 			" 交出来；没查清的地方明确说没查完。"})
-	writeCtx, cancel := context.WithTimeout(ctx, writeUpTimeout)
+	writeCtx, cancel := context.WithTimeout(ctx, q.r.limits.WriteUpTimeout)
 	defer cancel()
 	q.steps++
-	text, calls, tokens, err := askModel(writeCtx, q.r.agents.Investigator.Model, q.messages, q.r.submitSpecs)
+	// 这一次只给交结论的工具，工具清单和前面不同：前面的思考块不能带（带了整个请求会被拒），这次的也不留给复查
+	reply, tokens, err := askModel(writeCtx, q.r.agents.Investigator.Model, brain.WithoutReplay(q.messages), q.r.submitSpecs)
 	q.report.tokens += tokens
 	if err != nil {
 		return conclusionDraft{}, err
 	}
+	text, calls := reply.Text, reply.ToolCalls
 	for i := range calls {
 		if calls[i].ID == "" {
 			calls[i].ID = fmt.Sprintf("r%d-%d", q.steps, i)
@@ -292,10 +292,11 @@ func failureText(err error) string {
 	return "失败：" + err.Error()
 }
 
-// askModel 请求模型一次，收齐文字、工具调用与 token 数（出错时也算上知道的用量）；被截断按失败（brain.ErrTruncated）。
-func askModel(ctx context.Context, model brain.ChatModel, messages []brain.ChatMessage, specs []brain.ToolSpec) (string, []brain.ToolCall, int, error) {
+// askModel 请求模型一次，收齐回答（文字、工具调用、要原样带回的内容）与 token 数（出错时也算上知道的用量）；
+// 被截断按失败（brain.ErrTruncated）。
+func askModel(ctx context.Context, model brain.ChatModel, messages []brain.ChatMessage, specs []brain.ToolSpec) (brain.Reply, int, error) {
 	reply, err := brain.CollectReply(ctx, model, brain.ChatRequest{Messages: messages, Tools: specs})
-	return reply.Text, reply.ToolCalls, reply.Usage.PromptTokens + reply.Usage.OutputTokens, err
+	return reply, reply.Usage.PromptTokens + reply.Usage.OutputTokens, err
 }
 
 // submitConclusionSpec 是调查的代理交结论的工具（名字见 agents.go；查资料的两个见 lookup.go）。

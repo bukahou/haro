@@ -24,8 +24,6 @@ const (
 	recheckSearches = 2
 	// recheckRounds 是复查时最多请求调查的模型几轮：搜两次、读一两次，再留一轮交结论。
 	recheckRounds = 4
-	// recheckTimeout 是复查最多多久：调查的模型一轮几秒、搜一次一两秒，四轮一分钟够用；也算进告诉主人的最长等待。
-	recheckTimeout = time.Minute
 )
 
 // reviewMaterial 是交给审查的全部内容（编成 JSON 放在一条消息里）。现在的日期每次不同，放在这里，系统提示词逐字不变。
@@ -255,7 +253,7 @@ func doubtsMessage(doubts []reviewDoubt) (string, error) {
 }
 
 // recheck 把审查的疑点交回原来的调查对话复查一次：给同样的工具和一点额外的额度（recheckSearches、recheckRounds、
-// recheckTimeout；每一轮之前照样查调查的额度），让调查的模型逐条再查、再交一次结论。交出了就返回新结论；
+// Limits.RecheckTimeout；每一轮之前照样查调查的额度），让调查的模型逐条再查、再交一次结论。交出了就返回新结论；
 // 没交出（出错、超时、额度用完、轮数用完、交了空的）返回错误。
 func (q *inquiry) recheck(ctx context.Context, doubts []reviewDoubt) (conclusionDraft, error) {
 	message, err := doubtsMessage(doubts)
@@ -264,7 +262,7 @@ func (q *inquiry) recheck(ctx context.Context, doubts []reviewDoubt) (conclusion
 	}
 	q.answerCalls(draftReceived)
 	q.messages = append(q.messages, brain.ChatMessage{Role: brain.RoleUser, Text: message})
-	recheckCtx, cancel := context.WithTimeout(ctx, recheckTimeout)
+	recheckCtx, cancel := context.WithTimeout(ctx, q.r.limits.RecheckTimeout)
 	defer cancel()
 	searchCap := q.report.searches + recheckSearches
 	for range recheckRounds {
@@ -275,7 +273,7 @@ func (q *inquiry) recheck(ctx context.Context, doubts []reviewDoubt) (conclusion
 		draft, concluded, err := q.step(recheckCtx, q.r.investigationSpecs, searchCap)
 		if err != nil {
 			if recheckCtx.Err() != nil && ctx.Err() == nil {
-				return conclusionDraft{}, fmt.Errorf("复查超过了 %s", recheckTimeout)
+				return conclusionDraft{}, fmt.Errorf("复查超过了 %s", q.r.limits.RecheckTimeout)
 			}
 			return conclusionDraft{}, err
 		}

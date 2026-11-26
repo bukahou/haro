@@ -2,7 +2,8 @@
 # 调查审查：后台调查的草稿交给更强的模型核对（HARO_STRONG_LLM_USE 有 research 时才有）。只给它问题、草稿、草稿列出的那几个来源的
 # 摘录和现在的日期（不给调查过程；摘录的长短上限在 internal/research 定义），它用 submit_review 交回：通过，或逐条列出疑点。
 # 它只审、不改结论：疑点退回调查的模型复查一次。只审一次（max_steps 要是 1）；出错、超时、没用工具交回时用草稿。
-# 力度用 HARO_RESEARCH_EFFORT、思考写法用 HARO_STRONG_LLM_THINKING。
+# 力度用 HARO_RESEARCH_EFFORT；思考写法用它那个模型的（设了 HARO_RESEARCH_THINKING 时用它）。
+# 下面的 model、timeout、max_output_tokens 可以由 HARO_RESEARCH_REVIEWER、HARO_RESEARCH_REVIEW_TIMEOUT、HARO_RESEARCH_MAX_OUTPUT_TOKENS 换掉。
 # 正文引用的值：{{.ReviewTool}} 交回审查的工具名（代码里定义一处，只填下面 tools 里有的）。
 title: 调查审查
 mode: subtask

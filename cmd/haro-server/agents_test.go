@@ -200,6 +200,22 @@ func TestCheckClaudeSettings(t *testing.T) {
 	if err := checkClaudeSettings(adaptive); err == nil || !strings.Contains(err.Error(), "HARO_RESEARCH_EFFORT") {
 		t.Errorf("调查的力度要和两种思考写法都合得上：%v", err)
 	}
+	// 设了 HARO_RESEARCH_THINKING 时两个调查代理都用它：adaptive 时调查的力度可以是 xhigh；写错了起不来
+	research := base
+	research.ResearchThinking, research.ResearchEffort = "adaptive", "xhigh"
+	if err := checkClaudeSettings(research); err != nil {
+		t.Errorf("调查的思考是 adaptive 时力度可以是 xhigh：%v", err)
+	}
+	research.ResearchThinking = "on"
+	if err := checkClaudeSettings(research); err == nil || !strings.Contains(err.Error(), "HARO_RESEARCH_THINKING") {
+		t.Errorf("HARO_RESEARCH_THINKING 写错：应起不来并写明变量名：%v", err)
+	}
+	// 审查改用云端模型时，按云端模型的思考写法查调查的力度（更强的模型开着思考也不算）
+	byBase := adaptive
+	byBase.ResearchEffort, byBase.ResearchReviewer = "medium", config.ReviewerBase
+	if err := checkClaudeSettings(byBase); err != nil {
+		t.Errorf("力度 medium 两种写法都合得上：%v", err)
+	}
 	openai := base
 	openai.CloudLLMAPI, openai.CloudLLMThinking = config.CloudAPIOpenAI, "off"
 	if err := checkClaudeSettings(openai); err != nil {

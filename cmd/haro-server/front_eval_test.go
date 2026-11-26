@@ -37,15 +37,12 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
-	"unicode/utf8"
 
 	"github.com/caarlos0/env/v11"
-	"github.com/google/jsonschema-go/jsonschema"
 	"go.yaml.in/yaml/v3"
 
 	"github.com/bukahou/haro/internal/agents"
@@ -212,7 +209,7 @@ func TestFrontEvalRun(t *testing.T) {
 			}
 			t.Logf("%s %s：%s，最后一轮 %.1f 秒，给了 %d 个工具，输入最多 %d token，$%.4f（累计 $%.2f），调了 %v：%s", testCase.ID,
 				frontGroupLabels[group], state, float64(last.DoneMs)/1000, run.Offered, maxInt(run.Prompts), run.USD, spent, run.Tools,
-				frontOneLine(last.Answer, 70))
+				evalOneLine(last.Answer, 70))
 			if spent > budget {
 				t.Fatalf("累计 $%.2f 超过上限 $%.2f：停下（已答的在 %s）", spent, budget, out.Name())
 			}
@@ -540,7 +537,7 @@ func (r *frontRecorder) StreamReply(ctx context.Context, request brain.ChatReque
 	for _, message := range request.Messages {
 		if message.Role == brain.RoleTool && message.ToolCallID != "" && !r.seen[message.ToolCallID] {
 			r.seen[message.ToolCallID] = true
-			r.trace = append(r.trace, "  → "+message.ToolName+" 的结果："+frontOneLine(message.Text, 260))
+			r.trace = append(r.trace, "  → "+message.ToolName+" 的结果："+evalOneLine(message.Text, 260))
 		}
 	}
 	r.mu.Unlock()
@@ -549,7 +546,7 @@ func (r *frontRecorder) StreamReply(ctx context.Context, request brain.ChatReque
 			r.mu.Lock()
 			for _, call := range delta.ToolCalls {
 				arguments, _ := json.Marshal(call.Arguments)
-				r.trace = append(r.trace, "调用 "+call.Name+" "+frontOneLine(string(arguments), 200))
+				r.trace = append(r.trace, "调用 "+call.Name+" "+evalOneLine(string(arguments), 200))
 				r.tools = append(r.tools, call.Name)
 			}
 			if delta.Usage != nil {
@@ -682,7 +679,7 @@ func loadFrontCases(t *testing.T, dir string) []frontCase {
 
 func pickFrontCases(t *testing.T, cases []frontCase) []frontCase {
 	t.Helper()
-	wanted := frontList(os.Getenv("HARO_EVAL_CASES"))
+	wanted := evalList(os.Getenv("HARO_EVAL_CASES"))
 	if len(wanted) == 0 {
 		return cases
 	}
@@ -700,7 +697,7 @@ func pickFrontCases(t *testing.T, cases []frontCase) []frontCase {
 func pickFrontGroups(t *testing.T) []string {
 	t.Helper()
 	all := []string{groupHaiku, groupLocal, groupLocalThink}
-	wanted := frontList(os.Getenv("HARO_EVAL_GROUPS"))
+	wanted := evalList(os.Getenv("HARO_EVAL_GROUPS"))
 	if len(wanted) == 0 {
 		return all
 	}
@@ -710,37 +707,6 @@ func pickFrontGroups(t *testing.T) []string {
 		}
 	}
 	return wanted
-}
-
-func frontList(raw string) []string {
-	var items []string
-	for item := range strings.SplitSeq(raw, ",") {
-		if item = strings.TrimSpace(item); item != "" {
-			items = append(items, item)
-		}
-	}
-	return items
-}
-
-func envFloat(t *testing.T, name string, fallback float64) float64 {
-	t.Helper()
-	raw := os.Getenv(name)
-	if raw == "" {
-		return fallback
-	}
-	value, err := strconv.ParseFloat(raw, 64)
-	if err != nil || value <= 0 {
-		t.Fatalf("%s 要是正数：%q", name, raw)
-	}
-	return value
-}
-
-func frontOneLine(text string, limit int) string {
-	text = strings.Join(strings.Fields(text), " ")
-	if utf8.RuneCountInString(text) <= limit {
-		return text
-	}
-	return string([]rune(text)[:limit]) + "…"
 }
 
 func maxInt(values []int) int {
@@ -753,38 +719,6 @@ func maxInt(values []int) int {
 
 // ——— 判分 ———
 
-// 判分的三档（评审经工具交出）。
-const (
-	frontCorrect = "correct"
-	frontPartial = "partial"
-	frontWrong   = "wrong"
-)
-
-type frontVerdict struct {
-	Grade  string `json:"grade" jsonschema:"对照参考答案的判断"`
-	Reason string `json:"reason" jsonschema:"一两句理由（用中文写）：对在哪、错在哪"`
-	judged bool
-}
-
-func (v frontVerdict) score() float64 {
-	switch {
-	case !v.judged:
-		return 0
-	case v.Grade == frontCorrect:
-		return 1
-	case v.Grade == frontPartial:
-		return 0.5
-	}
-	return 0
-}
-
-func (v frontVerdict) mark() string {
-	if !v.judged {
-		return "未判"
-	}
-	return map[string]string{frontCorrect: "✓ 对", frontPartial: "◐ 部分对", frontWrong: "✗ 错"}[v.Grade]
-}
-
 func TestFrontEvalJudge(t *testing.T) {
 	dir, key := os.Getenv("HARO_EVAL_DIR"), os.Getenv("HARO_ANTHROPIC_API_KEY")
 	if dir == "" || key == "" {
@@ -794,65 +728,30 @@ func TestFrontEvalJudge(t *testing.T) {
 	for _, testCase := range loadFrontCases(t, dir) {
 		cases[testCase.ID] = testCase
 	}
-	runPath := os.Getenv("HARO_EVAL_RUN")
-	if runPath == "" {
-		matches, _ := filepath.Glob(filepath.Join(dir, "results", "run-*.jsonl"))
-		if len(matches) == 0 {
-			t.Fatal("results 里没有 run-*.jsonl")
-		}
-		slices.Sort(matches)
-		runPath = matches[len(matches)-1]
-	}
+	runPath := latestRun(t, dir)
 	runs := loadFrontRuns(t, runPath)
 	var settings config.ServerSettings
 	if err := env.Parse(&settings); err != nil {
 		t.Fatal(err)
 	}
 	judgeModel := cmp.Or(os.Getenv("HARO_EVAL_JUDGE_MODEL"), "claude-sonnet-5-5")
-	prices, _, err := pricecatalog.Load(context.Background(), &http.Client{Timeout: 30 * time.Second}, settings.ModelPricesURL,
-		settings.ModelPricesProvider, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	price, err := prices.Price(judgeModel)
-	if err != nil {
-		t.Fatal(err)
-	}
-	api, err := llm.NewClaudeAPI(key, "", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	judge := &frontRecorder{ChatModel: llm.NewAnthropicChatModel(llm.AnthropicOptions{API: api, Model: judgeModel, MaxTokens: 1000,
-		Effort: "low", Thinking: llm.ThinkingBetweenTools, MaxRetries: 2}), model: judgeModel,
-		pricing: spending.Pricing{USDToYen: 1, Models: map[string]spending.TokenPrice{judgeModel: price}}, seen: map[string]bool{}}
-	verdicts := make([]frontVerdict, len(runs))
+	judge := newEvalJudge(t, settings, key, judgeModel, llm.ThinkingBetweenTools, 1000)
+	verdicts := make([]evalVerdict, len(runs))
 	for i, run := range runs {
 		verdicts[i] = judgeFrontRun(t, judge, cases[run.Case], run)
 		t.Logf("%s %s：%s %s", run.Case, frontGroupLabels[run.Group], verdicts[i].mark(), verdicts[i].Reason)
 	}
-	report := frontReport(cases, runs, verdicts, filepath.Base(runPath), judgeModel, judge.usd)
+	report := frontReport(cases, runs, verdicts, filepath.Base(runPath), judgeModel, judge.spent())
 	path := filepath.Join(dir, "results", "report-"+time.Now().Format("20060102-1504")+".md")
 	if err := os.WriteFile(path, []byte(report), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	t.Logf("报告写到 %s（判分花了 $%.3f）", path, judge.usd)
+	t.Logf("报告写到 %s（判分花了 $%.3f）", path, judge.spent())
 }
 
 // judgeFrontRun 请评审对照参考答案判一次（看不到是哪一组），经 submit_grade 交出判断。没答完的那一轮也交给评审看（照实判）。
-func judgeFrontRun(t *testing.T, judge brain.ChatModel, testCase frontCase, run frontRun) frontVerdict {
+func judgeFrontRun(t *testing.T, judge brain.ChatModel, testCase frontCase, run frontRun) evalVerdict {
 	t.Helper()
-	schema, err := jsonschema.For[frontVerdict](nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	schema.Properties["grade"].Enum = []any{frontCorrect, frontPartial, frontWrong}
-	parameters, err := json.Marshal(schema)
-	if err != nil {
-		t.Fatal(err)
-	}
-	tool := brain.ToolSpec{Name: "submit_grade", Parameters: parameters,
-		Description: "交出判断。correct：做到了参考答案要求的（工具调用、结果、回答都对）；partial：大体对，但缺了一部分或有小错（参考答案里写了算部分对的情况照它）；" +
-			"wrong：没做到、做错、编造，或者这一轮没答完（失败、超时、一个字没说）。回答是说给人听的语音，文笔不重要，按参考答案里写的标准判。"}
 	var transcript strings.Builder
 	for _, turn := range run.Turns {
 		fmt.Fprintf(&transcript, "[%s] 主人：%s\n", turn.AskedAt.In(time.Local).Format("2006-01-02 15:04 Mon"), turn.Said)
@@ -870,29 +769,9 @@ func judgeFrontRun(t *testing.T, judge brain.ChatModel, testCase frontCase, run 
 		"程序核对应调的工具（%s）：%s\n\n参考答案与判分标准：%s", testCase.Category, transcript.String(), cmp.Or(strings.Join(run.Trace, "\n"), "（没调工具）"),
 		cmp.Or(strings.Join(run.Reminders, "；"), "（无）"), cmp.Or(strings.Join(run.Memories, "；"), "（无）"),
 		cmp.Or(strings.Join(testCase.ExpectTools, "、"), "无要求"), missing, testCase.Expect)
-	messages := []brain.ChatMessage{
-		{Role: brain.RoleSystem, Text: "你是评测的评审：对照参考答案，判断家用语音助手 Haro 在这道题里的表现（工具调用、最后的状态、说给主人的话）。只通过 submit_grade 工具交出判断。"},
-		{Role: brain.RoleUser, Text: question}}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-	for delta, err := range judge.StreamReply(ctx, brain.ChatRequest{Messages: messages, Tools: []brain.ToolSpec{tool}}) {
-		if err != nil {
-			t.Logf("评审出错：%v", err)
-			return frontVerdict{}
-		}
-		for _, call := range delta.ToolCalls {
-			if call.Name != tool.Name {
-				continue
-			}
-			raw, _ := json.Marshal(call.Arguments)
-			var verdict frontVerdict
-			if json.Unmarshal(raw, &verdict) == nil && slices.Contains([]string{frontCorrect, frontPartial, frontWrong}, verdict.Grade) {
-				verdict.judged = true
-				return verdict
-			}
-		}
-	}
-	return frontVerdict{}
+	return askJudge(t, judge, "你是评测的评审：对照参考答案，判断家用语音助手 Haro 在这道题里的表现（工具调用、最后的状态、说给主人的话）。",
+		question, "交出判断。correct：做到了参考答案要求的（工具调用、结果、回答都对）；partial：大体对，但缺了一部分或有小错（参考答案里写了算部分对的情况照它）；"+
+			"wrong：没做到、做错、编造，或者这一轮没答完（失败、超时、一个字没说）。回答是说给人听的语音，文笔不重要，按参考答案里写的标准判。")
 }
 
 func loadFrontRuns(t *testing.T, path string) []frontRun {
@@ -937,7 +816,7 @@ type frontTotals struct {
 }
 
 // frontReport 是 Markdown 报告：汇总（含每次请求输入最多多少 token，看 16k 够不够）、按类、逐题、明细。
-func frontReport(cases map[string]frontCase, runs []frontRun, verdicts []frontVerdict, runName, judgeModel string, judgeUSD float64) string {
+func frontReport(cases map[string]frontCase, runs []frontRun, verdicts []evalVerdict, runName, judgeModel string, judgeUSD float64) string {
 	var report strings.Builder
 	fmt.Fprintf(&report, "# 前台能力对比 %s\n\n回答：`%s`；判分：%s（初判，最后以人看为准；判分花了 $%.3f）\n\n",
 		time.Now().Format("2006-01-02 15:04"), runName, judgeModel, judgeUSD)
@@ -963,9 +842,9 @@ func frontReport(cases map[string]frontCase, runs []frontRun, verdicts []frontVe
 		}
 		switch {
 		case !verdict.judged:
-		case verdict.Grade == frontCorrect:
+		case verdict.Grade == gradeCorrect:
 			sum.correct++
-		case verdict.Grade == frontPartial:
+		case verdict.Grade == gradePartial:
 			sum.partial++
 		default:
 			sum.wrong++
@@ -1006,7 +885,7 @@ func frontReport(cases map[string]frontCase, runs []frontRun, verdicts []frontVe
 	ids := slices.Sorted(maps.Keys(cases))
 	report.WriteString("\n## 逐题\n\n| 题 | " + strings.Join(labelsOf(groups), " | ") + " |\n|---|" + strings.Repeat("---|", len(groups)) + "\n")
 	for _, id := range ids {
-		row := []string{id + " " + frontOneLine(strings.Join(cases[id].Turns, " → "), 26)}
+		row := []string{id + " " + evalOneLine(strings.Join(cases[id].Turns, " → "), 26)}
 		present := false
 		for _, group := range groups {
 			cell := "—"
@@ -1034,7 +913,7 @@ func frontReport(cases map[string]frontCase, runs []frontRun, verdicts []frontVe
 				fmt.Fprintf(&block, "- **%s** %s %s\n", frontGroupLabels[group], verdicts[i].mark(), verdicts[i].Reason)
 				for _, turn := range run.Turns {
 					fmt.Fprintf(&block, "  - [%s] 主人：%s\n  - Haro（第一句 %.1f 秒、答完 %.1f 秒%s）：%s\n", turn.AskedAt.In(time.Local).Format("15:04:05"),
-						turn.Said, float64(turn.FirstMs)/1000, float64(turn.DoneMs)/1000, frontTurnState(turn), cmp.Or(frontOneLine(turn.Answer, 600), "（没说话）"))
+						turn.Said, float64(turn.FirstMs)/1000, float64(turn.DoneMs)/1000, frontTurnState(turn), cmp.Or(evalOneLine(turn.Answer, 600), "（没说话）"))
 				}
 				for _, trace := range run.Trace {
 					fmt.Fprintf(&block, "  - %s\n", trace)

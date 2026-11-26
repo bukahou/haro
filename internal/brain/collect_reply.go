@@ -10,7 +10,8 @@ import (
 type Reply struct {
 	Text      string
 	ToolCalls []ToolCall
-	Usage     ReplyUsage // 不知道时为零值
+	Usage     ReplyUsage      // 不知道时为零值
+	Replay    *ProviderReplay // 要原样带回的内容（见 ProviderReplay；没有时为 nil）
 }
 
 // ErrTruncated 表示模型的输出到了上限、被截断：收齐回答的用途按失败处理（写了一半的摘要、结论不能用）。
@@ -32,6 +33,9 @@ func CollectReply(ctx context.Context, model ChatModel, request ChatRequest) (Re
 		}
 		text.WriteString(delta.Text)
 		reply.ToolCalls = append(reply.ToolCalls, delta.ToolCalls...)
+		if delta.Replay != nil {
+			reply.Replay = delta.Replay
+		}
 		stop = delta.Stop
 	}
 	reply.Text = text.String()

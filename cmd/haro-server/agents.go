@@ -158,11 +158,12 @@ func (a agentAssembly) build(toolbox brain.Toolbox, expertSearch vision.Search) 
 	return built, nil
 }
 
-// researchAgents 按定义装配后台调查的代理：调查（research）一定有；审查（research_review）在 HARO_STRONG_LLM_USE 有 research 时
-// 才有。调查的轮数默认是定义的 max_steps，设了 HARO_RESEARCH_MAX_ROUNDS 时用它。工具名按 research 自己提供的查（不在会话和
+// researchAgents 按定义装配后台调查的代理：调查（research）一定有；审查（research_review）见 ResearchReviewed。
+// 调查的轮数默认是定义的 max_steps，设了 HARO_RESEARCH_MAX_ROUNDS 时用它；审查用哪个模型、审一次多久默认按定义，
+// 设了 HARO_RESEARCH_REVIEWER、HARO_RESEARCH_REVIEW_TIMEOUT 时用它们。工具名按 research 自己提供的查（不在会话和
 // 工具箱里），正文里的工具名、上限由 research 填。模型不套额度（调查自己每一轮之前查）、不熔断（后台做，不急）。
 func (a agentAssembly) researchAgents(limits research.Limits) (research.Agents, error) {
-	reviewed := a.settings.StrongLLMFor(config.StrongForResearch)
+	reviewed := a.settings.ResearchReviewed()
 	definition := a.catalog[agents.Research]
 	model, investigatorModel, err := a.meteredForResearch(definition)
 	if err != nil {
@@ -179,6 +180,10 @@ func (a agentAssembly) researchAgents(limits research.Limits) (research.Agents, 
 	reviewerModel := "（不审查）"
 	if reviewed {
 		definition := a.catalog[agents.ResearchReview]
+		if a.settings.ResearchReviewer == config.ReviewerBase {
+			definition.Model = agents.TierBase
+		}
+		definition.Timeout = cmp.Or(a.settings.ResearchReviewTimeout, definition.Timeout)
 		model, id, err := a.meteredForResearch(definition)
 		if err != nil {
 			return research.Agents{}, err
@@ -191,7 +196,7 @@ func (a agentAssembly) researchAgents(limits research.Limits) (research.Agents, 
 		built.Reviewer, reviewerModel = &reviewer, id
 	}
 	a.logger.Info("代理：后台调查", "agent", investigator.Name, "model", investigatorModel, "max_rounds", rounds,
-		"reviewer", reviewerModel, "effort", a.settings.ResearchEffort)
+		"reviewer", reviewerModel, "effort", a.settings.ResearchEffort, "thinking", cmp.Or(a.settings.ResearchThinking, "（各用各的）"))
 	return built, nil
 }
 
@@ -272,6 +277,8 @@ func (a agentAssembly) meteredAs(definition agents.Definition, background bool) 
 	}
 	if background {
 		spec.effort, spec.retries, spec.firstTokenTimeout, spec.requestTimeout = s.ResearchEffort, researchRetries, 0, 0
+		spec.thinking = cmp.Or(s.ResearchThinking, spec.thinking)
+		spec.maxTokens = cmp.Or(s.ResearchMaxOutputTokens, spec.maxTokens)
 	}
 	return spending.NewMeteredChatModel(newCloudChatModel(s, a.claude, spec, a.client), spec.model, purpose, a.pricing, a.ledger, logger),
 		spec.model, nil

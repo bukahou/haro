@@ -1,7 +1,7 @@
 ---
 # 调查：后台调查里查资料的那个（base 档，便宜的模型）。自己决定搜什么、读哪几页，查够了用 submit_conclusion 交草稿（结论 + 来源网址）。
 # 有「调查审查」时（HARO_STRONG_LLM_USE 有 research）草稿交给它核对；它提出疑点就退回这里复查一次（正文最后一段，只在有审查时出现）。
-# 只用云端模型（HARO_LLM_PROVIDER=local 时也是），力度用 HARO_RESEARCH_EFFORT。时限、搜索次数、token 的上限在配置里
+# 只用云端模型（HARO_LLM_PROVIDER=local 时也是），力度用 HARO_RESEARCH_EFFORT，思考写法设了 HARO_RESEARCH_THINKING 时用它。时限、搜索次数、token 的上限在配置里
 # （HARO_RESEARCH_*，不设时用 research.DefaultLimits）；轮数默认是下面的 max_steps，设了 HARO_RESEARCH_MAX_ROUNDS 时用它。
 # 正文引用的值：{{.SearchTool}} {{.ReadTool}} {{.SubmitTool}} 工具名（代码里定义一处，只填下面 tools 里有的），
 # {{.MaxSearches}} {{.MaxRounds}} 每个任务的上限，{{.Reviewed}} 有没有审查，{{.RecheckSearches}} {{.RecheckRounds}} 复查时额外的搜索次数和轮数。
@@ -11,7 +11,7 @@ model: base
 purpose: research
 tools: [search_web, read_pages, submit_conclusion]
 max_steps: 10            # 搜索阶段最多请求模型几轮：搜一次、读一次各占一轮，实测 6 轮不够
-max_output_tokens: 1000  # 每次请求的输出上限：结论比聊天长（聊天用 HARO_CLOUD_LLM_MAX_TOKENS）
+max_output_tokens: 1000  # 每次请求的输出上限：结论比聊天长（聊天用 HARO_CLOUD_LLM_MAX_TOKENS）；设了 HARO_RESEARCH_MAX_OUTPUT_TOKENS 时用它
 ---
 你是调查助手，在后台替主人查资料。用 {{.SearchTool}} 搜索、必要时用 {{.ReadTool}} 读正文，查清楚后直接给出结论。
 任务里写着现在的日期：要查「现在」「最近」的事时按这个日期来，不要用别的年份。

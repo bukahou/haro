@@ -425,11 +425,36 @@ func TestNumericSettingRanges(t *testing.T) {
 		{"HARO_RESEARCH_MAX_ROUNDS", func(s *ServerSettings) { s.ResearchMaxRounds = -1 }},
 		{"HARO_RESEARCH_MAX_SEARCHES", func(s *ServerSettings) { s.ResearchMaxSearches = -1 }},
 		{"HARO_RESEARCH_MAX_TOKENS", func(s *ServerSettings) { s.ResearchMaxTokens = -1 }},
+		{"HARO_RESEARCH_WRITEUP_TIMEOUT", func(s *ServerSettings) { s.ResearchWriteUpTimeout = -time.Second }},
+		{"HARO_RESEARCH_RECHECK_TIMEOUT", func(s *ServerSettings) { s.ResearchRecheckTimeout = -time.Second }},
+		{"HARO_RESEARCH_REVIEW_TIMEOUT", func(s *ServerSettings) { s.ResearchReviewTimeout = -time.Second }},
+		{"HARO_RESEARCH_MAX_OUTPUT_TOKENS", func(s *ServerSettings) { s.ResearchMaxOutputTokens = -1 }},
+		{"HARO_RESEARCH_REVIEWER", func(s *ServerSettings) { s.ResearchReviewer = "sonnet" }},
 	} {
 		settings := cloudServerSettings(t)
 		c.change(&settings)
 		if err := settings.validateBrain(); err == nil || !strings.Contains(err.Error(), c.name) {
 			t.Errorf("%s 超出范围应起不来并写明：%v", c.name, err)
+		}
+	}
+}
+
+// 后台调查有没有审查：HARO_STRONG_LLM_USE 有 research；审查用更强的模型时还要设了它，改用云端模型时不用。
+func TestResearchReviewed(t *testing.T) {
+	cases := []struct {
+		strong, reviewer string
+		uses             []string
+		want             bool
+	}{
+		{"strong-model", ReviewerStrong, []string{StrongForResearch}, true},
+		{"", ReviewerStrong, []string{StrongForResearch}, false},
+		{"", ReviewerBase, []string{StrongForResearch}, true},
+		{"strong-model", ReviewerBase, []string{StrongForVision}, false},
+	}
+	for _, c := range cases {
+		settings := ServerSettings{StrongLLMModel: c.strong, ResearchReviewer: c.reviewer, StrongLLMUse: c.uses}
+		if got := settings.ResearchReviewed(); got != c.want {
+			t.Errorf("%+v：有审查应为 %v", c, c.want)
 		}
 	}
 }
@@ -448,6 +473,10 @@ func TestZeroMeansUnlimitedOffOrDefault(t *testing.T) {
 		"HARO_TOOL_TIMEOUT（程序里的默认值）":             func(s *ServerSettings) { s.ToolTimeout = 0 },
 		"HARO_RESEARCH_*（程序里的默认值）":               func(s *ServerSettings) { s.ResearchTimeout, s.ResearchMaxRounds = 0, 0 },
 		"HARO_RESEARCH_MAX_SEARCHES、TOKENS（默认值）": func(s *ServerSettings) { s.ResearchMaxSearches, s.ResearchMaxTokens = 0, 0 },
+		"HARO_RESEARCH_*_TIMEOUT（默认值）": func(s *ServerSettings) {
+			s.ResearchWriteUpTimeout, s.ResearchRecheckTimeout, s.ResearchReviewTimeout = 0, 0, 0
+		},
+		"HARO_RESEARCH_MAX_OUTPUT_TOKENS（代理定义的）": func(s *ServerSettings) { s.ResearchMaxOutputTokens = 0 },
 	} {
 		settings := cloudServerSettings(t)
 		change(&settings)

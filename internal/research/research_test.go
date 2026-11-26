@@ -841,12 +841,12 @@ func TestLongestWaitFollowsLimits(t *testing.T) {
 		limits := DefaultLimits
 		limits.Timeout = timeout
 		runner := newTestRunner(t, openTestStore(t), &scriptedModel{}, &fakeSearcher{}, &fakeBudget{}, rigSetup{limits: limits})
-		if got := runner.LongestWait(); got != timeout+writeUpTimeout {
-			t.Errorf("时限 %v + 写结论 %v：得到 %v", timeout, writeUpTimeout, got)
+		if got := runner.LongestWait(); got != timeout+limits.WriteUpTimeout {
+			t.Errorf("时限 %v + 写结论 %v：得到 %v", timeout, limits.WriteUpTimeout, got)
 		}
 		reviewed := newTestRunner(t, openTestStore(t), &scriptedModel{}, &fakeSearcher{}, &fakeBudget{},
 			rigSetup{limits: limits, reviewer: &reviewerModel{}, reviewTimeout: time.Minute})
-		if got, want := reviewed.LongestWait(), timeout+writeUpTimeout+time.Minute+recheckTimeout; got != want {
+		if got, want := reviewed.LongestWait(), timeout+limits.WriteUpTimeout+time.Minute+limits.RecheckTimeout; got != want {
 			t.Errorf("有审查时再加审查和复查的时限：得到 %v，应为 %v", got, want)
 		}
 	}
