@@ -86,6 +86,7 @@ type Session struct {
 	streamConfig    *StreamConfig                // 打开识别流用的设置；nil = 还没打开过（断开后按它重开）
 	pendingJobs     map[string]*transcriptionJob // 已判定说完、等待识别结果的语音段（按 item_id）
 	lastWakeKeyword string                       // 最近一次听到的唤醒词（配置里的原文，告诉模型开头可能带着它）
+	wakePhrases     []string                     // 识别流报的唤醒词（haro-asr 的关键词文件）：上次告诉终端的，变了才再说
 	language        string                       // 主人最近一句话识别出的语种（固定的话按它选语言）
 	// awake 照识别流报的记（醒 / 睡只由识别流的唤醒门改：haro.wake_word.detected、haro.wake_word.state）；
 	// 识别流断开期间记终端要的，重开后告诉新的流、由它回复确认。

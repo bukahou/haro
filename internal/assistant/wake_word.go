@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/bukahou/haro/internal/realtimeproto"
@@ -38,7 +40,7 @@ func (a *Assistant) runWakeWord(ctx context.Context) error {
 
 	window := &conversationWindow{idle: a.opts.WakeWord.IdleTimeout}
 	defer window.close()
-	a.logger.Info("💤 休眠中：叫「" + a.opts.WakeWord.Phrase + "」唤醒（或按回车）")
+	a.logger.Info("💤 休眠中：" + a.wakeHint() + "（或按回车）")
 
 	for {
 		a.playHeldNotices(ctx, window)
@@ -86,6 +88,8 @@ func (a *Assistant) handleWakeEvent(ctx context.Context, window *conversationWin
 		a.logger.Info("👂 已唤醒", "keyword", e.Keyword)
 	case realtimeproto.HaroWakeWordState:
 		a.applyWakeState(ctx, window, e.Awake)
+	case realtimeproto.SessionUpdated:
+		a.learnWakePhrases(e.Session.WakePhrases)
 	case realtimeproto.InputAudioBufferSpeechStarted:
 		if window.awake {
 			a.hearing.Store(true)
@@ -157,9 +161,26 @@ func (a *Assistant) applyWakeState(ctx context.Context, window *conversationWind
 	case !awake && window.awake:
 		window.sleep()
 		a.hearing.Store(false) // 说到一半休眠（例如按回车）：之后不会再有「说完」
-		a.logger.Info("💤 " + reason + "，休眠中：叫「" + a.opts.WakeWord.Phrase + "」唤醒（或按回车）")
+		a.logger.Info("💤 " + reason + "，休眠中：" + a.wakeHint() + "（或按回车）")
 		a.playSleepTone(ctx)
 	}
+}
+
+// learnWakePhrases 记下服务端告诉的唤醒词（haro-asr 的关键词文件里的：唤醒词只写在那一处）。只在主循环里调用。
+func (a *Assistant) learnWakePhrases(phrases []string) {
+	if len(phrases) == 0 || slices.Equal(phrases, a.wakePhrases) {
+		return
+	}
+	a.wakePhrases = slices.Clone(phrases)
+	a.logger.Info("👂 唤醒词：" + strings.Join(phrases, "、"))
+}
+
+// wakeHint 是日志里「怎么叫醒」的提示：知道唤醒词时写出来，还不知道（服务端还没告诉）时只说叫唤醒词。
+func (a *Assistant) wakeHint() string {
+	if len(a.wakePhrases) == 0 {
+		return "叫唤醒词唤醒"
+	}
+	return "叫「" + strings.Join(a.wakePhrases, "」或「") + "」唤醒"
 }
 
 // playNotice 服务端有事告诉主人（例如后台调查查完了、语音识别断开了）：响一声。醒着、睡着都响。

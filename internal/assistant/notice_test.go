@@ -156,7 +156,7 @@ func startNoticeAssistant(t *testing.T, bargeIn bool) (*noticeServer, *heldSpeak
 	haro := assistant.NewAssistant(assistant.Dependencies{
 		Manual: waitingManual{}, Microphone: loudMicrophone{}, Speaker: speaker, Brain: server,
 	}, assistant.Options{TurnDetection: realtimeproto.TurnDetection{Type: "server_vad"}, EchoGuard: echoGuard, BargeIn: bargeIn,
-		NoticeTone: pcm("[叮咚]"), WakeWord: assistant.WakeWordOptions{Phrase: "哈罗哈罗", IdleTimeout: time.Minute}},
+		NoticeTone: pcm("[叮咚]"), WakeWord: assistant.WakeWordOptions{IdleTimeout: time.Minute}},
 		slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -236,7 +236,7 @@ func TestNoticeWaitsUntilTheOwnerIsAnswered(t *testing.T) {
 	haro := assistant.NewAssistant(assistant.Dependencies{
 		Manual: waitingManual{}, Microphone: loudMicrophone{}, Speaker: speaker, Brain: server,
 	}, assistant.Options{TurnDetection: realtimeproto.TurnDetection{Type: "server_vad"}, EchoGuard: echoGuard,
-		NoticeTone: pcm("[叮咚]"), WakeWord: assistant.WakeWordOptions{Phrase: "哈罗哈罗", IdleTimeout: time.Minute}},
+		NoticeTone: pcm("[叮咚]"), WakeWord: assistant.WakeWordOptions{IdleTimeout: time.Minute}},
 		slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

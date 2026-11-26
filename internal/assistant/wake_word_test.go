@@ -160,7 +160,7 @@ func runWakeWordConversation(t *testing.T, failure sleepFailure) {
 	}, assistant.Options{TurnDetection: turn, EchoGuard: 10 * time.Millisecond,
 		NoticeTone:  pcm("[叮咚]"),
 		NoticeTones: map[string]realtimeproto.PCMAudio{realtimeproto.NoticeTranscriptionLost: pcm("[断开]")},
-		WakeWord: assistant.WakeWordOptions{Phrase: "哈罗哈罗", IdleTimeout: 150 * time.Millisecond,
+		WakeWord: assistant.WakeWordOptions{IdleTimeout: 150 * time.Millisecond,
 			SleepTone: pcm("[我去睡觉了]")},
 		Timing: assistant.Timing{WakeConfirm: 50 * time.Millisecond}}, logger)
 

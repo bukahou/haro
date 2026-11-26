@@ -45,7 +45,8 @@ func (a *Assistant) playResponse(ctx context.Context, turnSpan trace.Span, item 
 			return a.finishResponse(turnSpan, *done, err, answer.String(), committedAt)
 		case event := <-a.deps.Brain.Events():
 			switch e := event.(type) {
-			case realtimeproto.HaroNotice, realtimeproto.HaroWakeWordState: // 提示留到这一轮播完再响；醒 / 睡的回复留给主循环
+			case realtimeproto.HaroNotice, realtimeproto.HaroWakeWordState, realtimeproto.SessionUpdated:
+				// 提示留到这一轮播完再响；醒 / 睡的回复、服务端告诉的唤醒词留给主循环
 				select {
 				case a.replay <- e:
 				default:

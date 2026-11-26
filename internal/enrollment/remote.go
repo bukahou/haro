@@ -12,6 +12,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -23,40 +24,38 @@ import (
 	"github.com/bukahou/haro/internal/buildinfo"
 	"github.com/bukahou/haro/internal/endpoint"
 	"github.com/bukahou/haro/internal/realtimeproto"
-	"github.com/bukahou/haro/internal/voiceprint"
 )
 
-// Options 是一次登记的参数。
+// Options 是一次登记的参数。要读的句子向服务端要（第一句以 haro-asr 关键词文件里的唤醒词开头，终端不配唤醒词）。
 type Options struct {
-	ServerURL  string // 服务端的地址（同 HARO_SERVER_URL）
-	Name       string
-	WakePhrase string        // 终端配置的唤醒词（HARO_WAKE_PHRASE）：登记的第一句以它开头
-	Append     bool          // 补录（换了麦克风、换了位置时）
-	Seconds    time.Duration // 每句录多久
-	MinLevel   float64       // 一句的音量（RMS，0–1）低于这个就让用户重读；0 = DefaultMinLevel
-	Recorder   assistant.AudioRecorder
-	In         io.Reader // 按回车开始录（一般是 os.Stdin）
-	Out        io.Writer
-	Client     *http.Client
+	ServerURL string // 服务端的地址（同 HARO_SERVER_URL）
+	Name      string
+	Append    bool          // 补录（换了麦克风、换了位置时）
+	Seconds   time.Duration // 每句录多久
+	MinLevel  float64       // 一句的音量（RMS，0–1）低于这个就让用户重读；0 = DefaultMinLevel
+	Recorder  assistant.AudioRecorder
+	In        io.Reader // 按回车开始录（一般是 os.Stdin）
+	Out       io.Writer
+	Client    *http.Client
 }
 
 // DefaultMinLevel 是默认的音量门槛（RMS）。定值，没有单独实测：约 -46 dBFS，只拦下几乎没录到声音的情况
 // （麦克风静音、离得太远）。
 const DefaultMinLevel = 0.005
 
-// Run 录 voiceprint.EnrollmentSentences 里的每一句，发给服务端登记，打印结果。
+// Run 向服务端要登记要读的句子，录下每一句，发给服务端登记，打印结果。
 func Run(ctx context.Context, opts Options) error {
 	if opts.Name == "" {
 		return fmt.Errorf("要给出登记的名字")
-	}
-	if opts.WakePhrase == "" {
-		return fmt.Errorf("要给出唤醒词（登记的第一句以它开头）")
 	}
 	minLevel := opts.MinLevel
 	if minLevel <= 0 {
 		minLevel = DefaultMinLevel
 	}
-	sentences := voiceprint.EnrollmentSentences(opts.WakePhrase)
+	sentences, err := fetchSentences(ctx, opts)
+	if err != nil {
+		return err
+	}
 	if opts.Append {
 		fmt.Fprintf(opts.Out, "补录「%s」：录 %d 句，加进原来的声纹\n", opts.Name, len(sentences))
 	}
@@ -110,6 +109,46 @@ func recordFor(ctx context.Context, recorder assistant.AudioRecorder, seconds ti
 	return audio.Data, err
 }
 
+// fetchSentences 向服务端要登记要读的句子（服务端转给 haro-asr：它按关键词文件里的唤醒词生成第一句）。
+func fetchSentences(ctx context.Context, opts Options) ([]string, error) {
+	address, err := endpoint.Join(opts.ServerURL, realtimeproto.EnrollmentScriptPath, nil)
+	if err != nil {
+		return nil, err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, address, nil)
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("User-Agent", buildinfo.UserAgent())
+	request.Header.Set(buildinfo.Header, buildinfo.Version)
+	response, err := opts.Client.Do(request)
+	if err != nil {
+		return nil, fmt.Errorf("连不上服务端 %s: %w", opts.ServerURL, err)
+	}
+	defer response.Body.Close()
+	data, _ := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+	if response.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("取登记要读的句子失败：%w", httpFailure(response.StatusCode, data))
+	}
+	var script realtimeproto.EnrollmentScript
+	if err := json.Unmarshal(data, &script); err != nil {
+		return nil, fmt.Errorf("解析登记要读的句子: %w", err)
+	}
+	if len(script.Sentences) == 0 {
+		return nil, errors.New("服务端没给登记要读的句子")
+	}
+	return script.Sentences, nil
+}
+
+// httpFailure 把服务端回的错误说清楚：有 OpenAI 格式的错误说明就用它，没有就带上状态码和原文。
+func httpFailure(status int, body []byte) error {
+	var failure realtimeproto.HTTPError
+	if json.Unmarshal(body, &failure) == nil && failure.Error.Message != "" {
+		return errors.New(failure.Error.Message)
+	}
+	return fmt.Errorf("HTTP %d %s", status, strings.TrimSpace(string(body)))
+}
+
 func upload(ctx context.Context, opts Options, clips []string) (realtimeproto.VoiceprintEnrollmentResult, error) {
 	var none realtimeproto.VoiceprintEnrollmentResult
 	body, err := json.Marshal(realtimeproto.VoiceprintEnrollment{Append: &opts.Append, Clips: clips}) // 补录还是覆盖都写明
@@ -134,11 +173,7 @@ func upload(ctx context.Context, opts Options, clips []string) (realtimeproto.Vo
 	defer response.Body.Close()
 	data, _ := io.ReadAll(io.LimitReader(response.Body, 1<<20))
 	if response.StatusCode != http.StatusOK {
-		var failure realtimeproto.HTTPError
-		if json.Unmarshal(data, &failure) == nil && failure.Error.Message != "" {
-			return none, fmt.Errorf("登记失败：%s", failure.Error.Message)
-		}
-		return none, fmt.Errorf("登记失败：HTTP %d %s", response.StatusCode, strings.TrimSpace(string(data)))
+		return none, fmt.Errorf("登记失败：%w", httpFailure(response.StatusCode, data))
 	}
 	var parsed realtimeproto.VoiceprintEnrollmentResult
 	if err := json.Unmarshal(data, &parsed); err != nil {

@@ -46,6 +46,10 @@ type SessionUpdate struct {
 	// InputFormat 是之后 input_audio_buffer.append 的音频格式：走 WebSocket 时送音频之前必须声明。
 	// 进程内可以不填：每段音频本身带格式。
 	InputFormat AudioFormat
+	// WakePhrases 只在 session.updated 里有（haro 扩展）：语音前端认的唤醒词（haro-asr 关键词文件里的显示名）。
+	// 唤醒词只定义在关键词文件一处：haro-asr 报给服务端，服务端转给终端（日志提示、声纹登记的第一句用它）。
+	// 客户端定不了唤醒词：session.update 里带了就拒绝
+	WakePhrases []string
 }
 
 // InputAudioBufferAppend 往识别流送一段 PCM（终端录音每 20ms 一块）。识别流没开时服务端报错，不暂存音频。
@@ -144,8 +148,8 @@ type HaroWakeWordState struct {
 	Awake bool
 }
 
-// HaroNotice 是服务端给终端的一个提示（haro 扩展）：终端播一声提示音、不说话（服务端还不能主动开口）。
-// 例如后台调查查完了：主人听到后叫醒 haro，它先说结论。
+// HaroNotice 是服务端给终端的一个提示（haro 扩展）：终端播一声提示音、不说话。
+// 例如后台调查查完了：主人听到后叫醒 haro，它会告诉主人查完了。
 type HaroNotice struct {
 	Kind string // NoticeResearchDone 等；终端不认识的种类也照样响一声
 }
@@ -158,6 +162,8 @@ const (
 	NoticeTranscriptionLost = "transcription_lost"
 	// NoticeTranscriptionRestored：语音识别重开了（只在提示过断开之后才发）。
 	NoticeTranscriptionRestored = "transcription_restored"
+	// NoticeReminder：到点的提醒没能说出来（语音合成用不了）：终端播提醒专用的提示音。
+	NoticeReminder = "reminder"
 )
 
 // InputAudioBufferSpeechStarted 表示 VAD 检测到用户开始说话。
@@ -209,13 +215,27 @@ type ResponseOutputAudioDelta struct {
 }
 
 // ResponseCreated 表示服务端开始了一次回答（之后恰好有一个 ResponseDone）。
-type ResponseCreated struct{}
+type ResponseCreated struct {
+	// Unprompted 不为空（haro 扩展）：这次不是在回答主人刚说的话，而是服务端自己开口（例如到点的提醒），值是缘由
+	// （UnpromptedReminder 等；终端不认识的缘由照样播）。服务端只在终端没在播、没有进行中的回答时才这样开口，
+	// 所以它的音频不会和别的回答混在一起
+	Unprompted string
+}
+
+// 服务端自己开口的缘由（ResponseCreated.Unprompted）。
+const (
+	// UnpromptedReminder：到点的提醒。
+	UnpromptedReminder = "reminder"
+)
 
 // ResponseDone 表示本次回答结束；每个开始了的回答恰好对应一个 ResponseDone。
 type ResponseDone struct {
 	Status ResponseStatus
 	Reason ResponseReason // Status 不是 completed 时的原因
 	Usage  *Usage
+	// EndConversation（haro 扩展）：模型判断主人要结束这次对话（例如「好了，你先休息吧」）。终端把这次回答播完以后
+	// 请语音前端休眠；播的时候被打断就不睡（主人还在说）
+	EndConversation bool
 }
 
 // Error 是服务端侧的错误。出错的回答之后仍会有一个 Status=failed 的 ResponseDone。

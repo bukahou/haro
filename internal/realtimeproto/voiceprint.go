@@ -1,8 +1,9 @@
 package realtimeproto
 
-// 声纹登记接口（haro-asr 提供的 HTTP 接口，haro-server 原样转发）：终端录几句话发过去，
+// 声纹登记接口（haro-asr 提供的 HTTP 接口，haro-server 原样转发）：终端先取要读的句子，录几句话发过去，
 // haro-asr 算向量、存进声纹目录、立刻生效。请求和响应的结构只在这里定义，两端共用。
 //
+//	GET  EnrollmentScriptPath      成功 200 + EnrollmentScript（第一句以 haro-asr 关键词文件里的唤醒词开头）
 //	POST VoiceprintPath + {名字}   请求体 VoiceprintEnrollment；成功 200 + VoiceprintEnrollmentResult，失败 4xx/5xx + HTTPError
 
 // VoiceprintPath 是声纹登记接口的路径前缀，后面接要登记的名字（路径转义）。
@@ -10,6 +11,17 @@ const VoiceprintPath = "/v1/voiceprints/"
 
 // VoiceprintRoute 是服务端注册路由用的写法（Go ServeMux 的模式）。
 const VoiceprintRoute = "POST " + VoiceprintPath + "{name}"
+
+// EnrollmentScriptPath 是登记要读的句子（GET）。句子由 haro-asr 按它认的唤醒词生成：唤醒词只在它的关键词文件里写一处。
+const EnrollmentScriptPath = "/v1/voiceprint-enrollment/sentences"
+
+// EnrollmentScriptRoute 是注册路由用的写法。
+const EnrollmentScriptRoute = "GET " + EnrollmentScriptPath
+
+// EnrollmentScript 是登记时要读的句子（给人朗读的文本）。
+type EnrollmentScript struct {
+	Sentences []string `json:"sentences"`
+}
 
 // VoiceprintEnrollment 是登记请求。
 type VoiceprintEnrollment struct {

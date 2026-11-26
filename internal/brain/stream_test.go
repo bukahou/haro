@@ -637,3 +637,46 @@ func TestUncheckableSpeakerFollowsLastSpeakerUntilSleep(t *testing.T) {
 		t.Error("睡着以后再醒：算不出声纹的这句不应再沿用之前认出的人")
 	}
 }
+
+// 识别流报了它认的唤醒词（haro-asr 的关键词文件）：用 session.updated 告诉终端；重开后没变就不再说，变了再说一次。
+// 没开唤醒门的会话不报。
+func TestWakePhrasesFromRecognizerAreToldToTerminal(t *testing.T) {
+	voice := braintest.NewVoice()
+	session := newReopenSession(t, voice, brain.ReopenTiming{Delay: time.Millisecond, MaxDelay: 5 * time.Millisecond,
+		LostNoticeAfter: time.Hour})
+	turn := realtimeproto.TurnDetection{Type: "server_vad"}
+	first := braintest.Open(t, session, voice, realtimeproto.SessionUpdate{TurnDetection: &turn, WakeWord: true})
+	accepted := func(phrases ...string) realtimeproto.SessionUpdated {
+		return realtimeproto.SessionUpdated{Session: realtimeproto.SessionUpdate{Kind: realtimeproto.SessionTranscription,
+			TurnDetection: &turn, WakeWord: true, WakePhrases: phrases}}
+	}
+	if err := first.Emit(accepted("哈罗哈罗")); err != nil {
+		t.Fatal(err)
+	}
+	told := braintest.Expect[realtimeproto.SessionUpdated](t, session)
+	if !slices.Equal(told.Session.WakePhrases, []string{"哈罗哈罗"}) || !told.Session.WakeWord || told.Session.Kind != "" {
+		t.Errorf("应把唤醒词告诉终端（对话会话的 session.updated）：%+v", told.Session)
+	}
+
+	_ = first.Close() // 重开：唤醒词没变，不再说
+	second := waitOpened(t, voice, 2)
+	deadline := time.Now().Add(braintest.EventTimeout)
+	for len(second.AwakeCalls()) == 0 && time.Now().Before(deadline) { // 等重开收尾（恢复醒 / 睡）
+		time.Sleep(time.Millisecond)
+	}
+	if err := second.Emit(accepted("哈罗哈罗"), realtimeproto.HaroWakeWordState{}); err != nil {
+		t.Fatal(err)
+	}
+	if event := braintest.Next(t, session); event.Type() != "haro.wake_word.state" {
+		t.Errorf("唤醒词没变时不应再发 session.updated，先收到的是 %s", event.Type())
+	}
+
+	_ = second.Close() // 再重开：换了唤醒词，再说一次
+	third := waitOpened(t, voice, 3)
+	if err := third.Emit(accepted("小助手")); err != nil {
+		t.Fatal(err)
+	}
+	if told := braintest.Expect[realtimeproto.SessionUpdated](t, session); !slices.Equal(told.Session.WakePhrases, []string{"小助手"}) {
+		t.Errorf("唤醒词变了应再告诉终端：%q", told.Session.WakePhrases)
+	}
+}

@@ -134,7 +134,11 @@ func run(settings config.ASRSettings, logger *slog.Logger) error {
 		return err
 	}
 	models.add(release)
-	logger.Info("唤醒词已启用", "keywords_file", kws.KeywordsFile, "threshold", kws.Threshold,
+	wakePhrases, err := sherpa.KeywordPhrases(kws.KeywordsFile)
+	if err != nil {
+		return fmt.Errorf("读关键词文件里的唤醒词: %w", err)
+	}
+	logger.Info("唤醒词已启用", "keywords_file", kws.KeywordsFile, "phrases", wakePhrases, "threshold", kws.Threshold,
 		"model_files", []string{kws.EncoderFile, kws.DecoderFile, kws.JoinerFile})
 
 	speakers, closeSpeakers, err := loadSpeakerCheck(settings, logger)
@@ -145,7 +149,7 @@ func run(settings config.ASRSettings, logger *slog.Logger) error {
 
 	handler := asrserver.NewHandler(asrserver.Dependencies{Transcriber: recognizer,
 		NewVoiceDetector: newDetector, TurnDetector: turnDetector, NewKeywordSpotter: newKeywordSpotter,
-		Speakers: speakers, Settings: capabilitySettings(), Logger: logger})
+		WakePhrases: wakePhrases, Speakers: speakers, Settings: capabilitySettings(), Logger: logger})
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	listener, err := net.Listen("tcp", settings.Listen)

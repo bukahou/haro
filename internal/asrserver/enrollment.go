@@ -26,6 +26,16 @@ const maxUploadBytes = 32 << 20
 // minEnrollmentClips：至少几句（太少声纹不稳）。
 const minEnrollmentClips = 2
 
+// handleEnrollmentScript 给出登记要读的句子：第一句以关键词文件里的第一个唤醒词开头（唤醒时比对的就是喊唤醒词的声音）。
+// 没有唤醒词（没开唤醒词识别）时 503：登记的第一句没法写。
+func handleEnrollmentScript(w http.ResponseWriter, wakePhrases []string) {
+	if len(wakePhrases) == 0 {
+		writeError(w, http.StatusServiceUnavailable, "haro-asr 没有唤醒词（没配关键词文件），登记要读的第一句没法写")
+		return
+	}
+	writeJSON(w, http.StatusOK, realtimeproto.EnrollmentScript{Sentences: voiceprint.EnrollmentSentences(wakePhrases[0])})
+}
+
 func handleEnrollment(w http.ResponseWriter, r *http.Request, speakers *SpeakerCheck) {
 	if speakers == nil || speakers.Embedder == nil || speakers.Dir == "" {
 		writeError(w, http.StatusServiceUnavailable, "没有开声纹（haro-asr 没配说话人识别模型或声纹目录）")

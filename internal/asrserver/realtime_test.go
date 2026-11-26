@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -870,5 +871,40 @@ func TestRealtimeTranscriptionFailureNamesTheItem(t *testing.T) {
 	failed, ok2 := events[2].(realtimeproto.InputAudioTranscriptionFailed)
 	if !ok1 || !ok2 || failed.ItemID != stopped.ItemID || failed.Code != realtimeproto.CodeTranscriptionFailed {
 		t.Errorf("识别失败应发带编号的 transcription.failed：%#v", events)
+	}
+}
+
+// 开着唤醒门的转写会话在 session.updated 里报出关键词文件里的唤醒词（服务端转给终端）；没开唤醒门时不报。
+func TestSessionUpdatedCarriesWakePhrases(t *testing.T) {
+	for _, wakeWord := range []bool{true, false} {
+		server := httptest.NewServer(NewHandler(Dependencies{Transcriber: &fixedTranscriber{text: "你好"},
+			NewVoiceDetector: func(VoiceDetectorConfig) (VoiceDetector, error) {
+				return &energyDetector{silenceSamples: 300 * 16}, nil
+			},
+			NewKeywordSpotter: func() (KeywordSpotter, error) { return &fakeSpotter{}, nil },
+			WakePhrases:       []string{"哈罗哈罗"},
+			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil))}))
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		conn, _, err := websocket.Dial(ctx, transcriptionURL(t, server.URL), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := writeClientEvent(ctx, conn, transcriptionUpdate(realtimeproto.TurnDetection{Type: "server_vad"}, wakeWord)); err != nil {
+			t.Fatal(err)
+		}
+		updated, ok := readEvents(t, ctx, conn, 1)[0].(realtimeproto.SessionUpdated)
+		if !ok {
+			t.Fatal("第一个事件应是 session.updated")
+		}
+		want := []string(nil)
+		if wakeWord {
+			want = []string{"哈罗哈罗"}
+		}
+		if !reflect.DeepEqual(updated.Session.WakePhrases, want) {
+			t.Errorf("唤醒门 %v：session.updated 的唤醒词 = %q，应为 %q", wakeWord, updated.Session.WakePhrases, want)
+		}
+		conn.CloseNow()
+		cancel()
+		server.Close()
 	}
 }

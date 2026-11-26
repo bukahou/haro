@@ -310,7 +310,8 @@ type RecognizerStream interface {
 	// SetPlayback 告诉语音前端终端在不在播放回答（打断用）：true = 只听唤醒词（听到即打断），false = 恢复。
 	SetPlayback(ctx context.Context, playing bool) error
 	// Events 发出 InputAudioBufferSpeechStarted / SpeechStopped / InputAudioTranscriptionCompleted /
-	// HaroWakeWordDetected / Error；连接断开时关闭。
+	// HaroWakeWordDetected / Error；连接断开时关闭。打开时转写服务确认设置的 SessionUpdated（带着它认的唤醒词）
+	// 排在最前面（实现可以不发：会话就不知道唤醒词，终端的提示里不写具体是哪个词）。
 	Events() <-chan realtimeproto.ServerEvent
 	Close() error
 }

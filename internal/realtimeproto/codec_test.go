@@ -57,6 +57,9 @@ func TestServerEventsRoundTrip(t *testing.T) {
 	events := []ServerEvent{
 		SessionUpdated{Session: SessionUpdate{Kind: SessionTranscription, InputFormat: input16k, WakeWord: true,
 			TurnDetection: &TurnDetection{Type: "semantic_vad", Eagerness: "low"}}}, // haro-asr → 服务端：接受了设置
+		SessionUpdated{Session: SessionUpdate{Kind: SessionTranscription, InputFormat: input16k, WakeWord: true,
+			TurnDetection: &TurnDetection{Type: "server_vad"}, WakePhrases: []string{"哈罗哈罗"}}}, // 带上关键词文件里的唤醒词
+		SessionUpdated{Session: SessionUpdate{WakeWord: true, WakePhrases: []string{"哈罗哈罗", "嘿 haro"}}}, // 服务端 → 终端
 		InputAudioBufferSpeechStarted{AudioStartMs: 1200, ItemID: "item_1"},
 		InputAudioBufferSpeechStopped{AudioEndMs: 3400, ItemID: "item_1"},
 		InputAudioTranscriptionCompleted{ItemID: "item_1", Transcript: "讲个冷笑话"},
@@ -73,7 +76,10 @@ func TestServerEventsRoundTrip(t *testing.T) {
 		ResponseOutputAudioTranscriptDelta{Delta: "为什么数学老师离婚了？"},
 		ResponseOutputAudioDelta{Audio: PCMAudio{Format: AudioFormat{SampleRate: 32000, Channels: 1}, Data: []byte{9, 8, 7, 6}}},
 		ResponseCreated{},
+		ResponseCreated{Unprompted: UnpromptedReminder}, // 服务端自己开口（到点的提醒）
 		ResponseDone{Status: StatusCompleted, Usage: &Usage{InputTokens: 1200, OutputTokens: 20}},
+		ResponseDone{Status: StatusCompleted, EndConversation: true}, // 主人要结束对话：播完就睡
+		HaroNotice{Kind: NoticeReminder},
 		ResponseDone{Status: StatusIncomplete, Reason: ReasonEmptyTranscript},
 		Error{Code: CodeNoTranscriptionStream, Message: "识别流没有打开"},
 		HaroMCPMessage{Message: json.RawMessage(`{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}`)},
@@ -246,5 +252,43 @@ func TestErrorEventFor(t *testing.T) {
 	plain := ErrorEventFor("", errors.New("连不上"))
 	if plain.Code != CodeServerError || plain.Message != "连不上" {
 		t.Errorf("不带码的错误：%+v", plain)
+	}
+}
+
+// 唤醒词只由语音前端的关键词文件定：客户端在 session.update 里指定唤醒词，照办不了，拒绝（不默默忽略）。
+func TestClientSessionUpdateCannotSetWakePhrases(t *testing.T) {
+	data := []byte(`{"type":"session.update","session":{"type":"realtime","audio":{"input":{"turn_detection":null}},` +
+		`"haro":{"wake_word":{"enabled":true,"phrases":["芝麻开门"]}}}}`)
+	_, err := DecodeClientEvent(data, input16k)
+	var protocolErr *ProtocolError
+	if !errors.As(err, &protocolErr) || protocolErr.Code != CodeInvalidEvent {
+		t.Fatalf("session.update 带唤醒词应被拒绝（invalid_event），得到 %v", err)
+	}
+	// 阳性对照：同一条去掉 phrases 就能解开
+	plain := []byte(`{"type":"session.update","session":{"type":"realtime","audio":{"input":{"turn_detection":null}},` +
+		`"haro":{"wake_word":{"enabled":true}}}}`)
+	if _, err := DecodeClientEvent(plain, input16k); err != nil {
+		t.Fatalf("不带唤醒词的 session.update 应能解开：%v", err)
+	}
+}
+
+// 回答主人说的话时 response.created / response.done 不带 haro 扩展（官方实现照常认）。
+func TestResponseEventsOmitHaroWhenUnused(t *testing.T) {
+	for _, event := range []ServerEvent{ResponseCreated{}, ResponseDone{Status: StatusCompleted}} {
+		data, err := EncodeServerEvent(event)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var wire map[string]any
+		_ = json.Unmarshal(data, &wire)
+		if _, ok := wire["haro"]; ok {
+			t.Errorf("%s 没有扩展内容时不该带 haro：%s", event.Type(), data)
+		}
+	}
+	data, _ := EncodeServerEvent(ResponseCreated{Unprompted: UnpromptedReminder})
+	var wire map[string]any
+	_ = json.Unmarshal(data, &wire)
+	if haro, ok := wire["haro"].(map[string]any); !ok || haro["unprompted"] != UnpromptedReminder {
+		t.Errorf("服务端自己开口时 response.created 要带 haro.unprompted：%s", data)
 	}
 }

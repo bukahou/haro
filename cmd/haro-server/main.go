@@ -108,7 +108,7 @@ const (
 	shutdownResearch = 2 * time.Second
 )
 
-// brainHandler 是服务端的全部 HTTP 入口：对话（WebSocket）+ 远程登记声纹（转给 haro-asr）+ 存活 / 就绪检查。
+// brainHandler 是服务端的全部 HTTP 入口：对话（WebSocket）+ 远程登记声纹（要读的句子和登记都转给 haro-asr）+ 存活 / 就绪检查。
 // 终端只认识服务端的地址；haro-asr 只监听本机（集群里在同一个 Pod）。
 func brainHandler(settings config.ServerSettings, newSession brainserver.SessionFactory, monitor *readiness.Monitor,
 	logger *slog.Logger) (http.Handler, error) {
@@ -118,7 +118,9 @@ func brainHandler(settings config.ServerSettings, newSession brainserver.Session
 	}
 	mux := http.NewServeMux()
 	mux.Handle("/", brainserver.NewHandler(newSession, brainserver.Options{}, logger))
-	mux.Handle(realtimeproto.VoiceprintRoute, httputil.NewSingleHostReverseProxy(asrURL))
+	toASR := httputil.NewSingleHostReverseProxy(asrURL)
+	mux.Handle(realtimeproto.VoiceprintRoute, toASR)
+	mux.Handle(realtimeproto.EnrollmentScriptRoute, toASR)
 	mux.HandleFunc("GET /livez", readiness.Alive)
 	mux.Handle("GET /readyz", monitor)
 	return mux, nil

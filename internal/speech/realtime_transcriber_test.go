@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -88,6 +89,7 @@ func TestTranscriptionStreamDropsUnresponsiveServer(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer stream.Close()
+			expectAccepted(t, stream)
 			select {
 			case _, open := <-stream.Events():
 				if open || !c.wantClose {
@@ -224,6 +226,7 @@ func TestTranscriptionStreamLogsUndecodableEvents(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer stream.Close()
+	expectAccepted(t, stream)
 	if events := drain(t, stream); len(events) != 1 {
 		t.Errorf("解得开的那一个应照常交给会话：%v", events)
 	}
@@ -308,5 +311,50 @@ func TestOpenStreamRefusals(t *testing.T) {
 				t.Errorf("应带出转写服务的码 %s：%v", c.code, err)
 			}
 		})
+	}
+}
+
+// expectAccepted 读出打开时排在最前面的那个事件：转写服务确认设置的 session.updated。
+func expectAccepted(t *testing.T, stream brain.RecognizerStream) realtimeproto.SessionUpdated {
+	t.Helper()
+	select {
+	case event := <-stream.Events():
+		updated, ok := event.(realtimeproto.SessionUpdated)
+		if !ok {
+			t.Fatalf("打开后第一个事件应是转写服务的 session.updated，得到 %#v", event)
+		}
+		return updated
+	case <-time.After(time.Second):
+		t.Fatal("打开后应先交出转写服务的 session.updated")
+	}
+	return realtimeproto.SessionUpdated{}
+}
+
+// 转写服务确认设置时报的唤醒词原样交给会话（排在所有事件前面）：会话转给终端，唤醒词只在关键词文件里写一处。
+func TestTranscriptionStreamPassesAcceptedSettings(t *testing.T) {
+	reply := realtimeproto.SessionUpdated{Session: realtimeproto.SessionUpdate{Kind: realtimeproto.SessionTranscription,
+		TurnDetection: &realtimeproto.TurnDetection{Type: "server_vad"}, WakeWord: true, WakePhrases: []string{"哈罗哈罗"},
+		InputFormat: realtimeproto.TranscriptionFormat}}
+	server := fakeTranscriptionServer(t, reply, func(ctx context.Context, conn *websocket.Conn) {
+		started, _ := realtimeproto.EncodeServerEvent(realtimeproto.InputAudioBufferSpeechStarted{ItemID: "item_1"})
+		_ = conn.Write(ctx, websocket.MessageText, started)
+		readUntilClosed(ctx, conn)
+	})
+	client := &RealtimeTranscriptionClient{BaseURL: server.URL, Logger: slog.New(slog.DiscardHandler)}
+	stream, err := client.OpenStream(context.Background(), serverVAD)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	if got := expectAccepted(t, stream); !reflect.DeepEqual(got.Session.WakePhrases, []string{"哈罗哈罗"}) {
+		t.Errorf("唤醒词应原样交给会话：%q", got.Session.WakePhrases)
+	}
+	select {
+	case event := <-stream.Events():
+		if _, ok := event.(realtimeproto.InputAudioBufferSpeechStarted); !ok {
+			t.Errorf("之后的事件照常交出：%#v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("之后的事件没交出来")
 	}
 }

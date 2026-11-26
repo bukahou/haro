@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -80,6 +81,25 @@ func (s *Session) runStream(stream RecognizerStream) {
 	}
 }
 
+// wakePhrasesReported 是识别流报了它认的唤醒词（haro-asr 的关键词文件：唤醒词只写在那一处）。和上次告诉终端的不一样时，
+// 用 session.updated 告诉终端（日志里的提示用它）。没开唤醒门、或识别服务没报时不发。
+func (s *Session) wakePhrasesReported(phrases []string) {
+	s.mu.Lock()
+	config := s.streamConfig
+	changed := config != nil && config.WakeWord && len(phrases) > 0 && !slices.Equal(phrases, s.wakePhrases)
+	if changed {
+		s.wakePhrases = slices.Clone(phrases)
+	}
+	s.mu.Unlock()
+	if !changed {
+		return
+	}
+	turn := config.TurnDetection
+	s.logger.Info("识别流认的唤醒词：告诉终端", "phrases", phrases)
+	s.emit(realtimeproto.SessionUpdated{Session: realtimeproto.SessionUpdate{TurnDetection: &turn, WakeWord: true,
+		WakePhrases: slices.Clone(phrases)}})
+}
+
 // takeJob 取出（并去掉）等这句话识别结果的任务；没有时返回 nil。
 func (s *Session) takeJob(item string) *transcriptionJob {
 	s.mu.Lock()
@@ -141,6 +161,8 @@ func (s *Session) asleepLocked() bool {
 func (s *Session) pumpStreamEvents(stream RecognizerStream) {
 	for event := range stream.Events() {
 		switch e := event.(type) {
+		case realtimeproto.SessionUpdated: // 识别流打开（或重开）时转写服务确认了设置
+			s.wakePhrasesReported(e.Session.WakePhrases)
 		case realtimeproto.HaroWakeWordDetected:
 			if !s.winWake(stream, e) {
 				continue

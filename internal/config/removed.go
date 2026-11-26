@@ -31,6 +31,8 @@ var removedSettings = []removedSetting{
 		return err == nil && on
 	}, removed: "唤醒词是唯一的对话方式，不能关闭"},
 	{name: "HARO_MIN_SPEECH", side: terminalSide, removed: "按键说话已删除，这个时长不再使用"},
+	{name: "HARO_WAKE_PHRASE", side: terminalSide,
+		removed: "唤醒词只在 haro-asr 的关键词文件里写一处，终端从服务端拿（日志提示、声纹登记的第一句都用它）"},
 	{name: "HARO_VOICE_API_URL", removed: "整段转写的 voice-api 识别已删除，只用流式识别"},
 	{name: "HARO_ASR_MODEL_NAME", removed: "整段转写已删除，流式识别不用这个模型名"},
 	{name: "HARO_CAMERA_MODE", side: terminalSide, stillMeans: func(value string) bool { return value == "on-demand" },

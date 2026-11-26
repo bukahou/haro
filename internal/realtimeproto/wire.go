@@ -108,11 +108,12 @@ type wireSession struct {
 }
 
 type wireHaroSession struct {
-	WakeWord *wireEnabled `json:"wake_word,omitempty" jsonschema:"启用唤醒门：会话从休眠开始，听到唤醒词才处理用户说的话"`
+	WakeWord *wireWakeWordSetting `json:"wake_word,omitempty" jsonschema:"启用唤醒门：会话从休眠开始，听到唤醒词才处理用户说的话"`
 }
 
-type wireEnabled struct {
-	Enabled bool `json:"enabled"`
+type wireWakeWordSetting struct {
+	Enabled bool     `json:"enabled"`
+	Phrases []string `json:"phrases,omitempty" jsonschema:"只在 session.updated 里：语音前端认的唤醒词（关键词文件里的显示名）；session.update 里带了就拒绝"`
 }
 
 type wireAudioFormat struct {
@@ -255,11 +256,21 @@ type wireResponseCreated struct {
 	Response struct {
 		Status ResponseStatus `json:"status" jsonschema:"in_progress"`
 	} `json:"response"`
+	Haro *wireResponseCreatedExt `json:"haro,omitempty" jsonschema:"haro 扩展：服务端自己开口时带上；回答主人说的话时不带"`
+}
+
+type wireResponseCreatedExt struct {
+	Unprompted string `json:"unprompted" jsonschema:"服务端自己开口的缘由，例如 reminder（到点的提醒）；不认识的缘由照样播"`
 }
 
 type wireResponseDone struct {
-	Type     string           `json:"type"`
-	Response wireResponseBody `json:"response"`
+	Type     string               `json:"type"`
+	Response wireResponseBody     `json:"response"`
+	Haro     *wireResponseDoneExt `json:"haro,omitempty" jsonschema:"haro 扩展：没有要带的时不带"`
+}
+
+type wireResponseDoneExt struct {
+	EndConversation bool `json:"end_conversation,omitempty" jsonschema:"主人要结束这次对话：终端播完这次回答后请语音前端休眠，被打断就不睡"`
 }
 
 type wireResponseBody struct {

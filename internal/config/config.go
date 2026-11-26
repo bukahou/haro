@@ -240,10 +240,9 @@ type TerminalSettings struct {
 	VADPrefix    time.Duration `env:"HARO_VAD_PREFIX" envDefault:"300ms"` // 识别时带上语音开始前的这段（定值，没有单独实测）
 	EchoGuard    time.Duration `env:"HARO_ECHO_GUARD" envDefault:"300ms"` // 播完后再静音这么久才恢复收音（实测音箱的余音会被当成一句话；300 ms 是定值）；0 = 不等
 
-	// 唤醒词（唯一的对话方式）
-	WakePhrase string        `env:"HARO_WAKE_PHRASE" envDefault:"哈罗哈罗"` // 提示文字和声纹登记的第一句用它；要和 haro-asr 关键词文件里的唤醒词一致（识别唤醒词的是 haro-asr）
-	WakeIdle   time.Duration `env:"HARO_WAKE_IDLE" envDefault:"40s"`    // 对话窗口：回答播完后安静这么久就休眠（20 秒太快，接着问时已经睡了），休眠时说一声
-	BargeIn    bool          `env:"HARO_BARGE_IN" envDefault:"true"`    // 回答时喊唤醒词可以打断（需要唤醒词）
+	// 唤醒词（唯一的对话方式）。唤醒词本身只在 haro-asr 的关键词文件里写一处：终端从服务端拿（session.updated）
+	WakeIdle time.Duration `env:"HARO_WAKE_IDLE" envDefault:"40s"` // 对话窗口：回答播完后安静这么久就休眠（20 秒太快，接着问时已经睡了），休眠时说一声
+	BargeIn  bool          `env:"HARO_BARGE_IN" envDefault:"true"` // 回答时喊唤醒词可以打断（需要唤醒词）
 
 	// 硬件
 	// 设备一律自动检测（规则见 internal/terminal/device_rules.go）；只在要手动指定时才设，值是各系统自己的设备 ID
