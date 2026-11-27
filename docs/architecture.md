@@ -309,6 +309,10 @@ Anthropic 服务端搜索、Tavily 高级档各答一遍（真的会话，提示
 前台能力对比（花钱，默认不跑；题目放在仓库外）：`cmd/haro-server/front_eval_test.go`（`-tags eval`）：线上的前台（全套工具、
 系统提示词、主人资料、默认性格、情况说明，第一句照线上叫醒）分别用 Claude 和本机 OpenAI 兼容服务上的模型（思考关 / 开）答同一批题，
 先 `TestFrontEvalRun` 跑、再 `TestFrontEvalJudge` 判。
+后台调查对比（花钱，默认不跑；题目放在仓库外）：`cmd/haro-server/research_eval_test.go`（`-tags eval`）：同一批题按几组设置各跑一次
+真的后台调查（照线上装配），评审对照参考答案判。只考审查员：`cmd/haro-server/review_exam_test.go`（`-tags eval`）：同一批草稿
+（原样的、埋了一处错的）交给几组审查员各审一次，走线上审查的同一段代码（`internal/research/review_exam.go`，只在 eval 标签下编译），
+评审判埋的错抓没抓到。
 
 模型文件（识别、VAD、说完判断、唤醒词、声纹）不在仓库里，路径都由配置指定；服务端镜像里已经带着
 （清单、来源与许可证：`deploy/server/models.lock`、`deploy/server/MODELS.md`；本机下载：`scripts/fetch-models.sh ~/.local/share/haro`）。
