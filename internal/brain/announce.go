@@ -109,7 +109,7 @@ func (s *Session) runAnnouncement(ctx context.Context, announcement Announcement
 		s.rememberTurn(time.Now(), []ChatMessage{
 			{Role: RoleUser, Text: situationHeading + announcement.Note, Synthetic: true},
 			{Role: RoleAssistant, Text: heard},
-		}, 0)
+		}, 0, false) // 主动开口不请求模型：没有用量，也不算没报
 	}
 
 	s.emit(done)

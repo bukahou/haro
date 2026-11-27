@@ -379,8 +379,10 @@ func (s *Session) generateSentences(ctx context.Context, history []ChatMessage, 
 			stop = delta.Stop
 		}
 		usage = usage.add(roundUsage)
-		if roundUsage.InputKnown() { // 不知道时不算（「上下文太长就提前压缩」对不报用量的服务不起作用，见下面的用量日志）
+		if roundUsage.InputKnown() {
 			record.contextTokens = max(record.contextTokens, roundUsage.PromptTokens)
+		} else { // 不报用量的服务：「上下文太长就提前压缩」对它不起作用，记下来（不限轮数时改按轮数截，见 appendTurn）
+			record.contextUnknown = true
 		}
 		if stop == StopUnknown { // 流结束了却没说为什么停：不当成说完，按出错收尾（说出口的照样记进历史）
 			s.logger.Warn("模型的流结束了却没说为什么停：按出错收尾", "agent", agent.Name, "round", round, "tools", toolNames(calls))

@@ -215,13 +215,14 @@ func (c *Conversation) messages() []ChatMessage {
 	return messages
 }
 
-// turnTimeLabel 是一轮前面的时间标记（本地时间，和每轮告诉模型的「现在」同一个时区）；不知道时间的写明不知道。
+// turnTimeLabel 是一轮前面的时间标记（本地时间，和每轮告诉模型的「现在是……」同一种写法、同一个时区：年份和星期都带上，
+// 历史跨好几天时分得清「上周三说的」）；不知道时间的写明不知道。
 func turnTimeLabel(at time.Time) string {
 	if at.IsZero() {
-		return "（这一轮的时间不详）"
+		return "〔这一轮的时间不详〕"
 	}
 	at = at.Local()
-	return fmt.Sprintf("（%d 月 %d 日 %s）", at.Month(), at.Day(), at.Format("15:04"))
+	return "〔" + DateText(at) + at.Format("15:04") + "〕"
 }
 
 // currentSummary 是滚动摘要（没有时为空）。
@@ -234,10 +235,15 @@ func (c *Conversation) currentSummary() string {
 // compactKeepTurns：上下文太长时，提前移出窗口后留下最近几轮。
 const compactKeepTurns = 2
 
+// unknownUsageTurns：不按轮数截（MaxHistoryTurn 为 0）而模型服务不报用量时，改按这么多轮截：按 token 压缩对它不起作用，
+// 不截的话历史会一直变长。用的是不限轮数之前的默认窗口。
+const unknownUsageTurns = 6
+
 // appendTurn 记下一轮（编上号，只留最近 maxTurns 轮）并写盘；这一轮收尾了，「没收尾」的记录随之清掉。
 // contextTokens 是这一轮请求模型时带的上下文（最大的那次请求的输入 token，模型报的）：到了 Options.CompactContextTokens，
-// 最近 compactKeepTurns 轮之前的提前移出窗口、马上压缩（完整的对话记录里都还在）。
-func (c *Conversation) appendTurn(turn ConversationTurn, contextTokens int) {
+// 最近 compactKeepTurns 轮之前的提前移出窗口、马上压缩（完整的对话记录里都还在）。contextUnknown：这一轮的用量没报，
+// 不按轮数截时改按 unknownUsageTurns 截。
+func (c *Conversation) appendTurn(turn ConversationTurn, contextTokens int, contextUnknown bool) {
 	summarizing := c.book.summarizer() != nil // 先取：不在持有 Conversation.mu 时去锁对话簿
 	c.mu.Lock()
 	c.turnCount++
@@ -245,6 +251,10 @@ func (c *Conversation) appendTurn(turn ConversationTurn, contextTokens int) {
 	c.history = append(c.history, turn)
 	c.openTurn = nil
 	c.trimLocked(c.book.opts.MaxHistoryTurn, summarizing) // 窗口轮数只由对话簿持有（和重启时接上用的是同一个数）
+	if c.book.opts.MaxHistoryTurn == 0 && contextUnknown && len(c.history) > unknownUsageTurns {
+		c.book.logger.Info("模型服务没报用量：按 token 压缩不起作用，这一轮改按轮数截", "person", c.person, "keep_turns", unknownUsageTurns)
+		c.trimLocked(unknownUsageTurns, summarizing)
+	}
 	if threshold := c.book.opts.CompactContextTokens; threshold > 0 && contextTokens >= threshold && len(c.history) > compactKeepTurns {
 		c.book.logger.Info("上下文太长：提前移出窗口、压缩", "person", c.person, "context_tokens", contextTokens,
 			"threshold", threshold, "moved_turns", len(c.history)-compactKeepTurns)

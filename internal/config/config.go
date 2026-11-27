@@ -92,11 +92,13 @@ type ServerSettings struct {
 	// 主人资料：household.md（全家）+ 每人一份 *.md（开头 front matter 写 person: <声纹名字>）；空 = 不用。
 	// 设了就必须是读得到的目录（挂载没成、名字拼错时起不来，不当作「没有资料」）
 	ProfileDir string `env:"HARO_PROFILE_DIR"`
-	// 带上最近几轮对话（一问一答算一轮），要大于 0；更早的压成摘要或丢掉（HARO_CONVERSATION_SUMMARY）
-	MaxHistoryTurn int `env:"HARO_MAX_HISTORY_TURN" envDefault:"6"`
+	// 带上最近几轮对话（一问一答算一轮）；更早的压成摘要或丢掉（HARO_CONVERSATION_SUMMARY）。0 = 不按轮数截，
+	// 只在上下文到了 HARO_CONTEXT_COMPACT_TOKENS 时压缩（每轮前面带着那一轮的日期和时间，隔天的话模型分得清）；
+	// 模型服务不报用量的那几轮改按 6 轮截
+	MaxHistoryTurn int `env:"HARO_MAX_HISTORY_TURN" envDefault:"0"`
 	// 一轮里请求模型带的上下文（最大的那次请求的输入 token，模型报的）到了这么多，就提前把较早的几轮移出窗口、压缩（0 = 不看）。
 	// 守的是每次请求的输入低于 10 万（超过后 Claude Haiku 的单价翻五倍）：到 8 万就压，留出下一轮工具结果的余量。
-	// 平常（系统提示词加工具定义、主人资料约一万，最近几轮几千到一两万）碰不到它
+	// 系统提示词、工具定义、主人资料约一万；不按轮数截时，聊上几十轮才会碰到它
 	CompactContextTokens int `env:"HARO_CONTEXT_COMPACT_TOKENS" envDefault:"80000"`
 	// 会破坏的操作（删记事等）问了主人之后，多久没确认就作废；不设（0）= 程序里的默认值 brain.DefaultConfirmationTimeout
 	ConfirmationTimeout time.Duration `env:"HARO_CONFIRMATION_TIMEOUT"`
@@ -466,7 +468,7 @@ func (settings ServerSettings) validateStorage() error {
 
 // validateConversation 检查对话：带几轮历史、压缩的门槛、确认时效、工具时限、多台终端的仲裁。
 func (settings ServerSettings) validateConversation() error {
-	return errors.Join(positive("HARO_MAX_HISTORY_TURN", settings.MaxHistoryTurn),
+	return errors.Join(notNegative("HARO_MAX_HISTORY_TURN", settings.MaxHistoryTurn),
 		notNegative("HARO_CONTEXT_COMPACT_TOKENS", settings.CompactContextTokens),
 		notNegative("HARO_CONFIRMATION_TIMEOUT", settings.ConfirmationTimeout), notNegative("HARO_TOOL_TIMEOUT", settings.ToolTimeout),
 		notNegative("HARO_WAKE_ARBITRATION", settings.WakeArbitration))
