@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 
 	"github.com/bukahou/haro/internal/endpoint"
 )
@@ -23,9 +24,11 @@ func NewOpenMeteoClient(forecastURL, geocodingURL string, httpClient *http.Clien
 }
 
 // FindPlaces 按地名找坐标：返回地名库里最多 limit 个候选（最相关的在前），一个都没有时返回空。
-// language 决定返回的名字用什么语言写。
-func (c *OpenMeteoClient) FindPlaces(ctx context.Context, name, language string, limit int) ([]Place, error) {
-	query := url.Values{"name": {name}, "count": {strconv.Itoa(limit)}, "language": {language}, "format": {"json"}}
+func (c *OpenMeteoClient) FindPlaces(ctx context.Context, place PlaceQuery, limit int) ([]Place, error) {
+	query := url.Values{"name": {place.Name}, "count": {strconv.Itoa(limit)}, "language": {place.Language}, "format": {"json"}}
+	if place.CountryCode != "" {
+		query.Set("countryCode", strings.ToUpper(place.CountryCode))
+	}
 	var response struct {
 		Results []struct {
 			Name      string  `json:"name"`

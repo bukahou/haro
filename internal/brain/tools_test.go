@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"regexp"
 	"slices"
 	"strings"
@@ -539,5 +540,54 @@ func TestToolTimeoutComesFromOptions(t *testing.T) {
 	defer tools.mu.Unlock()
 	if tools.left <= 0 || tools.left > 3*time.Second {
 		t.Errorf("工具的期限应是配置的 3 秒以内，实际还剩 %v", tools.left)
+	}
+}
+
+// failingToolbox 让每个工具都按 errs 里给的错误失败（测试直接指定，不看参数）。
+type failingToolbox struct {
+	fakeToolbox
+	errs map[string]error
+}
+
+func (f *failingToolbox) Specs() []brain.ToolSpec {
+	var specs []brain.ToolSpec
+	for _, name := range slices.Sorted(maps.Keys(f.errs)) {
+		specs = append(specs, brain.ToolSpec{Name: name, Parameters: json.RawMessage(`{}`)})
+	}
+	return specs
+}
+
+func (f *failingToolbox) Call(ctx context.Context, call brain.ToolCall) (string, error) {
+	if err, ok := f.errs[call.Name]; ok {
+		return "", err
+	}
+	return f.fakeToolbox.Call(ctx, call)
+}
+
+// 工具出错时交给模型的附注按错误的类型分：参数不对（brain.ErrInvalidArguments，包了几层也认）叫它改参数重调；
+// 其余的说多半是暂时的；能直接念给主人的不加附注。错误的说明原样保留。
+func TestToolFailureHintFollowsErrorType(t *testing.T) {
+	invalid := brain.InvalidArguments(errors.New("第一次到点的时间不符合 rrule"))
+	toolbox := &failingToolbox{errs: map[string]error{
+		"set_reminder": fmt.Errorf("定提醒：%w", invalid),
+		"get_weather":  errors.New("连不上天气服务"),
+	}}
+	if !errors.Is(invalid, brain.ErrInvalidArguments) || invalid.Error() != "第一次到点的时间不符合 rrule" || brain.InvalidArguments(nil) != nil {
+		t.Fatalf("InvalidArguments 要认得出、说明不变、nil 还是 nil：%v", invalid)
+	}
+	both := braintest.Reply{ToolCalls: []brain.ToolCall{{Name: "set_reminder"}, {Name: "get_weather"}}}
+	model := braintest.NewModel(t, both, braintest.Say("好。"))
+	k := newToolTalker(t, model, toolbox)
+	braintest.Done(t, k.ask("每周三提醒我倒垃圾"))
+	var results []string
+	for _, msg := range model.LastRequest().Messages {
+		if msg.Role == brain.RoleTool {
+			results = append(results, msg.Text)
+		}
+	}
+	want := []string{brain.ToolFailedPrefix + "定提醒：第一次到点的时间不符合 rrule" + brain.InvalidArgumentsHint,
+		brain.ToolFailedPrefix + "连不上天气服务" + brain.TransientFailureHint}
+	if !slices.Equal(results, want) {
+		t.Errorf("附注应按错误类型分：\n got %q\nwant %q", results, want)
 	}
 }

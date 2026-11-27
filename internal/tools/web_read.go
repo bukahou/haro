@@ -9,6 +9,8 @@ import (
 	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/bukahou/haro/internal/brain"
 )
 
 // ReadWebPagesTool 是主对话里读网页的工具名（③A，2026-11-23 用户裁定 A：搜索只给摘要，时刻表、营业时间这类具体内容要读页面）。
@@ -41,7 +43,7 @@ func webReadTool(server *mcp.Server, searcher WebSearcher, meter SearchMeter, pa
 			}
 			if len(urls) == 0 {
 				if len(out.NotRead) == 0 {
-					return out, errors.New("urls 不能为空：给出要读的网址（用搜索结果里的）")
+					return out, brain.InvalidArguments(errors.New("urls 不能为空：给出要读的网址（用搜索结果里的）"))
 				}
 				return out, nil
 			}

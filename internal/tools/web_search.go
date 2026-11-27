@@ -14,6 +14,8 @@ import (
 	"github.com/failsafe-go/failsafe-go"
 	"github.com/failsafe-go/failsafe-go/retrypolicy"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/bukahou/haro/internal/brain"
 )
 
 // WebSearcher 是联网搜索的能力（v5 E3）：主对话的快查（R1）与后台调查共用。
@@ -308,7 +310,7 @@ func webSearchTools(searcher WebSearcher, meter SearchMeter, limits WebSearchLim
 				"读了、换了说法还是没有，再简短说没查到，给一个下一步（例如派后台调查），不要长篇猜测。"},
 			func(ctx context.Context, in webSearchInput) (string, error) {
 				if strings.TrimSpace(in.Query) == "" {
-					return "", errors.New("query 不能为空")
+					return "", brain.InvalidArguments(errors.New("query 不能为空"))
 				}
 				return quickSearchWith(ctx, searcher, meter, in.Query, limits, logger)
 			})

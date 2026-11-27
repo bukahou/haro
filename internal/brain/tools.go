@@ -17,6 +17,14 @@ import (
 // toolFailedPrefix 是工具出错时交给模型的结果的开头（后面接错误）。
 const toolFailedPrefix = "工具执行失败："
 
+// 工具出错时接在错误后面的附注：参数不对的要马上改了重调；其余的（连不上、超时、上游一时出错）多半是暂时的。
+// 实测：只给错误时，小模型之后主人再问也不再调用，一直说「服务在打瞌睡」，所以两种都要求下次重新调用。
+// 参数不对时也不能「多半是暂时的」：模型会照着放弃，不改参数（规则和第一次的时间对不上时没定上提醒）。
+const (
+	invalidArgumentsHint = "（参数不对，不是服务的问题：照工具说明改正参数，这一轮就重新调用；要改的是主人的意思本身（例如时间超出能定的范围）时，先问主人）"
+	transientFailureHint = "（多半是暂时的：如实告诉主人这次没查到；主人再问时要重新调用这个工具，不要凭之前的失败回答）"
+)
+
 // DefaultToolTimeout 是单次工具执行最多多久的默认值：Options.ToolTimeout 为零时用（服务端没设 HARO_TOOL_TIMEOUT 时就是它，
 // 默认值只写在这里）。
 const DefaultToolTimeout = 10 * time.Second
@@ -240,11 +248,13 @@ func (s *Session) callTool(ctx context.Context, record *turnRecord, call ToolCal
 	result, err := s.runTool(ctx, record, call)
 	if err != nil {
 		var spoken SpokenError
-		if errors.As(err, &spoken) { // 例如额度用完：不是暂时的，不提示重试
+		switch {
+		case errors.As(err, &spoken): // 例如额度用完：不是暂时的，不提示重试
 			return toolFailedPrefix + err.Error()
+		case errors.Is(err, ErrInvalidArguments):
+			return toolFailedPrefix + err.Error() + invalidArgumentsHint
 		}
-		// 实测：只给错误时，小模型之后主人再问也不再调用，一直说「服务在打瞌睡」
-		return toolFailedPrefix + err.Error() + "（多半是暂时的：如实告诉主人这次没查到；主人再问时要重新调用这个工具，不要凭之前的失败回答）"
+		return toolFailedPrefix + err.Error() + transientFailureHint
 	}
 	return result
 }

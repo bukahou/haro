@@ -56,7 +56,7 @@ func ReminderTools(desk ReminderDesk, logger *slog.Logger) Builtin {
 				if in.At != "" {
 					at, err := time.Parse(time.RFC3339, in.At)
 					if err != nil {
-						return reminderOutput{}, errors.New("at 要是 RFC 3339 的时间、带时区偏移（例如 2026-11-27T07:00:00+09:00）")
+						return reminderOutput{}, brain.InvalidArguments(errors.New("at 要是 RFC 3339 的时间、带时区偏移（例如 2026-11-27T07:00:00+09:00）"))
 					}
 					request.At = at
 				}
@@ -92,7 +92,7 @@ func ReminderTools(desk ReminderDesk, logger *slog.Logger) Builtin {
 				"结果里 not_found 是没有的编号，要如实告诉主人。要改时间的，取消旧的再定一个新的。"},
 			func(ctx context.Context, in cancelRemindersInput) (cancelRemindersOutput, error) {
 				if len(in.IDs) == 0 {
-					return cancelRemindersOutput{}, errors.New("ids 不能为空：要说清楚取消哪几个")
+					return cancelRemindersOutput{}, brain.InvalidArguments(errors.New("ids 不能为空：要说清楚取消哪几个"))
 				}
 				out := cancelRemindersOutput{Cancelled: []reminderJSON{}, NotFound: []int64{}}
 				for _, id := range in.IDs {
@@ -119,7 +119,7 @@ func ReminderTools(desk ReminderDesk, logger *slog.Logger) Builtin {
 				reminder, err := desk.Restore(ctx, brain.SpeakerFrom(ctx), in.ID)
 				logger.Info("恢复提醒", "id", in.ID, "err", err)
 				if errors.Is(err, reminders.ErrNotFound) {
-					return reminderOutput{}, errors.New("没有这个编号的取消了的提醒")
+					return reminderOutput{}, brain.InvalidArguments(errors.New("没有这个编号的取消了的提醒"))
 				}
 				if err != nil {
 					return reminderOutput{}, err

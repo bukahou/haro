@@ -20,6 +20,14 @@ type Place struct {
 	Region    string  `json:"region,omitempty"`
 }
 
+// PlaceQuery 是按地名找坐标的条件：Language 决定返回的名字用什么语言写；CountryCode（ISO 3166-1 两位代码，空 = 不限）
+// 只找这个国家的（同名的地方各国都有时，别国的不会排到前面）。
+type PlaceQuery struct {
+	Name        string
+	Language    string
+	CountryCode string
+}
+
 // Forecast 是给模型看的天气。来源没给的项不出现（不写成 0，免得模型当成真的 0 度、0 %）。
 type Forecast struct {
 	Place   Place     `json:"place"`

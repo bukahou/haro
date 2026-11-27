@@ -10,6 +10,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/bukahou/haro/internal/brain"
 	"github.com/bukahou/haro/internal/buildinfo"
 )
 
@@ -91,7 +92,8 @@ type SpokenToolError struct {
 // Phrase 实现 brain.SpokenError。
 func (e *SpokenToolError) Phrase() (string, map[string]string) { return e.Key, e.Values }
 
-// Call 调用一个工具，返回文字结果；工具报错时返回 *ToolError（可以念给主人的是 *SpokenToolError），连接出问题时返回其他错误。
+// Call 调用一个工具，返回文字结果；工具报错时返回 *ToolError（可以念给主人的是 *SpokenToolError；
+// 进程内的工具说参数不对时，再包成 brain.ErrInvalidArguments），连接出问题时返回其他错误。
 func (s *MCPServer) Call(ctx context.Context, name string, arguments map[string]any) (string, error) {
 	return s.callWithMeta(ctx, name, arguments, nil)
 }
@@ -112,6 +114,9 @@ func (s *MCPServer) callWithMeta(ctx context.Context, name string, arguments map
 		toolErr := ToolError{Tool: name, Text: contentText(result)}
 		if spoken, ok := spokenIn(result.Meta); ok {
 			return "", &SpokenToolError{ToolError: toolErr, Key: spoken.Phrase, Values: spoken.Values}
+		}
+		if invalid, _ := result.Meta[metaInvalid].(bool); invalid {
+			return "", brain.InvalidArguments(&toolErr)
 		}
 		return "", &toolErr
 	}
