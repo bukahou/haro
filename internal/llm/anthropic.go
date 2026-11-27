@@ -114,8 +114,8 @@ func CheckClaudeCredentials(apiKey string) error {
 // AnthropicChatModel 调用 Claude API 的 Messages 接口（官方 Go SDK，流式；v7 D2）。不同用途（聊天 / 摘要 / 调查）各一个，
 // 共用同一个 ClaudeAPI。
 //
-// 思考默认关掉：工具往来时，思考块（带签名）应原样回传，而 brain.ChatMessage 带不回原始内容块；
-// 关掉也最快（聊天 4 秒内要开始回答）。回答花多少力气由 Effort 管。各模型「关掉」的写法不同，见 Thinking。
+// 思考默认关掉：聊天 4 秒内要开始回答，关掉最快。回答花多少力气由 Effort 管。各模型「关掉」的写法不同，见 Thinking。
+// 开着思考时，回答里的思考块记在 brain.ReplyDelta.Replay 上，调用方带回时按原样放回（anthropic_replay.go）。
 //
 // 提示词缓存两个断点：① 系统提示词末尾（工具定义 + 系统提示词）② 上一轮结束处（之前的对话）。
 // 不放在请求末尾：每轮附在主人这句话前面的「现在的情况」（时间、位置……）每轮都变、也不进历史，
@@ -136,7 +136,7 @@ const (
 	// ThinkingDisabled 关掉思考（Haiku 5.5 等）。
 	ThinkingDisabled = "disabled"
 	// ThinkingBetweenTools 是 Sonnet 5.5 关掉思考的写法：它不接受 disabled（400）；回答前不思考，
-	// 只在两次工具调用之间写几句进度说明（以思考块返回；带不回去，丢掉）。
+	// 只在两次工具调用之间写几句进度说明（以思考块返回；调用方带回 Replay 时照样带回，不带就丢掉）。
 	ThinkingBetweenTools = "between_tools"
 	// ThinkingAdaptive 让模型自己决定想多少（思考关不掉的模型用这个）。
 	ThinkingAdaptive = "adaptive"
@@ -275,7 +275,7 @@ func (m *AnthropicChatModel) StreamReply(ctx context.Context, request brain.Chat
 				yield(brain.ReplyDelta{Usage: usage}, err)
 				return
 			}
-			yield(brain.ReplyDelta{ToolCalls: calls, Usage: usage, Stop: brain.StopCompleted}, nil)
+			yield(brain.ReplyDelta{ToolCalls: calls, Usage: usage, Stop: brain.StopCompleted, Replay: replayOf(message.Content)}, nil)
 		case anthropic.StopReasonMaxTokens, anthropic.StopReasonModelContextWindowExceeded:
 			// 截断（到了输出上限，或上下文满了）：不交出工具调用（写到一半的参数不完整）
 			yield(brain.ReplyDelta{Usage: usage, Stop: brain.StopMaxTokens}, nil)
@@ -376,19 +376,28 @@ func toAnthropicMessages(messages []brain.ChatMessage) (string, []anthropic.Mess
 				system = append(system, msg.Text)
 			}
 		case brain.RoleAssistant:
-			var blocks []anthropic.ContentBlockParamUnion
-			if msg.Text != "" {
-				blocks = append(blocks, anthropic.NewTextBlock(msg.Text))
-			}
-			for _, call := range msg.ToolCalls {
+			toolUse := func(call brain.ToolCall) (anthropic.ContentBlockParamUnion, bool) {
 				if !answered[index][call.ID] {
-					continue
+					return anthropic.ContentBlockParamUnion{}, false
 				}
 				input := call.Arguments
 				if input == nil {
 					input = map[string]any{} // Claude 要求 input 是对象
 				}
-				blocks = append(blocks, anthropic.NewToolUseBlock(toolUseID(call.ID), input, call.Name))
+				return anthropic.NewToolUseBlock(toolUseID(call.ID), input, call.Name), true
+			}
+			if blocks, ok := replayedAssistant(msg, toolUse); ok { // 开着思考：思考块原样带回
+				addAssistant(blocks...)
+				continue
+			}
+			var blocks []anthropic.ContentBlockParamUnion
+			if msg.Text != "" {
+				blocks = append(blocks, anthropic.NewTextBlock(msg.Text))
+			}
+			for _, call := range msg.ToolCalls {
+				if block, keep := toolUse(call); keep {
+					blocks = append(blocks, block)
+				}
 			}
 			addAssistant(blocks...)
 		case brain.RoleTool:

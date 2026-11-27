@@ -80,12 +80,18 @@ func (s *Session) offeredTools() []ToolSpec {
 
 // toolOverview 是系统提示词里「手边有哪些工具」那一行：从实际提供的清单生成，没提供的不出现（P5）。
 func toolOverview(specs []ToolSpec) string {
-	if len(specs) == 0 {
-		return ""
-	}
 	names := make([]string, 0, len(specs))
 	for _, spec := range specs {
 		names = append(names, spec.Name)
+	}
+	return ToolOverviewOf(names)
+}
+
+// ToolOverviewOf 是「手边有哪些工具」那一行的写法（names 为空时是空串）。不经工具箱、由模型服务那边提供的工具
+// （例如 Claude 的服务端搜索）也按这个写法介绍。
+func ToolOverviewOf(names []string) string {
+	if len(names) == 0 {
+		return ""
 	}
 	return "你手边的工具：" + strings.Join(names, "、") + "。"
 }

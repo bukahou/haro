@@ -5,6 +5,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"flag"
@@ -168,19 +169,28 @@ func checkClaudeSettings(settings config.ServerSettings) error {
 	if err := llm.CheckClaudeCredentials(settings.AnthropicAPIKey); err != nil {
 		return err
 	}
-	for _, check := range []struct{ name, value string }{
+	thinkings := []struct{ name, value string }{
 		{"HARO_CLOUD_LLM_THINKING", settings.CloudLLMThinking}, {"HARO_STRONG_LLM_THINKING", settings.StrongLLMThinking},
-	} {
+	}
+	if settings.ResearchThinking != "" {
+		thinkings = append(thinkings, struct{ name, value string }{"HARO_RESEARCH_THINKING", settings.ResearchThinking})
+	}
+	for _, check := range thinkings {
 		if err := llm.ValidateClaudeThinking(check.value); err != nil {
 			return fmt.Errorf("%s %w", check.name, err)
 		}
 	}
-	// 力度和它实际搭配的思考写法一起查：调查的力度两种都会用到（调查用云端模型的、审查用更强的模型的）
+	// 力度和它实际搭配的思考写法一起查：调查的力度两个代理都用（调查用云端模型的写法、审查用它那个模型的；
+	// 设了 HARO_RESEARCH_THINKING 时两个都用它）
+	reviewerThinking := settings.StrongLLMThinking
+	if settings.ResearchReviewer == config.ReviewerBase {
+		reviewerThinking = settings.CloudLLMThinking
+	}
 	for _, check := range []struct{ name, effort, thinking string }{
 		{"HARO_CLOUD_LLM_EFFORT", settings.CloudLLMEffort, settings.CloudLLMThinking},
 		{"HARO_STRONG_LLM_EFFORT", settings.StrongLLMEffort, settings.StrongLLMThinking},
-		{"HARO_RESEARCH_EFFORT", settings.ResearchEffort, settings.CloudLLMThinking},
-		{"HARO_RESEARCH_EFFORT", settings.ResearchEffort, settings.StrongLLMThinking},
+		{"HARO_RESEARCH_EFFORT", settings.ResearchEffort, cmp.Or(settings.ResearchThinking, settings.CloudLLMThinking)},
+		{"HARO_RESEARCH_EFFORT", settings.ResearchEffort, cmp.Or(settings.ResearchThinking, reviewerThinking)},
 	} {
 		if err := llm.ValidateClaudeEffort(check.effort, check.thinking); err != nil {
 			return fmt.Errorf("%s %w", check.name, err)

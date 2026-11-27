@@ -19,17 +19,26 @@ import (
 type Limits struct {
 	Timeout     time.Duration // 搜索阶段最多多久（默认 3 分钟）
 	MaxSearches int           // 最多搜几次（默认 5；没搜成的也算一次）
-	MaxTokens   int           // 累计 token 上限（默认 8 万）
+	// MaxTokens 是累计 token 上限（默认 30 万）：开着思考（xhigh）时每一轮都带着前面的思考和读到的网页，
+	// 对比试验里一个任务平均 8–9 万、最多 22 万；不开思考时最多 7 万
+	MaxTokens int
+	// WriteUpTimeout 是到上限后写结论最多多久（不算在搜索阶段里）：一次不带搜索工具的请求。默认 90 秒按开着思考定
+	// （不开思考时一般几秒就完）
+	WriteUpTimeout time.Duration
+	// RecheckTimeout 是审查提出疑点后复查最多多久：默认 2 分钟按开着思考定（复查最多四轮，开着思考一轮十几秒；
+	// 不开思考时一分钟够用）
+	RecheckTimeout time.Duration
 }
 
-// DefaultLimits 是 R2 裁定的默认值（服务端没设 HARO_RESEARCH_TIMEOUT、HARO_RESEARCH_MAX_SEARCHES、HARO_RESEARCH_MAX_TOKENS 时
-// 用它，默认值只写在这里）。
-var DefaultLimits = Limits{Timeout: 3 * time.Minute, MaxSearches: 5, MaxTokens: 80_000}
+// DefaultLimits 是默认值（R2 裁定；服务端没设 HARO_RESEARCH_* 时用它，默认值只写在这里）。按配置的默认（两个代理开着思考）定。
+var DefaultLimits = Limits{Timeout: 3 * time.Minute, MaxSearches: 5, MaxTokens: 300_000,
+	WriteUpTimeout: 90 * time.Second, RecheckTimeout: 2 * time.Minute}
 
 // check 检查上限：都要大于 0（配置里没设的，装配处已经换成默认值）。
 func (l Limits) check() error {
-	if l.Timeout <= 0 || l.MaxSearches <= 0 || l.MaxTokens <= 0 {
-		return fmt.Errorf("调查的上限都要大于 0：时限 %v、搜索 %d 次、%d token", l.Timeout, l.MaxSearches, l.MaxTokens)
+	if l.Timeout <= 0 || l.MaxSearches <= 0 || l.MaxTokens <= 0 || l.WriteUpTimeout <= 0 || l.RecheckTimeout <= 0 {
+		return fmt.Errorf("调查的上限都要大于 0：时限 %v、搜索 %d 次、%d token、写结论 %v、复查 %v",
+			l.Timeout, l.MaxSearches, l.MaxTokens, l.WriteUpTimeout, l.RecheckTimeout)
 	}
 	return nil
 }
@@ -98,9 +107,9 @@ func NewRunner(store TaskStore, agents Agents, searcher Searcher, meter Meter, b
 // LongestWait 是派出后最长要等多久：搜索阶段的时限加上到上限后写结论的时间；有审查时再加审查一次和复查的时限
 // （到时限就用已经查到的资料收尾）。
 func (r *Runner) LongestWait() time.Duration {
-	longest := r.limits.Timeout + writeUpTimeout
+	longest := r.limits.Timeout + r.limits.WriteUpTimeout
 	if r.agents.Reviewer != nil {
-		longest += r.agents.Reviewer.Timeout + recheckTimeout
+		longest += r.agents.Reviewer.Timeout + r.limits.RecheckTimeout
 	}
 	return longest
 }

@@ -217,14 +217,17 @@ type ChatMessage struct {
 	// Synthetic：用户角色里系统合成的消息，不是主人说的话（每轮附带的「现在的情况」、历史里「当时看了画面」的替身）。
 	// 怎么交给模型由各适配层决定；找「本轮主人那句话」时跳过它
 	Synthetic bool `json:"synthetic,omitempty"`
+	// Replay：assistant：这次回答里模型服务要求原样带回的内容（见 ProviderReplay）；不存盘
+	Replay *ProviderReplay `json:"-"`
 }
 
 // ReplyDelta 是模型流式输出的一段。
 type ReplyDelta struct {
-	Text      string      // 新增的可见文字（可能为空）
-	ToolCalls []ToolCall  // 模型要求调用的工具（可能为空）
-	Usage     *ReplyUsage // 只在最后一段上有
-	Stop      StopReason  // 只在最后一段上有意义（最后一段是 StopUnknown = 没说为什么停）
+	Text      string          // 新增的可见文字（可能为空）
+	ToolCalls []ToolCall      // 模型要求调用的工具（可能为空）
+	Usage     *ReplyUsage     // 只在最后一段上有
+	Stop      StopReason      // 只在最后一段上有意义（最后一段是 StopUnknown = 没说为什么停）
+	Replay    *ProviderReplay // 只在最后一段上有：要原样带回的内容（没有时为 nil）
 }
 
 // ToolSpec 描述一个可以给模型用的工具。

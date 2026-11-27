@@ -192,8 +192,15 @@ v10（2026-11-22 裁定）：记住的事和以前的对话都能按意思找回
   交草稿（结论和来源网址分开交）；调查时按网址记下拿到的资料（读到的正文优先，没读正文的用搜索结果的标题和摘要）。
   系统提示词逐字不变，现在的日期放在任务的消息里。
 - 任务由程序强制上限：时间、轮数、搜索次数、token，先到先停；到上限后不再给搜索工具，用已有资料写结论（标明没查完）。
-  时限、搜索次数、token 在 `HARO_RESEARCH_*`（不设时用 `research.DefaultLimits`），轮数默认是代理定义的 `max_steps`（设了 `HARO_RESEARCH_MAX_ROUNDS` 时用它）。
-- 审查（`HARO_STRONG_LLM_USE` 有 `research` 时）：草稿交给代理「调查审查」（`research_review.md`，更强的模型）核对，只给它问题、草稿、
+  时限、搜索次数、token、写结论和复查的时限在 `HARO_RESEARCH_*`（不设时用 `research.DefaultLimits`），轮数默认是代理定义的 `max_steps`
+  （设了 `HARO_RESEARCH_MAX_ROUNDS` 时用它）。
+- 两个调查代理的模型参数和对话分开设：思考写法 `HARO_RESEARCH_THINKING`（默认 `adaptive`，开着思考）、力度 `HARO_RESEARCH_EFFORT`（默认 `xhigh`）、
+  每次输出上限 `HARO_RESEARCH_MAX_OUTPUT_TOKENS`（不设时用代理定义的 `max_output_tokens`，思考也算在里面）；审查用哪个模型 `HARO_RESEARCH_REVIEWER`
+  （默认 `base` 云端模型，`strong` 更强的模型）、审一次多久 `HARO_RESEARCH_REVIEW_TIMEOUT`（不设时用定义的 `timeout`）。
+  在后台、主人不用等，所以开着思考：查得更细（读的网页更多、会交代来源之间的出入），对应的累计 token、写结论和复查的时限默认值也按开着思考定。
+  开着思考时，每一步回答里的思考块跟着回答带到下一步（`brain.ProviderReplay`，内容只有 Claude 的适配层看得懂：
+  `llm/anthropic_replay.go`）；思考块只在它之前的内容一字不差时才收，所以只在调查任务之内带，到上限写结论那一次换了工具清单，不带。
+- 审查（`HARO_STRONG_LLM_USE` 有 `research` 时）：草稿交给代理「调查审查」（`research_review.md`，模型档见上一条）核对，只给它问题、草稿、
   草稿列出的来源的摘录和现在的日期，不给调查过程（每个来源的摘录和调查时每页看到的一样长，总长有上限；列了却没拿到内容的写明）。
   它用 `submit_review` 交回：通过，或逐条疑点（哪句话、没依据 / 和资料矛盾 / 不准确、依据说的是什么）；只审一次，不改结论。
   有疑点时疑点作为一条消息交回原来的调查对话复查一次（额外的搜索次数、轮数、时间都有上限）：查到依据的保留并补上来源，
@@ -264,7 +271,7 @@ VAD 的门槛和静音时长（haro-asr 的 `asrserver.Timing`）。
 云端模型（`HARO_LLM_PROVIDER=cloud`）的接口格式由 `HARO_CLOUD_LLM_API` 选：
 
 - `anthropic`（默认）：Claude API（官方 Go SDK `anthropic-sdk-go`）。`HARO_CLOUD_LLM_MODEL` 例如 `claude-haiku-5-5`；
-  思考关掉求快，回答力度用 `HARO_CLOUD_LLM_EFFORT`（聊天、摘要）/ `HARO_RESEARCH_EFFORT`（后台调查：查资料和审查）；
+  对话的思考关掉求快，回答力度用 `HARO_CLOUD_LLM_EFFORT`（聊天、摘要）/ `HARO_RESEARCH_EFFORT`（后台调查：查资料和审查，思考另见上文「后台调查」）；
   开着提示词缓存，缓存读写按模型价格目录里的单价分开记账。
   凭证：`HARO_ANTHROPIC_API_KEY`；不填时只认配齐的 Workload Identity Federation（`ANTHROPIC_FEDERATION_RULE_ID`、
   `ANTHROPIC_ORGANIZATION_ID`、`ANTHROPIC_IDENTITY_TOKEN_FILE`：在 Kubernetes 里用服务账号令牌换短期令牌，不放长期密钥，
@@ -274,8 +281,9 @@ VAD 的门槛和静音时长（haro-asr 的 `asrserver.Timing`）。
   SDK 按「客户端 × HTTP 客户端」各存一份令牌，而集群的服务账号令牌只能换一次，多一份就会被拒（401）。
 - `openai`：任意 OpenAI 兼容的 `/chat/completions`（`HARO_CLOUD_LLM_URL`、`HARO_CLOUD_LLM_API_KEY`）。
 
-**更强的模型**（可选，`HARO_STRONG_LLM_MODEL`，例如 `claude-sonnet-5-5`；和云端模型同一个接口与凭证）：
-用 `strong` 档的代理（强模型、看画面）用它。什么时候交给它由前台的工具和规则定（看画面按配置、重答由前台模型认出主人在纠正后交出去），
+**更强的模型**（可选，`HARO_STRONG_LLM_MODEL`；和云端模型同一个接口与凭证）：
+用 `strong` 档的代理（强模型、看画面）用它。可以就是云端模型本身：它的思考写法 `HARO_STRONG_LLM_THINKING` 默认开着（`adaptive`），
+力度 `HARO_STRONG_LLM_EFFORT`，每次输出上限 `HARO_STRONG_LLM_MAX_TOKENS`（思考也算在里面），所以比关着思考的前台想得深。什么时候交给它由前台的工具和规则定（看画面按配置、重答由前台模型认出主人在纠正后交出去），
 不让模型凭自己有没有把握决定换不换。`HARO_STRONG_LLM_USE` 选用在哪些地方：
 
 - `vision`：看摄像头画面。`HARO_STRONG_LLM_VISION_MODE` 选怎么用：
@@ -287,17 +295,27 @@ VAD 的门槛和静音时长（haro-asr 的 `asrserver.Timing`）。
 - `correction`：主人纠正（说它答错了、让它重新想）或明说要想清楚时，前台模型调用内置工具 `ask_stronger_model`（`brain/escalation.go`），
   这一轮剩下的部分交给强模型接手重答（按 `strong` 用途单独记账）。「是不是在纠正」由模型认（任何语言、任何说法），不靠写死的词表；工具说明要求一认出就交、不争辩
   （实测：只写「纠正时调用」时，Haiku 觉得自己没错就会争辩、不交）
-- `research`：审查后台调查的结论（见上文「后台调查」）：云端模型搜索、读网页、写草稿，它只看问题、草稿和草稿列出的来源的摘录，
-  交回通过或疑点，疑点退回云端模型复查一次；不重写结论。审查出错时用草稿。不设 `research` 就不审查，草稿就是结论
+- `research`：审查后台调查的结论（见上文「后台调查」）：云端模型搜索、读网页、写草稿，审查只看问题、草稿和草稿列出的来源的摘录，
+  交回通过或疑点，疑点退回云端模型复查一次；不重写结论。审查出错时用草稿。不设 `research` 就不审查，草稿就是结论。
+  审查默认由云端模型做（`HARO_RESEARCH_REVIEWER=base`），设成 `strong` 时由它做
 
 接手时它出错或等太久（`HARO_STRONG_LLM_TIMEOUT`）由前台的模型接着回答。单价同样来自模型价格目录（目录里没有它就起不来）。
 Claude 各模型「关掉思考」的写法不同：`HARO_CLOUD_LLM_THINKING` / `HARO_STRONG_LLM_THINKING`，Haiku 5.5 用 `disabled`，
-Sonnet 5.5 只认 `between_tools`（两次工具调用之间会返回几句进度说明，haro 不回传；实测后续请求照样被接受）。
+Sonnet 5.5 只认 `between_tools`（两次工具调用之间会返回几句进度说明，对话里不回传；实测后续请求照样被接受）。
 
 真实接口的冒烟测试（花钱，默认不跑）：`HARO_ANTHROPIC_API_KEY=… go test -tags integration -run AnthropicLive -v ./internal/llm/`；
 看画面的专家：`go test -tags integration -run LiveExpert -v ./internal/vision/`（用法见该测试开头）；
 认不认得出纠正：`go test -tags integration -run LiveAskStronger -v ./internal/brain/`。
 看图小评测（花钱，默认不跑；样本放在仓库外）：`internal/llm/vision_eval_test.go`（`-tags eval`，先用 `HARO_EVAL_DRY_RUN=1` 看要花多少）。
+搜索质量对比（花钱，默认不跑；题目和参考答案放在仓库外）：`internal/llm/search_eval_test.go`（`-tags eval`）：同一批题由现在的设置、
+Anthropic 服务端搜索、Tavily 高级档各答一遍（真的会话，提示词照线上），先 `TestSearchEvalRun` 跑、填好参考答案再 `TestSearchEvalJudge` 判。
+前台能力对比（花钱，默认不跑；题目放在仓库外）：`cmd/haro-server/front_eval_test.go`（`-tags eval`）：线上的前台（全套工具、
+系统提示词、主人资料、默认性格、情况说明，第一句照线上叫醒）分别用 Claude 和本机 OpenAI 兼容服务上的模型（思考关 / 开）答同一批题，
+先 `TestFrontEvalRun` 跑、再 `TestFrontEvalJudge` 判。
+后台调查对比（花钱，默认不跑；题目放在仓库外）：`cmd/haro-server/research_eval_test.go`（`-tags eval`）：同一批题按几组设置各跑一次
+真的后台调查（照线上装配），评审对照参考答案判。只考审查员：`cmd/haro-server/review_exam_test.go`（`-tags eval`）：同一批草稿
+（原样的、埋了一处错的）交给几组审查员各审一次，走线上审查的同一段代码（`internal/research/review_exam.go`，只在 eval 标签下编译），
+评审判埋的错抓没抓到。
 
 模型文件（识别、VAD、说完判断、唤醒词、声纹）不在仓库里，路径都由配置指定；服务端镜像里已经带着
 （清单、来源与许可证：`deploy/server/models.lock`、`deploy/server/MODELS.md`；本机下载：`scripts/fetch-models.sh ~/.local/share/haro`）。
