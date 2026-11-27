@@ -46,7 +46,7 @@ func testAssembly(t *testing.T, settings config.ServerSettings, overrides map[st
 // cloudSettings 是用 OpenAI 兼容接口的云端配置（只建模型、不连网），更强的模型用在 uses 上。
 func cloudSettings(uses []string, visionMode string) config.ServerSettings {
 	return config.ServerSettings{LLMProvider: config.LLMCloud, CloudLLMAPI: config.CloudAPIOpenAI, CloudLLMURL: "http://127.0.0.1:9/v1",
-		CloudLLMModel: "base-model", CloudMaxTokens: 800, StrongLLMModel: "strong-model", StrongLLMUse: uses,
+		CloudLLMModel: "base-model", CloudMaxTokens: 800, StrongLLMModel: "strong-model", StrongLLMMaxTokens: 16000, StrongLLMUse: uses,
 		StrongLLMVisionMode: visionMode, ConversationSummary: true, ExtraSystemPrompt: "追加的一条规矩"}
 }
 

@@ -180,8 +180,9 @@ func (a agentAssembly) researchAgents(limits research.Limits) (research.Agents, 
 	reviewerModel := "（不审查）"
 	if reviewed {
 		definition := a.catalog[agents.ResearchReview]
-		if a.settings.ResearchReviewer == config.ReviewerBase {
-			definition.Model = agents.TierBase
+		definition.Model = agents.TierBase // 审查用哪档只看 HARO_RESEARCH_REVIEWER（取值启动时查过）
+		if a.settings.ResearchReviewer == config.ReviewerStrong {
+			definition.Model = agents.TierStrong
 		}
 		definition.Timeout = cmp.Or(a.settings.ResearchReviewTimeout, definition.Timeout)
 		model, id, err := a.meteredForResearch(definition)
@@ -261,6 +262,7 @@ func (a agentAssembly) meteredAs(definition agents.Definition, background bool) 
 		if s.StrongLLMModel == "" {
 			return nil, "", fmt.Errorf("代理 %s 用更强的模型，但没设 HARO_STRONG_LLM_MODEL", definition.Name)
 		}
+		maxTokens = cmp.Or(definition.MaxOutputTokens, s.StrongLLMMaxTokens) // 它开着思考时思考也算在里面，比聊天的上限大
 		spec = cloudModelSpec{model: s.StrongLLMModel, maxTokens: maxTokens, effort: s.StrongLLMEffort,
 			thinking: s.StrongLLMThinking, firstTokenTimeout: s.StrongLLMTimeout, requestTimeout: s.RequestTimeout}
 	case s.LLMProvider == config.LLMLocal && !background: // base 档、本地模型

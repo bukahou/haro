@@ -11,7 +11,7 @@ model: base
 purpose: research
 tools: [search_web, read_pages, submit_conclusion]
 max_steps: 10            # 搜索阶段最多请求模型几轮：搜一次、读一次各占一轮，实测 6 轮不够
-max_output_tokens: 1000  # 每次请求的输出上限：结论比聊天长（聊天用 HARO_CLOUD_LLM_MAX_TOKENS）；设了 HARO_RESEARCH_MAX_OUTPUT_TOKENS 时用它
+max_output_tokens: 16000 # 每次请求的输出上限（设了 HARO_RESEARCH_MAX_OUTPUT_TOKENS 时用它）：开着思考时思考也算在里面，对比试验里一个任务的输出合计最多 1.75 万
 ---
 你是调查助手，在后台替主人查资料。用 {{.SearchTool}} 搜索、必要时用 {{.ReadTool}} 读正文，查清楚后直接给出结论。
 任务里写着现在的日期：要查「现在」「最近」的事时按这个日期来，不要用别的年份。

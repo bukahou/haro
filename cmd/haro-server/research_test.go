@@ -43,7 +43,7 @@ func TestBuildResearchAgents(t *testing.T) {
 		t.Errorf("有审查时调查的正文要讲复查：%s", investigator.Instructions)
 	}
 	reviewer := reviewed.Reviewer
-	if reviewer == nil || reviewer.Name != "调查审查" || reviewer.MaxSteps != 1 || reviewer.Timeout != time.Minute ||
+	if reviewer == nil || reviewer.Name != "调查审查" || reviewer.MaxSteps != 1 || reviewer.Timeout != 2*time.Minute ||
 		!slices.Equal(reviewer.Tools, research.ReviewTools()) || !strings.Contains(reviewer.Instructions, "submit_review") {
 		t.Fatalf("审查：%+v", reviewer)
 	}
@@ -149,9 +149,10 @@ func TestResearchAgentsFollowResearchSettings(t *testing.T) {
 	settings.ResearchReviewer = config.ReviewerStrong
 
 	built, sent := requestsOf(settings)
-	if len(sent) != 2 || describe(sent[0]) != "base-model disabled medium 1000" || describe(sent[1]) != "strong-model between_tools medium 4000" ||
-		built.Reviewer.Timeout != time.Minute {
-		t.Errorf("都不设时照原来的：%v %v，审查时限 %v", describe(sent[0]), describe(sent[1]), built.Reviewer.Timeout)
+	if len(sent) != 2 || describe(sent[0]) != "base-model disabled medium 16000" || describe(sent[1]) != "strong-model between_tools medium 16000" ||
+		built.Reviewer.Timeout != 2*time.Minute {
+		t.Errorf("没设思考写法、输出上限、审查时限时：各用各的模型平常的写法，上限和时限照代理定义：%v %v，审查时限 %v",
+			describe(sent[0]), describe(sent[1]), built.Reviewer.Timeout)
 	}
 
 	settings.ResearchThinking, settings.ResearchEffort, settings.ResearchMaxOutputTokens = "adaptive", "xhigh", 16000
@@ -188,7 +189,7 @@ func TestResearchAgentsChargeResearch(t *testing.T) {
 	}))
 	defer refusing.Close()
 	settings := cloudSettings([]string{config.StrongForResearch}, config.VisionByExpert)
-	settings.CloudLLMURL = refusing.URL + "/v1"
+	settings.CloudLLMURL, settings.ResearchReviewer = refusing.URL+"/v1", config.ReviewerStrong
 	assembly := testAssembly(t, settings, nil)
 	ledger := &recordingLedger{Ledger: assembly.ledger}
 	assembly.ledger = ledger

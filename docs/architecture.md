@@ -194,12 +194,13 @@ v10（2026-11-22 裁定）：记住的事和以前的对话都能按意思找回
 - 任务由程序强制上限：时间、轮数、搜索次数、token，先到先停；到上限后不再给搜索工具，用已有资料写结论（标明没查完）。
   时限、搜索次数、token、写结论和复查的时限在 `HARO_RESEARCH_*`（不设时用 `research.DefaultLimits`），轮数默认是代理定义的 `max_steps`
   （设了 `HARO_RESEARCH_MAX_ROUNDS` 时用它）。
-- 两个调查代理的模型参数可以和对话分开设：思考写法 `HARO_RESEARCH_THINKING`（不设时各用各的模型平常的写法）、力度 `HARO_RESEARCH_EFFORT`、
-  每次输出上限 `HARO_RESEARCH_MAX_OUTPUT_TOKENS`（不设时用代理定义的 `max_output_tokens`）；审查用哪个模型 `HARO_RESEARCH_REVIEWER`
-  （`strong` 更强的模型，`base` 云端模型）、审一次多久 `HARO_RESEARCH_REVIEW_TIMEOUT`（不设时用定义的 `timeout`）。
+- 两个调查代理的模型参数和对话分开设：思考写法 `HARO_RESEARCH_THINKING`（默认 `adaptive`，开着思考）、力度 `HARO_RESEARCH_EFFORT`（默认 `xhigh`）、
+  每次输出上限 `HARO_RESEARCH_MAX_OUTPUT_TOKENS`（不设时用代理定义的 `max_output_tokens`，思考也算在里面）；审查用哪个模型 `HARO_RESEARCH_REVIEWER`
+  （默认 `base` 云端模型，`strong` 更强的模型）、审一次多久 `HARO_RESEARCH_REVIEW_TIMEOUT`（不设时用定义的 `timeout`）。
+  在后台、主人不用等，所以开着思考：查得更细（读的网页更多、会交代来源之间的出入），对应的累计 token、写结论和复查的时限默认值也按开着思考定。
   开着思考时，每一步回答里的思考块跟着回答带到下一步（`brain.ProviderReplay`，内容只有 Claude 的适配层看得懂：
   `llm/anthropic_replay.go`）；思考块只在它之前的内容一字不差时才收，所以只在调查任务之内带，到上限写结论那一次换了工具清单，不带。
-- 审查（`HARO_STRONG_LLM_USE` 有 `research` 时）：草稿交给代理「调查审查」（`research_review.md`，更强的模型）核对，只给它问题、草稿、
+- 审查（`HARO_STRONG_LLM_USE` 有 `research` 时）：草稿交给代理「调查审查」（`research_review.md`，模型档见上一条）核对，只给它问题、草稿、
   草稿列出的来源的摘录和现在的日期，不给调查过程（每个来源的摘录和调查时每页看到的一样长，总长有上限；列了却没拿到内容的写明）。
   它用 `submit_review` 交回：通过，或逐条疑点（哪句话、没依据 / 和资料矛盾 / 不准确、依据说的是什么）；只审一次，不改结论。
   有疑点时疑点作为一条消息交回原来的调查对话复查一次（额外的搜索次数、轮数、时间都有上限）：查到依据的保留并补上来源，
@@ -280,8 +281,9 @@ VAD 的门槛和静音时长（haro-asr 的 `asrserver.Timing`）。
   SDK 按「客户端 × HTTP 客户端」各存一份令牌，而集群的服务账号令牌只能换一次，多一份就会被拒（401）。
 - `openai`：任意 OpenAI 兼容的 `/chat/completions`（`HARO_CLOUD_LLM_URL`、`HARO_CLOUD_LLM_API_KEY`）。
 
-**更强的模型**（可选，`HARO_STRONG_LLM_MODEL`，例如 `claude-sonnet-5-5`；和云端模型同一个接口与凭证）：
-用 `strong` 档的代理（强模型、看画面）用它。什么时候交给它由前台的工具和规则定（看画面按配置、重答由前台模型认出主人在纠正后交出去），
+**更强的模型**（可选，`HARO_STRONG_LLM_MODEL`；和云端模型同一个接口与凭证）：
+用 `strong` 档的代理（强模型、看画面）用它。可以就是云端模型本身：它的思考写法 `HARO_STRONG_LLM_THINKING` 默认开着（`adaptive`），
+力度 `HARO_STRONG_LLM_EFFORT`，每次输出上限 `HARO_STRONG_LLM_MAX_TOKENS`（思考也算在里面），所以比关着思考的前台想得深。什么时候交给它由前台的工具和规则定（看画面按配置、重答由前台模型认出主人在纠正后交出去），
 不让模型凭自己有没有把握决定换不换。`HARO_STRONG_LLM_USE` 选用在哪些地方：
 
 - `vision`：看摄像头画面。`HARO_STRONG_LLM_VISION_MODE` 选怎么用：
@@ -293,8 +295,9 @@ VAD 的门槛和静音时长（haro-asr 的 `asrserver.Timing`）。
 - `correction`：主人纠正（说它答错了、让它重新想）或明说要想清楚时，前台模型调用内置工具 `ask_stronger_model`（`brain/escalation.go`），
   这一轮剩下的部分交给强模型接手重答（按 `strong` 用途单独记账）。「是不是在纠正」由模型认（任何语言、任何说法），不靠写死的词表；工具说明要求一认出就交、不争辩
   （实测：只写「纠正时调用」时，Haiku 觉得自己没错就会争辩、不交）
-- `research`：审查后台调查的结论（见上文「后台调查」）：云端模型搜索、读网页、写草稿，它只看问题、草稿和草稿列出的来源的摘录，
-  交回通过或疑点，疑点退回云端模型复查一次；不重写结论。审查出错时用草稿。不设 `research` 就不审查，草稿就是结论
+- `research`：审查后台调查的结论（见上文「后台调查」）：云端模型搜索、读网页、写草稿，审查只看问题、草稿和草稿列出的来源的摘录，
+  交回通过或疑点，疑点退回云端模型复查一次；不重写结论。审查出错时用草稿。不设 `research` 就不审查，草稿就是结论。
+  审查默认由云端模型做（`HARO_RESEARCH_REVIEWER=base`），设成 `strong` 时由它做
 
 接手时它出错或等太久（`HARO_STRONG_LLM_TIMEOUT`）由前台的模型接着回答。单价同样来自模型价格目录（目录里没有它就起不来）。
 Claude 各模型「关掉思考」的写法不同：`HARO_CLOUD_LLM_THINKING` / `HARO_STRONG_LLM_THINKING`，Haiku 5.5 用 `disabled`，

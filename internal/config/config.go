@@ -121,24 +121,31 @@ type ServerSettings struct {
 	// 不放长期密钥。⚠️ 不用 ANTHROPIC_API_KEY 这个名字：Claude Code 也读它
 	AnthropicAPIKey string `env:"HARO_ANTHROPIC_API_KEY"`
 	// anthropic 的回答力度（low / medium / high；思考写法是 adaptive 时还可以 xhigh / max）：聊天和摘要求快，调查多花点力气
-	// （HARO_RESEARCH_EFFORT 管后台调查的两个代理：查资料的云端模型、审查结论的更强的模型）
+	// （HARO_RESEARCH_EFFORT 管后台调查的两个代理：查资料的和审查结论的；在后台、主人不用等，开着思考用 xhigh）
 	CloudLLMEffort  string        `env:"HARO_CLOUD_LLM_EFFORT" envDefault:"low"`
-	ResearchEffort  string        `env:"HARO_RESEARCH_EFFORT" envDefault:"medium"`
+	ResearchEffort  string        `env:"HARO_RESEARCH_EFFORT" envDefault:"xhigh"`
 	CloudLLMTimeout time.Duration `env:"HARO_CLOUD_LLM_TIMEOUT" envDefault:"4s"`     // 等云端开始响应的上限（要大于 0），超过就当连不上（正常 2 s 内开始响应）
 	CloudMaxTokens  int           `env:"HARO_CLOUD_LLM_MAX_TOKENS" envDefault:"800"` // 每次最多输出多少 token（要大于 0）：要能装下约 300 字的详细回答
-	// anthropic 的思考：disabled（关掉）/ between_tools（Sonnet 5.5 关掉思考的写法，它不接受 disabled）/ adaptive（思考关不掉的模型）
+	// anthropic 的思考：disabled（关掉）/ between_tools（Sonnet 5.5 关掉思考的写法，它不接受 disabled）/ adaptive（开着，想多少由模型按力度定；
+	// 关不掉思考的模型也用它）。对话的思考关掉：要在 4 秒内开始回答
 	CloudLLMThinking string `env:"HARO_CLOUD_LLM_THINKING" envDefault:"disabled"`
 
 	// 更强的模型（可选）：按规则把几类请求交给它，其余仍用 HARO_CLOUD_LLM_MODEL；接口（HARO_CLOUD_LLM_API）与凭证和云端模型相同。
 	// 空 = 不分，全部用云端模型。用在哪些地方（逗号分隔）：vision = 看摄像头画面；correction = 主人纠正、或明说要想清楚时由前台模型交给它重答；
 	// research = 审查后台调查的结论（云端模型查资料、写草稿，它只核对、提出疑点，疑点退回云端模型复查；不设就不审查；
 	// HARO_RESEARCH_REVIEWER=base 时改由云端模型审查）。
-	// 思考写法同 HARO_CLOUD_LLM_THINKING（默认按 Sonnet 5.5）；接手回答时它出错或等太久由云端模型接手，审查出错时用草稿
-	StrongLLMModel    string        `env:"HARO_STRONG_LLM_MODEL"`
-	StrongLLMUse      []string      `env:"HARO_STRONG_LLM_USE" envDefault:"vision,correction,research" envSeparator:","`
-	StrongLLMEffort   string        `env:"HARO_STRONG_LLM_EFFORT" envDefault:"low"` // 审查调查结论时用 HARO_RESEARCH_EFFORT
-	StrongLLMThinking string        `env:"HARO_STRONG_LLM_THINKING" envDefault:"between_tools"`
-	StrongLLMTimeout  time.Duration `env:"HARO_STRONG_LLM_TIMEOUT" envDefault:"10s"` // 看画面 / 纠正时等它开始回答的上限（带图片比平时慢）
+	// 思考写法的取值同 HARO_CLOUD_LLM_THINKING，默认开着：前台判断自己答不好时才交给它，它要比前台想得深（可以是同一个模型、开着思考）；
+	// 开着思考时思考也算在每次输出的上限（HARO_STRONG_LLM_MAX_TOKENS）里。接手回答时它出错或等太久由云端模型接手，审查出错时用草稿
+	StrongLLMModel string   `env:"HARO_STRONG_LLM_MODEL"`
+	StrongLLMUse   []string `env:"HARO_STRONG_LLM_USE" envDefault:"vision,correction,research" envSeparator:","`
+	// 力度：看画面、接手重答时主人在等。看图评测里开着思考各档认得一样准，力度越高越慢（专家看一次：medium 平均约 5 秒、最长约 7 秒，
+	// xhigh 平均约 7 秒、最长约 11 秒）；审查调查结论时用 HARO_RESEARCH_EFFORT
+	StrongLLMEffort   string `env:"HARO_STRONG_LLM_EFFORT" envDefault:"medium"`
+	StrongLLMThinking string `env:"HARO_STRONG_LLM_THINKING" envDefault:"adaptive"`
+	// 每次最多输出多少 token（要大于 0）：开着思考时思考也算在里面。看图评测里一次最多约 1,100（high）/ 1,800（xhigh）；
+	// 接手重答要带着整段对话想、可能还要调工具，留出余量（上限只是封顶，按实际输出计费）
+	StrongLLMMaxTokens int           `env:"HARO_STRONG_LLM_MAX_TOKENS" envDefault:"8000"`
+	StrongLLMTimeout   time.Duration `env:"HARO_STRONG_LLM_TIMEOUT" envDefault:"10s"` // 看画面 / 纠正时等它开始回答的上限（带图片比平时慢）
 	// vision 用在哪：expert = 它当幕后专家看画面，把判断交给云端模型转述（前台始终是云端模型）；
 	// takeover = 带画面的那次请求直接换它回答。都要 HARO_STRONG_LLM_USE 里有 vision
 	StrongLLMVisionMode string `env:"HARO_STRONG_LLM_VISION_MODE" envDefault:"expert"`
@@ -195,12 +202,12 @@ type ServerSettings struct {
 	ResearchReviewTimeout  time.Duration `env:"HARO_RESEARCH_REVIEW_TIMEOUT"`  // 审一次最多多久
 	// 两个调查代理每次请求最多输出多少 token（开着思考时思考也算在里面）
 	ResearchMaxOutputTokens int `env:"HARO_RESEARCH_MAX_OUTPUT_TOKENS"`
-	// 两个调查代理的思考写法（取值同 HARO_CLOUD_LLM_THINKING）；空 = 各用各的模型平常的写法
-	// （调查用 HARO_CLOUD_LLM_THINKING，审查用它那个模型的）。力度是 HARO_RESEARCH_EFFORT
-	ResearchThinking string `env:"HARO_RESEARCH_THINKING"`
-	// 审查用哪个模型：strong = 更强的模型（HARO_STRONG_LLM_MODEL），base = 云端模型（HARO_CLOUD_LLM_MODEL）。
+	// 两个调查代理的思考写法（取值同 HARO_CLOUD_LLM_THINKING；两个代理用同一种，审查用更强的模型时要是它也认的写法）。
+	// 力度是 HARO_RESEARCH_EFFORT。开着思考查得更细（读的网页更多、会交代来源之间的出入）
+	ResearchThinking string `env:"HARO_RESEARCH_THINKING" envDefault:"adaptive"`
+	// 审查用哪个模型：base = 云端模型（HARO_CLOUD_LLM_MODEL），strong = 更强的模型（HARO_STRONG_LLM_MODEL）。
 	// 有没有审查看 HARO_STRONG_LLM_USE 有没有 research（见 ResearchReviewed）
-	ResearchReviewer string `env:"HARO_RESEARCH_REVIEWER" envDefault:"strong"`
+	ResearchReviewer string `env:"HARO_RESEARCH_REVIEWER" envDefault:"base"`
 	// 天气：Open-Meteo 公开接口，不用密钥。家的位置：「纬度,经度」（只放在配置里，不进代码），
 	// 或 "ip"（按家里的公网 IP 推定，城市级）；不设 = 查天气时必须说地名
 	Weather             bool   `env:"HARO_WEATHER" envDefault:"true"`
@@ -401,7 +408,8 @@ func (settings ServerSettings) validateModels() error {
 	}
 	if err := errors.Join(positive("HARO_LOCAL_LLM_TIMEOUT", settings.LocalLLMTimeout),
 		positive("HARO_CLOUD_LLM_TIMEOUT", settings.CloudLLMTimeout), positive("HARO_CLOUD_LLM_MAX_TOKENS", settings.CloudMaxTokens),
-		positive("HARO_STRONG_LLM_TIMEOUT", settings.StrongLLMTimeout), positive("HARO_REQUEST_TIMEOUT", settings.RequestTimeout),
+		positive("HARO_STRONG_LLM_TIMEOUT", settings.StrongLLMTimeout), positive("HARO_STRONG_LLM_MAX_TOKENS", settings.StrongLLMMaxTokens),
+		positive("HARO_REQUEST_TIMEOUT", settings.RequestTimeout),
 		notNegative("HARO_USD_JPY", settings.USDToYen)); err != nil {
 		return err
 	}
