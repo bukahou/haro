@@ -18,6 +18,8 @@ var (
 	WakeNote                  = wakeNote
 	RestrictedNote            = restrictedNote
 	ToolFailedPrefix          = toolFailedPrefix
+	InvalidArgumentsHint      = invalidArgumentsHint
+	TransientFailureHint      = transientFailureHint
 	AnswerTruncated           = answerTruncated
 	ToolOverview              = toolOverview
 )

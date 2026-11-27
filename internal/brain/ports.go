@@ -103,6 +103,25 @@ type SpokenError interface {
 	Phrase() (key string, values map[string]string)
 }
 
+// ErrInvalidArguments 表示一次工具调用的参数不对（缺了、格式不对、取值之间对不上、编号指向的东西没有）：照工具说明改了参数
+// 再调一次就行，不是服务出了问题。工具返回的错误满足 errors.Is(err, ErrInvalidArguments) 时，交给模型的附注叫它改参数重调，
+// 而不是当成「这次没查到」。用 InvalidArguments 包装。
+var ErrInvalidArguments = errors.New("参数不对")
+
+// InvalidArguments 把一个参数问题标成 ErrInvalidArguments：说明原样保留（Error() 不变），原来的错误照样能 errors.Is / errors.As。
+func InvalidArguments(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &invalidArgumentsError{err: err}
+}
+
+type invalidArgumentsError struct{ err error }
+
+func (e *invalidArgumentsError) Error() string        { return e.err.Error() }
+func (e *invalidArgumentsError) Unwrap() error        { return e.err }
+func (e *invalidArgumentsError) Is(target error) bool { return target == ErrInvalidArguments }
+
 // ProfileSource 给出主人资料：全家共用的 + 说话人自己的事实与偏好，外部注入（不在公开代码里）。
 // 放在系统提示词里内置规矩之后、性格之前；很少变，所以不影响提示词缓存。没有资料时返回空。
 type ProfileSource interface {

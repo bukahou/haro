@@ -3,10 +3,12 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -149,5 +151,45 @@ func TestIPHome(t *testing.T) {
 	}
 	if _, err := weather.NewIPHome(server.URL+"/ip", "家", server.Client()).Home(context.Background()); err == nil {
 		t.Error("第一次就连不上应报错")
+	}
+}
+
+// 填了国家代码时只在这个国家里找（地名库的 countryCode，转成大写）；不填不限国家。代码格式不对（不是两个字母）时，
+// 工具箱按参数定义拦下、标成参数不对，不去查。
+func TestWeatherCountryCode(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	var countries []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/search":
+			countries = append(countries, r.URL.Query().Get("countryCode"))
+			_, _ = w.Write([]byte(`{"results":[{"name":"府中市","latitude":35.67,"longitude":139.48,"country":"日本","admin1":"東京都"}]}`))
+		case "/forecast":
+			_, _ = w.Write([]byte(`{"current":{"time":"2026-11-17T10:00","temperature_2m":12.3,"weather_code":0}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	client := weather.NewOpenMeteoClient(server.URL+"/forecast", server.URL+"/search", server.Client())
+	box, err := NewToolbox(ctx, logger, WeatherTools(client, client, nil, "ja", logger))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer box.Close()
+
+	if _, err := callWeather(t, box, map[string]any{"place": "府中", "country_code": "jp"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := callWeather(t, box, map[string]any{"place": "府中"}); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(countries, []string{"JP", ""}) {
+		t.Errorf("国家代码应转成大写带给地名库、不填时不带：%q", countries)
+	}
+	if _, err := callWeather(t, box, map[string]any{"place": "府中", "country_code": "Japan"}); !errors.Is(err, brain.ErrInvalidArguments) ||
+		len(countries) != 2 {
+		t.Errorf("代码格式不对应标成参数不对、不去查：%v（查了 %d 次）", err, len(countries))
 	}
 }

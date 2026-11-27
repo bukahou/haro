@@ -53,9 +53,12 @@ func MemoryTools(desk MemoryDesk, location *time.Location, logger *slog.Logger) 
 				}
 				source := notes.Source(in.Source)
 				if !source.Valid() {
-					return memoryOutput{}, errors.New("source 只能是 owner（主人让记的）或 model（你觉得该记的）")
+					return memoryOutput{}, brain.InvalidArguments(errors.New("source 只能是 owner（主人让记的）或 model（你觉得该记的）"))
 				}
 				note, err := desk.Remember(ctx, brain.SpeakerFrom(ctx), in.Content, source, in.Resident)
+				if errors.Is(err, memory.ErrTooLong) { // 压短了再记就行
+					return memoryOutput{}, brain.InvalidArguments(err)
+				}
 				if err != nil {
 					return memoryOutput{}, err
 				}
@@ -67,7 +70,7 @@ func MemoryTools(desk MemoryDesk, location *time.Location, logger *slog.Logger) 
 				"conversations 是以前的对话（时间、主人说的、你答的）：你自己判断哪些相关，不相关的不要提。"},
 			func(ctx context.Context, in recallInput) (recallOutput, error) {
 				if in.Query == "" {
-					return recallOutput{}, errors.New("query 不能为空：写要找什么")
+					return recallOutput{}, brain.InvalidArguments(errors.New("query 不能为空：写要找什么"))
 				}
 				recollection, err := desk.Recall(ctx, brain.SpeakerFrom(ctx), in.Query)
 				if err != nil {
@@ -111,7 +114,7 @@ func MemoryTools(desk MemoryDesk, location *time.Location, logger *slog.Logger) 
 				"结果里 not_found 是没有的编号，要如实告诉主人。"},
 			func(ctx context.Context, in forgetInput) (forgetOutput, error) {
 				if len(in.IDs) == 0 {
-					return forgetOutput{}, errors.New("ids 不能为空：要说清楚忘掉哪几条")
+					return forgetOutput{}, brain.InvalidArguments(errors.New("ids 不能为空：要说清楚忘掉哪几条"))
 				}
 				out := forgetOutput{Forgotten: []memoryJSON{}, NotFound: []int64{}}
 				for _, id := range in.IDs {
@@ -135,7 +138,7 @@ func MemoryTools(desk MemoryDesk, location *time.Location, logger *slog.Logger) 
 				}
 				note, err := desk.Restore(ctx, brain.SpeakerFrom(ctx), in.ID)
 				if errors.Is(err, notes.ErrNotFound) {
-					return memoryOutput{}, errors.New("没有这个编号的、忘掉了的记忆")
+					return memoryOutput{}, brain.InvalidArguments(errors.New("没有这个编号的、忘掉了的记忆"))
 				}
 				if err != nil {
 					return memoryOutput{}, err

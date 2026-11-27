@@ -92,12 +92,12 @@ func TestRetriesOnceOnTimeout(t *testing.T) {
 	client := NewOpenMeteoClient(server.URL, server.URL, server.Client())
 	client.fetch.attemptTimeout = 100 * time.Millisecond
 
-	places, err := client.FindPlaces(context.Background(), "测试", "ja", 5)
+	places, err := client.FindPlaces(context.Background(), PlaceQuery{Name: "测试", Language: "ja"}, 5)
 	if err != nil || len(places) != 1 || places[0].Name != "测试市" || calls.Load() != 2 {
 		t.Fatalf("超时后应重试一次并成功：%+v %v 请求了 %d 次", places, err, calls.Load())
 	}
 	calls.Store(10)
-	if _, err := client.FindPlaces(context.Background(), "bad", "ja", 5); err == nil || calls.Load() != 11 {
+	if _, err := client.FindPlaces(context.Background(), PlaceQuery{Name: "bad", Language: "ja"}, 5); err == nil || calls.Load() != 11 {
 		t.Errorf("服务报 4xx 不重试：%v 请求了 %d 次", err, calls.Load()-10)
 	}
 }

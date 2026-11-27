@@ -332,3 +332,51 @@ func TestMemoryTools(t *testing.T) {
 		t.Error("没忘掉的恢复不了")
 	}
 }
+
+// 参数不对的调用：不符合工具定义的，工具箱自己拦下、不交给工具服务；工具自己说参数不对的（brain.InvalidArguments），
+// 结果里带着标记，工具箱还原成同样的错误。两种都满足 errors.Is(err, brain.ErrInvalidArguments)，说明原样保留；
+// 工具的其他错误不带这个标记（阳性对照：同一个工具在参数对时照常执行）。
+func TestInvalidArgumentsAreMarked(t *testing.T) {
+	ctx := context.Background()
+	var ran int
+	probe := func(server *mcp.Server) {
+		AddTool(server, &mcp.Tool{Name: "strict_echo", Annotations: ReadOnly}, func(_ context.Context, in echoInput) (echoOutput, error) {
+			ran++
+			switch in.Text {
+			case "":
+				return echoOutput{}, brain.InvalidArguments(errors.New("text 不能为空：写要说的话"))
+			case "坏了":
+				return echoOutput{}, errors.New("上游一时连不上")
+			}
+			return echoOutput{Echo: in.Text}, nil
+		})
+	}
+	box, err := NewToolbox(ctx, quietLogger, probe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer box.Close()
+
+	_, err = box.Call(ctx, brain.ToolCall{Name: "strict_echo", Arguments: map[string]any{"text": 3}})
+	if !errors.Is(err, brain.ErrInvalidArguments) || ran != 0 {
+		t.Errorf("类型不对的参数应由工具箱拦下（不执行）、标成参数不对：%v（执行了 %d 次）", err, ran)
+	}
+	_, err = box.Call(ctx, brain.ToolCall{Name: "strict_echo", Arguments: map[string]any{"text": "嗨", "extra": true}})
+	if !errors.Is(err, brain.ErrInvalidArguments) || ran != 0 {
+		t.Errorf("多出定义里没有的参数应由工具箱拦下：%v（执行了 %d 次）", err, ran)
+	}
+
+	_, err = box.Call(ctx, brain.ToolCall{Name: "strict_echo", Arguments: map[string]any{"text": ""}})
+	var toolErr *ToolError
+	if !errors.Is(err, brain.ErrInvalidArguments) || !errors.As(err, &toolErr) || err.Error() != "text 不能为空：写要说的话" {
+		t.Errorf("工具说参数不对时应还原成同样的错误、说明不变：%v", err)
+	}
+	_, err = box.Call(ctx, brain.ToolCall{Name: "strict_echo", Arguments: map[string]any{"text": "坏了"}})
+	if err == nil || errors.Is(err, brain.ErrInvalidArguments) {
+		t.Errorf("工具的其他错误不该标成参数不对：%v", err)
+	}
+	if out, err := box.Call(ctx, brain.ToolCall{Name: "strict_echo", Arguments: map[string]any{"text": "嗨"}}); err != nil ||
+		!strings.Contains(out, "嗨") {
+		t.Errorf("参数对时照常执行：%q %v", out, err)
+	}
+}

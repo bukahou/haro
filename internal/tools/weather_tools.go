@@ -10,12 +10,13 @@ import (
 	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/bukahou/haro/internal/brain"
 	"github.com/bukahou/haro/internal/weather"
 )
 
 // PlaceFinder 按地名找坐标：返回地名库里最多 limit 个候选（最相关的在前），一个都没有时返回空。
 type PlaceFinder interface {
-	FindPlaces(ctx context.Context, name, language string, limit int) ([]weather.Place, error)
+	FindPlaces(ctx context.Context, query weather.PlaceQuery, limit int) ([]weather.Place, error)
 }
 
 // placeCandidates 是按地名找时最多要几个候选。
@@ -68,13 +69,14 @@ func pickPlace(ctx context.Context, places PlaceFinder, home weather.HomeLocator
 		return weather.Place{Name: name, Latitude: *in.Latitude, Longitude: *in.Longitude}, true, nil
 	case name == "":
 		if home == nil {
-			return weather.Place{}, false, errors.New("家的位置没有设置（HARO_WEATHER_HOME），要说清楚查哪里")
+			return weather.Place{}, false, brain.InvalidArguments(errors.New("家的位置没有设置（HARO_WEATHER_HOME），要说清楚查哪里"))
 		}
 		out.Home = true
 		place, err := home.Home(ctx)
 		return place, err == nil, err
 	}
-	candidates, err := places.FindPlaces(ctx, name, language, placeCandidates)
+	candidates, err := places.FindPlaces(ctx, weather.PlaceQuery{Name: name, Language: language, CountryCode: in.CountryCode},
+		placeCandidates)
 	if err != nil {
 		return weather.Place{}, false, err
 	}
@@ -90,10 +92,12 @@ func pickPlace(ctx context.Context, places PlaceFinder, home weather.HomeLocator
 }
 
 type weatherInput struct {
-	Place     string   `json:"place,omitempty" jsonschema:"地名，例如「大阪市」「Osaka」「上海」；查家里时不填"`
-	Latitude  *float64 `json:"latitude,omitempty" jsonschema:"纬度：从上一次结果的 other_places 里挑了别的地方时，和经度一起填"`
-	Longitude *float64 `json:"longitude,omitempty" jsonschema:"经度：和纬度一起填"`
-	Days      int      `json:"days,omitempty"` // 说明由 weatherInputSchema 用常量拼出
+	Place string `json:"place,omitempty" jsonschema:"地名，例如「大阪市」「Osaka」「上海」；查家里时不填。用当地的写法或罗马字更容易查到"`
+	// CountryCode 让地名库只找这个国家的：同名的地方各国都有（中文、日文的同一个写法常常先查到别国的）
+	CountryCode string   `json:"country_code,omitempty" jsonschema:"地点所在国家的两位代码（ISO 3166-1，例如 JP、CN、US）：知道是哪个国家时填，同名的别国地方就不会排在前面"`
+	Latitude    *float64 `json:"latitude,omitempty" jsonschema:"纬度：从上一次结果的 other_places 里挑了别的地方时，和经度一起填"`
+	Longitude   *float64 `json:"longitude,omitempty" jsonschema:"经度：和纬度一起填"`
+	Days        int      `json:"days,omitempty"` // 说明由 weatherInputSchema 用常量拼出
 }
 
 // weatherInputSchema 是 get_weather 的参数定义：由 weatherInput 生成；天数的范围和默认值用常量拼进说明
@@ -105,6 +109,7 @@ func weatherInputSchema() *jsonschema.Schema {
 	}
 	schema.Properties["days"].Description = fmt.Sprintf("要几天的预报（含今天），%d–%d，默认 %d",
 		weather.MinForecastDays, weather.MaxForecastDays, defaultForecastDays)
+	schema.Properties["country_code"].Pattern = "^[A-Za-z]{2}$"
 	return schema
 }
 

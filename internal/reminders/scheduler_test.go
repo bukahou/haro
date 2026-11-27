@@ -68,6 +68,7 @@ func newScheduler(t *testing.T) (*Scheduler, *fakeAnnouncer, *clock) {
 	return scheduler, announcer, now
 }
 
+// 定提醒时请求本身不对的都拒绝，并标成参数不对（brain.ErrInvalidArguments：改了参数再定就行）；在用的满了也拒绝，但不是参数的问题。
 func TestSetValidates(t *testing.T) {
 	s, _, now := newScheduler(t)
 	ctx := context.Background()
@@ -83,9 +84,12 @@ func TestSetValidates(t *testing.T) {
 		{"已经过了", Request{Text: "喝水", At: now.Now().Add(-time.Minute)}, "已经过了"},
 		{"太远", Request{Text: "喝水", After: MaxAhead + time.Hour}, "最远"},
 		{"规则不对", Request{Text: "喝水", After: time.Hour, Rule: "每天"}, "rrule"},
+		// 每周三，第一次却给了 12 月 3 日（周四）
+		{"规则和第一次的时间对不上", Request{Text: "倒垃圾", At: time.Date(2026, 12, 3, 7, 0, 0, 0, jst), Rule: "FREQ=WEEKLY;BYDAY=WE"}, "不符合 rrule"},
 	} {
-		if _, err := s.Set(ctx, "主人", c.request); err == nil || !strings.Contains(err.Error(), c.want) {
-			t.Errorf("%s：应拒绝（含「%s」），得到 %v", c.name, c.want, err)
+		_, err := s.Set(ctx, "主人", c.request)
+		if err == nil || !strings.Contains(err.Error(), c.want) || !errors.Is(err, brain.ErrInvalidArguments) {
+			t.Errorf("%s：应拒绝（含「%s」）并标成参数不对，得到 %v", c.name, c.want, err)
 		}
 	}
 	for i := range MaxActivePerPerson {
@@ -93,8 +97,9 @@ func TestSetValidates(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := s.Set(ctx, "主人", Request{Text: "喝水", After: time.Hour}); err == nil || !strings.Contains(err.Error(), "最多") {
-		t.Errorf("在用的满了应拒绝：%v", err)
+	if _, err := s.Set(ctx, "主人", Request{Text: "喝水", After: time.Hour}); err == nil || !strings.Contains(err.Error(), "最多") ||
+		errors.Is(err, brain.ErrInvalidArguments) {
+		t.Errorf("在用的满了应拒绝（不是参数的问题）：%v", err)
 	}
 	if _, err := s.Set(ctx, "老大", Request{Text: "写作业", After: time.Hour}); err != nil {
 		t.Errorf("上限按人算：%v", err)

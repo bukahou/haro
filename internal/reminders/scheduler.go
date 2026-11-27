@@ -87,19 +87,19 @@ type Request struct {
 }
 
 // Set 给 person 定一条提醒。校验：要说的话不空、不太长；时间二选一、在将来、不超过 MaxAhead；重复规则合法；
-// 在用的不超过 MaxActivePerPerson。
+// 在用的不超过 MaxActivePerPerson。请求本身不对的（前几项）标成 brain.ErrInvalidArguments：改了参数再定就行。
 func (s *Scheduler) Set(ctx context.Context, person string, request Request) (Reminder, error) {
 	now := s.now()
 	if request.Text == "" {
-		return Reminder{}, errors.New("text 不能为空：写到点时要说的那句话")
+		return Reminder{}, brain.InvalidArguments(errors.New("text 不能为空：写到点时要说的那句话"))
 	}
 	if runes := utf8.RuneCountInString(request.Text); runes > MaxTextRunes {
-		return Reminder{}, fmt.Errorf("text 太长（%d 字），到点要说的话最多 %d 字", runes, MaxTextRunes)
+		return Reminder{}, brain.InvalidArguments(fmt.Errorf("text 太长（%d 字），到点要说的话最多 %d 字", runes, MaxTextRunes))
 	}
 	var first time.Time
 	switch {
 	case request.After > 0 && !request.At.IsZero(), request.After <= 0 && request.At.IsZero():
-		return Reminder{}, errors.New("after_seconds 和 at 要恰好给一个")
+		return Reminder{}, brain.InvalidArguments(errors.New("after_seconds 和 at 要恰好给一个"))
 	case request.After > 0:
 		first = now.Add(request.After)
 	default:
@@ -108,13 +108,13 @@ func (s *Scheduler) Set(ctx context.Context, person string, request Request) (Re
 	first = first.UTC().Truncate(time.Second)
 	switch {
 	case !first.After(now):
-		return Reminder{}, errors.New("这个时间已经过了：按现在的时间重新算")
+		return Reminder{}, brain.InvalidArguments(errors.New("这个时间已经过了：按现在的时间重新算"))
 	case first.Sub(now) > MaxAhead:
-		return Reminder{}, fmt.Errorf("最远只能定到 %d 天以后", int(MaxAhead.Hours()/24))
+		return Reminder{}, brain.InvalidArguments(fmt.Errorf("最远只能定到 %d 天以后", int(MaxAhead.Hours()/24)))
 	}
 	if request.Rule != "" {
 		if _, err := parseRecurrence(request.Rule, first, s.location); err != nil {
-			return Reminder{}, err
+			return Reminder{}, brain.InvalidArguments(err)
 		}
 	}
 	if count, err := s.store.CountActive(ctx, person); err != nil {

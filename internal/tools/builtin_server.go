@@ -24,7 +24,8 @@ const (
 	metaSpeaker  = "haro/speaker"
 	metaVerified = "haro/voice_verified" // 这一轮的话是不是声纹认出的登记过的人说的（只许本人做的事据此决定，例如定提醒）
 	metaCall     = "haro/call"
-	metaSpoken   = "haro/spoken" // 结果里：这个错误可以直接念给主人（brain.SpokenError），值是那句话的键和要填的值
+	metaSpoken   = "haro/spoken"            // 结果里：这个错误可以直接念给主人（brain.SpokenError），值是那句话的键和要填的值
+	metaInvalid  = "haro/invalid_arguments" // 结果里：这个错误是参数不对（brain.ErrInvalidArguments），值是 true
 )
 
 // AddTool 注册一个内置工具：参数 In、结果 Out 都是结构体，工具定义由它们生成，调用前按定义校验参数
@@ -55,12 +56,18 @@ func AddTextTool[In any](server *mcp.Server, tool *mcp.Tool, run func(context.Co
 	})
 }
 
-// failedResult 是工具出错时交回去的：能念给主人的错误做成带标记的结果（Toolbox 那边还原），其余的交给 SDK 包成工具错误。
+// failedResult 是工具出错时交回去的：能念给主人的错误、参数不对的错误做成带标记的结果（Toolbox 那边还原成同样的错误），
+// 其余的交给 SDK 包成工具错误。
 func failedResult(err error) (*mcp.CallToolResult, error) {
 	var spoken brain.SpokenError
-	if errors.As(err, &spoken) {
+	switch {
+	case errors.As(err, &spoken):
 		key, values := spoken.Phrase()
 		result := &mcp.CallToolResult{Meta: mcp.Meta{metaSpoken: spokenMeta{Phrase: key, Values: values}}}
+		result.SetError(err)
+		return result, nil
+	case errors.Is(err, brain.ErrInvalidArguments):
+		result := &mcp.CallToolResult{Meta: mcp.Meta{metaInvalid: true}}
 		result.SetError(err)
 		return result, nil
 	}
