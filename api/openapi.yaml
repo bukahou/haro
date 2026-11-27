@@ -1,0 +1,1030 @@
+openapi: 3.0.3
+info:
+  title: haro App API
+  version: 0.1.0
+  description: |
+    haro 手机 App 用的接口（第一批：账号、登录、我、花费、终端、管理员）。
+    服务端和 App 都从这份契约生成代码；⛔ 两边都不绕过契约私下约定字段。契约每改一次升版本号。
+
+    约定：
+    - 鉴权：`Authorization: Bearer <访问令牌>`（haro 自己发的令牌，登录见 `/v1/auth/oidc/start`）。
+    - 出错：RFC 9457（`application/problem+json`），App 按 `code` 判断，`detail` 是给人看的说明（按 `Accept-Language` 的语言）。
+    - 时间：ISO 8601、UTC；App 按设备时区显示。
+    - 金额：`Money`（数值是十进制字符串 + ISO 4217 币种）；汇总类是 `MoneyTotal`（换成默认货币，带换算提示）。
+    - 业务参数（各种上限、可选项）由 `/v1/client-config` 下发，App 不写死。
+    - App 请求时用 `User-Agent` 带上 App 的版本（例如 `haro-ios/1.0.0`）。
+servers:
+  - url: https://haro.example.com
+    description: 占位（真实地址由部署决定）
+security:
+  - bearerAuth: []
+tags:
+  - name: auth
+    description: 登录（经 haro 后端代理 akasha；App 不直接调 akasha）
+  - name: me
+    description: 登录的这个账号
+  - name: spending
+    description: 花费与上限
+  - name: terminals
+    description: 这个账号的终端
+  - name: admin
+    description: 管理员才能用（只看运维信息，看不到别人的内容）
+paths:
+  /v1/auth/oidc/start:
+    get:
+      tags: [auth]
+      operationId: startLogin
+      summary: 开始登录（浏览器跳转）
+      description: |
+        App 用系统的网页登录框（ASWebAuthenticationSession，回调 scheme `haro`）打开这个地址；haro 跳到 akasha 登录，
+        回来后跳到固定的 `haro://auth/callback`：
+        - 成功：`haro://auth/callback#access_token=…&refresh_token=…&expires_in=3600&token_type=Bearer`
+        - 失败：`haro://auth/callback?oidc_error=<OidcError>`
+        这不是 JSON 接口。
+      security: []
+      parameters:
+        - name: invite
+          in: query
+          required: false
+          description: 管理员发的邀请码（没有账号时用）
+          schema:
+            type: string
+            maxLength: 64
+      responses:
+        '302':
+          description: 跳到 akasha 的登录页
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /v1/auth/oidc/callback:
+    get:
+      tags: [auth]
+      operationId: finishLogin
+      summary: akasha 登录完回来的地址（浏览器跳转，App 不直接调）
+      security: []
+      parameters:
+        - name: code
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: state
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        '302':
+          description: 跳到 `haro://auth/callback`（见 startLogin）
+  /v1/auth/refresh:
+    post:
+      tags: [auth]
+      operationId: refreshTokens
+      summary: 用刷新令牌换新的一对（刷新令牌用一次就作废）
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshRequest'
+      responses:
+        '200':
+          description: 新的一对令牌
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenPair'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /v1/auth/logout:
+    post:
+      tags: [auth]
+      operationId: logout
+      summary: 登出（作废刷新令牌）
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshRequest'
+      responses:
+        '204':
+          description: 已登出（令牌本来就无效时也是 204）
+  /v1/client-config:
+    get:
+      tags: [me]
+      operationId: getClientConfig
+      summary: App 要用的业务参数（不用登录）
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/AcceptLanguage'
+      responses:
+        '200':
+          description: 参数
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClientConfig'
+  /v1/me:
+    get:
+      tags: [me]
+      operationId: getMe
+      summary: 登录的这个账号
+      parameters:
+        - $ref: '#/components/parameters/AcceptLanguage'
+      responses:
+        '200':
+          description: 账号
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Me'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    patch:
+      tags: [me]
+      operationId: updateMe
+      summary: 改显示名、默认货币
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MeUpdate'
+      responses:
+        '200':
+          description: 改后的账号
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Me'
+        '400':
+          $ref: '#/components/responses/ValidationFailed'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /v1/me/overview:
+    get:
+      tags: [me]
+      operationId: getOverview
+      summary: 「我的」页的摘要（一个接口给齐）
+      parameters:
+        - $ref: '#/components/parameters/AcceptLanguage'
+      responses:
+        '200':
+          description: 摘要
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Overview'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /v1/me/profile:
+    get:
+      tags: [me]
+      operationId: getProfile
+      summary: 主人资料（每次对话都会带给 haro）
+      responses:
+        '200':
+          description: 资料
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Profile'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    put:
+      tags: [me]
+      operationId: replaceProfile
+      summary: 整份替换主人资料
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProfileUpdate'
+      responses:
+        '200':
+          description: 改后的资料
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Profile'
+        '400':
+          $ref: '#/components/responses/ValidationFailed'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /v1/me/home:
+    get:
+      tags: [me]
+      operationId: getHome
+      summary: 家的位置（天气用）和节假日的国家
+      parameters:
+        - $ref: '#/components/parameters/AcceptLanguage'
+      responses:
+        '200':
+          description: 家
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Home'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    put:
+      tags: [me]
+      operationId: replaceHome
+      summary: 改家的位置、节假日的国家
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HomeUpdate'
+      responses:
+        '200':
+          description: 改后的家
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Home'
+        '400':
+          $ref: '#/components/responses/ValidationFailed'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /v1/places:
+    get:
+      tags: [me]
+      operationId: searchPlaces
+      summary: 搜地名（只到区 / 市，设家的位置用）
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 100
+        - $ref: '#/components/parameters/AcceptLanguage'
+      responses:
+        '200':
+          description: 候选（最相关的在前）
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Place'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /v1/countries:
+    get:
+      tags: [me]
+      operationId: listCountries
+      summary: 可选的国家（支持节假日的那些）
+      parameters:
+        - $ref: '#/components/parameters/AcceptLanguage'
+      responses:
+        '200':
+          description: 国家（按名字排序）
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Country'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /v1/spending:
+    get:
+      tags: [spending]
+      operationId: getSpending
+      summary: 这个月和今天的花费（默认货币，带换算提示）
+      parameters:
+        - $ref: '#/components/parameters/AcceptLanguage'
+      responses:
+        '200':
+          description: 花费
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Spending'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /v1/terminals:
+    get:
+      tags: [terminals]
+      operationId: listTerminals
+      summary: 这个账号的终端
+      parameters:
+        - $ref: '#/components/parameters/AcceptLanguage'
+      responses:
+        '200':
+          description: 终端（在线的在前）
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Terminal'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /v1/terminals/pair:
+    post:
+      tags: [terminals]
+      operationId: pairTerminal
+      summary: 用终端给的配对码把它绑到这个账号
+      description: 配对码只能来自用户眼前的终端（手输或扫终端显示的二维码）；App ⛔ 不接收链接、通知推过来的配对码。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PairRequest'
+      responses:
+        '200':
+          description: 绑定成功
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PairResult'
+        '400':
+          $ref: '#/components/responses/ValidationFailed'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /v1/terminals/{terminalId}:
+    parameters:
+      - $ref: '#/components/parameters/TerminalId'
+    patch:
+      tags: [terminals]
+      operationId: renameTerminal
+      summary: 改终端的名字
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TerminalUpdate'
+      responses:
+        '200':
+          description: 改后的终端
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Terminal'
+        '400':
+          $ref: '#/components/responses/ValidationFailed'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [terminals]
+      operationId: removeTerminal
+      summary: 移除终端（它的凭证立即作废）
+      responses:
+        '204':
+          description: 已移除
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /v1/admin/accounts:
+    get:
+      tags: [admin]
+      operationId: listAccounts
+      summary: 账号列表（运维信息）
+      parameters:
+        - $ref: '#/components/parameters/AcceptLanguage'
+      responses:
+        '200':
+          description: 账号
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AccountSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /v1/admin/terminals/pending:
+    get:
+      tags: [admin]
+      operationId: listPendingTerminals
+      summary: 等待批准的新终端
+      parameters:
+        - $ref: '#/components/parameters/AcceptLanguage'
+      responses:
+        '200':
+          description: 新终端（先来的在前）
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PendingTerminal'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /v1/admin/terminals/pending/{terminalId}/approve:
+    parameters:
+      - $ref: '#/components/parameters/TerminalId'
+    post:
+      tags: [admin]
+      operationId: approveTerminal
+      summary: 批准新终端（它成为一个匿名账号的终端）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TerminalApproval'
+      responses:
+        '204':
+          description: 已批准
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /v1/admin/terminals/pending/{terminalId}/reject:
+    parameters:
+      - $ref: '#/components/parameters/TerminalId'
+    post:
+      tags: [admin]
+      operationId: rejectTerminal
+      summary: 拒绝新终端
+      responses:
+        '204':
+          description: 已拒绝
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: haro 发的访问令牌（不是 akasha 的）
+  parameters:
+    AcceptLanguage:
+      name: Accept-Language
+      in: header
+      required: false
+      description: 给人看的文字（说明、标签）用的语言；不带时用中文
+      schema:
+        type: string
+        maxLength: 100
+    TerminalId:
+      name: terminalId
+      in: path
+      required: true
+      schema:
+        type: string
+        maxLength: 64
+  responses:
+    Unauthorized:
+      description: 没登录、令牌无效或过期（`code` 区分）
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Forbidden:
+      description: 没有权限（例如不是管理员）
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    NotFound:
+      description: 没有这个东西（或不是这个账号的）
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    ValidationFailed:
+      description: 请求不符合契约或业务规则
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Conflict:
+      description: 状态不允许（例如配对码已被用过）
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    RateLimited:
+      description: 太频繁，稍后再试
+      headers:
+        Retry-After:
+          description: 多少秒后再试
+          schema:
+            type: integer
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+  schemas:
+    ErrorCode:
+      type: string
+      description: 稳定的错误码（App 按它判断，不看文字）
+      enum:
+        - unauthorized
+        - token_expired
+        - invalid_token
+        - forbidden
+        - not_found
+        - validation_failed
+        - conflict
+        - rate_limited
+        - pending_approval
+        - account_disabled
+        - pairing_code_invalid
+        - pairing_code_expired
+        - pairing_attempts_exceeded
+        - upgrade_required
+        - internal
+    OidcError:
+      type: string
+      description: 登录失败时 `haro://auth/callback?oidc_error=` 的值
+      enum:
+        - pending_approval
+        - account_disabled
+        - invite_invalid
+        - login_cancelled
+        - login_failed
+    Problem:
+      type: object
+      description: RFC 9457
+      required: [type, title, status, code]
+      properties:
+        type:
+          type: string
+          description: 问题类型的 URI（`about:blank` 或 haro 的文档地址）
+        title:
+          type: string
+        status:
+          type: integer
+        code:
+          $ref: '#/components/schemas/ErrorCode'
+        detail:
+          type: string
+          description: 给人看的说明（按 Accept-Language）
+    RefreshRequest:
+      type: object
+      required: [refresh_token]
+      properties:
+        refresh_token:
+          type: string
+          minLength: 1
+          maxLength: 200
+    TokenPair:
+      type: object
+      required: [access_token, refresh_token, expires_in, token_type]
+      properties:
+        access_token:
+          type: string
+        refresh_token:
+          type: string
+        expires_in:
+          type: integer
+          description: 访问令牌还有多少秒过期
+        token_type:
+          type: string
+          enum: [Bearer]
+    Money:
+      type: object
+      description: 金额：数值（十进制字符串，按币种的最小单位）+ 币种
+      required: [amount, currency]
+      properties:
+        amount:
+          type: string
+          pattern: '^-?[0-9]+(\.[0-9]+)?$'
+          example: '3000'
+        currency:
+          type: string
+          pattern: '^[A-Z]{3}$'
+          example: JPY
+    MoneyTotal:
+      type: object
+      description: 换成默认货币的合计，带换算提示
+      required: [total, by_currency]
+      properties:
+        total:
+          $ref: '#/components/schemas/Money'
+        by_currency:
+          type: array
+          description: 换算前按币种分开的合计
+          items:
+            $ref: '#/components/schemas/Money'
+        conversion_note:
+          type: string
+          nullable: true
+          description: 有换算时给人看的提示（几种币种、哪天的汇率）；没换算时为 null
+        rate_date:
+          type: string
+          format: date
+          nullable: true
+    ClientConfig:
+      type: object
+      required: [server_version, api_version, min_app_version, limits]
+      properties:
+        server_version:
+          type: string
+        api_version:
+          type: string
+          description: 这份契约的版本号
+        min_app_version:
+          type: string
+          description: 支持的最低 App 版本；更旧时提示更新
+        limits:
+          $ref: '#/components/schemas/Limits'
+        monthly_cap_options:
+          type: array
+          description: 管理员给账号 / 终端定月上限时的可选档位（默认货币）
+          items:
+            $ref: '#/components/schemas/Money'
+    Limits:
+      type: object
+      required: [profile_max_chars, display_name_max_chars, terminal_name_max_chars, page_size]
+      properties:
+        profile_max_chars:
+          type: integer
+        display_name_max_chars:
+          type: integer
+        terminal_name_max_chars:
+          type: integer
+        page_size:
+          type: integer
+    Role:
+      type: string
+      enum: [admin, member]
+    AccountStatus:
+      type: string
+      enum: [active, pending_approval, disabled]
+    JoinedVia:
+      type: string
+      enum: [admin, invite, approval, terminal]
+    Me:
+      type: object
+      required: [account_id, display_name, role, status, default_currency, created_at]
+      properties:
+        account_id:
+          type: string
+        display_name:
+          type: string
+        role:
+          $ref: '#/components/schemas/Role'
+        status:
+          $ref: '#/components/schemas/AccountStatus'
+        default_currency:
+          type: string
+          pattern: '^[A-Z]{3}$'
+        created_at:
+          type: string
+          format: date-time
+    MeUpdate:
+      type: object
+      properties:
+        display_name:
+          type: string
+          minLength: 1
+          maxLength: 40
+        default_currency:
+          type: string
+          pattern: '^[A-Z]{3}$'
+    Overview:
+      type: object
+      required: [terminals, memory, research, spending]
+      properties:
+        terminals:
+          type: object
+          required: [total, online, needs_upgrade]
+          properties:
+            total:
+              type: integer
+            online:
+              type: integer
+            needs_upgrade:
+              type: integer
+        memory:
+          type: object
+          required: [background_items, resident, notes]
+          properties:
+            background_items:
+              type: integer
+            resident:
+              type: integer
+            notes:
+              type: integer
+        research:
+          type: object
+          required: [running]
+          properties:
+            running:
+              type: integer
+        spending:
+          $ref: '#/components/schemas/MonthSpending'
+        admin:
+          type: object
+          nullable: true
+          description: 管理员才有
+          required: [pending_terminals, pending_accounts]
+          properties:
+            pending_terminals:
+              type: integer
+            pending_accounts:
+              type: integer
+    Profile:
+      type: object
+      required: [text, max_chars, updated_at]
+      properties:
+        text:
+          type: string
+          description: 资料正文（Markdown）。⛔ 不写密码、银行卡和账户号、证件号码、验证码和密钥
+        max_chars:
+          type: integer
+        updated_at:
+          type: string
+          format: date-time
+          nullable: true
+    ProfileUpdate:
+      type: object
+      required: [text]
+      properties:
+        text:
+          type: string
+          maxLength: 10000
+    Place:
+      type: object
+      required: [name, country_code, latitude, longitude]
+      properties:
+        name:
+          type: string
+          description: 区 / 市的名字（按 Accept-Language）
+        region:
+          type: string
+          nullable: true
+          description: 上一级（都道府县、州、省）
+        country_code:
+          type: string
+          pattern: '^[A-Z]{2}$'
+        latitude:
+          type: number
+        longitude:
+          type: number
+    Home:
+      type: object
+      required: [place, holidays_country]
+      properties:
+        place:
+          allOf:
+            - $ref: '#/components/schemas/Place'
+          nullable: true
+          description: 没设时为 null（问天气时要说地名）
+        holidays_country:
+          type: string
+          nullable: true
+          pattern: '^[A-Z]{2}$'
+          description: 告诉 haro 哪个国家的节假日；null = 不告诉
+    HomeUpdate:
+      type: object
+      required: [place, holidays_country]
+      properties:
+        place:
+          allOf:
+            - $ref: '#/components/schemas/Place'
+          nullable: true
+        holidays_country:
+          type: string
+          nullable: true
+          pattern: '^[A-Z]{2}$'
+    Country:
+      type: object
+      required: [code, name]
+      properties:
+        code:
+          type: string
+          pattern: '^[A-Z]{2}$'
+        name:
+          type: string
+          description: 按 Accept-Language
+    SpendingStatus:
+      type: string
+      description: ok = 正常；near = 快到上限（提醒）；reached = 到了上限（暂停回答）
+      enum: [ok, near, reached]
+    MonthSpending:
+      type: object
+      required: [spent, status, can_raise]
+      properties:
+        spent:
+          $ref: '#/components/schemas/MoneyTotal'
+        cap:
+          allOf:
+            - $ref: '#/components/schemas/Money'
+          nullable: true
+          description: 这个月的上限（含口头提高的）；null = 不设上限
+        remaining:
+          allOf:
+            - $ref: '#/components/schemas/Money'
+          nullable: true
+        status:
+          $ref: '#/components/schemas/SpendingStatus'
+        can_raise:
+          type: boolean
+          description: 到上限后能不能口头临时提高
+        raise_amount:
+          allOf:
+            - $ref: '#/components/schemas/Money'
+          nullable: true
+    PurposeSpending:
+      type: object
+      required: [purpose, label, spent]
+      properties:
+        purpose:
+          type: string
+          description: 用途的代码（chat、research、search、summary、vision、strong）
+        label:
+          type: string
+          description: 给人看的名字（按 Accept-Language）
+        spent:
+          $ref: '#/components/schemas/MoneyTotal'
+    Spending:
+      type: object
+      required: [month, by_purpose, today]
+      properties:
+        month:
+          $ref: '#/components/schemas/MonthSpending'
+        by_purpose:
+          type: array
+          items:
+            $ref: '#/components/schemas/PurposeSpending'
+        today:
+          type: object
+          required: [research, search]
+          properties:
+            research:
+              type: object
+              required: [spent]
+              properties:
+                spent:
+                  $ref: '#/components/schemas/MoneyTotal'
+                cap:
+                  allOf:
+                    - $ref: '#/components/schemas/Money'
+                  nullable: true
+                remaining:
+                  allOf:
+                    - $ref: '#/components/schemas/Money'
+                  nullable: true
+            search:
+              type: object
+              required: [used]
+              properties:
+                used:
+                  type: integer
+                  description: 今天用了几个搜索积分
+                cap:
+                  type: integer
+                  nullable: true
+    TerminalNetwork:
+      type: string
+      description: 从哪里连进来的
+      enum: [lan, internet]
+    Terminal:
+      type: object
+      required: [terminal_id, name, online, version, needs_upgrade, network, recognizes]
+      properties:
+        terminal_id:
+          type: string
+        name:
+          type: string
+        online:
+          type: boolean
+        version:
+          type: string
+        needs_upgrade:
+          type: boolean
+        upgrade_note:
+          type: string
+          nullable: true
+          description: 怎么升级（给人看的，按 Accept-Language）
+        last_seen_at:
+          type: string
+          format: date-time
+          nullable: true
+        network:
+          $ref: '#/components/schemas/TerminalNetwork'
+        recognizes:
+          type: array
+          description: 这台终端认得谁的声音（显示名）
+          items:
+            type: string
+    TerminalUpdate:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 40
+    PairRequest:
+      type: object
+      required: [code]
+      properties:
+        code:
+          type: string
+          description: 终端念出来 / 显示的配对码
+          minLength: 4
+          maxLength: 16
+    PairResult:
+      type: object
+      required: [terminal, merged]
+      properties:
+        terminal:
+          $ref: '#/components/schemas/Terminal'
+        suggested_name:
+          type: string
+          nullable: true
+        merged:
+          type: object
+          description: 这台终端匿名期间的数据，并进了这个账号多少
+          required: [conversations, reminders]
+          properties:
+            conversations:
+              type: integer
+            reminders:
+              type: integer
+    PendingTerminal:
+      type: object
+      required: [terminal_id, reported_name, short_id, requested_at, network, version]
+      properties:
+        terminal_id:
+          type: string
+        reported_name:
+          type: string
+          description: 终端自报的名字
+        short_id:
+          type: string
+          description: 短编号（和终端上显示的对得上）
+        requested_at:
+          type: string
+          format: date-time
+        network:
+          $ref: '#/components/schemas/TerminalNetwork'
+        version:
+          type: string
+    TerminalApproval:
+      type: object
+      properties:
+        monthly_cap:
+          allOf:
+            - $ref: '#/components/schemas/Money'
+          nullable: true
+          description: 这台匿名终端每月的上限；null = 按默认档位
+    AccountSummary:
+      type: object
+      required: [account_id, display_name, role, status, joined_via, spent_this_month, terminals_online]
+      properties:
+        account_id:
+          type: string
+        display_name:
+          type: string
+        role:
+          $ref: '#/components/schemas/Role'
+        status:
+          $ref: '#/components/schemas/AccountStatus'
+        joined_via:
+          $ref: '#/components/schemas/JoinedVia'
+        spent_this_month:
+          $ref: '#/components/schemas/MoneyTotal'
+        cap:
+          allOf:
+            - $ref: '#/components/schemas/Money'
+          nullable: true
+        terminals_online:
+          type: integer
+        last_used_at:
+          type: string
+          format: date-time
+          nullable: true
+        app_version:
+          type: string
+          nullable: true
+        deletion_scheduled_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: 软删除后彻底删掉的时间（30 天后）；没删除时为 null
