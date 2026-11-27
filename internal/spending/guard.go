@@ -32,6 +32,9 @@ type TokenPrice struct {
 	// Tiers：一次请求的输入（含缓存读写）超过 AboveInputTokens 时，整次按那一档的单价算（例如上下文超过 10 万 token）。
 	// 按门槛从低到高
 	Tiers []PriceTier
+	// LongCacheWriteFactor：写进留得久的缓存的输入（ReplyUsage.CacheWriteLongTokens）按那一档输入价的几倍算
+	// （价格目录里没有这一项，由装配处按厂商填）；0 = 和一般的缓存写同价
+	LongCacheWriteFactor float64
 }
 
 // PriceTier 是按输入量分的一档单价。
@@ -63,6 +66,7 @@ func (p Pricing) LLMYen(model string, usage brain.ReplyUsage) float64 {
 	if !ok || price.Free { // 不在表里的建不出记账模型（NewMeteredChatModel），走不到这里
 		return 0
 	}
+	longFactor := price.LongCacheWriteFactor
 	price = price.forInput(usage.PromptTokens)
 	cacheRead, cacheWrite := price.CacheReadUSDPerMillion, price.CacheWriteUSDPerMillion
 	if cacheRead <= 0 {
@@ -71,9 +75,15 @@ func (p Pricing) LLMYen(model string, usage brain.ReplyUsage) float64 {
 	if cacheWrite <= 0 {
 		cacheWrite = price.InputUSDPerMillion
 	}
+	longWrite := min(usage.CacheWriteLongTokens, usage.CacheWriteTokens)
+	longWritePrice := cacheWrite
+	if longFactor > 0 {
+		longWritePrice = price.InputUSDPerMillion * longFactor
+	}
 	uncached := max(usage.PromptTokens-usage.CacheReadTokens-usage.CacheWriteTokens, 0)
 	usd := (float64(uncached)*price.InputUSDPerMillion + float64(usage.CacheReadTokens)*cacheRead +
-		float64(usage.CacheWriteTokens)*cacheWrite + float64(usage.OutputTokens)*price.OutputUSDPerMillion) / 1e6
+		float64(usage.CacheWriteTokens-longWrite)*cacheWrite + float64(longWrite)*longWritePrice +
+		float64(usage.OutputTokens)*price.OutputUSDPerMillion) / 1e6
 	return usd * p.USDToYen
 }
 

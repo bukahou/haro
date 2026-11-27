@@ -21,6 +21,27 @@ func DateText(t time.Time) string {
 	return t.Format("2006年1月2日") + "（" + WeekdayName(t) + "）"
 }
 
+// ElapsedText 是一段时间告诉模型的说法（例如「3 小时 12 分钟」「2 天 5 小时」）。
+func ElapsedText(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return "不到 1 分钟"
+	case d < time.Hour:
+		return fmt.Sprintf("%d 分钟", int(d/time.Minute))
+	case d < 24*time.Hour:
+		hours, minutes := int(d/time.Hour), int(d%time.Hour/time.Minute)
+		if minutes == 0 {
+			return fmt.Sprintf("%d 小时", hours)
+		}
+		return fmt.Sprintf("%d 小时 %d 分钟", hours, minutes)
+	}
+	days, hours := int(d/(24*time.Hour)), int(d%(24*time.Hour)/time.Hour)
+	if hours == 0 {
+		return fmt.Sprintf("%d 天", days)
+	}
+	return fmt.Sprintf("%d 天 %d 小时", days, hours)
+}
+
 // Brief 实现 Briefer。
 func (c ClockBriefer) Brief(string) Briefing {
 	now := time.Now()

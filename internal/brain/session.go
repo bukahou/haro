@@ -45,6 +45,9 @@ type Options struct {
 	MaxHistoryTurn int // 保留最近几轮（一问一答算一轮）的文字历史；0 = 不按轮数截，只按 CompactContextTokens 压缩
 	// CompactContextTokens：一轮里请求模型带的上下文（输入 token）到了这么多，就提前把较早的几轮移出窗口、压缩；0 = 不看
 	CompactContextTokens int
+	// IdleCompactAfter：一份对话闲了这么久（最后一轮之后没人说话），就在后台同样提前压缩（ConversationBook.RunIdleCompaction）；
+	// 0 = 不按闲置压缩
+	IdleCompactAfter time.Duration
 
 	StreamReopen ReopenTiming // 识别流断开后重开的节奏；零值 = DefaultReopenTiming
 	// ConfirmationTimeout：会破坏的操作问了主人之后，多久没确认就作废；零值 = DefaultConfirmationTimeout

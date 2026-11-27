@@ -240,6 +240,10 @@ func assembleBrain(ctx context.Context, settings config.ServerSettings, catalog 
 	if built.summary != nil {                                                    // 滚动摘要：代理「摘要」，按它自己的用途记账
 		components.Conversations.SummarizeWith(*built.summary)
 	}
+	if options.IdleCompactAfter > 0 { // 闲了一阵的对话在后台提前压缩：随 ctx（服务端的运行期）结束
+		go components.Conversations.RunIdleCompaction(ctx)
+		logger.Info("对话闲了一阵就在后台提前压缩", "idle", options.IdleCompactAfter)
+	}
 	if settings.ProfileDir != "" { // 主人资料：外部注入，改了文件下一轮就生效
 		profiles := profile.OpenDir(settings.ProfileDir, logger)
 		household, people := profiles.Summary()

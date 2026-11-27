@@ -242,3 +242,60 @@ func TestUnlimitedHistoryFallsBackWhenUsageUnknown(t *testing.T) {
 		t.Errorf("上下文到了门槛：只留最近 %d 轮，留了 %d 轮", compactKeepTurns, got)
 	}
 }
+
+// 闲了 IdleCompactAfter 以上的对话提前压缩：只留最近 compactKeepTurns 轮；压过的、闲得不够久的、正在进行一轮的、
+// 不知道时间的都不动。
+func TestIdleConversationsAreCompacted(t *testing.T) {
+	book := NewConversationBook(nil, Options{IdleCompactAfter: time.Hour}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	now := time.Date(2026, 11, 27, 18, 0, 0, 0, time.Local)
+	fill := func(person string, last time.Time) *Conversation {
+		conversation := book.Conversation(person)
+		for i := range 5 {
+			conversation.appendTurn(ConversationTurn{At: last.Add(time.Duration(i-4) * time.Minute),
+				Messages: []ChatMessage{{Role: RoleUser, Text: fmt.Sprintf("第 %d 句", i+1)}, {Role: RoleAssistant, Text: "好。"}}}, 1000, false)
+		}
+		return conversation
+	}
+	idle := fill("主人", now.Add(-2*time.Hour))
+	recent := fill("老大", now.Add(-10*time.Minute))
+	busy := fill("老二", now.Add(-3*time.Hour))
+	busy.keepOpenTurn(ConversationTurn{At: now.Add(-3 * time.Hour), Messages: []ChatMessage{{Role: RoleUser, Text: "还在查"}}})
+	unknown := book.Conversation("老三")
+	for range 5 {
+		unknown.appendTurn(ConversationTurn{Messages: []ChatMessage{{Role: RoleUser, Text: "旧记录"}}}, 1000, false)
+	}
+
+	book.compactIdle(now)
+	turns := func(c *Conversation) int { c.mu.Lock(); defer c.mu.Unlock(); return len(c.history) }
+	if got := turns(idle); got != compactKeepTurns {
+		t.Errorf("闲了 2 小时：应只留最近 %d 轮，留了 %d 轮", compactKeepTurns, got)
+	}
+	for name, c := range map[string]*Conversation{"闲了 10 分钟": recent, "正在进行一轮": busy, "不知道时间": unknown} {
+		if got := turns(c); got != 5 {
+			t.Errorf("%s：不该压，留了 %d 轮", name, got)
+		}
+	}
+	if last := idle.lastTurnAt(); !last.Equal(now.Add(-2 * time.Hour)) {
+		t.Errorf("压缩后最近一轮的时间不变：%v", last)
+	}
+	book.compactIdle(now.Add(time.Hour))
+	if got := turns(idle); got != compactKeepTurns {
+		t.Errorf("压过的不再重复压：留了 %d 轮", got)
+	}
+}
+
+// 「过了多久」的说法：不到一分钟、分钟、小时（整点不写分钟）、天。
+func TestElapsedText(t *testing.T) {
+	for d, want := range map[time.Duration]string{
+		20 * time.Second:                "不到 1 分钟",
+		45 * time.Minute:                "45 分钟",
+		3 * time.Hour:                   "3 小时",
+		3*time.Hour + 12*time.Minute:    "3 小时 12 分钟",
+		2*24*time.Hour + 5*time.Hour:    "2 天 5 小时",
+		3*24*time.Hour + 20*time.Minute: "3 天",
+	} {
+		if got := ElapsedText(d); got != want {
+			t.Errorf("%v：%q，应是 %q", d, got, want)
+		}
+	}
+}

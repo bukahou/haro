@@ -100,6 +100,9 @@ type ServerSettings struct {
 	// 守的是每次请求的输入低于 10 万（超过后 Claude Haiku 的单价翻五倍）：到 8 万就压，留出下一轮工具结果的余量。
 	// 系统提示词、工具定义、主人资料约一万；不按轮数截时，聊上几十轮才会碰到它
 	CompactContextTokens int `env:"HARO_CONTEXT_COMPACT_TOKENS" envDefault:"80000"`
+	// 一份对话闲了这么久（最后一轮之后没人说话），就在后台同样提前压缩（0 = 不按闲置压缩）：和对话的提示词缓存
+	// （HARO_CLOUD_LLM_CACHE_TTL）一样长——缓存过期后再开口，第一次请求不必带着整段旧对话按全价重新处理
+	IdleCompactAfter time.Duration `env:"HARO_CONTEXT_IDLE_COMPACT" envDefault:"1h"`
 	// 会破坏的操作（删记事等）问了主人之后，多久没确认就作废；不设（0）= 程序里的默认值 brain.DefaultConfirmationTimeout
 	ConfirmationTimeout time.Duration `env:"HARO_CONFIRMATION_TIMEOUT"`
 	// 单次工具执行最多多久（所有工具共用，包括远程 MCP）；天气这类工具在这个期限里自己分配主力和备用的时间。
@@ -131,6 +134,9 @@ type ServerSettings struct {
 	// anthropic 的思考：disabled（关掉）/ between_tools（Sonnet 5.5 关掉思考的写法，它不接受 disabled）/ adaptive（开着，想多少由模型按力度定；
 	// 关不掉思考的模型也用它）。对话的思考关掉：要在 4 秒内开始回答
 	CloudLLMThinking string `env:"HARO_CLOUD_LLM_THINKING" envDefault:"disabled"`
+	// anthropic 的提示词缓存留多久（5m / 1h），只管云端模型的对话（后台调查一步接一步，用 5 分钟）：对话不按轮数截，
+	// 隔了 5 分钟再开口就要按全价重新处理整段历史；1 小时的写缓存贵一些（输入价的 2 倍，5 分钟是 1.25 倍），一小时内回来都读得到
+	CloudLLMCacheTTL string `env:"HARO_CLOUD_LLM_CACHE_TTL" envDefault:"1h"`
 
 	// 更强的模型（可选）：按规则把几类请求交给它，其余仍用 HARO_CLOUD_LLM_MODEL；接口（HARO_CLOUD_LLM_API）与凭证和云端模型相同。
 	// 空 = 不分，全部用云端模型。用在哪些地方（逗号分隔）：vision = 看摄像头画面；correction = 主人纠正、或明说要想清楚时由前台模型交给它重答；
@@ -470,6 +476,7 @@ func (settings ServerSettings) validateStorage() error {
 func (settings ServerSettings) validateConversation() error {
 	return errors.Join(notNegative("HARO_MAX_HISTORY_TURN", settings.MaxHistoryTurn),
 		notNegative("HARO_CONTEXT_COMPACT_TOKENS", settings.CompactContextTokens),
+		notNegative("HARO_CONTEXT_IDLE_COMPACT", settings.IdleCompactAfter),
 		notNegative("HARO_CONFIRMATION_TIMEOUT", settings.ConfirmationTimeout), notNegative("HARO_TOOL_TIMEOUT", settings.ToolTimeout),
 		notNegative("HARO_WAKE_ARBITRATION", settings.WakeArbitration))
 }

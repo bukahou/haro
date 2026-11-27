@@ -169,6 +169,9 @@ func checkClaudeSettings(settings config.ServerSettings) error {
 	if err := llm.CheckClaudeCredentials(settings.AnthropicAPIKey); err != nil {
 		return err
 	}
+	if err := llm.ValidateClaudeCacheTTL(settings.CloudLLMCacheTTL); err != nil {
+		return fmt.Errorf("HARO_CLOUD_LLM_CACHE_TTL %w", err)
+	}
 	thinkings := []struct{ name, value string }{
 		{"HARO_CLOUD_LLM_THINKING", settings.CloudLLMThinking}, {"HARO_STRONG_LLM_THINKING", settings.StrongLLMThinking},
 	}
@@ -212,6 +215,7 @@ type cloudModelSpec struct {
 	model             string
 	maxTokens         int
 	effort, thinking  string        // 只对 anthropic 有效
+	cacheTTL          string        // 提示词缓存留多久（只对 anthropic 有效；空 = 5 分钟）
 	retries           int           // SDK 在 429 / 5xx / 断线时自己重试几次
 	firstTokenTimeout time.Duration // 等开始回答最多多久；0 = 不限
 	requestTimeout    time.Duration // 整次请求最多多久；0 = 只受调用方的 context 管
@@ -224,7 +228,8 @@ func newCloudChatModel(settings config.ServerSettings, claude *llm.ClaudeAPI, sp
 	if settings.CloudLLMAPI == config.CloudAPIAnthropic {
 		return llm.WithRequestTelemetry(llm.NewAnthropicChatModel(llm.AnthropicOptions{API: claude, Model: spec.model,
 			MaxTokens: spec.maxTokens, Effort: spec.effort, Thinking: spec.thinking, MaxRetries: spec.retries,
-			FirstTokenTimeout: spec.firstTokenTimeout, RequestTimeout: spec.requestTimeout}), llm.ProviderAnthropic, spec.model)
+			FirstTokenTimeout: spec.firstTokenTimeout, RequestTimeout: spec.requestTimeout, CacheTTL: spec.cacheTTL}),
+			llm.ProviderAnthropic, spec.model)
 	}
 	return llm.WithRequestTelemetry(llm.NewOpenAIChatModel(llm.OpenAIOptions{BaseURL: settings.CloudLLMURL, Model: spec.model,
 		APIKey: settings.CloudLLMAPIKey, MaxTokens: spec.maxTokens, HTTPClient: client, ToolCallIDs: llm.ToolCallIDStyle(settings.CloudLLMToolCallIDs),
@@ -266,6 +271,9 @@ func loadPricing(ctx context.Context, settings config.ServerSettings, client *ht
 		price, err := catalog.Price(model)
 		if err != nil {
 			return pricing, fmt.Errorf("模型单价（%s）: %w", settings.ModelPricesURL, err)
+		}
+		if settings.CloudLLMAPI == config.CloudAPIAnthropic {
+			price.LongCacheWriteFactor = llm.ClaudeLongCacheWriteFactor // 1 小时缓存的写入价目录里没有
 		}
 		pricing.Models[model] = price
 		logger.Info("模型单价（每百万 token 的美元价，来自模型价格目录）", "model", model, "provider", catalog.Provider,
@@ -378,6 +386,7 @@ func buildBrainOptions(settings config.ServerSettings) (brain.Options, error) {
 		return brain.Options{}, err
 	}
 	options := brain.Options{MaxHistoryTurn: settings.MaxHistoryTurn, CompactContextTokens: settings.CompactContextTokens,
+		IdleCompactAfter:    settings.IdleCompactAfter,
 		ConfirmationTimeout: settings.ConfirmationTimeout, ToolTimeout: settings.ToolTimeout, Phrases: phrases,
 		MonthlyRaiseYen: settings.MonthlyRaiseYen}
 	if settings.PersonasDir == "" {

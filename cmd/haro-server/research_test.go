@@ -258,3 +258,50 @@ func TestResearchSearchAdaptsWebSearcher(t *testing.T) {
 		t.Error("积分照转")
 	}
 }
+
+// 提示词缓存留多久：云端模型的对话（前台）按 HARO_CLOUD_LLM_CACHE_TTL（1 小时）；后台调查一步接一步地请求，
+// 不管怎么设都用 5 分钟（请求里不带 ttl）。
+func TestCacheTTLOnlyForConversation(t *testing.T) {
+	var mu sync.Mutex
+	var bodies []map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		bodies = append(bodies, body)
+		mu.Unlock()
+		http.Error(w, `{"type":"error","error":{"type":"invalid_request_error","message":"bad request"}}`, http.StatusBadRequest)
+	}))
+	defer server.Close()
+	settings := cloudSettings([]string{config.StrongForResearch}, config.VisionByExpert)
+	settings.CloudLLMAPI, settings.AnthropicAPIKey, settings.CloudLLMURL = config.CloudAPIAnthropic, "k", server.URL
+	settings.CloudLLMThinking, settings.StrongLLMThinking, settings.CloudLLMCacheTTL = "disabled", "adaptive", llm.CacheTTL1h
+	assembly := testAssembly(t, settings, nil)
+	claude, err := llm.NewClaudeAPI("k", server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	assembly.claude = claude
+	front, _, err := assembly.metered(assembly.catalog[agents.Front])
+	if err != nil {
+		t.Fatal(err)
+	}
+	built, err := assembly.researchAgents(research.DefaultLimits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := brain.ChatRequest{Messages: []brain.ChatMessage{{Role: brain.RoleSystem, Text: "规矩"}, {Role: brain.RoleUser, Text: "你好"}}}
+	for _, model := range []brain.ChatModel{front, built.Investigator.Model} {
+		if _, err := brain.CollectReply(t.Context(), model, request); err == nil {
+			t.Fatal("假服务回 400：请求应失败")
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	ttlOf := func(body map[string]any) any {
+		return body["system"].([]any)[0].(map[string]any)["cache_control"].(map[string]any)["ttl"]
+	}
+	if len(bodies) != 2 || ttlOf(bodies[0]) != "1h" || ttlOf(bodies[1]) != nil {
+		t.Errorf("前台的断点应带 ttl 1h、调查的不带：%v / %v", ttlOf(bodies[0]), ttlOf(bodies[1]))
+	}
+}

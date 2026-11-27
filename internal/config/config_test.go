@@ -418,6 +418,7 @@ func TestNumericSettingRanges(t *testing.T) {
 		{"HARO_REQUEST_TIMEOUT", func(s *ServerSettings) { s.RequestTimeout = 0 }},
 		{"HARO_MAX_HISTORY_TURN", func(s *ServerSettings) { s.MaxHistoryTurn = -1 }},
 		{"HARO_CONTEXT_COMPACT_TOKENS", func(s *ServerSettings) { s.CompactContextTokens = -1 }},
+		{"HARO_CONTEXT_IDLE_COMPACT", func(s *ServerSettings) { s.IdleCompactAfter = -time.Minute }},
 		{"HARO_CONFIRMATION_TIMEOUT", func(s *ServerSettings) { s.ConfirmationTimeout = -time.Second }},
 		{"HARO_TOOL_TIMEOUT", func(s *ServerSettings) { s.ToolTimeout = -time.Second }},
 		{"HARO_WAKE_ARBITRATION", func(s *ServerSettings) { s.WakeArbitration = -time.Millisecond }},

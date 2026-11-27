@@ -182,6 +182,7 @@ func TestCheckClaudeSettings(t *testing.T) {
 		"HARO_STRONG_LLM_EFFORT":   func(s *config.ServerSettings) { s.StrongLLMEffort = "max" },
 		"HARO_CLOUD_LLM_THINKING":  func(s *config.ServerSettings) { s.CloudLLMThinking = "off" },
 		"HARO_STRONG_LLM_THINKING": func(s *config.ServerSettings) { s.StrongLLMThinking = "enabled" },
+		"HARO_CLOUD_LLM_CACHE_TTL": func(s *config.ServerSettings) { s.CloudLLMCacheTTL = "2h" },
 		"HARO_ANTHROPIC_API_KEY":   func(s *config.ServerSettings) { s.AnthropicAPIKey = "" }, // 也没配 WIF：没有凭证
 	} {
 		settings := base

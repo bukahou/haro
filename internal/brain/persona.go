@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/google/jsonschema-go/jsonschema"
 )
@@ -163,6 +164,9 @@ func (s *Session) briefing(conversation *Conversation, record *turnRecord) strin
 	var lines []string
 	if person != "" && person != SharedPerson {
 		lines = append(lines, "现在说话的是："+person+"（按声纹认出）。")
+	}
+	if last := conversation.lastTurnAt(); !last.IsZero() { // 历史不按轮数截、会跨好几天：一眼看出是接着聊还是隔了很久
+		lines = append(lines, "离上一次说话过了 "+ElapsedText(time.Since(last))+"。")
 	}
 	if conversation.detached {
 		lines = append(lines, conversationUnreadableNote)

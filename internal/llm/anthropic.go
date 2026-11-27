@@ -129,6 +129,25 @@ type AnthropicChatModel struct {
 	maxRetries        int
 	firstTokenTimeout time.Duration
 	requestTimeout    time.Duration
+	cacheTTL          anthropic.CacheControlEphemeralTTL // 缓存断点留多久；空 = API 的默认（5 分钟）
+}
+
+// 提示词缓存留多久（AnthropicOptions.CacheTTL 的取值）。断点都用同一个，不混用（混用时 1 小时的要排在前面）。
+const (
+	CacheTTL5m = string(anthropic.CacheControlEphemeralTTLTTL5m)
+	CacheTTL1h = string(anthropic.CacheControlEphemeralTTLTTL1h)
+)
+
+// ClaudeLongCacheWriteFactor 是写进 1 小时缓存的输入按普通输入价的几倍算（5 分钟缓存是 1.25 倍，写在价格目录里；
+// 1 小时的目录里没有）。价格表用它算 ReplyUsage.CacheWriteLongTokens 的钱。
+const ClaudeLongCacheWriteFactor = 2.0
+
+// ValidateClaudeCacheTTL 检查缓存留多久（空 = 默认的 5 分钟）。
+func ValidateClaudeCacheTTL(ttl string) error {
+	if !slices.Contains([]string{"", CacheTTL5m, CacheTTL1h}, ttl) {
+		return fmt.Errorf("只能是 %s 或 %s，现在是 %q", CacheTTL5m, CacheTTL1h, ttl)
+	}
+	return nil
 }
 
 // Thinking 的取值。
@@ -186,13 +205,24 @@ type AnthropicOptions struct {
 	// RequestTimeout 是一次请求从发出到流结束最多多久；0 = 只受调用方的 context 管（例如后台调查有自己的总时限）。
 	// 不放在共用的 HTTP 客户端上：客户端的总超时连读流也算在内，各用途要的长短不同。
 	RequestTimeout time.Duration
+	// CacheTTL 是提示词缓存留多久：CacheTTL1h 给隔一阵才再说话的对话用（写缓存贵一些，一小时内回来都读得到）；
+	// 连着请求的（后台调查一步接一步）用默认的 5 分钟就够。空 = 5 分钟
+	CacheTTL string
 }
 
 // NewAnthropicChatModel 创建模型（不发请求）。
 func NewAnthropicChatModel(options AnthropicOptions) *AnthropicChatModel {
 	return &AnthropicChatModel{api: options.API, model: options.Model, maxTokens: options.MaxTokens,
 		effort: anthropic.OutputConfigEffort(options.Effort), thinking: options.Thinking, maxRetries: options.MaxRetries,
-		firstTokenTimeout: options.FirstTokenTimeout, requestTimeout: options.RequestTimeout}
+		firstTokenTimeout: options.FirstTokenTimeout, requestTimeout: options.RequestTimeout,
+		cacheTTL: anthropic.CacheControlEphemeralTTL(options.CacheTTL)}
+}
+
+// cacheControl 是这个模型的缓存断点（留多久按 CacheTTL）。
+func (m *AnthropicChatModel) cacheControl() anthropic.CacheControlEphemeralParam {
+	breakpoint := anthropic.NewCacheControlEphemeralParam() // 带上 type：零值的结构体整个不发
+	breakpoint.TTL = m.cacheTTL
+	return breakpoint
 }
 
 // thinkingConfig 按 Thinking 组装请求里的 thinking。
@@ -303,10 +333,10 @@ func (m *AnthropicChatModel) request(request brain.ChatRequest) (anthropic.Messa
 	system, converted := toAnthropicMessages(messages)
 	if system != "" {
 		// 断点 ①：工具定义 + 系统提示词。对话窗口滑动（最早一轮掉出去）时它们照样命中缓存
-		params.System = []anthropic.TextBlockParam{{Text: system, CacheControl: anthropic.NewCacheControlEphemeralParam()}}
+		params.System = []anthropic.TextBlockParam{{Text: system, CacheControl: m.cacheControl()}}
 	}
-	markPreviousTurnForCache(converted) // 断点 ②
-	markToolLoopForCache(converted)     // 断点 ③
+	markPreviousTurnForCache(converted, m.cacheControl()) // 断点 ②
+	markToolLoopForCache(converted, m.cacheControl())     // 断点 ③
 	params.Messages = converted
 	if len(tools) == 0 {
 		// 没有工具的请求，历史里却可能有工具往来（例如后台调查到上限后不再给工具、逼模型用已有资料写结论）：
@@ -423,7 +453,7 @@ func toAnthropicMessages(messages []brain.ChatMessage) (string, []anthropic.Mess
 // markPreviousTurnForCache 在「上一轮结束处」打缓存断点：这一轮主人说的话（最后一条不以工具结果开头的用户消息）
 // 前面那条消息的最后一块。这一轮的话附着「现在的情况」、每轮都变，放在断点之后；之前的对话下一轮原样再发，从缓存读。
 // 第一轮（前面没有对话）不打。
-func markPreviousTurnForCache(messages []anthropic.MessageParam) {
+func markPreviousTurnForCache(messages []anthropic.MessageParam, breakpoint anthropic.CacheControlEphemeralParam) {
 	for index := len(messages) - 1; index > 0; index-- {
 		user := messages[index].OfUser
 		if user == nil || len(user.Content) == 0 || user.Content[0].OfToolResult != nil {
@@ -439,7 +469,7 @@ func markPreviousTurnForCache(messages []anthropic.MessageParam) {
 		}
 		if len(blocks) > 0 {
 			if cache := blocks[len(blocks)-1].GetCacheControl(); cache != nil {
-				*cache = anthropic.NewCacheControlEphemeralParam()
+				*cache = breakpoint
 			}
 		}
 		return
@@ -449,7 +479,7 @@ func markPreviousTurnForCache(messages []anthropic.MessageParam) {
 // markToolLoopForCache 在一轮里连着调工具时（最后一条消息以工具结果开头）给最后一条消息的最后一块打缓存断点：
 // 这一轮的下一步原样带着到这里为止的全部内容，从缓存读，不再每一步都按没缓存的价格重付这一轮已有的工具往来
 // （后台调查一个任务就是一轮里十几步）。这一轮的第一步（最后一条是主人的话）不打：一问一答的轮次不多付写缓存的钱。
-func markToolLoopForCache(messages []anthropic.MessageParam) {
+func markToolLoopForCache(messages []anthropic.MessageParam, breakpoint anthropic.CacheControlEphemeralParam) {
 	if len(messages) == 0 {
 		return
 	}
@@ -458,7 +488,7 @@ func markToolLoopForCache(messages []anthropic.MessageParam) {
 		return
 	}
 	if cache := last.Content[len(last.Content)-1].GetCacheControl(); cache != nil {
-		*cache = anthropic.NewCacheControlEphemeralParam()
+		*cache = breakpoint
 	}
 }
 
@@ -600,5 +630,5 @@ func partialUsage(message anthropic.Message) *brain.ReplyUsage {
 func usageOf(usage anthropic.Usage) *brain.ReplyUsage {
 	read, write := int(usage.CacheReadInputTokens), int(usage.CacheCreationInputTokens)
 	return &brain.ReplyUsage{PromptTokens: int(usage.InputTokens) + read + write, OutputTokens: int(usage.OutputTokens),
-		CacheReadTokens: read, CacheWriteTokens: write}
+		CacheReadTokens: read, CacheWriteTokens: write, CacheWriteLongTokens: min(int(usage.CacheCreation.Ephemeral1hInputTokens), write)}
 }
