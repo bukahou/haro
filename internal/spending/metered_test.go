@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/bukahou/haro/internal/brain"
+	"github.com/bukahou/haro/internal/money"
 )
 
 // chargeLog 是只记在内存里的账本，看记了几笔、每笔是什么。
@@ -31,8 +32,8 @@ func (l *chargeLog) Total(context.Context, time.Time, ...Purpose) (Totals, error
 func (l *chargeLog) FlushPending(context.Context) error       { return nil }
 func (l *chargeLog) CheckWritable(context.Context) error      { return nil }
 func (l *chargeLog) RaiseCap(context.Context, CapRaise) error { return nil }
-func (l *chargeLog) CapRaised(context.Context, time.Time) (float64, error) {
-	return 0, nil
+func (l *chargeLog) CapRaised(context.Context, time.Time) (money.Sum, error) {
+	return money.Sum{}, nil
 }
 func (l *chargeLog) Close() error { return nil }
 
@@ -68,7 +69,7 @@ func (s streamScript) StreamReply(ctx context.Context, _ brain.ChatRequest) iter
 	}
 }
 
-var testPricing = Pricing{USDToYen: 150, Models: map[string]TokenPrice{"m": {InputUSDPerMillion: 1, OutputUSDPerMillion: 5}}}
+var testPricing = Pricing{Models: map[string]TokenPrice{"m": {InputUSDPerMillion: 1, OutputUSDPerMillion: 5}}}
 
 func metered(inner brain.ChatModel, ledger Ledger) *MeteredChatModel {
 	return NewMeteredChatModel(inner, "m", PurposeChat, testPricing, ledger, slog.New(slog.NewTextHandler(io.Discard, nil)))

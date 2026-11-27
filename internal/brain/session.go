@@ -9,6 +9,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 
+	"github.com/bukahou/haro/internal/money"
 	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
@@ -56,8 +57,8 @@ type Options struct {
 	ToolTimeout time.Duration
 	// Phrases：不经模型、直接念的固定的话（每种语言一份）；零值 = 程序里带的那份
 	Phrases Phrases
-	// MonthlyRaiseYen：口头提高月度上限时每次加多少（念给主人听的数，和额度那一层用同一个配置）
-	MonthlyRaiseYen float64
+	// MonthlyRaise：口头提高月度上限时每次加多少（默认货币；念给主人听的数，和额度那一层用同一个配置）
+	MonthlyRaise money.Amount
 
 	// 性格档案（可选）：两个以上时提供 switch_persona 工具
 	Personas       []Persona

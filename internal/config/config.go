@@ -16,6 +16,8 @@ import (
 	"golang.org/x/text/language"
 
 	"github.com/bukahou/haro/internal/realtimeproto"
+
+	"github.com/bukahou/haro/internal/money"
 )
 
 // 前台的模型从哪来（HARO_LLM_PROVIDER）。
@@ -158,22 +160,30 @@ type ServerSettings struct {
 	// takeover = 带画面的那次请求直接换它回答。都要 HARO_STRONG_LLM_USE 里有 vision
 	StrongLLMVisionMode string `env:"HARO_STRONG_LLM_VISION_MODE" envDefault:"expert"`
 
-	// 费用：用量账本与上限。汇率来自配置；云端模型的单价来自公共的模型价格目录（启动时拉取，见 pricecatalog）。
+	// 费用：用量账本与上限。每笔按原始币种记（服务商按美元收费），上限和念给主人的金额用默认货币，换算用每天的参考汇率；
+	// 云端模型的单价来自公共的模型价格目录（启动时拉取，见 pricecatalog）。
 	// 用量账本（SQLite 文件）：上限按账本合计，空 = 只在内存里、重启清零 ⇒ 设了月度上限（用到云端模型时必须设）就必须设它
-	UsageDB  string  `env:"HARO_USAGE_DB"`
-	USDToYen float64 `env:"HARO_USD_JPY"` // 1 美元折多少日元；用到云端模型时必填
+	UsageDB string `env:"HARO_USAGE_DB"`
+	// 默认货币（ISO 4217，例如 JPY）：费用上限、念给主人的金额都用它。跟用的人有关，没有默认值；用到云端模型时必须设
+	DefaultCurrency string `env:"HARO_DEFAULT_CURRENCY"`
+	// 参考汇率（欧洲央行每天公布的那份，公开、不用密钥）：地址、拉到的那份存在哪（下次拉不到时用；空 = 不存，拉不到就起不来）。
+	// 默认货币就是美元时不用汇率
+	ExchangeRatesURL   string `env:"HARO_EXCHANGE_RATES_URL" envDefault:"https://www.ecb.europa.eu/stats/eurofxref/eurofxref-daily.xml"`
+	ExchangeRatesCache string `env:"HARO_EXCHANGE_RATES_CACHE"`
 	// 模型价格目录（models.dev 的格式）：地址、取哪一家厂商的价格（目录里的 provider，和云端接口对应）、
 	// 拉到的那份存在哪（下次拉不到时用；空 = 不存，拉不到就起不来）
-	ModelPricesURL      string  `env:"HARO_MODEL_PRICES_URL" envDefault:"https://models.dev/api.json"`
-	ModelPricesProvider string  `env:"HARO_MODEL_PRICES_PROVIDER" envDefault:"anthropic"`
-	ModelPricesCache    string  `env:"HARO_MODEL_PRICES_CACHE"`
-	ResearchDailyYen    float64 `env:"HARO_RESEARCH_DAILY_YEN" envDefault:"100"` // 后台调查每天上限；0 = 不限
-	// 每月总费用上限（日元，大模型 + 搜索）。用到云端模型时必须设、要大于 0（没有默认值：漏配时起不来，不悄悄不限）；
+	ModelPricesURL      string `env:"HARO_MODEL_PRICES_URL" envDefault:"https://models.dev/api.json"`
+	ModelPricesProvider string `env:"HARO_MODEL_PRICES_PROVIDER" envDefault:"anthropic"`
+	ModelPricesCache    string `env:"HARO_MODEL_PRICES_CACHE"`
+	// 下面三个金额都是默认货币的（数值跟着币种走，所以没有默认值）。
+	// 后台调查每天上限；0 / 不设 = 不限（月度上限照样管着）
+	ResearchDailyCap float64 `env:"HARO_RESEARCH_DAILY_CAP"`
+	// 每月总费用上限（大模型 + 搜索）。用到云端模型时必须设、要大于 0（漏配时起不来，不悄悄不限）；
 	// 真想不限就写一个足够大的数。只用本地模型（不花钱）时可以不设
-	MonthlyYen float64 `env:"HARO_MONTHLY_YEN"`
-	// 月度上限到了以后：主人口头确认一次提高多少（0 = 不能口头提高，到上限就停到下个月）；
+	MonthlyCap float64 `env:"HARO_MONTHLY_CAP"`
+	// 月度上限到了以后：主人口头确认一次提高多少（0 / 不设 = 不能口头提高，到上限就停到下个月）；
 	// 判断主人要不要提高的那次小调用每天最多几次（它不受额度管，靠这个封顶；能口头提高时要大于 0）
-	MonthlyRaiseYen      float64 `env:"HARO_MONTHLY_RAISE_YEN" envDefault:"500"`
+	MonthlyRaise         float64 `env:"HARO_MONTHLY_RAISE"`
 	OverBudgetDailyCalls int     `env:"HARO_OVER_BUDGET_DAILY_CALLS" envDefault:"30"`
 	SearchDailyCredits   int     `env:"HARO_SEARCH_DAILY_CREDITS" envDefault:"30"` // 搜索积分每天上限（封在 Tavily 免费额度内）；0 = 不限
 	SearchCreditUSD      float64 `env:"HARO_SEARCH_CREDIT_USD"`                    // 每个搜索积分的美元价；0 = 免费额度内
@@ -425,12 +435,11 @@ func (settings ServerSettings) validateModels() error {
 	if err := errors.Join(positive("HARO_LOCAL_LLM_TIMEOUT", settings.LocalLLMTimeout),
 		positive("HARO_CLOUD_LLM_TIMEOUT", settings.CloudLLMTimeout), positive("HARO_CLOUD_LLM_MAX_TOKENS", settings.CloudMaxTokens),
 		positive("HARO_STRONG_LLM_TIMEOUT", settings.StrongLLMTimeout), positive("HARO_STRONG_LLM_MAX_TOKENS", settings.StrongLLMMaxTokens),
-		positive("HARO_REQUEST_TIMEOUT", settings.RequestTimeout),
-		notNegative("HARO_USD_JPY", settings.USDToYen)); err != nil {
+		positive("HARO_REQUEST_TIMEOUT", settings.RequestTimeout)); err != nil {
 		return err
 	}
-	if settings.UsesCloudLLM() && (settings.USDToYen <= 0 || settings.ModelPricesURL == "" || settings.ModelPricesProvider == "") {
-		return fmt.Errorf("用到云端模型时必须设 HARO_USD_JPY、HARO_MODEL_PRICES_URL、HARO_MODEL_PRICES_PROVIDER（费用上限要靠汇率和单价折算，v5 R5）")
+	if settings.UsesCloudLLM() && (settings.DefaultCurrency == "" || settings.ModelPricesURL == "" || settings.ModelPricesProvider == "") {
+		return fmt.Errorf("用到云端模型时必须设 HARO_DEFAULT_CURRENCY、HARO_MODEL_PRICES_URL、HARO_MODEL_PRICES_PROVIDER（费用上限要靠单价和汇率换算，v5 R5）")
 	}
 	if err := settings.validateStrongLLM(); err != nil {
 		return err
@@ -440,22 +449,30 @@ func (settings ServerSettings) validateModels() error {
 
 // validateSpending 检查费用的上限：都不能是负数；用到云端模型时必须有月度上限，有月度上限就必须有账本。
 func (settings ServerSettings) validateSpending() error {
-	if err := errors.Join(notNegative("HARO_MONTHLY_YEN", settings.MonthlyYen),
-		notNegative("HARO_RESEARCH_DAILY_YEN", settings.ResearchDailyYen), notNegative("HARO_MONTHLY_RAISE_YEN", settings.MonthlyRaiseYen),
+	if settings.DefaultCurrency != "" {
+		if _, err := money.ParseCurrency(settings.DefaultCurrency); err != nil {
+			return fmt.Errorf("HARO_DEFAULT_CURRENCY：%w", err)
+		}
+	}
+	if err := errors.Join(notNegative("HARO_MONTHLY_CAP", settings.MonthlyCap),
+		notNegative("HARO_RESEARCH_DAILY_CAP", settings.ResearchDailyCap), notNegative("HARO_MONTHLY_RAISE", settings.MonthlyRaise),
 		notNegative("HARO_OVER_BUDGET_DAILY_CALLS", settings.OverBudgetDailyCalls),
 		notNegative("HARO_SEARCH_DAILY_CREDITS", settings.SearchDailyCredits),
 		notNegative("HARO_SEARCH_CREDIT_USD", settings.SearchCreditUSD)); err != nil {
 		return err
 	}
-	if settings.UsesCloudLLM() && settings.MonthlyYen <= 0 {
-		return fmt.Errorf("用到云端模型时必须设 HARO_MONTHLY_YEN（每月总费用上限，日元）且大于 0；真想不限就写一个足够大的数")
+	if settings.UsesCloudLLM() && settings.MonthlyCap <= 0 {
+		return fmt.Errorf("用到云端模型时必须设 HARO_MONTHLY_CAP（每月总费用上限，按 HARO_DEFAULT_CURRENCY 的币种）且大于 0；真想不限就写一个足够大的数")
 	}
-	if settings.MonthlyYen > 0 && settings.UsageDB == "" {
-		return fmt.Errorf("设了 HARO_MONTHLY_YEN（月度上限）就必须设 HARO_USAGE_DB：上限按账本合计，只记在内存里时一重启就清零")
+	if (settings.MonthlyCap > 0 || settings.ResearchDailyCap > 0) && settings.DefaultCurrency == "" {
+		return fmt.Errorf("设了费用上限就必须设 HARO_DEFAULT_CURRENCY（上限是哪种货币）")
+	}
+	if settings.MonthlyCap > 0 && settings.UsageDB == "" {
+		return fmt.Errorf("设了 HARO_MONTHLY_CAP（月度上限）就必须设 HARO_USAGE_DB：上限按账本合计，只记在内存里时一重启就清零")
 	}
 	if settings.CanRaiseMonthlyCap() && settings.OverBudgetDailyCalls == 0 {
 		return fmt.Errorf("能口头提高月度上限时 HARO_OVER_BUDGET_DAILY_CALLS 要大于 0（是 0 就一次都判断不了）；" +
-			"不让主人口头提高就把 HARO_MONTHLY_RAISE_YEN 设成 0")
+			"不让主人口头提高就不设 HARO_MONTHLY_RAISE（或设成 0）")
 	}
 	return nil
 }
@@ -680,8 +697,17 @@ const (
 )
 
 // CanRaiseMonthlyCap 判断主人能不能在月度上限到了以后口头临时提高：设了上限和每次提高的金额，判断用云端的模型。
+// Currency 是默认货币的规范写法（大写的 ISO 4217；加载时已校验过）；没设时为空。
+func (s ServerSettings) Currency() string {
+	code, _ := money.ParseCurrency(s.DefaultCurrency)
+	return code
+}
+
+// HasSpendingCaps 判断设没设费用上限（设了就要用汇率把账本的原始金额换成默认货币）。
+func (s ServerSettings) HasSpendingCaps() bool { return s.MonthlyCap > 0 || s.ResearchDailyCap > 0 }
+
 func (s ServerSettings) CanRaiseMonthlyCap() bool {
-	return s.MonthlyYen > 0 && s.MonthlyRaiseYen > 0 && s.LLMProvider == LLMCloud
+	return s.MonthlyCap > 0 && s.MonthlyRaise > 0 && s.LLMProvider == LLMCloud
 }
 
 // VisionExpert 判断看画面是否交给幕后专家（更强的模型）。
@@ -729,8 +755,8 @@ func (s ServerSettings) validateStrongLLM() error {
 	if err := s.cloudLLMReady(); err != nil {
 		return fmt.Errorf("设了 HARO_STRONG_LLM_MODEL（它和云端模型用同一个接口）时%w", err)
 	}
-	if s.USDToYen <= 0 {
-		return fmt.Errorf("设了 HARO_STRONG_LLM_MODEL 时必须设 HARO_USD_JPY（费用上限要靠它折算；单价从模型价格目录取）")
+	if s.DefaultCurrency == "" {
+		return fmt.Errorf("设了 HARO_STRONG_LLM_MODEL 时必须设 HARO_DEFAULT_CURRENCY（费用上限要靠它换算；单价从模型价格目录取）")
 	}
 	return nil
 }

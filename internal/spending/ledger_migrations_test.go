@@ -40,10 +40,10 @@ func TestLedgerMigratesOldLayouts(t *testing.T) {
 			if err != nil {
 				t.Fatalf("迁移旧账本：%v", err)
 			}
-			if totals, err := ledger.Total(ctx, time.Unix(0, 0)); err != nil || totals.Yen != 4 {
+			if totals, err := ledger.Total(ctx, time.Unix(0, 0)); err != nil || spentJPY(totals) != 4 {
 				t.Errorf("原来的记录应都在：%+v %v", totals, err)
 			}
-			if err := ledger.Record(ctx, Charge{Purpose: PurposeChat, Item: "llm:a", InputTokens: 300, Incomplete: true, Yen: 0.5}); err != nil {
+			if err := ledger.Record(ctx, Charge{Purpose: PurposeChat, Item: "llm:a", InputTokens: 300, Incomplete: true, Cost: jpy(0.5)}); err != nil {
 				t.Fatal(err)
 			}
 			if err := ledger.Record(ctx, Charge{Purpose: PurposeChat, Item: "llm:a", TokensUnknown: true, Incomplete: true}); err != nil {
@@ -56,10 +56,10 @@ func TestLedgerMigratesOldLayouts(t *testing.T) {
 				t.Fatalf("再打开：%v", err)
 			}
 			defer ledger.Close()
-			if err := ledger.RaiseCap(ctx, CapRaise{Yen: 50, Person: "主人"}); err != nil {
+			if err := ledger.RaiseCap(ctx, CapRaise{Amount: jpy(50), Person: "主人"}); err != nil {
 				t.Fatalf("迁移后的旧账本也要能记临时提高的上限：%v", err)
 			}
-			if raised, err := ledger.CapRaised(ctx, time.Unix(0, 0)); err != nil || raised != 50 {
+			if raised, err := ledger.CapRaised(ctx, time.Unix(0, 0)); err != nil || raised.Amount("JPY") != jpy(50) {
 				t.Errorf("提高的上限：%v %v", raised, err)
 			}
 			db := ledger.(*sqliteLedger).db

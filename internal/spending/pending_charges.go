@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/bukahou/haro/internal/sqliteschema"
+
+	"github.com/bukahou/haro/internal/money"
 )
 
 // maxPendingCharges 是账本写不进时内存里最多留几笔待补写。写不进之后，有上限的付费调用、搜索都不放行（Guard），
@@ -66,11 +68,11 @@ func (l *pendingChargesLedger) Close() error {
 	defer cancel()
 	l.mu.Lock()
 	if err := l.flushLocked(ctx); err != nil {
-		var yen float64
+		lost := money.Sum{}
 		for _, charge := range l.pending {
-			yen += charge.Yen
+			lost.Add(charge.Cost)
 		}
-		l.logger.Error("💴 关停时还有花费没写进账本：这几笔丢了", "charges", len(l.pending), "yen", yen, "err", err)
+		l.logger.Error("💴 关停时还有花费没写进账本：这几笔丢了", "charges", len(l.pending), "cost", lost.String(), "err", err)
 		l.pending = nil
 	}
 	l.mu.Unlock()
@@ -101,7 +103,7 @@ func (l *pendingChargesLedger) flushLocked(ctx context.Context) error {
 func (l *pendingChargesLedger) keepLocked(charge Charge, cause error) error {
 	if len(l.pending) >= maxPendingCharges {
 		l.logger.Error("💴 账本写不进，内存里待补写的也满了：这一笔记不上", "pending", len(l.pending),
-			"purpose", charge.Purpose, "item", charge.Item, "yen", charge.Yen, "credits", charge.Credits, "err", cause)
+			"purpose", charge.Purpose, "item", charge.Item, "cost", charge.Cost.String(), "credits", charge.Credits, "err", cause)
 		return fmt.Errorf("账本写不进，待补写的已满 %d 笔，这一笔没记上: %w", maxPendingCharges, cause)
 	}
 	if len(l.pending) == 0 {

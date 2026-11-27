@@ -204,7 +204,7 @@ type searchEnv struct {
 	profiles     brain.ProfileSource
 	briefers     []brain.Briefer
 	home         weather.Place
-	pricing      spending.Pricing // USDToYen = 1：LLMYen 算出来就是美元
+	pricing      spending.Pricing // LLMCost 算出来是美元
 	frontModel   string           // 前台模型（Claude 的模型 ID，或本机模型的名字）
 	localURL     string           // 本机 OpenAI 兼容服务的地址（HARO_EVAL_LOCAL_URL）；空 = 前台用 Claude
 	speaker      string
@@ -336,7 +336,7 @@ func prepareSearchEnv(t *testing.T, ctx context.Context, settings config.ServerS
 	if err != nil {
 		t.Fatal(err)
 	}
-	environment.pricing = spending.Pricing{USDToYen: 1, Models: map[string]spending.TokenPrice{settings.CloudLLMModel: price}}
+	environment.pricing = spending.Pricing{Models: map[string]spending.TokenPrice{settings.CloudLLMModel: price}}
 	environment.frontModel, environment.localURL = settings.CloudLLMModel, os.Getenv("HARO_EVAL_LOCAL_URL")
 	if environment.localURL != "" {
 		environment.frontModel = cmp.Or(os.Getenv("HARO_EVAL_LOCAL_MODEL"), "local")
@@ -560,7 +560,7 @@ func (m *meteredFront) StreamReply(ctx context.Context, request brain.ChatReques
 		for delta, err := range m.ChatModel.StreamReply(ctx, request) {
 			m.mu.Lock()
 			if delta.Usage != nil {
-				m.usage.addRequest(*delta.Usage, m.pricing.LLMYen(m.model, *delta.Usage))
+				m.usage.addRequest(*delta.Usage, m.pricing.LLMCost(m.model, *delta.Usage).Value())
 			}
 			for _, call := range delta.ToolCalls {
 				m.usage.Trace = append(m.usage.Trace, traceOf(call.Name, call.Arguments))
@@ -667,7 +667,7 @@ func (m *serverToolsFront) streamRound(ctx context.Context, params anthropic.Mes
 func (m *serverToolsFront) record(message anthropic.Message, usage brain.ReplyUsage) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.usage.addRequest(usage, m.pricing.LLMYen(m.model, usage))
+	m.usage.addRequest(usage, m.pricing.LLMCost(m.model, usage).Value())
 	searches := int(message.Usage.ServerToolUse.WebSearchRequests)
 	m.usage.WebSearches += searches
 	m.usage.PageReads += int(message.Usage.ServerToolUse.WebFetchRequests)
@@ -916,7 +916,7 @@ func TestSearchEvalJudge(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pricing := spending.Pricing{USDToYen: 1, Models: map[string]spending.TokenPrice{judgeModel: price}}
+	pricing := spending.Pricing{Models: map[string]spending.TokenPrice{judgeModel: price}}
 	judge := &meteredFront{ChatModel: NewAnthropicChatModel(AnthropicOptions{API: claudeAPIForTest(key, "", nil), Model: judgeModel,
 		MaxTokens: 1000, Effort: "low", Thinking: ThinkingBetweenTools, MaxRetries: 2}), model: judgeModel, pricing: pricing}
 	verdicts := make([]searchVerdict, len(runs))

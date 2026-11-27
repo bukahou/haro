@@ -33,8 +33,8 @@ func TestUnwrittenChargesStopPaidCallsUntilWritten(t *testing.T) {
 	ctx := context.Background()
 	flaky := &flakyLedger{Ledger: openTestLedger(t)}
 	ledger := WithBookkeeping(flaky, quietLogger)
-	guard := NewGuard(ledger, Limits{MonthlyYen: 1000, ResearchDailyYen: 500, SearchDailyCredits: 30}, quietLogger)
-	pricing := Pricing{USDToYen: 100, Models: map[string]TokenPrice{"cloud": {InputUSDPerMillion: 1}}}
+	guard := NewGuard(ledger, Limits{Currency: "JPY", Monthly: jpy(1000), ResearchDaily: jpy(500), SearchDailyCredits: 30}, fixedRates{}, quietLogger)
+	pricing := Pricing{Models: map[string]TokenPrice{"cloud": {InputUSDPerMillion: 1}}}
 	cloud := &replyModel{text: "云端"} // 每次 100 万 token = 100 日元
 	model := NewBudgetedChatModel(NewMeteredChatModel(cloud, "cloud", PurposeChat, pricing, ledger, quietLogger), guard, quietLogger)
 
@@ -67,7 +67,7 @@ func TestUnwrittenChargesStopPaidCallsUntilWritten(t *testing.T) {
 	if got, err := collectText(t, model); err != nil || got != "云端" {
 		t.Fatalf("写得进了：补写后照常回答：%q %v", got, err)
 	}
-	if spent, err := flaky.Total(ctx, time.Time{}); err != nil || spent.Yen != 300 {
+	if spent, err := flaky.Total(ctx, time.Time{}); err != nil || spentJPY(spent) != 300 {
 		t.Errorf("写不进的那笔补写后应算在合计里（3 次 × 100 日元）：%+v %v", spent, err)
 	}
 	if err := ledger.CheckWritable(ctx); err != nil {
@@ -84,18 +84,18 @@ func TestUnwrittenChargeKeepsItsTime(t *testing.T) {
 	ledger.(*pendingChargesLedger).now = func() time.Time { return today.Add(-time.Hour) }
 
 	flaky.failing.Store(true)
-	if err := ledger.Record(ctx, Charge{Purpose: PurposeResearch, Item: "llm:cloud", Yen: 5}); !errors.Is(err, errDiskFull) {
+	if err := ledger.Record(ctx, Charge{Purpose: PurposeResearch, Item: "llm:cloud", Cost: jpy(5)}); !errors.Is(err, errDiskFull) {
 		t.Fatalf("写不进时应把原因交给调用方：%v", err)
 	}
 	flaky.failing.Store(false)
 	if err := ledger.FlushPending(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if spent, _ := flaky.Total(ctx, today, PurposeResearch); spent.Yen != 0 {
-		t.Errorf("昨天的那笔不应算进今天：%v", spent.Yen)
+	if spent, _ := flaky.Total(ctx, today, PurposeResearch); spentJPY(spent) != 0 {
+		t.Errorf("昨天的那笔不应算进今天：%v", spentJPY(spent))
 	}
-	if spent, _ := flaky.Total(ctx, today.AddDate(0, 0, -1), PurposeResearch); spent.Yen != 5 {
-		t.Errorf("昨天的那笔应算在昨天：%v", spent.Yen)
+	if spent, _ := flaky.Total(ctx, today.AddDate(0, 0, -1), PurposeResearch); spentJPY(spent) != 5 {
+		t.Errorf("昨天的那笔应算在昨天：%v", spentJPY(spent))
 	}
 }
 
@@ -136,17 +136,17 @@ func TestUnwrittenChargesWrittenOnNextRecordAndClose(t *testing.T) {
 	ledger := WithBookkeeping(flaky, slog.New(logs))
 
 	flaky.failing.Store(true)
-	_ = ledger.Record(ctx, Charge{Purpose: PurposeChat, Item: "llm:first", Yen: 1})
-	_ = ledger.Record(ctx, Charge{Purpose: PurposeChat, Item: "llm:second", Yen: 2})
+	_ = ledger.Record(ctx, Charge{Purpose: PurposeChat, Item: "llm:first", Cost: jpy(1)})
+	_ = ledger.Record(ctx, Charge{Purpose: PurposeChat, Item: "llm:second", Cost: jpy(2)})
 	if outage, levels := logs.withField("err"); len(outage) != 1 || levels[0] != slog.LevelError {
 		t.Errorf("开始写不进时应打一行错误日志（不是每笔都打）：%v %v", outage, levels)
 	}
 	flaky.failing.Store(false)
-	if err := ledger.Record(ctx, Charge{Purpose: PurposeChat, Item: "llm:third", Yen: 4}); err != nil {
+	if err := ledger.Record(ctx, Charge{Purpose: PurposeChat, Item: "llm:third", Cost: jpy(4)}); err != nil {
 		t.Fatalf("写得进了：%v", err)
 	}
-	if spent, _ := flaky.Total(ctx, time.Time{}); spent.Yen != 7 {
-		t.Errorf("记下一笔之前应先补写：%v", spent.Yen)
+	if spent, _ := flaky.Total(ctx, time.Time{}); spentJPY(spent) != 7 {
+		t.Errorf("记下一笔之前应先补写：%v", spentJPY(spent))
 	}
 	if recovered, _ := logs.withField("written"); len(recovered) != 1 || recovered[0]["written"] != int64(2) {
 		t.Errorf("补写上了应打一行，写明几笔：%v", recovered)
@@ -156,7 +156,7 @@ func TestUnwrittenChargesWrittenOnNextRecordAndClose(t *testing.T) {
 	}
 
 	flaky.failing.Store(true)
-	_ = ledger.Record(ctx, Charge{Purpose: PurposeChat, Item: "llm:at-close", Yen: 8})
+	_ = ledger.Record(ctx, Charge{Purpose: PurposeChat, Item: "llm:at-close", Cost: jpy(8)})
 	flaky.failing.Store(false)
 	if err := ledger.Close(); err != nil {
 		t.Fatal(err)
@@ -166,8 +166,8 @@ func TestUnwrittenChargesWrittenOnNextRecordAndClose(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer reopened.Close()
-	if spent, _ := reopened.Total(ctx, time.Time{}); spent.Yen != 15 {
-		t.Errorf("关停前应最后补写一次：%v", spent.Yen)
+	if spent, _ := reopened.Total(ctx, time.Time{}); spentJPY(spent) != 15 {
+		t.Errorf("关停前应最后补写一次：%v", spentJPY(spent))
 	}
 }
 
@@ -178,11 +178,11 @@ func TestUnwrittenChargesLostAtCloseAreLogged(t *testing.T) {
 	logs := &logRecords{}
 	ledger := WithBookkeeping(flaky, slog.New(logs))
 	flaky.failing.Store(true)
-	_ = ledger.Record(ctx, Charge{Purpose: PurposeChat, Item: "llm:x", Yen: 3})
-	_ = ledger.Record(ctx, Charge{Purpose: PurposeChat, Item: "llm:x", Yen: 4})
+	_ = ledger.Record(ctx, Charge{Purpose: PurposeChat, Item: "llm:x", Cost: jpy(3)})
+	_ = ledger.Record(ctx, Charge{Purpose: PurposeChat, Item: "llm:x", Cost: jpy(4)})
 	_ = ledger.Close()
 	lost, levels := logs.withField("charges")
-	if len(lost) != 1 || lost[0]["charges"] != int64(2) || lost[0]["yen"] != float64(7) || levels[0] != slog.LevelError {
+	if len(lost) != 1 || lost[0]["charges"] != int64(2) || lost[0]["cost"] != "7 JPY" || levels[0] != slog.LevelError {
 		t.Errorf("丢掉的几笔、多少钱要打一行错误日志：%v %v", lost, levels)
 	}
 }

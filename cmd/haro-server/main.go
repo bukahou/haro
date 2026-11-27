@@ -29,6 +29,7 @@ import (
 	"github.com/bukahou/haro/internal/config"
 	"github.com/bukahou/haro/internal/endpoint"
 	"github.com/bukahou/haro/internal/llm"
+	"github.com/bukahou/haro/internal/money"
 	"github.com/bukahou/haro/internal/persona"
 	"github.com/bukahou/haro/internal/pricecatalog"
 	"github.com/bukahou/haro/internal/readiness"
@@ -237,11 +238,11 @@ func newCloudChatModel(settings config.ServerSettings, claude *llm.ClaudeAPI, sp
 		llm.ProviderOpenAICompatible, spec.model)
 }
 
-// loadPricing 是把用量折成日元的单价表：云端模型（和设了的更强的模型）的单价从模型价格目录取（启动时拉取，拉不到用上次存的；
-// 都没有、或目录里没有用到的模型就起不来 —— 费用上限要靠单价折算），本地模型标成不花钱；汇率、搜索积分的价格来自配置。
+// loadPricing 是把用量算成钱的单价表（美元）：云端模型（和设了的更强的模型）的单价从模型价格目录取（启动时拉取，拉不到用上次存的；
+// 都没有、或目录里没有用到的模型就起不来 —— 费用上限要靠单价算），本地模型标成不花钱；搜索积分的价格来自配置。
 // 不用云端模型时不拉目录。
 func loadPricing(ctx context.Context, settings config.ServerSettings, client *http.Client, logger *slog.Logger) (spending.Pricing, error) {
-	pricing := spending.Pricing{USDToYen: settings.USDToYen, SearchCreditUSD: settings.SearchCreditUSD,
+	pricing := spending.Pricing{SearchCreditUSD: settings.SearchCreditUSD,
 		Models: map[string]spending.TokenPrice{settings.Model: {Free: true}}}
 	var cloudModels []string
 	if settings.UsesCloudLLM() {
@@ -392,7 +393,7 @@ func buildBrainOptions(settings config.ServerSettings) (brain.Options, error) {
 	options := brain.Options{MaxHistoryTurn: settings.MaxHistoryTurn, CompactContextTokens: settings.CompactContextTokens,
 		IdleCompactAfter:    settings.IdleCompactAfter,
 		ConfirmationTimeout: settings.ConfirmationTimeout, ToolTimeout: settings.ToolTimeout, Phrases: phrases,
-		MonthlyRaiseYen: settings.MonthlyRaiseYen}
+		MonthlyRaise: money.Of(settings.MonthlyRaise, settings.Currency())}
 	if settings.PersonasDir == "" {
 		return options, nil
 	}
@@ -429,3 +430,23 @@ const strongCooldown = 30 * time.Second
 
 // unavailableRetry：连不上模型服务之后，这么久内不再去连（马上告诉主人连不上），之后放一个请求去试（沿用同一个冷却时间）。
 const unavailableRetry = 30 * time.Second
+
+// exchangeRates 是把账本的原始金额（服务商的美元，以前记的日元）换成默认货币的汇率：设了费用上限才要。
+// 启动时拉一次欧洲央行的参考汇率（拉不到用上次存的；都没有就起不来，不按猜的汇率判断上限），之后定时重拉，随 ctx 结束。
+func exchangeRates(ctx context.Context, settings config.ServerSettings, client *http.Client, logger *slog.Logger) (money.Converter, error) {
+	if !settings.HasSpendingCaps() {
+		return money.SameCurrencyOnly{}, nil
+	}
+	rates := money.NewECBRates(settings.ExchangeRatesURL, settings.ExchangeRatesCache, client, logger)
+	if err := rates.Load(ctx); err != nil {
+		return nil, fmt.Errorf("参考汇率: %w", err)
+	}
+	if settings.ExchangeRatesCache == "" {
+		logger.Warn("没设 HARO_EXCHANGE_RATES_CACHE：参考汇率拉到的不存，下次拉不到时服务端起不来")
+	}
+	if _, err := rates.Convert(money.Sum{money.USD: money.MicrosPerUnit}, settings.Currency()); err != nil {
+		return nil, fmt.Errorf("HARO_DEFAULT_CURRENCY=%s：参考汇率里没有这种货币: %w", settings.Currency(), err)
+	}
+	go rates.RunRefresh(ctx)
+	return rates, nil
+}

@@ -65,10 +65,10 @@ func TestChargeLogWritesOneLinePerCharge(t *testing.T) {
 	ledger := &loggingLedger{Ledger: inner, logger: slog.New(logs)}
 
 	charges := []Charge{
-		{Purpose: PurposeChat, Item: "llm:haiku", InputTokens: 7000, OutputTokens: 98, CacheReadTokens: 6900, Yen: 1.2},
-		{Purpose: PurposeChat, Item: "llm:haiku", InputTokens: 7100, CacheReadTokens: 7000, Yen: 0.9, Incomplete: true},
+		{Purpose: PurposeChat, Item: "llm:haiku", InputTokens: 7000, OutputTokens: 98, CacheReadTokens: 6900, Cost: jpy(1.2)},
+		{Purpose: PurposeChat, Item: "llm:haiku", InputTokens: 7100, CacheReadTokens: 7000, Cost: jpy(0.9), Incomplete: true},
 		{Purpose: PurposeChat, Item: "llm:haiku", Incomplete: true, TokensUnknown: true},
-		{Purpose: PurposeResearch, Item: "tavily", Credits: 2, Yen: 3},
+		{Purpose: PurposeResearch, Item: "tavily", Credits: 2, Cost: jpy(3)},
 	}
 	for _, charge := range charges {
 		if err := ledger.Record(ctx, charge); err != nil {

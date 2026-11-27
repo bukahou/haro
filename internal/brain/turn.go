@@ -3,6 +3,8 @@ package brain
 import (
 	"strings"
 	"time"
+
+	"github.com/bukahou/haro/internal/money"
 )
 
 // 回合收尾：一轮里的进展随时记进 turnRecord（主人的话、每次工具往来和结果、最后说的话），
@@ -41,8 +43,8 @@ type turnRecord struct {
 	restricted bool
 	// truncated：最后一段到了模型的输出上限，没说完
 	truncated bool
-	// capRaisedTo：这一轮主人确认后把月度上限提高到了多少（日元）；0 = 没提高
-	capRaisedTo float64
+	// capRaisedTo：这一轮主人确认后把月度上限提高到了多少（默认货币）；零值 = 没提高
+	capRaisedTo money.Amount
 	// contextTokens：这一轮请求模型时带的上下文——最大的那次请求的输入 token（模型报的；不知道时为 0）
 	contextTokens int
 	// contextUnknown：这一轮有说完了的请求没报输入用量（模型服务不报）：按 token 压缩对这一轮不起作用

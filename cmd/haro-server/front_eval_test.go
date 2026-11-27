@@ -263,7 +263,7 @@ func prepareFrontShared(t *testing.T, ctx context.Context, settings config.Serve
 	if err != nil {
 		t.Fatal(err)
 	}
-	shared.pricing = spending.Pricing{USDToYen: 1, Models: map[string]spending.TokenPrice{settings.CloudLLMModel: price, "local": {Free: true}}}
+	shared.pricing = spending.Pricing{Models: map[string]spending.TokenPrice{settings.CloudLLMModel: price, "local": {Free: true}}}
 	t.Logf("前台（Claude 组）：%s（思考 %s、力度 %s、输出上限 %d、最多 %d 步）；本机：%q；性格 %d 个（默认 %s）；主人资料 %t；说话的人 %q",
 		settings.CloudLLMModel, settings.CloudLLMThinking, settings.CloudLLMEffort, frontOutputLimit(settings, front), front.MaxSteps,
 		shared.localURL, len(shared.personas), settings.PersonaDefault, shared.profiles != nil, shared.speaker)
@@ -553,7 +553,7 @@ func (r *frontRecorder) StreamReply(ctx context.Context, request brain.ChatReque
 				r.prompts = append(r.prompts, delta.Usage.PromptTokens)
 				r.output += delta.Usage.OutputTokens
 				r.thinking += delta.Usage.ThinkingChars
-				r.usd += r.pricing.LLMYen(r.model, *delta.Usage)
+				r.usd += r.pricing.LLMCost(r.model, *delta.Usage).Value()
 			}
 			r.mu.Unlock()
 			if !yield(delta, err) {

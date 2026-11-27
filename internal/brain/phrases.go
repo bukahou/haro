@@ -34,7 +34,16 @@ var phraseKeys = []string{PhraseOverMonthlyBudget, PhraseOverResearchDaily, Phra
 type Phrases struct {
 	Default   string                       `json:"default"`
 	Languages map[string]map[string]string `json:"languages"`
+	// Money 是每种语言里金额怎么念：币种代码 → 写法（{amount} 换成数值）；"*" 是没列出的币种（{currency} 换成代码）。
+	// 话里写 {名字:money} 的地方按它念，币种取 values 里的 PhraseCurrency。
+	Money map[string]map[string]string `json:"money"`
 }
+
+// PhraseCurrency 是 values 里放币种代码（ISO 4217）的名字：话里 {名字:money} 的金额都按这个币种念。
+const PhraseCurrency = "currency"
+
+// moneyAnyCurrency 是 Money 里「没列出的币种」那一项。
+const moneyAnyCurrency = "*"
 
 //go:embed phrases.json
 var builtinPhrases []byte
@@ -61,6 +70,9 @@ func LoadPhrases(path string) (Phrases, error) {
 				return Phrases{}, fmt.Errorf("固定的话 %s：%s 缺少 %s", path, language, key)
 			}
 		}
+		if !strings.Contains(phrases.Money[language][moneyAnyCurrency], "{amount}") {
+			return Phrases{}, fmt.Errorf("固定的话 %s：money 里 %s 缺少 %q（没列出的币种怎么念，要有 {amount}）", path, language, moneyAnyCurrency)
+		}
 	}
 	return phrases, nil
 }
@@ -76,11 +88,10 @@ func builtinPhrasesOrPanic() Phrases {
 
 // Say 取 language 的 key 那句，填上 values；没有这种语言用默认语言。
 func (p Phrases) Say(language, key string, values map[string]string) string {
-	texts, ok := p.Languages[language]
-	if !ok {
-		texts = p.Languages[p.Default]
+	if _, ok := p.Languages[language]; !ok {
+		language = p.Default
 	}
-	text := texts[key]
+	text := p.moneyPlaceholders(language, p.Languages[language][key], values)
 	names := make([]string, 0, len(values))
 	for name := range values {
 		names = append(names, name)
@@ -88,6 +99,20 @@ func (p Phrases) Say(language, key string, values map[string]string) string {
 	slices.Sort(names)
 	for _, name := range names {
 		text = strings.ReplaceAll(text, "{"+name+"}", values[name])
+	}
+	return text
+}
+
+// moneyPlaceholders 把话里的 {名字:money} 换成按这种语言念的金额（数值取 values[名字]，币种取 values[PhraseCurrency]）。
+func (p Phrases) moneyPlaceholders(language, text string, values map[string]string) string {
+	formats := p.Money[language]
+	code := values[PhraseCurrency]
+	format, ok := formats[code]
+	if !ok {
+		format = strings.ReplaceAll(formats[moneyAnyCurrency], "{currency}", code)
+	}
+	for name, value := range values {
+		text = strings.ReplaceAll(text, "{"+name+":money}", strings.ReplaceAll(format, "{amount}", value))
 	}
 	return text
 }

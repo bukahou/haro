@@ -20,6 +20,7 @@ import (
 	"github.com/bukahou/haro/internal/graceful"
 	"github.com/bukahou/haro/internal/holidays"
 	"github.com/bukahou/haro/internal/llm"
+	"github.com/bukahou/haro/internal/money"
 	"github.com/bukahou/haro/internal/notes"
 	"github.com/bukahou/haro/internal/profile"
 	"github.com/bukahou/haro/internal/readiness"
@@ -117,11 +118,17 @@ func connectServices(ctx context.Context, settings config.ServerSettings, logger
 	if settings.UsageDB == "" {
 		logger.Warn("没设 HARO_USAGE_DB：用量只记在内存里，服务端重启后额度重新计算")
 	}
-	deps.guard = spending.NewGuard(deps.ledger, spending.Limits{ResearchDailyYen: settings.ResearchDailyYen,
-		MonthlyYen: settings.MonthlyYen, SearchDailyCredits: settings.SearchDailyCredits, WarnRatio: spending.DefaultWarnRatio,
-		MonthlyRaiseYen: settings.MonthlyRaiseYen}, logger)
-	logger.Info("费用上限", "research_daily_yen", settings.ResearchDailyYen, "monthly_yen", settings.MonthlyYen,
-		"search_daily_credits", settings.SearchDailyCredits)
+	rates, err := exchangeRates(ctx, settings, deps.httpClient, logger)
+	if err != nil {
+		return deps, err
+	}
+	currency := settings.Currency()
+	limits := spending.Limits{Currency: currency, ResearchDaily: money.Of(settings.ResearchDailyCap, currency),
+		Monthly: money.Of(settings.MonthlyCap, currency), SearchDailyCredits: settings.SearchDailyCredits,
+		WarnRatio: spending.DefaultWarnRatio, MonthlyRaise: money.Of(settings.MonthlyRaise, currency)}
+	deps.guard = spending.NewGuard(deps.ledger, limits, rates, logger)
+	logger.Info("费用上限（默认货币；账本按原始币种记，判断时按参考汇率换算）", "currency", currency,
+		"research_daily", limits.ResearchDaily.String(), "monthly", limits.Monthly.String(), "search_daily_credits", settings.SearchDailyCredits)
 	if deps.conversations, err = openConversationStore(ctx, settings, shutdown); err != nil {
 		return deps, err
 	}
@@ -260,7 +267,7 @@ func assembleBrain(ctx context.Context, settings config.ServerSettings, catalog 
 	if built.overBudget != nil { // 月度上限到了以后，主人可以口头临时提高（判断交给代理「额度判断」）
 		components.MonthlyCap = deps.guard
 		components.OverBudget = built.overBudget
-		logger.Info("月度上限到了以后可以口头临时提高", "raise_yen", settings.MonthlyRaiseYen, "daily_checks", settings.OverBudgetDailyCalls)
+		logger.Info("月度上限到了以后可以口头临时提高", "raise", options.MonthlyRaise.String(), "daily_checks", settings.OverBudgetDailyCalls)
 	}
 	var store brain.ConversationStore // 没设对话库时是 nil 接口（不是装着 nil 指针的接口）
 	if deps.conversations != nil {

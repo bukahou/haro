@@ -49,6 +49,10 @@ var removedSettings = []removedSetting{
 		on, err := strconv.ParseBool(value)
 		return err == nil && on
 	}, removed: "天气并进了 HARO_TOOLS 的工具组：不要天气就在 HARO_TOOLS 里列出别的组、不写 weather"},
+	{name: "HARO_USD_JPY", removed: "汇率改为每天拉欧洲央行的参考汇率（HARO_EXCHANGE_RATES_URL），不再手写；上限的币种由 HARO_DEFAULT_CURRENCY 定"},
+	{name: "HARO_MONTHLY_YEN", removed: "改名为 HARO_MONTHLY_CAP（金额按 HARO_DEFAULT_CURRENCY 的币种，把值写到新名字下）"},
+	{name: "HARO_RESEARCH_DAILY_YEN", removed: "改名为 HARO_RESEARCH_DAILY_CAP（按 HARO_DEFAULT_CURRENCY 的币种；没有默认值了，不设 = 不限）"},
+	{name: "HARO_MONTHLY_RAISE_YEN", removed: "改名为 HARO_MONTHLY_RAISE（按 HARO_DEFAULT_CURRENCY 的币种；没有默认值了，不设 = 不能口头提高）"},
 	{name: "HARO_NETDIAG_DNS_NAME", removed: "网络诊断工具已删除"},
 	{name: "HARO_NETDIAG_INTERNET_TARGET", removed: "网络诊断工具已删除"},
 	{name: "HARO_CONTEXT_SIZE", removed: "本地模型改走 Ollama 的 OpenAI 兼容端点，上下文长度在 Ollama 那边配（OLLAMA_CONTEXT_LENGTH）"},

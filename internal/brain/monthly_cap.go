@@ -6,9 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"strconv"
 	"time"
 
+	"github.com/bukahou/haro/internal/money"
 	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
@@ -25,9 +25,9 @@ var ErrMonthlyCapReached = errors.New("这个月的费用到了上限")
 
 // MonthlyCap 是月度费用上限：主人口头确认后可以临时提高（额度那一层实现）。
 type MonthlyCap interface {
-	// RaiseMonthlyCap 把这个月的上限提高一次（加多少由配置定），返回提高后的上限（日元）。
+	// RaiseMonthlyCap 把这个月的上限提高一次（加多少由配置定），返回提高后的上限（默认货币）。
 	// ctx 里要带着 person 对 RaiseMonthlyCapTool 的确认（WithConfirmation），没有就拒绝。
-	RaiseMonthlyCap(ctx context.Context, person string) (float64, error)
+	RaiseMonthlyCap(ctx context.Context, person string) (money.Amount, error)
 }
 
 var raiseMonthlyCapSpec = ToolSpec{Name: RaiseMonthlyCapTool, Parameters: ParametersFor[struct{}](), RequiresConfirmation: true,
@@ -52,8 +52,8 @@ func (s *Session) canRaiseMonthlyCap() bool {
 
 // capRaiseResult 是「提高上限」交给模型的结果。
 type capRaiseResult struct {
-	RaisedYen       float64 `json:"raised_yen"`
-	MonthlyLimitYen float64 `json:"monthly_limit_yen"`
+	Raised       string `json:"raised"`        // 例如「500 JPY」
+	MonthlyLimit string `json:"monthly_limit"` // 提高后的上限
 }
 
 // raiseMonthlyCap 执行主人确认过的「提高上限」（ctx 里带着主人的确认）。
@@ -64,8 +64,8 @@ func (s *Session) raiseMonthlyCap(ctx context.Context, record *turnRecord) (stri
 		return "", err
 	}
 	record.capRaisedTo = limit
-	s.logger.Info("💴 主人确认：这个月的上限提高了", "raised_yen", s.opts.MonthlyRaiseYen, "limit_yen", limit)
-	data, err := json.Marshal(capRaiseResult{RaisedYen: s.opts.MonthlyRaiseYen, MonthlyLimitYen: limit})
+	s.logger.Info("💴 主人确认：这个月的上限提高了", "raised", s.opts.MonthlyRaise.String(), "limit", limit.String())
+	data, err := json.Marshal(capRaiseResult{Raised: s.opts.MonthlyRaise.String(), MonthlyLimit: limit.String()})
 	return string(data), err
 }
 
@@ -111,12 +111,12 @@ func (s *Session) answerOverBudget(ctx context.Context, record *turnRecord, capE
 	language := s.language
 	s.mu.Unlock()
 	switch {
-	case record.capRaisedTo > 0:
+	case record.capRaisedTo.Micros > 0:
 		return s.speakFixedReply(ctx, s.opts.Phrases.Say(language, PhraseMonthlyCapRaised,
-			map[string]string{"limit": strconv.FormatFloat(record.capRaisedTo, 'f', 0, 64)}))
+			map[string]string{"limit": record.capRaisedTo.Rounded(), PhraseCurrency: record.capRaisedTo.Currency}))
 	case record.askedConfirmation:
 		return s.speakFixedReply(ctx, s.opts.Phrases.Say(language, PhraseConfirmCapRaise,
-			map[string]string{"raise": strconv.FormatFloat(s.opts.MonthlyRaiseYen, 'f', 0, 64)}))
+			map[string]string{"raise": s.opts.MonthlyRaise.Rounded(), PhraseCurrency: s.opts.MonthlyRaise.Currency}))
 	}
 	var spoken SpokenError
 	if errors.As(capErr, &spoken) {
@@ -132,7 +132,7 @@ func (s *Session) pendingActionNotes() []string {
 	for _, action := range s.currentConversation().unexpiredPendingActions(time.Now()) {
 		what := action.Call.Name
 		if action.Call.Name == RaiseMonthlyCapTool {
-			what = fmt.Sprintf("把这个月的费用上限临时提高 %.0f 日元", s.opts.MonthlyRaiseYen)
+			what = "把这个月的费用上限临时提高 " + s.opts.MonthlyRaise.String()
 		}
 		notes = append(notes, fmt.Sprintf("待确认的操作 %s：%s（刚才已经问过主人要不要做）", action.ID, what))
 	}
