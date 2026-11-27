@@ -95,9 +95,9 @@ type ServerSettings struct {
 	// 带上最近几轮对话（一问一答算一轮），要大于 0；更早的压成摘要或丢掉（HARO_CONVERSATION_SUMMARY）
 	MaxHistoryTurn int `env:"HARO_MAX_HISTORY_TURN" envDefault:"6"`
 	// 一轮里请求模型带的上下文（最大的那次请求的输入 token，模型报的）到了这么多，就提前把较早的几轮移出窗口、压缩（0 = 不看）。
-	// 默认值是估算，没有实测：系统提示词加工具定义约 4k，最近 6 轮一般 5k–12k；24k 只在工具结果特别长时触发。
-	// 待用账本里实际的 prompt_tokens 校准
-	CompactContextTokens int `env:"HARO_CONTEXT_COMPACT_TOKENS" envDefault:"24000"`
+	// 守的是每次请求的输入低于 10 万（超过后 Claude Haiku 的单价翻五倍）：到 8 万就压，留出下一轮工具结果的余量。
+	// 平常（系统提示词加工具定义、主人资料约一万，最近几轮几千到一两万）碰不到它
+	CompactContextTokens int `env:"HARO_CONTEXT_COMPACT_TOKENS" envDefault:"80000"`
 	// 会破坏的操作（删记事等）问了主人之后，多久没确认就作废；不设（0）= 程序里的默认值 brain.DefaultConfirmationTimeout
 	ConfirmationTimeout time.Duration `env:"HARO_CONFIRMATION_TIMEOUT"`
 	// 单次工具执行最多多久（所有工具共用，包括远程 MCP）；天气这类工具在这个期限里自己分配主力和备用的时间。
@@ -197,6 +197,7 @@ type ServerSettings struct {
 	ResearchMaxRounds      int           `env:"HARO_RESEARCH_MAX_ROUNDS"`      // 搜索阶段最多请求模型几轮（搜一次、读一次各占一轮）
 	ResearchMaxSearches    int           `env:"HARO_RESEARCH_MAX_SEARCHES"`    // 最多搜几次
 	ResearchMaxTokens      int           `env:"HARO_RESEARCH_MAX_TOKENS"`      // 累计 token 上限
+	ResearchMaxCallTokens  int           `env:"HARO_RESEARCH_MAX_CALL_TOKENS"` // 一次请求带的上下文上限（到了就用已有资料写结论）
 	ResearchWriteUpTimeout time.Duration `env:"HARO_RESEARCH_WRITEUP_TIMEOUT"` // 到上限后写结论最多多久
 	ResearchRecheckTimeout time.Duration `env:"HARO_RESEARCH_RECHECK_TIMEOUT"` // 审查提出疑点后复查最多多久
 	ResearchReviewTimeout  time.Duration `env:"HARO_RESEARCH_REVIEW_TIMEOUT"`  // 审一次最多多久
@@ -481,6 +482,7 @@ func (settings ServerSettings) validateResearch() error {
 		notNegative("HARO_RESEARCH_MAX_ROUNDS", settings.ResearchMaxRounds),
 		notNegative("HARO_RESEARCH_MAX_SEARCHES", settings.ResearchMaxSearches),
 		notNegative("HARO_RESEARCH_MAX_TOKENS", settings.ResearchMaxTokens),
+		notNegative("HARO_RESEARCH_MAX_CALL_TOKENS", settings.ResearchMaxCallTokens),
 		notNegative("HARO_RESEARCH_WRITEUP_TIMEOUT", settings.ResearchWriteUpTimeout),
 		notNegative("HARO_RESEARCH_RECHECK_TIMEOUT", settings.ResearchRecheckTimeout),
 		notNegative("HARO_RESEARCH_REVIEW_TIMEOUT", settings.ResearchReviewTimeout),

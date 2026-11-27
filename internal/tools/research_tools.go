@@ -71,7 +71,7 @@ func longestWaitNote(longest time.Duration) string {
 }
 
 type startResearchInput struct {
-	Question string `json:"question" jsonschema:"要调查的问题，用主人说话的语言写完整、具体（包含主人关心的点）；照主人的意思写，不要加主人没说的条件（住在哪、截止日期这类自己推测的不要加）"`
+	Question string `json:"question" jsonschema:"要调查的问题，用主人说话的语言写完整、具体（包含主人关心的点）；照主人的意思写，不要加主人没说的条件（住在哪、截止日期这类自己推测的不要加）；要写到家附近的，用町名或车站名，不写门牌号、房间号"`
 }
 
 type startResearchOutput struct {

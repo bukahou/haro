@@ -205,7 +205,7 @@ func TestCameraBackendIsValidated(t *testing.T) {
 	}
 }
 
-// 提前压缩的门槛：默认 24000；0 = 不看；负数起不来。
+// 提前压缩的门槛：默认 80000（守每次请求的输入低于 10 万）；0 = 不看；负数起不来。
 func TestCompactContextTokens(t *testing.T) {
 	clearHaroEnv(t)
 	minimal := map[string]string{"HARO_LLM_PROVIDER": "local", "HARO_TTS": "piper", "HARO_TTS_URL": "http://127.0.0.1:9",
@@ -216,8 +216,8 @@ func TestCompactContextTokens(t *testing.T) {
 		t.Setenv(name, value)
 	}
 	settings, err := LoadBrainSettings()
-	if err != nil || settings.CompactContextTokens != 24000 {
-		t.Fatalf("默认 24000：%d %v", settings.CompactContextTokens, err)
+	if err != nil || settings.CompactContextTokens != 80000 {
+		t.Fatalf("默认 80000：%d %v", settings.CompactContextTokens, err)
 	}
 	t.Setenv("HARO_CONTEXT_COMPACT_TOKENS", "0")
 	if settings, err := LoadBrainSettings(); err != nil || settings.CompactContextTokens != 0 {
@@ -425,6 +425,7 @@ func TestNumericSettingRanges(t *testing.T) {
 		{"HARO_RESEARCH_MAX_ROUNDS", func(s *ServerSettings) { s.ResearchMaxRounds = -1 }},
 		{"HARO_RESEARCH_MAX_SEARCHES", func(s *ServerSettings) { s.ResearchMaxSearches = -1 }},
 		{"HARO_RESEARCH_MAX_TOKENS", func(s *ServerSettings) { s.ResearchMaxTokens = -1 }},
+		{"HARO_RESEARCH_MAX_CALL_TOKENS", func(s *ServerSettings) { s.ResearchMaxCallTokens = -1 }},
 		{"HARO_RESEARCH_WRITEUP_TIMEOUT", func(s *ServerSettings) { s.ResearchWriteUpTimeout = -time.Second }},
 		{"HARO_RESEARCH_RECHECK_TIMEOUT", func(s *ServerSettings) { s.ResearchRecheckTimeout = -time.Second }},
 		{"HARO_RESEARCH_REVIEW_TIMEOUT", func(s *ServerSettings) { s.ResearchReviewTimeout = -time.Second }},

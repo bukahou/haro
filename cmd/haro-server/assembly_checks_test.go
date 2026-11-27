@@ -72,9 +72,9 @@ func TestResearchLimits(t *testing.T) {
 		t.Errorf("都没设时应是 research.DefaultLimits：%+v", got)
 	}
 	got := researchLimits(config.ServerSettings{ResearchTimeout: time.Minute, ResearchMaxSearches: 2, ResearchMaxTokens: 1000,
-		ResearchWriteUpTimeout: 2 * time.Minute, ResearchRecheckTimeout: 3 * time.Minute})
+		ResearchMaxCallTokens: 500, ResearchWriteUpTimeout: 2 * time.Minute, ResearchRecheckTimeout: 3 * time.Minute})
 	want := research.DefaultLimits
-	want.Timeout, want.MaxSearches, want.MaxTokens = time.Minute, 2, 1000
+	want.Timeout, want.MaxSearches, want.MaxTokens, want.MaxCallTokens = time.Minute, 2, 1000, 500
 	want.WriteUpTimeout, want.RecheckTimeout = 2*time.Minute, 3*time.Minute
 	if got != want {
 		t.Errorf("设了的用配置的：%+v", got)

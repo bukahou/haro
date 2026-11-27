@@ -156,12 +156,31 @@ func TestProfileReloadsWhenFilesChange(t *testing.T) {
 	}
 }
 
+// 写多少都照发，只有超过保险上限（防误贴大文件）的部分截掉。
 func TestProfileLengthLimit(t *testing.T) {
 	dir := t.TempDir()
-	write(t, dir, "owner.md", "---\nperson: 主人\n---\n"+strings.Repeat("长", personAdviseRunes*hardLimitFactor+100))
+	write(t, dir, "household.md", strings.Repeat("宅", 3000))
+	write(t, dir, "owner.md", "---\nperson: 主人\n---\n"+strings.Repeat("长", maxProfileRunes+100))
 	got := store(t, dir).Profile("主人")
-	if n := strings.Count(got, "长"); n != personAdviseRunes*hardLimitFactor {
-		t.Errorf("超过两倍建议字数的部分截掉：%d 字", n)
+	if n := strings.Count(got, "宅"); n != 3000 {
+		t.Errorf("几千字的资料应原样发：%d 字", n)
+	}
+	if n := strings.Count(got, "长"); n != maxProfileRunes {
+		t.Errorf("超过保险上限的部分截掉：%d 字", n)
+	}
+}
+
+// 没内容的小标题（模板里没填的那几节）不发；标题后面、连着的空行（删掉注释和空项留下的）也不发；下面只有更低级的
+// 小标题、而它有内容时，上级标题保留。
+func TestProfileDropsEmptyHeadings(t *testing.T) {
+	data := "---\nperson: 主人\n---\n## 基本\n- 称呼：\n\n## 偏好\n<!-- 写饮食 -->\n\n- 饮食：自己做饭\n\n## 健康\n- 过敏：\n" +
+		"## 家里\n### 宠物\n- 猫：橘子\n## 其他\n"
+	_, body, err := parse([]byte(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "## 偏好\n- 饮食：自己做饭\n\n## 家里\n### 宠物\n- 猫：橘子"; body != want {
+		t.Errorf("没内容的小标题和多余的空行不该发：\n got %q\nwant %q", body, want)
 	}
 }
 
@@ -182,7 +201,7 @@ func TestProfileKeepsHeadingsWithSubItems(t *testing.T) {
 func TestProfileCutsAtLineEnd(t *testing.T) {
 	dir := t.TempDir()
 	line := strings.Repeat("长", 100) + "。"
-	write(t, dir, "owner.md", "---\nperson: 主人\n---\n"+strings.Repeat(line+"\n", 15))
+	write(t, dir, "owner.md", "---\nperson: 主人\n---\n"+strings.Repeat(line+"\n", 120))
 	got := store(t, dir).Profile("主人")
 	lines := 0
 	for _, l := range strings.Split(got, "\n") {
@@ -193,7 +212,7 @@ func TestProfileCutsAtLineEnd(t *testing.T) {
 			}
 		}
 	}
-	if want := personAdviseRunes * hardLimitFactor / len([]rune(line+"\n")); lines != want {
+	if want := maxProfileRunes / len([]rune(line+"\n")); lines != want {
 		t.Errorf("应保留 %d 行完整的，得到 %d 行", want, lines)
 	}
 }

@@ -22,6 +22,9 @@ type Limits struct {
 	// MaxTokens 是累计 token 上限（默认 30 万）：开着思考（xhigh）时每一轮都带着前面的思考和读到的网页，
 	// 对比试验里一个任务平均 8–9 万、最多 22 万；不开思考时最多 7 万
 	MaxTokens int
+	// MaxCallTokens 是一次请求带的上下文上限（默认 8 万）：上一次请求的输入到了这么多，就不再查（复查也停下），用已有资料写结论。
+	// 累计上限管不住单次：一轮比一轮长，最后几轮的单次可能很大；输入超过 10 万时 Claude Haiku 的单价翻五倍，留出写结论的余量
+	MaxCallTokens int
 	// WriteUpTimeout 是到上限后写结论最多多久（不算在搜索阶段里）：一次不带搜索工具的请求。默认 90 秒按开着思考定
 	// （不开思考时一般几秒就完）
 	WriteUpTimeout time.Duration
@@ -31,14 +34,14 @@ type Limits struct {
 }
 
 // DefaultLimits 是默认值（R2 裁定；服务端没设 HARO_RESEARCH_* 时用它，默认值只写在这里）。按配置的默认（两个代理开着思考）定。
-var DefaultLimits = Limits{Timeout: 3 * time.Minute, MaxSearches: 5, MaxTokens: 300_000,
+var DefaultLimits = Limits{Timeout: 3 * time.Minute, MaxSearches: 5, MaxTokens: 300_000, MaxCallTokens: 80_000,
 	WriteUpTimeout: 90 * time.Second, RecheckTimeout: 2 * time.Minute}
 
 // check 检查上限：都要大于 0（配置里没设的，装配处已经换成默认值）。
 func (l Limits) check() error {
-	if l.Timeout <= 0 || l.MaxSearches <= 0 || l.MaxTokens <= 0 || l.WriteUpTimeout <= 0 || l.RecheckTimeout <= 0 {
-		return fmt.Errorf("调查的上限都要大于 0：时限 %v、搜索 %d 次、%d token、写结论 %v、复查 %v",
-			l.Timeout, l.MaxSearches, l.MaxTokens, l.WriteUpTimeout, l.RecheckTimeout)
+	if l.Timeout <= 0 || l.MaxSearches <= 0 || l.MaxTokens <= 0 || l.MaxCallTokens <= 0 || l.WriteUpTimeout <= 0 || l.RecheckTimeout <= 0 {
+		return fmt.Errorf("调查的上限都要大于 0：时限 %v、搜索 %d 次、累计 %d token、单次 %d token、写结论 %v、复查 %v",
+			l.Timeout, l.MaxSearches, l.MaxTokens, l.MaxCallTokens, l.WriteUpTimeout, l.RecheckTimeout)
 	}
 	return nil
 }
