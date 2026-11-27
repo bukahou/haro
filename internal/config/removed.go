@@ -45,6 +45,10 @@ var removedSettings = []removedSetting{
 	{name: "HARO_PIPER_PYTHON", removed: "服务端不再拉起 Piper：Piper 单独运行，服务端只按 HARO_TTS_URL 连"},
 	{name: "HARO_PIPER_MODEL", removed: "服务端不再拉起 Piper，模型由运行 Piper 的命令指定"},
 	{name: "HARO_PIPER_PORT", removed: "服务端不再拉起 Piper，按 HARO_TTS_URL 连"},
+	{name: "HARO_WEATHER", stillMeans: func(value string) bool {
+		on, err := strconv.ParseBool(value)
+		return err == nil && on
+	}, removed: "天气并进了 HARO_TOOLS 的工具组：不要天气就在 HARO_TOOLS 里列出别的组、不写 weather"},
 	{name: "HARO_NETDIAG_DNS_NAME", removed: "网络诊断工具已删除"},
 	{name: "HARO_NETDIAG_INTERNET_TARGET", removed: "网络诊断工具已删除"},
 	{name: "HARO_CONTEXT_SIZE", removed: "本地模型改走 Ollama 的 OpenAI 兼容端点，上下文长度在 Ollama 那边配（OLLAMA_CONTEXT_LENGTH）"},

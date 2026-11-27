@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/bukahou/haro/internal/agents"
@@ -156,26 +157,28 @@ func buildTooling(ctx context.Context, settings config.ServerSettings, catalog a
 		kit.briefers = append(kit.briefers, brain.BriefLines(calendar.Brief))
 		logger.Info("节假日：今天、明天是节假日时告诉模型", "country", calendar.Country())
 	}
-	if !settings.Tools {
-		return kit, nil
+	var builtins []tools.Builtin // 内置工具按组开（HARO_TOOLS，不设 = 全开）
+	if settings.ToolGroupOn(config.ToolGroupMemory) {
+		store, err := notes.Open(ctx, settings.NotesDB)
+		if err != nil {
+			return kit, err
+		}
+		shutdown.add("记事库", store.Close)
+		keeper, stopMemory := startMemory(ctx, settings, store, deps, logger)
+		shutdown.add("长期记忆", stopMemory)
+		builtins = append(builtins, tools.MemoryTools(keeper, time.Local, logger))
+		kit.briefers = append(kit.briefers, keeper) // 常驻记忆：每轮附在情况说明里
 	}
-	store, err := notes.Open(ctx, settings.NotesDB)
-	if err != nil {
-		return kit, err
+	if settings.ToolGroupOn(config.ToolGroupReminders) {
+		scheduler, stopReminders, err := startReminders(ctx, settings, kit.notices, logger)
+		if err != nil {
+			return kit, err
+		}
+		shutdown.add("提醒", stopReminders)
+		builtins = append(builtins, tools.ReminderTools(scheduler, logger))
+		kit.briefers = append(kit.briefers, scheduler) // 错过的提醒：主人下次开口时告诉他
 	}
-	shutdown.add("记事库", store.Close)
-	keeper, stopMemory := startMemory(ctx, settings, store, deps, logger)
-	shutdown.add("长期记忆", stopMemory)
-	builtins := []tools.Builtin{tools.MemoryTools(keeper, time.Local, logger)}
-	kit.briefers = append(kit.briefers, keeper) // 常驻记忆：每轮附在情况说明里
-	scheduler, stopReminders, err := startReminders(ctx, settings, kit.notices, logger)
-	if err != nil {
-		return kit, err
-	}
-	shutdown.add("提醒", stopReminders)
-	builtins = append(builtins, tools.ReminderTools(scheduler, logger))
-	kit.briefers = append(kit.briefers, scheduler) // 错过的提醒：主人下次开口时告诉他
-	if settings.Weather {                          // 天气：Open-Meteo 为主，日本气象厅备用；都不用密钥
+	if settings.ToolGroupOn(config.ToolGroupWeather) { // 天气：Open-Meteo 为主（备用按 HARO_WEATHER_BACKUP）；都不用密钥
 		weatherHTTP := weather.NewHTTPClient() // 连接等得短：连不上就早点交给备用
 		home := weatherHome(ctx, settings, weatherHTTP, logger)
 		openMeteo := weather.NewOpenMeteoClient(settings.WeatherForecastURL, settings.WeatherGeocodingURL, weatherHTTP)
@@ -185,24 +188,33 @@ func buildTooling(ctx context.Context, settings config.ServerSettings, catalog a
 			kit.briefers = append(kit.briefers, brain.BriefLines(weather.LocationNote{Home: home}.Brief)) // 每轮告诉模型主人家大致在哪（城市级）
 		}
 	}
+	// 联网搜索服务：设了密钥就有。前台的搜索工具、后台调查各是一组；看画面的专家查资料也用它（不算前台的工具组）
 	if searcher := connectWebSearch(settings, deps.httpClient, logger); searcher != nil {
 		shutdown.add("联网搜索", searcher.Close)
-		meter := spending.NewSearchMeter(deps.guard, deps.ledger, deps.pricing, spending.PurposeSearch, tools.TavilyName)
-		builtins = append(builtins, tools.WebSearchTools(searcher, meter, logger))
+		meter := spending.NewSearchMeter(deps.guard, deps.ledger, deps.pricing, spending.PurposeSearch, searcher.Name())
 		kit.expertSearch = func(ctx context.Context, query string) (string, error) {
 			return tools.QuickSearch(ctx, searcher, meter, query, logger)
 		}
-		runner, closeRunner, err := startResearch(ctx, settings, newAgentAssembly(settings, catalog, deps, logger), searcher, logger)
-		if err != nil {
-			return kit, err
+		if settings.ToolGroupOn(config.ToolGroupSearch) {
+			builtins = append(builtins, tools.WebSearchTools(searcher, meter, logger))
 		}
-		shutdown.add("后台调查", closeRunner)
-		builtins = append(builtins, tools.ResearchTools(runner))
-		kit.briefers = append(kit.briefers, runner)
-		runner.OnFinished(func(task research.Task) { // 查完了：让他最近说话的那台终端响一声，叫醒后任务板会先说结论
-			delivered := kit.notices.Notify(task.Person, realtimeproto.HaroNotice{Kind: realtimeproto.NoticeResearchDone})
-			logger.Info("调查结束：通知终端", "id", task.ID, "status", task.Status, "terminals", delivered)
-		})
+		if settings.ResearchesWithCloud() {
+			runner, closeRunner, err := startResearch(ctx, settings, newAgentAssembly(settings, catalog, deps, logger), searcher, logger)
+			if err != nil {
+				return kit, err
+			}
+			shutdown.add("后台调查", closeRunner)
+			builtins = append(builtins, tools.ResearchTools(runner))
+			kit.briefers = append(kit.briefers, runner)
+			runner.OnFinished(func(task research.Task) { // 查完了：让他最近说话的那台终端响一声，叫醒后任务板会先说结论
+				delivered := kit.notices.Notify(task.Person, realtimeproto.HaroNotice{Kind: realtimeproto.NoticeResearchDone})
+				logger.Info("调查结束：通知终端", "id", task.ID, "status", task.Status, "terminals", delivered)
+			})
+		}
+	}
+	if len(builtins) == 0 && settings.MCPServersFile == "" {
+		logger.Info("工具：内置的一组都没开，也没有外部的 MCP 服务")
+		return kit, nil
 	}
 	box, err := tools.NewToolbox(ctx, logger, builtins...)
 	if err != nil {
@@ -210,6 +222,15 @@ func buildTooling(ctx context.Context, settings config.ServerSettings, catalog a
 	}
 	shutdown.add("工具箱", func() error { box.Close(); return nil })
 	kit.toolbox = box
+	if settings.MCPServersFile != "" { // 外部的 MCP 服务：允许名单里的工具连上后加进清单（连不上的在后台接着连）
+		servers, err := tools.LoadRemoteServers(settings.MCPServersFile, os.LookupEnv)
+		if err != nil {
+			return kit, fmt.Errorf("HARO_MCP_SERVERS_FILE：%w", err)
+		}
+		if err := box.AttachRemoteServers(ctx, servers, deps.httpClient); err != nil {
+			return kit, err
+		}
+	}
 	return kit, nil
 }
 

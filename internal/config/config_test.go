@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -37,9 +38,9 @@ func TestCloudLLMReadyForAnthropic(t *testing.T) {
 
 }
 
-// 天气的备用来源只认 jma / none；家的位置写错照样报错。
+// 天气的备用来源只认 jma / none（不设 = 不用备用：跟部署的地方有关，没有默认值）；家的位置写错照样报错。
 func TestValidateWeather(t *testing.T) {
-	for _, backup := range []string{WeatherBackupJMA, WeatherBackupNone} {
+	for _, backup := range []string{WeatherBackupJMA, WeatherBackupNone, ""} {
 		if err := (ServerSettings{WeatherBackup: backup, WeatherGeocodingLanguage: "ja"}).validateWeather(); err != nil {
 			t.Errorf("%s 应通过：%v", backup, err)
 		}
@@ -209,7 +210,7 @@ func TestCameraBackendIsValidated(t *testing.T) {
 func TestCompactContextTokens(t *testing.T) {
 	clearHaroEnv(t)
 	minimal := map[string]string{"HARO_LLM_PROVIDER": "local", "HARO_TTS": "piper", "HARO_TTS_URL": "http://127.0.0.1:9",
-		"HARO_ASR_URL": "http://127.0.0.1:9", "HARO_TOOLS": "false", "HARO_WEATHER": "false", "HARO_SERVER_LISTEN": "127.0.0.1:0",
+		"HARO_ASR_URL": "http://127.0.0.1:9", "HARO_MODEL": "local-model", "HARO_TOOLS": "none", "HARO_SERVER_LISTEN": "127.0.0.1:0",
 		"HARO_STRONG_LLM_MODEL": "", "HARO_TAVILY_API_KEY": "", "HARO_CONTEXT_COMPACT_TOKENS": "",
 		"HARO_CONVERSATIONS_DB": filepath.Join(t.TempDir(), "conversations.db")}
 	for name, value := range minimal {
@@ -326,8 +327,13 @@ func TestValidateBrainTable(t *testing.T) {
 		{"用云端却没设汇率", func(s *ServerSettings) {
 			s.LLMProvider, s.CloudLLMModel, s.AnthropicAPIKey, s.USDToYen = LLMCloud, "claude-haiku-5-5", "k", 0
 		}, "HARO_USD_JPY"},
-		{"开着工具却没有记事库", func(s *ServerSettings) { s.Tools, s.NotesDB = true, "" }, "HARO_NOTES_DB"},
-		{"记事候选上限为零", func(s *ServerSettings) { s.Tools, s.NotesDB, s.NotesListLimit = true, "/tmp/notes.db", 0 }, "HARO_NOTES_LIST_LIMIT"},
+		{"开着记事却没有记事库", func(s *ServerSettings) { s.ToolGroups, s.NotesDB = nil, "" }, "HARO_NOTES_DB"},
+		{"记事候选上限为零", func(s *ServerSettings) { s.ToolGroups, s.NotesDB, s.NotesListLimit = nil, "/tmp/notes.db", 0 }, "HARO_NOTES_LIST_LIMIT"},
+		{"工具组写错", func(s *ServerSettings) { s.ToolGroups = []string{"memory", "wether"} }, "HARO_TOOLS"},
+		{"原来的 true", func(s *ServerSettings) { s.ToolGroups = []string{"true"} }, "HARO_TOOLS"},
+		{"none 和别的组一起写", func(s *ServerSettings) { s.ToolGroups = []string{"none", "weather"} }, "HARO_TOOLS"},
+		{"用本地模型却没写模型名", func(s *ServerSettings) { s.LLMProvider, s.Model = LLMLocal, "" }, "HARO_MODEL"},
+		{"设了嵌入地址却没写模型名", func(s *ServerSettings) { s.EmbeddingURL, s.EmbeddingModel = "http://127.0.0.1:9/v1", "" }, "HARO_EMBEDDING_MODEL"},
 		{"嵌入服务的地址不是网址", func(s *ServerSettings) { s.EmbeddingURL = "haro-embedding:80" }, "HARO_EMBEDDING_URL"},
 		{"设了嵌入服务却没有模型名", func(s *ServerSettings) { s.EmbeddingURL, s.EmbeddingModel = "http://127.0.0.1:8080/v1", "" }, "HARO_EMBEDDING_MODEL"},
 		{"主人资料的目录不存在", func(s *ServerSettings) { s.ProfileDir = filepath.Join(t.TempDir(), "没有这个目录") }, "HARO_PROFILE_DIR"},
@@ -346,7 +352,7 @@ func TestValidateBrainTable(t *testing.T) {
 // localServerSettings 是只用本地模型、Piper、不开工具的服务端配置（默认值照配置里的写法解析）。
 func localServerSettings(t *testing.T) ServerSettings {
 	return serverSettingsFrom(t, map[string]string{"HARO_TTS": TTSPiper, "HARO_TTS_URL": "http://127.0.0.1:5000",
-		"HARO_ASR_URL": "http://127.0.0.1:59126", "HARO_LLM_PROVIDER": LLMLocal, "HARO_TOOLS": "false"})
+		"HARO_ASR_URL": "http://127.0.0.1:59126", "HARO_LLM_PROVIDER": LLMLocal, "HARO_MODEL": "local-model", "HARO_TOOLS": "none"})
 }
 
 // cloudServerSettings 是用云端模型、配齐了费用刹车（月度上限 + 账本）的服务端配置。
@@ -368,7 +374,7 @@ func TestSpendingBrakes(t *testing.T) {
 		t.Errorf("只用本地模型时不设月度上限也行：%v", err)
 	}
 	research := localServerSettings(t)
-	research.Tools, research.NotesDB, research.TavilyAPIKey = true, "/tmp/notes.db", "k"
+	research.ToolGroups, research.TavilyAPIKey = []string{ToolGroupResearch}, "k"
 	research.CloudLLMModel, research.AnthropicAPIKey, research.USDToYen = "claude-haiku-5-5", "k", 150
 	for _, c := range []struct {
 		name     string
@@ -496,14 +502,14 @@ func TestZeroMeansUnlimitedOffOrDefault(t *testing.T) {
 
 // 地名库用的语言要是规范写法的小写语言代码（按语言代码表查）。
 func TestWeatherGeocodingLanguage(t *testing.T) {
-	for _, good := range []string{"ja", "en", "zh", "ko"} {
+	for _, good := range []string{"ja", "en", "zh", "ko", ""} { // 不设 = 地名库默认的语言
 		settings := localServerSettings(t)
 		settings.WeatherGeocodingLanguage = good
 		if err := settings.validateBrain(); err != nil {
 			t.Errorf("%s 应该可以：%v", good, err)
 		}
 	}
-	for _, bad := range []string{"jp", "JA", "jpn", "zh-TW", "", "日语"} {
+	for _, bad := range []string{"jp", "JA", "jpn", "zh-TW", "日语"} {
 		settings := localServerSettings(t)
 		settings.WeatherGeocodingLanguage = bad
 		if err := settings.validateBrain(); err == nil || !strings.Contains(err.Error(), "HARO_WEATHER_GEOCODING_LANGUAGE") {
@@ -523,5 +529,38 @@ func TestLocalTimeZone(t *testing.T) {
 	zone = LocalTimeZone(time.Date(2026, 11, 21, 0, 0, 0, 0, time.UTC))
 	if zone != (TimeZone{Name: "UTC", Offset: "+00:00"}) {
 		t.Errorf("UTC、没设 TZ：%+v", zone)
+	}
+}
+
+// HARO_TOOLS 是内置工具的组：不设（或写成空）= 全开；列出的才开；none = 一个都不要。原来的 HARO_WEATHER=false 起不来、写明怎么改。
+func TestToolGroupsFromEnvironment(t *testing.T) {
+	for value, want := range map[string][]string{
+		"":               ToolGroups,
+		"memory,weather": {ToolGroupMemory, ToolGroupWeather},
+		"none":           nil,
+	} {
+		settings := serverSettingsFrom(t, map[string]string{"HARO_TOOLS": value})
+		if err := settings.validateToolGroups(); err != nil {
+			t.Errorf("HARO_TOOLS=%q 应通过：%v", value, err)
+		}
+		var on []string
+		for _, group := range ToolGroups {
+			if settings.ToolGroupOn(group) {
+				on = append(on, group)
+			}
+		}
+		if !slices.Equal(on, want) {
+			t.Errorf("HARO_TOOLS=%q 开着的组：%v，应是 %v", value, on, want)
+		}
+	}
+	lookup := func(env map[string]string) func(string) (string, bool) {
+		return func(name string) (string, bool) { value, ok := env[name]; return value, ok }
+	}
+	if _, err := checkRemovedSettings(lookup(map[string]string{"HARO_WEATHER": "false"}), serverSide); err == nil ||
+		!strings.Contains(err.Error(), "HARO_TOOLS") {
+		t.Errorf("HARO_WEATHER=false 要求的是关天气，应起不来并写明改用 HARO_TOOLS：%v", err)
+	}
+	if _, err := checkRemovedSettings(lookup(map[string]string{"HARO_WEATHER": "true"}), serverSide); err != nil {
+		t.Errorf("HARO_WEATHER=true 只是多余，不该起不来：%v", err)
 	}
 }

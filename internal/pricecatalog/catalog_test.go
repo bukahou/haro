@@ -58,6 +58,9 @@ func TestLoadFetchesAndSaves(t *testing.T) {
 		haiku.Tiers[0].Price.InputUSDPerMillion != 0.5 || haiku.Tiers[0].Price.CacheWriteUSDPerMillion != 0.625 {
 		t.Errorf("haiku 的单价：%+v %v", haiku, err)
 	}
+	if haiku.LongCacheWriteFactor != 2 {
+		t.Errorf("Anthropic 的 1 小时缓存写入按输入价的 2 倍：%v", haiku.LongCacheWriteFactor)
+	}
 	old, err := catalog.Price("claude-old")
 	if err != nil || len(old.Tiers) != 1 || old.Tiers[0].AboveInputTokens != 200_000 || old.Tiers[0].Price.InputUSDPerMillion != 6 {
 		t.Errorf("老写法的「超过 20 万」也算一档：%+v %v", old, err)

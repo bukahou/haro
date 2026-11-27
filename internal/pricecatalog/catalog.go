@@ -24,6 +24,10 @@ const (
 	maxCatalogBytes = 64 << 20
 )
 
+// longCacheWriteFactors：写进 1 小时提示词缓存的输入按普通输入价的几倍算，按厂商（目录里只有 5 分钟缓存的写入价）。
+// 来源：厂商的价格说明（Anthropic：1 小时缓存写入 = 基础输入价 × 2）。没写的厂商是 0（没有 1 小时缓存）。
+var longCacheWriteFactors = map[string]float64{"anthropic": 2}
+
 // Catalog 是一家厂商（目录里的 provider）的模型单价。
 type Catalog struct {
 	Provider  string
@@ -81,6 +85,7 @@ func (c Catalog) Price(model string) (spending.TokenPrice, error) {
 		price.Tiers = append(price.Tiers, spending.PriceTier{AboveInputTokens: 200_000, Price: entry.Cost.ContextOver200K.tokenPrice()})
 	}
 	slices.SortFunc(price.Tiers, func(a, b spending.PriceTier) int { return a.AboveInputTokens - b.AboveInputTokens })
+	price.LongCacheWriteFactor = longCacheWriteFactors[c.Provider]
 	return price, nil
 }
 

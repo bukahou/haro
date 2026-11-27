@@ -21,13 +21,22 @@ import (
 // fullTooling 按服务端的装配（buildTooling）把工具都打开：记事本、天气、联网搜索、后台调查。不连网（搜索用到时才连）。
 func fullTooling(t *testing.T) tooling {
 	t.Helper()
+	return toolingWith(t, nil)
+}
+
+// toolingWith 同 fullTooling，装配前按 adjust 改配置（例如只开某几组、接外部服务）。
+func toolingWith(t *testing.T, adjust func(*config.ServerSettings)) tooling {
+	t.Helper()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	settings := config.ServerSettings{Tools: true, NotesDB: filepath.Join(t.TempDir(), "notes.db"), NotesListLimit: 200,
-		Weather: true, WeatherBackup: config.WeatherBackupJMA, WeatherGeocodingLanguage: "ja",
+	settings := config.ServerSettings{NotesDB: filepath.Join(t.TempDir(), "notes.db"), NotesListLimit: 200, // 不设 HARO_TOOLS = 全开
+		WeatherBackup: config.WeatherBackupJMA, WeatherGeocodingLanguage: "ja",
 		WeatherForecastURL: "http://127.0.0.1:9/v1/forecast", WeatherGeocodingURL: "http://127.0.0.1:9/v1/search",
 		WeatherJMAURL: "http://127.0.0.1:9/bosai", WeatherReverseGeocoderURL: "http://127.0.0.1:9/reverse",
 		TavilyAPIKey: "test", TavilyMCPURL: "http://127.0.0.1:9/mcp/",
 		LLMProvider: config.LLMCloud, CloudLLMAPI: config.CloudAPIOpenAI, CloudLLMURL: "http://127.0.0.1:9/v1", CloudLLMModel: "base-model"}
+	if adjust != nil {
+		adjust(&settings)
+	}
 	ledger, err := spending.OpenLedger(t.Context(), "")
 	if err != nil {
 		t.Fatal(err)
@@ -90,18 +99,19 @@ func TestHolidaysBriefing(t *testing.T) {
 		t.Fatal(err)
 	}
 	var shutdown shutdownSteps
-	without, err := buildTooling(t.Context(), config.ServerSettings{}, catalog, deps, logger, &shutdown)
+	noTools := []string{config.ToolGroupsNone}
+	without, err := buildTooling(t.Context(), config.ServerSettings{ToolGroups: noTools}, catalog, deps, logger, &shutdown)
 	if err != nil {
 		t.Fatal(err)
 	}
-	with, err := buildTooling(t.Context(), config.ServerSettings{Holidays: "JP"}, catalog, deps, logger, &shutdown)
+	with, err := buildTooling(t.Context(), config.ServerSettings{ToolGroups: noTools, Holidays: "JP"}, catalog, deps, logger, &shutdown)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(with.briefers) != len(without.briefers)+1 {
 		t.Errorf("设了 HARO_HOLIDAYS 应多一份说明：%d / %d", len(with.briefers), len(without.briefers))
 	}
-	if _, err := buildTooling(t.Context(), config.ServerSettings{Holidays: "XX"}, catalog, deps, logger, &shutdown); err == nil ||
+	if _, err := buildTooling(t.Context(), config.ServerSettings{ToolGroups: noTools, Holidays: "XX"}, catalog, deps, logger, &shutdown); err == nil ||
 		!strings.Contains(err.Error(), "HARO_HOLIDAYS") {
 		t.Errorf("不支持的国家代码应起不来并写明变量名：%v", err)
 	}

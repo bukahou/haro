@@ -272,9 +272,6 @@ func loadPricing(ctx context.Context, settings config.ServerSettings, client *ht
 		if err != nil {
 			return pricing, fmt.Errorf("模型单价（%s）: %w", settings.ModelPricesURL, err)
 		}
-		if settings.CloudLLMAPI == config.CloudAPIAnthropic {
-			price.LongCacheWriteFactor = llm.ClaudeLongCacheWriteFactor // 1 小时缓存的写入价目录里没有
-		}
 		pricing.Models[model] = price
 		logger.Info("模型单价（每百万 token 的美元价，来自模型价格目录）", "model", model, "provider", catalog.Provider,
 			"input", price.InputUSDPerMillion, "output", price.OutputUSDPerMillion, "cache_read", price.CacheReadUSDPerMillion,
@@ -336,8 +333,15 @@ func weatherForecaster(ctx context.Context, settings config.ServerSettings, prim
 	return weather.WithBackup(primary, "Open-Meteo", jma, "日本气象厅", logger)
 }
 
+// webSearchService 是联网搜索服务（现在的实现是 Tavily）：搜索、读网页，记账时的名目，关停。
+type webSearchService interface {
+	tools.WebSearcher
+	Name() string
+	Close() error
+}
+
 // connectWebSearch 准备联网搜索（这时不连：用到时才连，断了自动重连）；没设密钥时返回 nil。
-func connectWebSearch(settings config.ServerSettings, httpClient *http.Client, logger *slog.Logger) *tools.TavilySearcher {
+func connectWebSearch(settings config.ServerSettings, httpClient *http.Client, logger *slog.Logger) webSearchService {
 	if settings.TavilyAPIKey == "" {
 		logger.Info("联网搜索：没设 HARO_TAVILY_API_KEY，不提供")
 		return nil
