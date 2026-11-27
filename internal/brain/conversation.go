@@ -1,6 +1,7 @@
 package brain
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -215,13 +216,14 @@ func (c *Conversation) messages() []ChatMessage {
 	return messages
 }
 
-// turnTimeLabel 是一轮前面的时间标记（本地时间，和每轮告诉模型的「现在」同一个时区）；不知道时间的写明不知道。
+// turnTimeLabel 是一轮前面的时间标记（本地时间，和每轮告诉模型的「现在是……」同一种写法、同一个时区：年份和星期都带上，
+// 历史跨好几天时分得清「上周三说的」）；不知道时间的写明不知道。
 func turnTimeLabel(at time.Time) string {
 	if at.IsZero() {
-		return "（这一轮的时间不详）"
+		return "〔这一轮的时间不详〕"
 	}
 	at = at.Local()
-	return fmt.Sprintf("（%d 月 %d 日 %s）", at.Month(), at.Day(), at.Format("15:04"))
+	return "〔" + DateText(at) + at.Format("15:04") + "〕"
 }
 
 // currentSummary 是滚动摘要（没有时为空）。
@@ -234,10 +236,15 @@ func (c *Conversation) currentSummary() string {
 // compactKeepTurns：上下文太长时，提前移出窗口后留下最近几轮。
 const compactKeepTurns = 2
 
+// unknownUsageTurns：不按轮数截（MaxHistoryTurn 为 0）而模型服务不报用量时，改按这么多轮截：按 token 压缩对它不起作用，
+// 不截的话历史会一直变长。用的是不限轮数之前的默认窗口。
+const unknownUsageTurns = 6
+
 // appendTurn 记下一轮（编上号，只留最近 maxTurns 轮）并写盘；这一轮收尾了，「没收尾」的记录随之清掉。
 // contextTokens 是这一轮请求模型时带的上下文（最大的那次请求的输入 token，模型报的）：到了 Options.CompactContextTokens，
-// 最近 compactKeepTurns 轮之前的提前移出窗口、马上压缩（完整的对话记录里都还在）。
-func (c *Conversation) appendTurn(turn ConversationTurn, contextTokens int) {
+// 最近 compactKeepTurns 轮之前的提前移出窗口、马上压缩（完整的对话记录里都还在）。contextUnknown：这一轮的用量没报，
+// 不按轮数截时改按 unknownUsageTurns 截。
+func (c *Conversation) appendTurn(turn ConversationTurn, contextTokens int, contextUnknown bool) {
 	summarizing := c.book.summarizer() != nil // 先取：不在持有 Conversation.mu 时去锁对话簿
 	c.mu.Lock()
 	c.turnCount++
@@ -245,6 +252,10 @@ func (c *Conversation) appendTurn(turn ConversationTurn, contextTokens int) {
 	c.history = append(c.history, turn)
 	c.openTurn = nil
 	c.trimLocked(c.book.opts.MaxHistoryTurn, summarizing) // 窗口轮数只由对话簿持有（和重启时接上用的是同一个数）
+	if c.book.opts.MaxHistoryTurn == 0 && contextUnknown && len(c.history) > unknownUsageTurns {
+		c.book.logger.Info("模型服务没报用量：按 token 压缩不起作用，这一轮改按轮数截", "person", c.person, "keep_turns", unknownUsageTurns)
+		c.trimLocked(unknownUsageTurns, summarizing)
+	}
 	if threshold := c.book.opts.CompactContextTokens; threshold > 0 && contextTokens >= threshold && len(c.history) > compactKeepTurns {
 		c.book.logger.Info("上下文太长：提前移出窗口、压缩", "person", c.person, "context_tokens", contextTokens,
 			"threshold", threshold, "moved_turns", len(c.history)-compactKeepTurns)
@@ -254,6 +265,76 @@ func (c *Conversation) appendTurn(turn ConversationTurn, contextTokens int) {
 	c.mu.Unlock()
 	c.book.save(c)
 	c.book.maybeSummarize(c)
+}
+
+// idleCheckEvery 是多久看一次有没有闲着的对话（RunIdleCompaction）：比闲置的门槛短得多就行，看一遍只是遍历内存里的几份对话。
+const idleCheckEvery = time.Minute
+
+// RunIdleCompaction 在后台定时把闲了 Options.IdleCompactAfter 以上的对话提前压缩，直到 ctx 结束；门槛是 0 时直接返回。
+// 隔了很久再开口时，第一次请求不必带着整段旧对话：提示词缓存这时多半已经过期，整段要按没缓存的价格重新处理、开口也慢。
+func (b *ConversationBook) RunIdleCompaction(ctx context.Context) {
+	idle := b.opts.IdleCompactAfter
+	if idle <= 0 {
+		return
+	}
+	ticker := time.NewTicker(min(idleCheckEvery, idle))
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			b.compactIdle(now)
+		}
+	}
+}
+
+// compactIdle 把到 now 为止闲了 Options.IdleCompactAfter 以上的对话提前压缩（压过的不再重复压）。
+func (b *ConversationBook) compactIdle(now time.Time) {
+	summarizing := b.summarizer() != nil
+	b.mu.Lock()
+	conversations := make([]*Conversation, 0, len(b.byPerson))
+	for _, conversation := range b.byPerson {
+		conversations = append(conversations, conversation)
+	}
+	b.mu.Unlock()
+	for _, conversation := range conversations {
+		if conversation.compactIfIdle(now, b.opts.IdleCompactAfter, summarizing) {
+			b.save(conversation)
+			b.maybeSummarize(conversation)
+		}
+	}
+}
+
+// compactIfIdle 在最后一轮之后闲了 idle 以上时，把最近 compactKeepTurns 轮之前的移出窗口（和上下文太长时一样），返回移没移。
+// 正在进行的一轮（有没收尾的记录）、不知道时间的旧记录、本来就没几轮的不动。
+func (c *Conversation) compactIfIdle(now time.Time, idle time.Duration, summarizing bool) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.detached || c.openTurn != nil || len(c.history) <= compactKeepTurns {
+		return false
+	}
+	last := c.history[len(c.history)-1].At
+	if last.IsZero() || now.Sub(last) < idle {
+		return false
+	}
+	c.book.logger.Info("对话闲了一阵：提前移出窗口、压缩", "person", c.person, "idle", now.Sub(last).Round(time.Minute),
+		"moved_turns", len(c.history)-compactKeepTurns)
+	c.trimLocked(compactKeepTurns, summarizing)
+	c.compacted = summarizing
+	return true
+}
+
+// lastTurnAt 是最近一轮的时间（还没压进摘要的也算）；不知道或一轮都没有时是零值。
+func (c *Conversation) lastTurnAt() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, turns := range [][]ConversationTurn{c.history, c.unsummarized} {
+		if len(turns) > 0 {
+			return turns[len(turns)-1].At
+		}
+	}
+	return time.Time{}
 }
 
 // numberTurnsLocked 给还没编号的轮次补上号（按先后：掉出窗口的在前），返回补没补。调用方持有锁（或对话还没交出去）。

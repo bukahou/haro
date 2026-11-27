@@ -253,7 +253,7 @@ func doubtsMessage(doubts []reviewDoubt) (string, error) {
 }
 
 // recheck 把审查的疑点交回原来的调查对话复查一次：给同样的工具和一点额外的额度（recheckSearches、recheckRounds、
-// Limits.RecheckTimeout；每一轮之前照样查调查的额度），让调查的模型逐条再查、再交一次结论。交出了就返回新结论；
+// Limits.RecheckTimeout；每一轮之前照样查调查的额度和单次的上下文上限），让调查的模型逐条再查、再交一次结论。交出了就返回新结论；
 // 没交出（出错、超时、额度用完、轮数用完、交了空的）返回错误。
 func (q *inquiry) recheck(ctx context.Context, doubts []reviewDoubt) (conclusionDraft, error) {
 	message, err := doubtsMessage(doubts)
@@ -268,6 +268,9 @@ func (q *inquiry) recheck(ctx context.Context, doubts []reviewDoubt) (conclusion
 	for range recheckRounds {
 		if err := q.r.budget.AllowResearch(ctx); err != nil {
 			return conclusionDraft{}, err
+		}
+		if limit := q.r.limits.MaxCallTokens; q.report.lastPrompt >= limit {
+			return conclusionDraft{}, fmt.Errorf("一次请求的上下文已经到了约 %d token（单次上限 %d）", q.report.lastPrompt, limit)
 		}
 		q.report.recheckRounds++
 		draft, concluded, err := q.step(recheckCtx, q.r.investigationSpecs, searchCap)

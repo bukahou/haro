@@ -32,12 +32,9 @@ import (
 	"github.com/bukahou/haro/internal/frontmatter"
 )
 
-// 字数上限（U5）：每轮都发给模型，写长了每轮都多花钱。超过建议字数写一条警告；超过两倍就截断。
-const (
-	householdAdviseRunes = 400
-	personAdviseRunes    = 600
-	hardLimitFactor      = 2
-)
+// maxProfileRunes 是每份资料最多发给模型多少字：只防误贴进一大篇文件，平常写多少都不碰它。资料每轮都发，但内容不变时
+// 吃得到提示词缓存，多写一些几乎不花钱；两份都写满时前台的一次请求也还在 4 万 token 左右，离单价变贵的长度（10 万）很远。
+const maxProfileRunes = 10_000
 
 // HouseholdFile 是全家共用的资料文件名。
 const HouseholdFile = "household.md"
@@ -144,14 +141,14 @@ func (s *Store) refresh() {
 			continue
 		}
 		if name == HouseholdFile {
-			household = s.limit(name, body, householdAdviseRunes)
+			household = s.limit(name, body)
 			continue
 		}
 		if len(names) == 0 {
 			s.logger.Warn("资料文件开头没写是谁（front matter 的 person:），跳过", "file", name)
 			continue
 		}
-		body = s.limit(name, body, personAdviseRunes)
+		body = s.limit(name, body)
 		if body == "" {
 			continue // 模板原样、还没填内容：不算有资料
 		}
@@ -193,19 +190,14 @@ func (s *Store) recovered() {
 	}
 }
 
-// limit 超过建议字数时警告，超过两倍时截断（每轮都发给模型：太长每轮都多花钱）。截断落在行尾，不切断半句。
-func (s *Store) limit(file, body string, advise int) string {
+// limit 超过 maxProfileRunes 时截断并警告（截断落在行尾，不切断半句）。
+func (s *Store) limit(file, body string) string {
 	runes := utf8.RuneCountInString(body)
-	if runes <= advise {
+	if runes <= maxProfileRunes {
 		return body
 	}
-	hard := advise * hardLimitFactor
-	if runes > hard {
-		s.logger.Warn("资料太长，超出的部分不发给模型", "file", file, "runes", runes, "limit", hard)
-		return cutAtLineEnd(body, hard)
-	}
-	s.logger.Warn("资料比建议的长（每轮都发给模型，越长越贵）", "file", file, "runes", runes, "advise", advise)
-	return body
+	s.logger.Warn("资料太长，超出的部分不发给模型", "file", file, "runes", runes, "limit", maxProfileRunes)
+	return cutAtLineEnd(body, maxProfileRunes)
 }
 
 // cutAtLineEnd 取 body 的前 maxRunes 个字，退回到最后一个完整行的末尾；第一行就放不下时只能按字数截。
@@ -284,11 +276,49 @@ func parse(data []byte) (names []string, body string, err error) {
 		blank = false
 		lines = append(lines, line)
 	}
-	body = strings.TrimSpace(strings.Join(lines, "\n"))
+	body = strings.TrimSpace(strings.Join(tidyHeadings(lines), "\n"))
 	if !hasContent(body) {
 		return names, "", nil // 只有标题、没写内容（模板原样）：当成没有
 	}
 	return names, body, nil
+}
+
+// tidyHeadings 去掉没内容的小标题（到下一个同级或更高级的标题之前都没写东西），以及标题后面、开头和连着的空行
+// （删掉注释、没填的项之后留下的）：模板里没填的那几节不发给模型。
+func tidyHeadings(lines []string) []string {
+	var kept []string
+	for i, line := range lines {
+		if level := headingLevel(line); level > 0 && !sectionHasContent(lines[i+1:], level) {
+			continue
+		}
+		if line == "" && (len(kept) == 0 || kept[len(kept)-1] == "" || headingLevel(kept[len(kept)-1]) > 0) {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return kept
+}
+
+// headingLevel 是 Markdown 标题的级数（「## 偏好」是 2）；不是标题时是 0。
+func headingLevel(line string) int {
+	level := len(line) - len(strings.TrimLeft(line, "#"))
+	if level == 0 || level > 6 || !strings.HasPrefix(line[level:], " ") {
+		return 0
+	}
+	return level
+}
+
+// sectionHasContent 判断一个 level 级标题下面（到下一个同级或更高级的标题之前）有没有写了的内容（更低级的小标题不算）。
+func sectionHasContent(rest []string, level int) bool {
+	for _, line := range rest {
+		switch next := headingLevel(line); {
+		case next > 0 && next <= level:
+			return false
+		case next == 0 && strings.TrimSpace(line) != "":
+			return true
+		}
+	}
+	return false
 }
 
 // hasContent 判断除了 Markdown 标题，还有没有真正写了的内容。

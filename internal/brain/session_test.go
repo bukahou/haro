@@ -303,7 +303,8 @@ func TestSessionEmotionTags(t *testing.T) {
 		}
 	}
 	k.ask("冰箱里有什么")
-	if last := model.history[len(model.history)-1].Text; !strings.HasPrefix(last, "[调侃]") {
+	history := withoutSynthetic(model.history)
+	if last := history[len(history)-1].Text; !strings.HasPrefix(last, "[调侃]") {
 		t.Errorf("历史里应保留模型原话（含标记），得到 %q", last)
 	}
 }

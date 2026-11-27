@@ -1128,3 +1128,31 @@ func TestBriefSaysWhenBoardCannotBeRead(t *testing.T) {
 		t.Errorf("任务板读不出来：应告诉模型不知道调查的情况：%+v", board)
 	}
 }
+
+// 单次的上下文到了上限（Limits.MaxCallTokens）：不再给搜索工具，用已有资料写结论；累计、轮数都还没到也一样。
+// 假模型每次报 1000 的输入：上限设成 1000，搜一次之后就该收工（阳性对照：上限比它大时照常一直搜到轮数上限）。
+func TestResearchStopsAtCallTokenLimit(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		callLimit int
+		want      []bool
+	}{
+		{"到了单次上限", 1000, []bool{true, false}},
+		{"没到单次上限", 1001, []bool{true, true, true, false}},
+	} {
+		search := call("search_web", map[string]any{"query": "越查越长"})
+		model := &scriptedModel{repeat: &search}
+		limits := DefaultLimits
+		limits.MaxCallTokens = c.callLimit
+		rig := newRig(t, model, rigSetup{limits: limits, rounds: 3})
+		done := rig.research(t, "长问题")
+		if done.Status != StatusPartial || done.Conclusion != limitConclusion {
+			t.Errorf("%s：应收工、用查到的写结论：%+v", c.name, done)
+		}
+		model.mu.Lock()
+		if !slices.Equal(model.toolsSeen, c.want) {
+			t.Errorf("%s：每次请求有没有给搜索工具 %v，应是 %v", c.name, model.toolsSeen, c.want)
+		}
+		model.mu.Unlock()
+	}
+}

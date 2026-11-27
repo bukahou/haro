@@ -45,7 +45,7 @@ func MemoryTools(desk MemoryDesk, location *time.Location, logger *slog.Logger) 
 		AddTool(server, &mcp.Tool{Name: RememberTool, Annotations: Changes,
 			Description: "记住一件以后用得上的事。主人说「记一下」「你记住」时 source 填 owner；主人顺口说出的、以后用得上的偏好或事实" +
 				"（例如「我不吃香菜」「我周三固定加班」），你觉得该记的，source 填 model（不用先问）。称呼、忌口、作息这类每次说话都该记着的，" +
-				"resident 填 true（会每轮附在情况说明里）。不记住址、健康状况、证件号、密码、银行卡这类敏感信息，也不记别人的隐私。" +
+				"resident 填 true（会每轮附在情况说明里）。不记密码、银行卡和账户号、证件号码、验证码和密钥这类拿到就能直接用的信息，也不记别人的隐私。" +
 				"记下来不等于会提醒：要到点说出来的事用定提醒的工具。记完简短说一句「记住了」。"},
 			func(ctx context.Context, in rememberInput) (memoryOutput, error) {
 				if !brain.VoiceVerifiedFrom(ctx) {

@@ -42,9 +42,12 @@ type Components struct {
 
 // Options 是服务端的可调参数。
 type Options struct {
-	MaxHistoryTurn int // 保留最近几轮（一问一答算一轮）的文字历史
+	MaxHistoryTurn int // 保留最近几轮（一问一答算一轮）的文字历史；0 = 不按轮数截，只按 CompactContextTokens 压缩
 	// CompactContextTokens：一轮里请求模型带的上下文（输入 token）到了这么多，就提前把较早的几轮移出窗口、压缩；0 = 不看
 	CompactContextTokens int
+	// IdleCompactAfter：一份对话闲了这么久（最后一轮之后没人说话），就在后台同样提前压缩（ConversationBook.RunIdleCompaction）；
+	// 0 = 不按闲置压缩
+	IdleCompactAfter time.Duration
 
 	StreamReopen ReopenTiming // 识别流断开后重开的节奏；零值 = DefaultReopenTiming
 	// ConfirmationTimeout：会破坏的操作问了主人之后，多久没确认就作废；零值 = DefaultConfirmationTimeout
@@ -360,17 +363,17 @@ func (s *Session) useConversationOf(person string) {
 }
 
 // rememberTurn 把整理好的一轮（closeTurn 的结果：主人的话、工具往来、最终回答）写进这个人的历史；
-// contextTokens 是这一轮请求模型时带的上下文（见 Conversation.appendTurn）。
+// contextTokens、contextUnknown 是这一轮请求模型时带的上下文、用量报没报（见 Conversation.appendTurn）。
 //
 // 为什么要保留工具往来：只保留最终回答时，历史里全是「记下了」「网络正常」，小模型照着学，
 // 就不再调用工具、直接说办好了（实测：同一段历史，只留回答时 4 次里 0 次调用 save_note，
 // 保留工具往来时 4 次都调用）。
-func (s *Session) rememberTurn(at time.Time, messages []ChatMessage, contextTokens int) {
+func (s *Session) rememberTurn(at time.Time, messages []ChatMessage, contextTokens int, contextUnknown bool) {
 	s.mu.Lock()
 	s.answeredInResponse = true
 	conversation := s.conversation
 	s.mu.Unlock()
-	conversation.appendTurn(ConversationTurn{At: at, Messages: messages}, contextTokens)
+	conversation.appendTurn(ConversationTurn{At: at, Messages: messages}, contextTokens, contextUnknown)
 }
 
 // deviceLabel 是日志里的设备名：没有时写「没有」。

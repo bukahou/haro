@@ -189,6 +189,26 @@ func TestPricingWithPromptCache(t *testing.T) {
 	}
 }
 
+// 写进留得久的缓存的那部分（CacheWriteLongTokens）按「那一档的输入价 × LongCacheWriteFactor」算，其余的缓存写照目录的价；
+// 没填倍数时和一般的缓存写同价。
+func TestPricingWithLongCacheWrites(t *testing.T) {
+	usage := brain.ReplyUsage{PromptTokens: 1_000_000, CacheReadTokens: 600_000, CacheWriteTokens: 300_000,
+		CacheWriteLongTokens: 200_000, OutputTokens: 100_000}
+	price := TokenPrice{InputUSDPerMillion: 0.10, OutputUSDPerMillion: 0.50, CacheReadUSDPerMillion: 0.01,
+		CacheWriteUSDPerMillion: 0.125, LongCacheWriteFactor: 2}
+	priced := Pricing{USDToYen: 100, Models: map[string]TokenPrice{"claude": price}}
+	// 没命中 10 万 × 0.10 + 读 60 万 × 0.01 + 一般的写 10 万 × 0.125 + 1 小时的写 20 万 × 0.20 + 输出 10 万 × 0.50
+	// = 0.01 + 0.006 + 0.0125 + 0.04 + 0.05 = 0.1185 美元
+	if got := priced.LLMYen("claude", usage); got < 11.849 || got > 11.851 {
+		t.Errorf("带 1 小时缓存写的费用 = %v，应为 11.85 日元", got)
+	}
+	price.LongCacheWriteFactor = 0
+	same := Pricing{USDToYen: 100, Models: map[string]TokenPrice{"claude": price}}
+	if got := same.LLMYen("claude", usage); got < 10.349 || got > 10.351 {
+		t.Errorf("没填倍数时和一般的缓存写同价 = %v，应为 10.35 日元", got)
+	}
+}
+
 // v7：v7 以前建的账本（没有缓存两列）打开时自动补列，旧记录照常合计，新记录能写进缓存用量。
 func TestLedgerUpgradesOldSchema(t *testing.T) {
 	ctx := context.Background()

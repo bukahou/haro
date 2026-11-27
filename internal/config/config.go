@@ -92,12 +92,17 @@ type ServerSettings struct {
 	// 主人资料：household.md（全家）+ 每人一份 *.md（开头 front matter 写 person: <声纹名字>）；空 = 不用。
 	// 设了就必须是读得到的目录（挂载没成、名字拼错时起不来，不当作「没有资料」）
 	ProfileDir string `env:"HARO_PROFILE_DIR"`
-	// 带上最近几轮对话（一问一答算一轮），要大于 0；更早的压成摘要或丢掉（HARO_CONVERSATION_SUMMARY）
-	MaxHistoryTurn int `env:"HARO_MAX_HISTORY_TURN" envDefault:"6"`
+	// 带上最近几轮对话（一问一答算一轮）；更早的压成摘要或丢掉（HARO_CONVERSATION_SUMMARY）。0 = 不按轮数截，
+	// 只在上下文到了 HARO_CONTEXT_COMPACT_TOKENS 时压缩（每轮前面带着那一轮的日期和时间，隔天的话模型分得清）；
+	// 模型服务不报用量的那几轮改按 6 轮截
+	MaxHistoryTurn int `env:"HARO_MAX_HISTORY_TURN" envDefault:"0"`
 	// 一轮里请求模型带的上下文（最大的那次请求的输入 token，模型报的）到了这么多，就提前把较早的几轮移出窗口、压缩（0 = 不看）。
-	// 默认值是估算，没有实测：系统提示词加工具定义约 4k，最近 6 轮一般 5k–12k；24k 只在工具结果特别长时触发。
-	// 待用账本里实际的 prompt_tokens 校准
-	CompactContextTokens int `env:"HARO_CONTEXT_COMPACT_TOKENS" envDefault:"24000"`
+	// 守的是每次请求的输入低于 10 万（超过后 Claude Haiku 的单价翻五倍）：到 8 万就压，留出下一轮工具结果的余量。
+	// 系统提示词、工具定义、主人资料约一万；不按轮数截时，聊上几十轮才会碰到它
+	CompactContextTokens int `env:"HARO_CONTEXT_COMPACT_TOKENS" envDefault:"80000"`
+	// 一份对话闲了这么久（最后一轮之后没人说话），就在后台同样提前压缩（0 = 不按闲置压缩）：和对话的提示词缓存
+	// （HARO_CLOUD_LLM_CACHE_TTL）一样长——缓存过期后再开口，第一次请求不必带着整段旧对话按全价重新处理
+	IdleCompactAfter time.Duration `env:"HARO_CONTEXT_IDLE_COMPACT" envDefault:"1h"`
 	// 会破坏的操作（删记事等）问了主人之后，多久没确认就作废；不设（0）= 程序里的默认值 brain.DefaultConfirmationTimeout
 	ConfirmationTimeout time.Duration `env:"HARO_CONFIRMATION_TIMEOUT"`
 	// 单次工具执行最多多久（所有工具共用，包括远程 MCP）；天气这类工具在这个期限里自己分配主力和备用的时间。
@@ -129,6 +134,9 @@ type ServerSettings struct {
 	// anthropic 的思考：disabled（关掉）/ between_tools（Sonnet 5.5 关掉思考的写法，它不接受 disabled）/ adaptive（开着，想多少由模型按力度定；
 	// 关不掉思考的模型也用它）。对话的思考关掉：要在 4 秒内开始回答
 	CloudLLMThinking string `env:"HARO_CLOUD_LLM_THINKING" envDefault:"disabled"`
+	// anthropic 的提示词缓存留多久（5m / 1h），只管云端模型的对话（后台调查一步接一步，用 5 分钟）：对话不按轮数截，
+	// 隔了 5 分钟再开口就要按全价重新处理整段历史；1 小时的写缓存贵一些（输入价的 2 倍，5 分钟是 1.25 倍），一小时内回来都读得到
+	CloudLLMCacheTTL string `env:"HARO_CLOUD_LLM_CACHE_TTL" envDefault:"1h"`
 
 	// 更强的模型（可选）：按规则把几类请求交给它，其余仍用 HARO_CLOUD_LLM_MODEL；接口（HARO_CLOUD_LLM_API）与凭证和云端模型相同。
 	// 空 = 不分，全部用云端模型。用在哪些地方（逗号分隔）：vision = 看摄像头画面；correction = 主人纠正、或明说要想清楚时由前台模型交给它重答；
@@ -197,6 +205,7 @@ type ServerSettings struct {
 	ResearchMaxRounds      int           `env:"HARO_RESEARCH_MAX_ROUNDS"`      // 搜索阶段最多请求模型几轮（搜一次、读一次各占一轮）
 	ResearchMaxSearches    int           `env:"HARO_RESEARCH_MAX_SEARCHES"`    // 最多搜几次
 	ResearchMaxTokens      int           `env:"HARO_RESEARCH_MAX_TOKENS"`      // 累计 token 上限
+	ResearchMaxCallTokens  int           `env:"HARO_RESEARCH_MAX_CALL_TOKENS"` // 一次请求带的上下文上限（到了就用已有资料写结论）
 	ResearchWriteUpTimeout time.Duration `env:"HARO_RESEARCH_WRITEUP_TIMEOUT"` // 到上限后写结论最多多久
 	ResearchRecheckTimeout time.Duration `env:"HARO_RESEARCH_RECHECK_TIMEOUT"` // 审查提出疑点后复查最多多久
 	ResearchReviewTimeout  time.Duration `env:"HARO_RESEARCH_REVIEW_TIMEOUT"`  // 审一次最多多久
@@ -210,6 +219,9 @@ type ServerSettings struct {
 	ResearchReviewer string `env:"HARO_RESEARCH_REVIEWER" envDefault:"base"`
 	// 天气：Open-Meteo 公开接口，不用密钥。家的位置：「纬度,经度」（只放在配置里，不进代码），
 	// 或 "ip"（按家里的公网 IP 推定，城市级）；不设 = 查天气时必须说地名
+	// 告诉模型哪个国家的节假日（今天、明天是节假日时每轮附一行）：ISO 3166-1 两位代码（例如 JP，支持的见 internal/holidays）；
+	// 空 = 不告诉。跟部署的地方有关，没有默认值
+	Holidays            string `env:"HARO_HOLIDAYS"`
 	Weather             bool   `env:"HARO_WEATHER" envDefault:"true"`
 	WeatherHome         string `env:"HARO_WEATHER_HOME"`
 	WeatherHomeName     string `env:"HARO_WEATHER_HOME_NAME"`                                         // 家的名字；空 = 坐标时不写名字，IP 定位时用城市名
@@ -465,8 +477,9 @@ func (settings ServerSettings) validateStorage() error {
 
 // validateConversation 检查对话：带几轮历史、压缩的门槛、确认时效、工具时限、多台终端的仲裁。
 func (settings ServerSettings) validateConversation() error {
-	return errors.Join(positive("HARO_MAX_HISTORY_TURN", settings.MaxHistoryTurn),
+	return errors.Join(notNegative("HARO_MAX_HISTORY_TURN", settings.MaxHistoryTurn),
 		notNegative("HARO_CONTEXT_COMPACT_TOKENS", settings.CompactContextTokens),
+		notNegative("HARO_CONTEXT_IDLE_COMPACT", settings.IdleCompactAfter),
 		notNegative("HARO_CONFIRMATION_TIMEOUT", settings.ConfirmationTimeout), notNegative("HARO_TOOL_TIMEOUT", settings.ToolTimeout),
 		notNegative("HARO_WAKE_ARBITRATION", settings.WakeArbitration))
 }
@@ -481,6 +494,7 @@ func (settings ServerSettings) validateResearch() error {
 		notNegative("HARO_RESEARCH_MAX_ROUNDS", settings.ResearchMaxRounds),
 		notNegative("HARO_RESEARCH_MAX_SEARCHES", settings.ResearchMaxSearches),
 		notNegative("HARO_RESEARCH_MAX_TOKENS", settings.ResearchMaxTokens),
+		notNegative("HARO_RESEARCH_MAX_CALL_TOKENS", settings.ResearchMaxCallTokens),
 		notNegative("HARO_RESEARCH_WRITEUP_TIMEOUT", settings.ResearchWriteUpTimeout),
 		notNegative("HARO_RESEARCH_RECHECK_TIMEOUT", settings.ResearchRecheckTimeout),
 		notNegative("HARO_RESEARCH_REVIEW_TIMEOUT", settings.ResearchReviewTimeout),

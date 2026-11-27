@@ -3,6 +3,7 @@ package brain_test
 import (
 	"context"
 	"iter"
+	"strings"
 	"testing"
 	"time"
 
@@ -32,10 +33,11 @@ func newInterruptTalker(t *testing.T, model brain.ChatModel) *talker {
 func lastAnswer(k *talker, model *fakeModel) string {
 	k.t.Helper()
 	k.ask("讲个故事")
-	if len(model.history) == 0 {
+	history := withoutSynthetic(model.history) // 情况说明（系统合成）不是历史
+	if len(history) == 0 {
 		k.t.Fatal("历史是空的")
 	}
-	return model.history[len(model.history)-1].Text
+	return history[len(history)-1].Text
 }
 
 // 回答还在生成时被打断：截断点之前开始播的句子算听到（听到一半的也算），之后的不记。
@@ -81,5 +83,27 @@ func TestInterruptBeforeSpeaking(t *testing.T) {
 	model.tokens, model.delay = []string{"好。"}, 0
 	if got := lastAnswer(k, model); got != "（还没说出口就被主人打断了）" {
 		t.Errorf("得到 %q", got)
+	}
+}
+
+// 有历史时，每轮的情况说明里写着离上一次说话过了多久（历史不按轮数截、会跨好几天）；第一轮没有历史，不写。
+func TestSituationTellsTimeSinceLastTurn(t *testing.T) {
+	model := &fakeModel{tokens: []string{"好。"}}
+	k := newInterruptTalker(t, model)
+	mentions := func() bool {
+		for _, msg := range model.history {
+			if msg.Synthetic && strings.Contains(msg.Text, "离上一次说话过了 不到 1 分钟。") {
+				return true
+			}
+		}
+		return false
+	}
+	k.ask("你好")
+	if mentions() {
+		t.Errorf("第一轮没有上一次：%+v", model.history)
+	}
+	k.ask("再说一句")
+	if !mentions() {
+		t.Errorf("第二轮应写着离上一次说话过了多久：%+v", model.history)
 	}
 }

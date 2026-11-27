@@ -330,3 +330,37 @@ func claudeAPIForTest(apiKey, baseURL string, client *http.Client) *ClaudeAPI {
 	}
 	return api
 }
+
+// CacheTTL 设成 1 小时时，三个缓存断点都带 ttl: 1h（不混用）；用量里写进 1 小时缓存的单独记（CacheWriteLongTokens）。
+// 默认（空）不带 ttl，按 API 的 5 分钟（阳性对照在 TestAnthropicStreamsTextToolCallsAndCacheUsage：断点照样有）。
+func TestAnthropicLongCacheTTL(t *testing.T) {
+	events := slices.Clone(textThenToolEvents)
+	events[0] = strings.Replace(events[0], `"cache_creation_input_tokens":300,`,
+		`"cache_creation_input_tokens":300,"cache_creation":{"ephemeral_1h_input_tokens":300,"ephemeral_5m_input_tokens":0},`, 1)
+	for _, c := range []struct {
+		ttl, want string
+		long      int
+	}{{CacheTTL1h, "1h", 300}, {"", "", 300}} {
+		server := llmtest.NewClaudeServer(t, llmtest.Script{Events: events})
+		model := NewAnthropicChatModel(AnthropicOptions{API: claudeAPIForTest("test-key", server.URL, server.Client()),
+			Model: "claude-haiku-5-5", MaxTokens: 800, CacheTTL: c.ttl})
+		messages := []brain.ChatMessage{{Role: brain.RoleSystem, Text: "你是 haro。"}, {Role: brain.RoleUser, Text: "上一轮"},
+			{Role: brain.RoleAssistant, Text: "上一轮的回答"}, {Role: brain.RoleUser, Text: "这一轮"}}
+		reply, err := brain.CollectReply(t.Context(), model, brain.ChatRequest{Messages: messages})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if reply.Usage.CacheWriteLongTokens != c.long || reply.Usage.CacheWriteTokens != 300 {
+			t.Errorf("ttl %q：1 小时缓存的写入应单独记：%+v", c.ttl, reply.Usage)
+		}
+		body := server.Request(0)
+		system := body["system"].([]any)[0].(map[string]any)["cache_control"].(map[string]any)
+		previous := body["messages"].([]any)[1].(map[string]any)["content"].([]any)
+		turn := previous[len(previous)-1].(map[string]any)["cache_control"].(map[string]any)
+		for name, breakpoint := range map[string]map[string]any{"系统提示词": system, "上一轮结束处": turn} {
+			if got, _ := breakpoint["ttl"].(string); got != c.want || breakpoint["type"] != "ephemeral" {
+				t.Errorf("ttl %q：%s的断点 = %v，ttl 应为 %q", c.ttl, name, breakpoint, c.want)
+			}
+		}
+	}
+}

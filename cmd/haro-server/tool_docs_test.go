@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/bukahou/haro/internal/agents"
@@ -72,5 +73,36 @@ func TestToolTableInDocsMatchesCode(t *testing.T) {
 	}
 	if unknown := brain.UnknownTools(slices.Sorted(maps.Keys(table)), kit.toolbox); len(unknown) > 0 {
 		t.Errorf("architecture.md 的工具表里有代码里没有的工具：%v", unknown)
+	}
+}
+
+// 节假日（HARO_HOLIDAYS）不是工具：关掉工具时照样接上一份说明；不支持的国家代码起不来，报错写明变量名。
+func TestHolidaysBriefing(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ledger, err := spending.OpenLedger(t.Context(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ledger.Close() })
+	deps := services{httpClient: &http.Client{}, guard: spending.NewGuard(ledger, spending.Limits{}, logger)}
+	catalog, err := agents.Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var shutdown shutdownSteps
+	without, err := buildTooling(t.Context(), config.ServerSettings{}, catalog, deps, logger, &shutdown)
+	if err != nil {
+		t.Fatal(err)
+	}
+	with, err := buildTooling(t.Context(), config.ServerSettings{Holidays: "JP"}, catalog, deps, logger, &shutdown)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(with.briefers) != len(without.briefers)+1 {
+		t.Errorf("设了 HARO_HOLIDAYS 应多一份说明：%d / %d", len(with.briefers), len(without.briefers))
+	}
+	if _, err := buildTooling(t.Context(), config.ServerSettings{Holidays: "XX"}, catalog, deps, logger, &shutdown); err == nil ||
+		!strings.Contains(err.Error(), "HARO_HOLIDAYS") {
+		t.Errorf("不支持的国家代码应起不来并写明变量名：%v", err)
 	}
 }

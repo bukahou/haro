@@ -24,6 +24,7 @@ type investigationReport struct {
 	gathered        int    // 成功拿到的资料份数（搜索成功、读网页成功）：一份都没有就不交出结论
 	lookupFailure   string // 最近一次搜索、读网页为什么没成功（一份资料都没拿到时写进原因）
 	tokens          int    // 调查的模型用的 token（搜索阶段、写结论、复查）
+	lastPrompt      int    // 上一次请求调查的模型时带的输入 token（模型报的；和 Limits.MaxCallTokens 比）
 	// 审查（日志用）：结果、疑点几处、复查了几轮、审查用的 token
 	review        reviewOutcome
 	doubts        int
@@ -84,6 +85,8 @@ search:
 			stop = fmt.Sprintf("已经查了 %d 轮（上限）", report.rounds)
 		case report.tokens >= limits.MaxTokens:
 			stop = fmt.Sprintf("用了约 %d token（上限 %d）", report.tokens, limits.MaxTokens)
+		case report.lastPrompt >= limits.MaxCallTokens:
+			stop = fmt.Sprintf("一次请求的上下文已经到了约 %d token（单次上限 %d）", report.lastPrompt, limits.MaxCallTokens)
 		case searchCtx.Err() != nil:
 			stop = fmt.Sprintf("查了 %s（时间上限）", limits.Timeout)
 		}
@@ -153,6 +156,9 @@ func (q *inquiry) step(ctx context.Context, offer []brain.ToolSpec, searchCap in
 	q.steps++
 	reply, tokens, err := askModel(ctx, q.r.agents.Investigator.Model, q.messages, offer)
 	q.report.tokens += tokens
+	if reply.Usage.PromptTokens > 0 {
+		q.report.lastPrompt = reply.Usage.PromptTokens
+	}
 	if err != nil {
 		return conclusionDraft{}, false, err
 	}

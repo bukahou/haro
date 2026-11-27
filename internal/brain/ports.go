@@ -280,8 +280,10 @@ type ReplyUsage struct {
 	// 记账时分开算；不报缓存的模型都是 0
 	CacheReadTokens  int
 	CacheWriteTokens int
-	ThinkingChars    int // 思考内容的字数（只统计，不朗读）；用来查「看不见的输出」
-	Requests         int // 这次回答请求了模型几次（调工具时不止一次；add 累加时计数）
+	// CacheWriteLongTokens 是 CacheWriteTokens 里写进留得久的缓存的（Claude 的 1 小时缓存）：单价比一般的缓存写更高
+	CacheWriteLongTokens int
+	ThinkingChars        int // 思考内容的字数（只统计，不朗读）；用来查「看不见的输出」
+	Requests             int // 这次回答请求了模型几次（调工具时不止一次；add 累加时计数）
 	// Incomplete：请求被打断或出错，用量只知道一部分：OutputTokens 不知道（为 0，不编）；
 	// 知道多少输入取决于厂商（Claude 在流的开头就报了输入）。TokensUnknown：连输入也不知道（还没开始就失败了，
 	// 或服务端不报用量）。累加时有一次不知道，合计就不知道
@@ -308,6 +310,7 @@ func (u *ReplyUsage) add(request *ReplyUsage) *ReplyUsage {
 	total.OutputTokens += request.OutputTokens
 	total.CacheReadTokens += request.CacheReadTokens
 	total.CacheWriteTokens += request.CacheWriteTokens
+	total.CacheWriteLongTokens += request.CacheWriteLongTokens
 	total.ThinkingChars += request.ThinkingChars
 	total.Requests++
 	total.Incomplete = total.Incomplete || request.Incomplete

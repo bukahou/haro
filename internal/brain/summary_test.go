@@ -58,7 +58,7 @@ func TestRollingSummary(t *testing.T) {
 			{Role: RoleTool, Text: "工具结果不进摘要"}}}
 	}
 	for _, text := range []string{"车停在 B2", "第二句", "第三句", "第四句"} {
-		conversation.appendTurn(turn(text), 0) // 窗口 2 轮：第 3、4 轮时掉出 2 轮，还不够一批
+		conversation.appendTurn(turn(text), 0, false) // 窗口 2 轮：第 3、4 轮时掉出 2 轮，还不够一批
 	}
 	if model.count() != 0 {
 		t.Fatal("没攒够一批不该压缩")
@@ -66,7 +66,7 @@ func TestRollingSummary(t *testing.T) {
 	if messages := conversation.messages(); len(messages) != 4*4 { // 每轮：时间标记 + 三条
 		t.Errorf("还没压进摘要的照常带着：%d 条", len(messages))
 	}
-	conversation.appendTurn(turn("第五句"), 0) // 掉出第 3 轮：够 3 轮了
+	conversation.appendTurn(turn("第五句"), 0, false) // 掉出第 3 轮：够 3 轮了
 	deadline := time.Now().Add(2 * time.Second)
 	for conversation.currentSummary() == "" && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
@@ -96,7 +96,7 @@ func TestNoSummaryKeepsOldBehaviour(t *testing.T) {
 	book := NewConversationBook(nil, Options{MaxHistoryTurn: 2}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	conversation := book.Conversation("主人")
 	for i := 0; i < 5; i++ {
-		conversation.appendTurn(ConversationTurn{Messages: []ChatMessage{{Role: RoleUser, Text: "x"}, {Role: RoleAssistant, Text: "y"}}}, 0)
+		conversation.appendTurn(ConversationTurn{Messages: []ChatMessage{{Role: RoleUser, Text: "x"}, {Role: RoleAssistant, Text: "y"}}}, 0, false)
 	}
 	if len(conversation.messages()) != 2*3 || conversation.currentSummary() != "" {
 		t.Error("没开摘要：掉出窗口的直接丢")
@@ -111,7 +111,7 @@ func TestTruncatedSummaryIsNotUsed(t *testing.T) {
 	conversation := book.Conversation("主人")
 	for _, text := range []string{"车停在 B2", "第二句", "第三句", "第四句", "第五句"} {
 		conversation.appendTurn(ConversationTurn{Messages: []ChatMessage{{Role: RoleUser, Text: text},
-			{Role: RoleAssistant, Text: "好的。"}}}, 0)
+			{Role: RoleAssistant, Text: "好的。"}}}, 0, false)
 	}
 	deadline := time.Now().Add(2 * time.Second)
 	for model.count() == 0 && time.Now().Before(deadline) {
@@ -138,9 +138,9 @@ func TestCompactionSummarizesRightAway(t *testing.T) {
 	turn := func(text string) ConversationTurn {
 		return ConversationTurn{Messages: []ChatMessage{{Role: RoleUser, Text: text}, {Role: RoleAssistant, Text: "好。"}}}
 	}
-	conversation.appendTurn(turn("第一句"), 100)
-	conversation.appendTurn(turn("第二句"), 100)
-	conversation.appendTurn(turn("第三句"), 1000) // 到了门槛：移出 1 轮（不到一批 3 轮）
+	conversation.appendTurn(turn("第一句"), 100, false)
+	conversation.appendTurn(turn("第二句"), 100, false)
+	conversation.appendTurn(turn("第三句"), 1000, false) // 到了门槛：移出 1 轮（不到一批 3 轮）
 	deadline := time.Now().Add(2 * time.Second)
 	for conversation.currentSummary() == "" && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
@@ -214,7 +214,7 @@ func TestUnsummarizedTurnsAreCapped(t *testing.T) {
 	book.SummarizeWith(Agent{Name: "摘要", Model: failingSummaryModel{}, Instructions: "写摘要。"})
 	conversation := book.Conversation("主人")
 	for range 30 {
-		conversation.appendTurn(ConversationTurn{Messages: []ChatMessage{{Role: RoleUser, Text: "问"}, {Role: RoleAssistant, Text: "答"}}}, 0)
+		conversation.appendTurn(ConversationTurn{Messages: []ChatMessage{{Role: RoleUser, Text: "问"}, {Role: RoleAssistant, Text: "答"}}}, 0, false)
 	}
 	if got := unsummarizedSeqs(conversation); !slices.Equal(got, seqRange(28-maxUnsummarizedTurns+1, 28)) {
 		t.Errorf("攒着的只留最近 %d 轮（第 29、30 轮在窗口里）：%v", maxUnsummarizedTurns, got)
@@ -235,7 +235,7 @@ func TestStoredUnsummarizedTurnsAreCappedOnNextTurn(t *testing.T) {
 	book := NewConversationBook(store, Options{MaxHistoryTurn: 2}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	book.SummarizeWith(Agent{Name: "摘要", Model: failingSummaryModel{}, Instructions: "写摘要。"})
 	conversation := book.Conversation("主人")
-	conversation.appendTurn(ConversationTurn{Messages: []ChatMessage{{Role: RoleUser, Text: "新的"}}}, 0)
+	conversation.appendTurn(ConversationTurn{Messages: []ChatMessage{{Role: RoleUser, Text: "新的"}}}, 0, false)
 	if got := unsummarizedSeqs(conversation); !slices.Equal(got, seqRange(6, maxUnsummarizedTurns+5)) {
 		t.Errorf("记下一轮时按上限截：%v", got)
 	}
@@ -285,7 +285,7 @@ func TestSummaryRemovesSummarizedTurnsBySeq(t *testing.T) {
 	conversation := book.Conversation("主人")
 	turn := ConversationTurn{Messages: []ChatMessage{{Role: RoleUser, Text: "问"}, {Role: RoleAssistant, Text: "答"}}}
 	for range 5 { // 第 1–3 轮掉出窗口：够一批，开始压（卡在模型那里）
-		conversation.appendTurn(turn, 0)
+		conversation.appendTurn(turn, 0, false)
 	}
 	select {
 	case <-model.entered:
@@ -293,7 +293,7 @@ func TestSummaryRemovesSummarizedTurnsBySeq(t *testing.T) {
 		t.Fatal("够一批了，应该开始压缩")
 	}
 	for range 13 { // 压缩期间又掉出第 4–16 轮：攒着的超过上限，最早的第 1–4 轮被丢掉
-		conversation.appendTurn(turn, 0)
+		conversation.appendTurn(turn, 0, false)
 	}
 	close(model.release)
 	select {

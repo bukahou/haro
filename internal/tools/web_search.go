@@ -307,7 +307,8 @@ func webSearchTools(searcher WebSearcher, meter SearchMeter, limits WebSearchLim
 				"主人的话是语音识别出来的，地名、人名可能被写成读音相近的字：搜不到时换成读音相近的写法再搜一次。" +
 				"摘要里没有要的具体内容（时刻、价格、营业时间、步骤）时，这一轮就接着用 " + ReadWebPagesTool + " 读结果里最相关的页面，" +
 				"不要先问主人要不要读；结果和问题不相关时，换个说法再搜一次。" +
-				"读了、换了说法还是没有，再简短说没查到，给一个下一步（例如派后台调查），不要长篇猜测。"},
+				"读了、换了说法还是没有，再简短说没查到，给一个下一步（例如派后台调查），不要长篇猜测。" +
+				"搜家附近的东西时用町名或车站名，不要把主人的门牌号、房间号写进搜索词。"},
 			func(ctx context.Context, in webSearchInput) (string, error) {
 				if strings.TrimSpace(in.Query) == "" {
 					return "", brain.InvalidArguments(errors.New("query 不能为空"))

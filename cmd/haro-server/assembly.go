@@ -17,6 +17,7 @@ import (
 	"github.com/bukahou/haro/internal/conversationstore"
 	"github.com/bukahou/haro/internal/embedding"
 	"github.com/bukahou/haro/internal/graceful"
+	"github.com/bukahou/haro/internal/holidays"
 	"github.com/bukahou/haro/internal/llm"
 	"github.com/bukahou/haro/internal/notes"
 	"github.com/bukahou/haro/internal/profile"
@@ -147,6 +148,14 @@ type tooling struct {
 func buildTooling(ctx context.Context, settings config.ServerSettings, catalog agents.Catalog, deps services, logger *slog.Logger,
 	shutdown *shutdownSteps) (tooling, error) {
 	kit := tooling{briefers: []brain.Briefer{brain.ClockBriefer{}, deps.guard}, notices: brain.NewNoticeHub()}
+	if settings.Holidays != "" { // 今天、明天是节假日时告诉模型（不是工具：关掉工具时照样有）
+		calendar, err := holidays.ForCountry(settings.Holidays)
+		if err != nil {
+			return kit, fmt.Errorf("HARO_HOLIDAYS：%w", err)
+		}
+		kit.briefers = append(kit.briefers, brain.BriefLines(calendar.Brief))
+		logger.Info("节假日：今天、明天是节假日时告诉模型", "country", calendar.Country())
+	}
 	if !settings.Tools {
 		return kit, nil
 	}
@@ -239,6 +248,10 @@ func assembleBrain(ctx context.Context, settings config.ServerSettings, catalog 
 	components.Conversations = brain.NewConversationBook(store, options, logger) // 所有终端连接共用：换终端、重连、服务端重启都接得上
 	if built.summary != nil {                                                    // 滚动摘要：代理「摘要」，按它自己的用途记账
 		components.Conversations.SummarizeWith(*built.summary)
+	}
+	if options.IdleCompactAfter > 0 { // 闲了一阵的对话在后台提前压缩：随 ctx（服务端的运行期）结束
+		go components.Conversations.RunIdleCompaction(ctx)
+		logger.Info("对话闲了一阵就在后台提前压缩", "idle", options.IdleCompactAfter)
 	}
 	if settings.ProfileDir != "" { // 主人资料：外部注入，改了文件下一轮就生效
 		profiles := profile.OpenDir(settings.ProfileDir, logger)

@@ -62,6 +62,7 @@ func researchLimits(settings config.ServerSettings) research.Limits {
 	limits.Timeout = cmp.Or(settings.ResearchTimeout, limits.Timeout)
 	limits.MaxSearches = cmp.Or(settings.ResearchMaxSearches, limits.MaxSearches)
 	limits.MaxTokens = cmp.Or(settings.ResearchMaxTokens, limits.MaxTokens)
+	limits.MaxCallTokens = cmp.Or(settings.ResearchMaxCallTokens, limits.MaxCallTokens)
 	limits.WriteUpTimeout = cmp.Or(settings.ResearchWriteUpTimeout, limits.WriteUpTimeout)
 	limits.RecheckTimeout = cmp.Or(settings.ResearchRecheckTimeout, limits.RecheckTimeout)
 	return limits

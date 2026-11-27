@@ -275,10 +275,11 @@ func (a agentAssembly) meteredAs(definition agents.Definition, background bool) 
 			a.pricing, a.ledger, logger), s.Model, nil
 	default: // base 档、云端模型
 		spec = cloudModelSpec{model: s.CloudLLMModel, maxTokens: maxTokens, effort: s.CloudLLMEffort,
-			thinking: s.CloudLLMThinking, firstTokenTimeout: s.CloudLLMTimeout, requestTimeout: s.RequestTimeout}
+			thinking: s.CloudLLMThinking, cacheTTL: s.CloudLLMCacheTTL, firstTokenTimeout: s.CloudLLMTimeout, requestTimeout: s.RequestTimeout}
 	}
 	if background {
 		spec.effort, spec.retries, spec.firstTokenTimeout, spec.requestTimeout = s.ResearchEffort, researchRetries, 0, 0
+		spec.cacheTTL = "" // 一步接一步地请求：5 分钟的缓存就够，1 小时的写缓存贵
 		spec.thinking = cmp.Or(s.ResearchThinking, spec.thinking)
 		spec.maxTokens = cmp.Or(s.ResearchMaxOutputTokens, spec.maxTokens)
 	}
