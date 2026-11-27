@@ -17,6 +17,7 @@ require (
 	github.com/openai/openai-go/v3 v3.105.0
 	github.com/pion/mediadevices v0.10.1
 	github.com/pressly/goose/v3 v3.30.1
+	github.com/rickar/cal/v2 v2.1.34
 	github.com/rivo/uniseg v0.4.7
 	github.com/teambition/rrule-go v1.8.2
 	github.com/yalue/onnxruntime_go v1.32.1

@@ -17,6 +17,7 @@ import (
 	"github.com/bukahou/haro/internal/conversationstore"
 	"github.com/bukahou/haro/internal/embedding"
 	"github.com/bukahou/haro/internal/graceful"
+	"github.com/bukahou/haro/internal/holidays"
 	"github.com/bukahou/haro/internal/llm"
 	"github.com/bukahou/haro/internal/notes"
 	"github.com/bukahou/haro/internal/profile"
@@ -147,6 +148,14 @@ type tooling struct {
 func buildTooling(ctx context.Context, settings config.ServerSettings, catalog agents.Catalog, deps services, logger *slog.Logger,
 	shutdown *shutdownSteps) (tooling, error) {
 	kit := tooling{briefers: []brain.Briefer{brain.ClockBriefer{}, deps.guard}, notices: brain.NewNoticeHub()}
+	if settings.Holidays != "" { // 今天、明天是节假日时告诉模型（不是工具：关掉工具时照样有）
+		calendar, err := holidays.ForCountry(settings.Holidays)
+		if err != nil {
+			return kit, fmt.Errorf("HARO_HOLIDAYS：%w", err)
+		}
+		kit.briefers = append(kit.briefers, brain.BriefLines(calendar.Brief))
+		logger.Info("节假日：今天、明天是节假日时告诉模型", "country", calendar.Country())
+	}
 	if !settings.Tools {
 		return kit, nil
 	}

@@ -219,6 +219,9 @@ type ServerSettings struct {
 	ResearchReviewer string `env:"HARO_RESEARCH_REVIEWER" envDefault:"base"`
 	// 天气：Open-Meteo 公开接口，不用密钥。家的位置：「纬度,经度」（只放在配置里，不进代码），
 	// 或 "ip"（按家里的公网 IP 推定，城市级）；不设 = 查天气时必须说地名
+	// 告诉模型哪个国家的节假日（今天、明天是节假日时每轮附一行）：ISO 3166-1 两位代码（例如 JP，支持的见 internal/holidays）；
+	// 空 = 不告诉。跟部署的地方有关，没有默认值
+	Holidays            string `env:"HARO_HOLIDAYS"`
 	Weather             bool   `env:"HARO_WEATHER" envDefault:"true"`
 	WeatherHome         string `env:"HARO_WEATHER_HOME"`
 	WeatherHomeName     string `env:"HARO_WEATHER_HOME_NAME"`                                         // 家的名字；空 = 坐标时不写名字，IP 定位时用城市名
