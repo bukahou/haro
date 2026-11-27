@@ -81,7 +81,7 @@ type ServerSettings struct {
 
 	// 模型
 	OllamaURL string `env:"HARO_OLLAMA_URL" envDefault:"http://127.0.0.1:11434"`
-	Model     string `env:"HARO_MODEL" envDefault:"qwen3-vl:8b-instruct"` // 本地（ollama）模型；4b 是思考变体，每轮多等 1.5–3 秒
+	Model     string `env:"HARO_MODEL"` // 本地（ollama）模型名：HARO_LLM_PROVIDER=local 时必须设（模型名不写在程序里）
 	// 等本地模型开始回答的上限：ollama 卸掉模型后的第一句要先从磁盘载入（冷启动十几秒），不能按等云端的几秒算，
 	// 否则会被当成连不上、触发熔断
 	LocalLLMTimeout time.Duration `env:"HARO_LOCAL_LLM_TIMEOUT" envDefault:"30s"`
@@ -181,19 +181,21 @@ type ServerSettings struct {
 	// 语音识别：haro-asr 单独运行（模型等配置见 ASRSettings），服务端只认它的地址
 	ASRURL string `env:"HARO_ASR_URL"` // 流式转写服务的根地址（协议照 OpenAI Realtime 的转写会话），例如 http://127.0.0.1:59126
 
-	// 工具（见 docs/architecture.md）：自研工具内置在服务端里，MCP 只接第三方服务
-	Tools   bool   `env:"HARO_TOOLS" envDefault:"true"`
-	NotesDB string `env:"HARO_NOTES_DB"` // 记事与记忆（v10：记事已并进记忆）、提醒的存储：SQLite 文件路径（服务端直接连）
+	// 工具（见 docs/architecture.md）：内置的按组开关（逗号分隔，组名见 ToolGroups；不设 = 全开，none = 一个都不要）；
+	// 外部的 MCP 服务列在 HARO_MCP_SERVERS_FILE 里（格式照 Claude Code 的 .mcp.json，见 internal/tools/remote_servers.go）
+	ToolGroups     []string `env:"HARO_TOOLS" envSeparator:","`
+	MCPServersFile string   `env:"HARO_MCP_SERVERS_FILE"`
+	NotesDB        string   `env:"HARO_NOTES_DB"` // 记事与记忆（v10：记事已并进记忆）、提醒的存储：SQLite 文件路径（服务端直接连）
 	// 列出记忆、没法按意思找时交给模型挑的最多条数（新的在前）；超过时结果里写明一共几条、只给了几条
 	NotesListLimit int `env:"HARO_NOTES_LIST_LIMIT" envDefault:"200"`
 	// 长期记忆按意思找（v10）：OpenAI 兼容的嵌入接口的根（集群里是 Text Embeddings Inference，例如 http://host/v1）。
 	// 不设 = 不按意思找（照样能记、列、忘、恢复；「查」只给最近记的，以前的对话查不了）。环境相关：没有默认值
 	EmbeddingURL    string `env:"HARO_EMBEDDING_URL"`
-	EmbeddingModel  string `env:"HARO_EMBEDDING_MODEL" envDefault:"intfloat/multilingual-e5-small"`
+	EmbeddingModel  string `env:"HARO_EMBEDDING_MODEL"`   // 设了 HARO_EMBEDDING_URL 就必须设（模型名不写在程序里）
 	EmbeddingAPIKey string `env:"HARO_EMBEDDING_API_KEY"` // 云端的嵌入服务才要（凭证：无默认值，只来自环境变量）
-	// 模型要求的前缀：e5 系列问句加「query: 」、被检索的内容加「passage: 」；换了不要求前缀的模型时设成空
-	EmbeddingQueryPrefix    string `env:"HARO_EMBEDDING_QUERY_PREFIX" envDefault:"query: "`
-	EmbeddingDocumentPrefix string `env:"HARO_EMBEDDING_DOCUMENT_PREFIX" envDefault:"passage: "`
+	// 模型要求的前缀（跟着模型走，所以没有默认值）：e5 系列问句加「query: 」、被检索的内容加「passage: 」；不设 = 不加
+	EmbeddingQueryPrefix    string `env:"HARO_EMBEDDING_QUERY_PREFIX"`
+	EmbeddingDocumentPrefix string `env:"HARO_EMBEDDING_DOCUMENT_PREFIX"`
 	// 联网搜索：Tavily 官方远程 MCP。密钥不设 = 不提供联网搜索（凭证：无默认值，只来自环境变量）
 	TavilyAPIKey string `env:"HARO_TAVILY_API_KEY"`
 	TavilyMCPURL string `env:"HARO_TAVILY_MCP_URL" envDefault:"https://mcp.tavily.com/mcp/"`
@@ -222,18 +224,17 @@ type ServerSettings struct {
 	// 告诉模型哪个国家的节假日（今天、明天是节假日时每轮附一行）：ISO 3166-1 两位代码（例如 JP，支持的见 internal/holidays）；
 	// 空 = 不告诉。跟部署的地方有关，没有默认值
 	Holidays            string `env:"HARO_HOLIDAYS"`
-	Weather             bool   `env:"HARO_WEATHER" envDefault:"true"`
 	WeatherHome         string `env:"HARO_WEATHER_HOME"`
 	WeatherHomeName     string `env:"HARO_WEATHER_HOME_NAME"`                                         // 家的名字；空 = 坐标时不写名字，IP 定位时用城市名
 	WeatherIPLocateURL  string `env:"HARO_WEATHER_IP_LOCATE_URL" envDefault:"https://ipinfo.io/json"` // IP 定位服务（HTTPS，不用密钥）
 	WeatherForecastURL  string `env:"HARO_WEATHER_FORECAST_URL" envDefault:"https://api.open-meteo.com/v1/forecast"`
 	WeatherGeocodingURL string `env:"HARO_WEATHER_GEOCODING_URL" envDefault:"https://geocoding-api.open-meteo.com/v1/search"`
 	// 按地名找坐标时用的语言（地名库返回的名字用这种语言写）：ISO 639 的小写语言代码，例如 ja、en（启动时按语言代码表检查；
-	// 写错时地名库不报错、只是改用英文或当地的名字）
-	WeatherGeocodingLanguage string `env:"HARO_WEATHER_GEOCODING_LANGUAGE" envDefault:"ja"`
+	// 写错时地名库不报错、只是改用英文或当地的名字）。跟部署的地方有关，没有默认值：不设 = 地名库默认的语言（英文）
+	WeatherGeocodingLanguage string `env:"HARO_WEATHER_GEOCODING_LANGUAGE"`
 	// Open-Meteo 查不到时的备用：jma = 日本气象厅网站的数据（只覆盖日本、按地区；地区按坐标自动找：
-	// 国土地理院的地址反查 + 气象厅的地区表，所以要查的坐标也会发给国土地理院）；none = 不用备用
-	WeatherBackup             string `env:"HARO_WEATHER_BACKUP" envDefault:"jma"`
+	// 国土地理院的地址反查 + 气象厅的地区表，所以要查的坐标也会发给国土地理院）。跟部署的地方有关，没有默认值：不设或 none = 不用备用
+	WeatherBackup             string `env:"HARO_WEATHER_BACKUP"`
 	WeatherJMAURL             string `env:"HARO_WEATHER_JMA_URL" envDefault:"https://www.jma.go.jp/bosai"`
 	WeatherReverseGeocoderURL string `env:"HARO_WEATHER_REVERSE_GEOCODER_URL" envDefault:"https://mreversegeocoder.gsi.go.jp/reverse-geocoder/LonLatToAddress"`
 
@@ -370,7 +371,7 @@ func (settings TerminalSettings) validateTerminal() error {
 func (settings ServerSettings) validateBrain() error {
 	for _, validate := range []func() error{settings.validateCommon, settings.validateSpeech, settings.validateModels,
 		settings.validateSpending, settings.validateWeather, settings.validateStorage, settings.validateConversation,
-		settings.validateResearch, settings.validateListen} {
+		settings.validateResearch, settings.validateListen, settings.validateToolGroups} {
 		if err := validate(); err != nil {
 			return err
 		}
@@ -406,6 +407,9 @@ func (settings ServerSettings) validateSpeech() error {
 func (settings ServerSettings) validateModels() error {
 	switch settings.LLMProvider {
 	case LLMLocal:
+		if settings.Model == "" {
+			return fmt.Errorf("HARO_LLM_PROVIDER=local 时必须设 HARO_MODEL（本地模型名）")
+		}
 	case LLMCloud:
 		if err := settings.cloudLLMReady(); err != nil {
 			return fmt.Errorf("HARO_LLM_PROVIDER=cloud 时%w（或临时用 HARO_LLM_PROVIDER=local）", err)
@@ -458,10 +462,10 @@ func (settings ServerSettings) validateSpending() error {
 
 // validateStorage 检查记事库、主人资料的目录。
 func (settings ServerSettings) validateStorage() error {
-	if settings.Tools && settings.NotesDB == "" {
-		return fmt.Errorf("HARO_TOOLS=true 时必须设 HARO_NOTES_DB（或设 HARO_TOOLS=false）")
+	if settings.ToolGroupOn(ToolGroupMemory) && settings.NotesDB == "" {
+		return fmt.Errorf("开着记事与记忆（HARO_TOOLS 里有 %s，不设 HARO_TOOLS 时也是）就必须设 HARO_NOTES_DB", ToolGroupMemory)
 	}
-	if settings.Tools && settings.NotesListLimit <= 0 {
+	if settings.ToolGroupOn(ToolGroupMemory) && settings.NotesListLimit <= 0 {
 		return fmt.Errorf("HARO_NOTES_LIST_LIMIT 要大于 0（列出记忆时交给模型的最多条数），现在是 %d", settings.NotesListLimit)
 	}
 	if settings.EmbeddingURL != "" {
@@ -585,7 +589,7 @@ func (s ServerSettings) UsesCloudLLM() bool {
 
 // ResearchesWithCloud 判断开没开后台调查（有联网搜索才有；调查只用云端模型）。
 func (s ServerSettings) ResearchesWithCloud() bool {
-	return s.Tools && s.TavilyAPIKey != ""
+	return s.ToolGroupOn(ToolGroupResearch) && s.TavilyAPIKey != ""
 }
 
 // WeatherHomePlace 解析 HARO_WEATHER_HOME（「纬度,经度」）；没设时 Set=false。
@@ -616,6 +620,45 @@ type WeatherHome struct {
 
 // WeatherHomeByIP 是 HARO_WEATHER_HOME 的特殊值：按公网 IP 定位。
 const WeatherHomeByIP = "ip"
+
+// 内置工具的组（HARO_TOOLS 的取值）：一组是一项能力的全部工具，组名只在这里定义。
+const (
+	ToolGroupMemory    = "memory"    // 记事与长期记忆（要 HARO_NOTES_DB）
+	ToolGroupReminders = "reminders" // 提醒
+	ToolGroupWeather   = "weather"   // 天气
+	ToolGroupSearch    = "search"    // 前台的联网搜索、读网页（要搜索的密钥）
+	ToolGroupResearch  = "research"  // 后台调查（要搜索的密钥）
+	// ToolGroupsNone 是「一个都不要」（不设 HARO_TOOLS 是全开）
+	ToolGroupsNone = "none"
+)
+
+// ToolGroups 是全部的组：不设 HARO_TOOLS 时全开。
+var ToolGroups = []string{ToolGroupMemory, ToolGroupReminders, ToolGroupWeather, ToolGroupSearch, ToolGroupResearch}
+
+// ToolGroupOn 判断开没开这组内置工具：不设 HARO_TOOLS 时全开。
+func (s ServerSettings) ToolGroupOn(group string) bool {
+	if len(s.ToolGroups) == 0 {
+		return true
+	}
+	return slices.Contains(s.ToolGroups, group)
+}
+
+// validateToolGroups 检查 HARO_TOOLS：只能是组名，或单独一个 none。原来的 true / false 不再认（写明怎么改）。
+func (s ServerSettings) validateToolGroups() error {
+	for _, group := range s.ToolGroups {
+		switch {
+		case slices.Contains(ToolGroups, group):
+		case group == ToolGroupsNone && len(s.ToolGroups) == 1:
+		case group == "true" || group == "false":
+			return fmt.Errorf("HARO_TOOLS 现在是内置工具的组（逗号分隔：%s；%s = 一个都不要）：原来的 true 删掉这一行即可（不设 = 全开），false 改成 %s",
+				strings.Join(ToolGroups, ","), ToolGroupsNone, ToolGroupsNone)
+		default:
+			return fmt.Errorf("HARO_TOOLS 只能是 %s 里的组（逗号分隔），或单独一个 %s；现在有 %q",
+				strings.Join(ToolGroups, "、"), ToolGroupsNone, group)
+		}
+	}
+	return nil
+}
 
 // HARO_WEATHER_BACKUP 的取值。
 const (
@@ -697,8 +740,11 @@ func (s ServerSettings) validateWeather() error {
 	if _, err := s.WeatherHomePlace(); err != nil {
 		return err
 	}
-	if s.WeatherBackup != WeatherBackupJMA && s.WeatherBackup != WeatherBackupNone {
-		return fmt.Errorf("HARO_WEATHER_BACKUP 只能是 %s 或 %s，现在是 %q", WeatherBackupJMA, WeatherBackupNone, s.WeatherBackup)
+	if s.WeatherBackup != "" && s.WeatherBackup != WeatherBackupJMA && s.WeatherBackup != WeatherBackupNone {
+		return fmt.Errorf("HARO_WEATHER_BACKUP 只能是 %s 或 %s（不设 = 不用备用），现在是 %q", WeatherBackupJMA, WeatherBackupNone, s.WeatherBackup)
+	}
+	if s.WeatherGeocodingLanguage == "" {
+		return nil
 	}
 	// 地名库要小写的 ISO 639 语言代码；按语言代码表（x/text/language）查，写法也要是规范的那个（jpn、JA 都不行，要 ja）
 	if base, err := language.ParseBase(s.WeatherGeocodingLanguage); err != nil || base.String() != s.WeatherGeocodingLanguage {

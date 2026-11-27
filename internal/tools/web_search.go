@@ -8,11 +8,8 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
-	"sync"
 	"unicode/utf8"
 
-	"github.com/failsafe-go/failsafe-go"
-	"github.com/failsafe-go/failsafe-go/retrypolicy"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/bukahou/haro/internal/brain"
@@ -70,12 +67,9 @@ const TavilyName = "tavily"
 // 只用 tavily_search / tavily_extract 两个工具；crawl / map / research 不用（贵、慢，调查流程由服务端自己控制）。
 // 第一次用到时才连；会话断了（Tavily 重启、网络断过）丢掉旧的，当次重连再试一次，之后用到时照样重连。
 type TavilySearcher struct {
-	spec    ServerSpec
-	options TavilyOptions
-	logger  *slog.Logger
-
-	mu     sync.Mutex
-	server *MCPServer // nil = 还没连上，或者断了
+	connection *remoteConnection
+	options    TavilyOptions
+	logger     *slog.Logger
 }
 
 // TavilyOptions 是 Tavily 的档位。零值是线上在用的：基础档、不偏向哪个国家。
@@ -102,9 +96,12 @@ func NewTavilySearcher(endpoint, apiKey string, client *http.Client, logger *slo
 
 // NewTavilySearcherWith 同 NewTavilySearcher，按 options 的档位搜（比较不同档位时用）。
 func NewTavilySearcherWith(endpoint, apiKey string, options TavilyOptions, client *http.Client, logger *slog.Logger) *TavilySearcher {
-	return &TavilySearcher{logger: logger, options: options, spec: ServerSpec{Name: TavilyName, URL: endpoint, Client: client,
-		Headers: map[string]string{"Authorization": "Bearer " + apiKey}}}
+	spec := ServerSpec{Name: TavilyName, URL: endpoint, Client: client, Headers: map[string]string{"Authorization": "Bearer " + apiKey}}
+	return &TavilySearcher{logger: logger, options: options, connection: newRemoteConnection(spec, checkTavilyTools, logger)}
 }
+
+// Name 是联网搜索服务商的名字（记账时这笔花费的名目）。
+func (t *TavilySearcher) Name() string { return TavilyName }
 
 // depth 是 Tavily 的 search_depth / extract_depth。
 func (t *TavilySearcher) depth() string {
@@ -122,61 +119,24 @@ func (t *TavilySearcher) creditsPerCharge() int {
 	return tavilyBasicCredits
 }
 
-// connected 返回连着的会话；还没连就连上（并核对要用的两个工具都在）。
-func (t *TavilySearcher) connected(ctx context.Context) (*MCPServer, error) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if t.server != nil {
-		return t.server, nil
-	}
-	server, err := ConnectMCPServer(ctx, t.spec, t.logger)
-	if err != nil {
-		return nil, err
-	}
+// checkTavilyTools 核对要用的两个工具都在（连上时）。
+func checkTavilyTools(server *MCPServer) error {
 	for _, name := range []string{"tavily_search", "tavily_extract"} {
 		if server.Tool(name) == nil {
-			server.Close()
-			return nil, fmt.Errorf("Tavily 的工具清单里没有 %s（服务改版了？）", name)
+			return fmt.Errorf("Tavily 的工具清单里没有 %s（服务改版了？）", name)
 		}
 	}
-	t.server = server
-	return server, nil
+	return nil
 }
 
-// drop 丢掉断了的会话（下次用到时重连）。
-func (t *TavilySearcher) drop(server *MCPServer) {
-	t.mu.Lock()
-	if t.server == server {
-		t.server = nil
-	}
-	t.mu.Unlock()
-	_ = server.Close()
-	t.logger.Warn("联网搜索：和 Tavily 的会话断了，下次用到时重连")
-}
-
-// call 调用一个 Tavily 工具。连接出问题（不是 Tavily 说这次调用有错）时丢掉会话、重连再试一次。
+// call 调用一个 Tavily 工具（连接出问题时重连再试一次，见 remoteConnection）。
 // 每发出一次请求用 record 记一笔 credits 积分（没拿到结果的标不完整）；连都没连上时请求没发出去，不记。
 func (t *TavilySearcher) call(ctx context.Context, name string, arguments map[string]any, credits int, record SearchRecorder) (string, error) {
-	retry := retrypolicy.NewBuilder[string]().WithMaxRetries(1).
-		HandleIf(func(_ string, err error) bool {
-			var toolErr *ToolError
-			return err != nil && !errors.As(err, &toolErr) && ctx.Err() == nil
-		}).Build()
-	return failsafe.With(retry).WithContext(ctx).Get(func() (string, error) {
-		server, err := t.connected(ctx)
-		if err != nil {
-			return "", fmt.Errorf("连不上 Tavily: %w", err)
-		}
-		text, err := server.CallKnown(ctx, name, arguments)
+	return t.connection.call(ctx, name, arguments, func(err error) {
 		// 写不进时由计量那边留着补写，补写成功之前不放行有上限的搜索（spending.WithBookkeeping）
 		if recordErr := record.RecordSearch(ctx, credits, err != nil); recordErr != nil {
 			t.logger.Warn("搜索用量没写进账本", "err", recordErr, "credits", credits, "incomplete", err != nil)
 		}
-		var toolErr *ToolError
-		if err != nil && !errors.As(err, &toolErr) && ctx.Err() == nil {
-			t.drop(server)
-		}
-		return text, err
 	})
 }
 
@@ -250,16 +210,7 @@ func (t *TavilySearcher) ReadCredits(pages int) int {
 }
 
 // Close 断开。
-func (t *TavilySearcher) Close() error {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if t.server == nil {
-		return nil
-	}
-	err := t.server.Close()
-	t.server = nil
-	return err
-}
+func (t *TavilySearcher) Close() error { return t.connection.Close() }
 
 // WebSearchLimits 是快查和读网页给模型多少：搜一次几条、搜索结果截到多少字、读网页每页多少字（读得越多这一轮越贵、越慢）。
 type WebSearchLimits struct {

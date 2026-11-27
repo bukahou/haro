@@ -33,7 +33,7 @@ type TokenPrice struct {
 	// 按门槛从低到高
 	Tiers []PriceTier
 	// LongCacheWriteFactor：写进留得久的缓存的输入（ReplyUsage.CacheWriteLongTokens）按那一档输入价的几倍算
-	// （价格目录里没有这一项，由装配处按厂商填）；0 = 和一般的缓存写同价
+	// （目录里没有这一项，internal/pricecatalog 按厂商填）；0 = 和一般的缓存写同价
 	LongCacheWriteFactor float64
 }
 

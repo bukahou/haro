@@ -143,7 +143,7 @@ type frontShared struct {
 	home         weather.HomeLocator
 	openMeteo    *weather.OpenMeteoClient
 	forecaster   weather.Forecaster
-	searcher     *tools.TavilySearcher
+	searcher     webSearchService
 	pricing      spending.Pricing
 	api          *llm.ClaudeAPI
 	localURL     string
@@ -166,7 +166,7 @@ func TestFrontEvalRun(t *testing.T) {
 	if err := env.Parse(&settings); err != nil {
 		t.Fatal(err)
 	}
-	settings.Tools, settings.Weather = true, true
+	settings.ToolGroups = nil // 内置工具全开
 	if settings.CloudLLMModel == "" {
 		t.Fatal("要设 HARO_CLOUD_LLM_MODEL（线上前台用的模型）")
 	}

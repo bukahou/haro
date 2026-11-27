@@ -42,15 +42,28 @@ func TestBriefOnlyOnHolidays(t *testing.T) {
 		t.Fatal(err)
 	}
 	for now, want := range map[string][]string{
-		"2026-11-22": {"明天是日本的节假日：Labor Thanksgiving Day。"},
-		"2026-09-21": {"今天是日本的节假日：Respect for the Aged Day。",
-			"明天是日本的节假日：National holiday between Respect for the Aged Day and Autumnal Equinox Day。"},
+		"2026-11-22": {"明天是节假日（JP）：Labor Thanksgiving Day。"},
+		"2026-09-21": {"今天是节假日（JP）：Respect for the Aged Day。",
+			"明天是节假日（JP）：National holiday between Respect for the Aged Day and Autumnal Equinox Day。"},
 		"2026-11-25": nil,
 	} {
 		at := day(t, now).Add(10 * time.Hour)
 		calendar.now = func() time.Time { return at }
 		if got := calendar.Brief(""); !slices.Equal(got, want) {
 			t.Errorf("%s：%q，应是 %q", now, got, want)
+		}
+	}
+}
+
+// 别的国家只改配置：库里有全国节假日的都登记了（例如美国的独立日、德国的统一日）。
+func TestOtherCountries(t *testing.T) {
+	for code, date := range map[string]string{"US": "2026-07-03", "de": "2026-10-03"} {
+		calendar, err := ForCountry(code)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if name, ok := calendar.Holiday(day(t, date)); !ok {
+			t.Errorf("%s 的 %s 应是节假日：%q", code, date, name)
 		}
 	}
 }

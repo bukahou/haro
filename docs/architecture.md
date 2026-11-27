@@ -64,7 +64,7 @@ haro 是一个家用语音助手：家里每个房间放一台**终端**（麦�
 | `StreamingRecognizer` | `internal/speech`：按 `HARO_ASR_URL` 连 haro-asr（或其他照 OpenAI Realtime 转写会话的服务） |
 | `ChatModel` | `internal/llm`：Claude API（官方 SDK）、OpenAI 兼容接口（官方 openai-go；本地 Ollama 走它的兼容端点），本地和云端按配置二选一、不自动互相顶替。请求可以「工具照给、这轮不许调用」（提示词缓存不失效）；输出到上限（或上下文满了）时明确报「被截断」；流要么交代为什么停，要么报错：连接正常关掉却没收到结束标志按连不上算，停下的原因认不出或没交代的不当成说完；需要预热的模型另实现 `ModelWarmer`。三个适配跑同一组契约测试（`internal/llm/contract_test.go`） |
 | `SpeechSynthesizer` | `internal/speech`：GPT-SoVITS（边合成边播放）、Piper。两种实现跑同一组契约测试（`internal/speech/synthesizer_contract_test.go`） |
-| `Toolbox` | `internal/tools`：内置工具 + 第三方 MCP 服务 |
+| `Toolbox` | `internal/tools`：内置工具 + 外部 MCP 服务（配置文件里列出） |
 | `ConversationStore` | `internal/conversationstore`：SQLite（goose 迁移）；每一轮带说话的时间，发给模型时每轮前标日期和时刻 |
 | `Briefer` | 每轮补充给模型的即时情况：现在几号几点、主人家大致在哪（城市级）、额度提醒、后台调查的任务板、错过的提醒 |
 
@@ -108,7 +108,8 @@ haro 是一个家用语音助手：家里每个房间放一台**终端**（麦�
 
   附上的情况（任务板、额度提醒、错过的提醒）主人听完那一轮才算告诉了；那一轮被打断就下一轮再附上，
   但最多再附上一次（`brain.BriefingCuts`，再附上时说明上次被打断了），又被打断就当告诉过了。
-  这几段很少变；每轮会变的内容（时间、离上一次说话过了多久、今天和明天是不是节假日（`HARO_HOLIDAYS` 设了国家时，`internal/holidays`）、
+  这几段很少变；每轮会变的内容（时间、离上一次说话过了多久、今天和明天是不是节假日（`HARO_HOLIDAYS` 设了国家时，`internal/holidays`：
+  规则用 rickar/cal，库里有全国节假日的 47 国都登记了）、
   位置、谁在说话、任务板）附在这一轮主人的话前面——
   支持提示词缓存的模型按开头复用，本地模型也不用每轮从头处理；历史里只存主人的原话。
   主人资料每轮都发给模型：写事实与偏好（住址、通勤、家里的机器、常用的名字都可以），不写密码、银行卡和账户号、证件号码、
@@ -118,7 +119,17 @@ haro 是一个家用语音助手：家里每个房间放一台**终端**（麦�
 
 ### 工具
 
-自研工具注册在服务端进程内的 MCP 服务上（参数、结果由结构体定义，调用前校验；每个工具标明只读 / 会改数据 / 会破坏）；第三方服务只接远程 Streamable HTTP。
+自研工具注册在服务端进程内的 MCP 服务上（参数、结果由结构体定义，调用前校验；每个工具标明只读 / 会改数据 / 会破坏），按组开关
+（`HARO_TOOLS`：`memory` 记事与长期记忆、`reminders`、`weather`、`search` 前台的搜索和读网页、`research` 后台调查；不设 = 全开，`none` = 都不要；
+组名只在 `internal/config` 定义一处）。看画面的专家查资料用同一个搜索服务（设了密钥就有），不算前台的工具组。
+
+外部的 MCP 服务不改代码就能接上、拿掉：列在 `HARO_MCP_SERVERS_FILE` 里（`internal/tools/remote_servers.go`），格式照 Claude Code 的 `.mcp.json`
+（`mcpServers` → 名字 → `type` / `url` / `headers`），另加两项：`tools` 是允许名单（必填，服务那边别的工具不交给模型），
+`confirm` 是另外要主人确认的工具。`url`、`headers` 里的 `${名字}` 启动时换成环境变量的值（凭证不写进文件，没设就起不来）。
+只支持 Streamable HTTP（服务都单独运行，服务端不在本机拉起程序）。启动时各连一次：连不上不影响启动，后台按退避重连，
+连上后它的工具才出现在清单里；用着断了，当次重连再试一次（和联网搜索共用一份连接代码）。
+要不要主人确认 = 服务标了会破坏（按 MCP 规范，没标注的、非只读的都算）**或** `confirm` 里列了；配置只能加、不能免。
+和内置工具重名就起不来。每次调用写一行日志（服务、工具、用时、成没成功）；外部工具不花钱的不记账。
 会破坏的工具（和提高月度上限）执行时要带着主人的确认（确认闸放进去的 `brain.Confirmation`），工具箱和额度那一层自己核对，见不到就不执行。
 工具箱执行前还按工具的参数定义校验参数。参数不对的（工具箱拦下的，或工具自己报的 `brain.ErrInvalidArguments`：格式不对、取值之间对不上、
 编号指向的东西没有）交给模型时附注叫它改正参数、这一轮就重调；其他错误（连不上、超时、上游一时出错）附注说多半是暂时的。
@@ -145,7 +156,7 @@ haro 是一个家用语音助手：家里每个房间放一台**终端**（麦�
 
 ### 天气的备用来源（`internal/weather`）
 
-Open-Meteo 连不上或报错时，日本境内的地点改查日本气象厅网站的数据（`HARO_WEATHER_BACKUP=jma`，默认开；`none` 关掉）：
+Open-Meteo 连不上或报错时，日本境内的地点改查日本气象厅网站的数据（`HARO_WEATHER_BACKUP=jma`；跟部署的地方有关，没有默认值，不设 = 不用备用）：
 
 - 内容：短期预报（三天，天气是气象厅的日语原文）+ 周间预报（到第 7 天）+ 附近观测站的实况（最近的站缺测时用下一个）。
   没有体感温度与降水量预报；交给模型的结果里注明来源。
@@ -165,7 +176,7 @@ v10（2026-11-22 裁定）：记住的事和以前的对话都能按意思找回
 - **由模型调工具写**（`remember` / `forget`）；只有声纹认出的这句能记、恢复，忘掉过确认闸。不记住址、健康、证件、密码一类（写在工具说明里）。
 - **常驻记忆**（称呼、忌口这类）每轮附在情况说明里（不进系统提示词，提示词缓存不受影响）：新的在前，最多 15 条、一共 400 字。
 - **按意思找**（`recall`）：嵌入模型把文字变成向量（`internal/embedding`：OpenAI 兼容的嵌入接口，`HARO_EMBEDDING_*`；集群里是
-  Text Embeddings Inference 跑 `intfloat/multilingual-e5-small`，e5 要的「query: / passage: 」前缀是配置项）。
+  Text Embeddings Inference 跑 `intfloat/multilingual-e5-small`；模型名和 e5 要的「query: / passage: 」前缀都是配置项，程序里没有默认值）。
   向量存在 SQLite（记事库的 `note_vectors`、对话库的 `transcript_vectors`），检索在服务端内存里逐条算余弦相似度（`memory.Index`）：
   家里的规模一次几毫秒，不加依赖、不改构建。⚠️ 对话超过约 10 万轮、或一次检索超过 50 ms 时换 PostgreSQL + pgvector（只换 `Index` 后面的实现）。
   一次给模型最像的记住的事 5 条、以前的对话 3 轮，相关不相关由模型判断。
@@ -282,7 +293,7 @@ VAD 的门槛和静音时长（haro-asr 的 `asrserver.Timing`）。
 - `anthropic`（默认）：Claude API（官方 Go SDK `anthropic-sdk-go`）。`HARO_CLOUD_LLM_MODEL` 例如 `claude-haiku-5-5`；
   对话的思考关掉求快，回答力度用 `HARO_CLOUD_LLM_EFFORT`（聊天、摘要）/ `HARO_RESEARCH_EFFORT`（后台调查：查资料和审查，思考另见上文「后台调查」）；
   开着提示词缓存，缓存读写按模型价格目录里的单价分开记账。对话的缓存留 `HARO_CLOUD_LLM_CACHE_TTL`（默认 1 小时；
-  写进 1 小时缓存的按输入价的 2 倍记，目录里只有 5 分钟的价），后台调查一步接一步地请求，用 5 分钟的。
+  写进 1 小时缓存的按输入价的 2 倍记：目录里只有 5 分钟的价，倍数由 `internal/pricecatalog` 按厂商补上），后台调查一步接一步地请求，用 5 分钟的。
   凭证：`HARO_ANTHROPIC_API_KEY`；不填时只认配齐的 Workload Identity Federation（`ANTHROPIC_FEDERATION_RULE_ID`、
   `ANTHROPIC_ORGANIZATION_ID`、`ANTHROPIC_IDENTITY_TOKEN_FILE`：在 Kubernetes 里用服务账号令牌换短期令牌，不放长期密钥，
   配法见 Anthropic 文档「Use WIF with Kubernetes」），没配齐就起不来。不走 SDK 的默认凭证链：

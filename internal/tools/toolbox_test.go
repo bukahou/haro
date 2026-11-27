@@ -98,12 +98,12 @@ func TestToolboxReportsProgramVersion(t *testing.T) {
 	remote := httptest.NewServer(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, nil))
 	defer remote.Close()
 
-	box, err := NewToolbox(context.Background(), quietLogger)
+	builtin, err := startBuiltinServer(t.Context(), nil, quietLogger)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer box.Close()
-	if got := box.servers[0].session.InitializeResult().ServerInfo.Version; got != buildinfo.Version {
+	defer builtin.Close()
+	if got := builtin.session.InitializeResult().ServerInfo.Version; got != buildinfo.Version {
 		t.Errorf("内置服务报的版本：%q", got)
 	}
 	client, err := ConnectMCPServer(context.Background(), ServerSpec{Name: "fake", URL: remote.URL}, quietLogger) // 联网搜索走这条路

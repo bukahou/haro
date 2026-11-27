@@ -138,10 +138,6 @@ const (
 	CacheTTL1h = string(anthropic.CacheControlEphemeralTTLTTL1h)
 )
 
-// ClaudeLongCacheWriteFactor 是写进 1 小时缓存的输入按普通输入价的几倍算（5 分钟缓存是 1.25 倍，写在价格目录里；
-// 1 小时的目录里没有）。价格表用它算 ReplyUsage.CacheWriteLongTokens 的钱。
-const ClaudeLongCacheWriteFactor = 2.0
-
 // ValidateClaudeCacheTTL 检查缓存留多久（空 = 默认的 5 分钟）。
 func ValidateClaudeCacheTTL(ttl string) error {
 	if !slices.Contains([]string{"", CacheTTL5m, CacheTTL1h}, ttl) {
