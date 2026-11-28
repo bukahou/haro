@@ -1,6 +1,7 @@
 package calendar
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"embed"
@@ -126,6 +127,32 @@ func (s *Store) recordSync(ctx context.Context, person, calendar, name string, a
 	_, err := s.db.ExecContext(ctx, `INSERT INTO calendar_syncs (person, calendar, name, synced_at) VALUES (?, ?, ?, ?)
 		ON CONFLICT (person, calendar) DO UPDATE SET name = excluded.name, synced_at = excluded.synced_at`, person, calendar, name, at.Unix())
 	return err
+}
+
+// unsync 去掉一个系统日历同步进来的日程、删掉它的同步记录（同一个事务）；返回去掉了几条。没同步过时 ErrNotFound。
+func (s *Store) unsync(ctx context.Context, person, calendar string, at time.Time) (int64, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	record, err := tx.ExecContext(ctx, `DELETE FROM calendar_syncs WHERE person = ? AND calendar = ?`, person, calendar)
+	if err != nil {
+		return 0, err
+	}
+	if n, err := record.RowsAffected(); err != nil || n == 0 {
+		return 0, cmp.Or(err, ErrNotFound)
+	}
+	events, err := tx.ExecContext(ctx, `UPDATE events SET deleted_at = ?, updated_at = ? WHERE person = ? AND source = ? AND calendar = ?
+		AND deleted_at IS NULL`, at.Unix(), at.Unix(), person, SourceSystem, calendar)
+	if err != nil {
+		return 0, err
+	}
+	removed, err := events.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return removed, tx.Commit()
 }
 
 // Sync 是一个系统日历最近一次同步。

@@ -83,9 +83,9 @@ func (s *Service) Run(ctx context.Context) {
 	}
 }
 
-// Prune 清过期的小票：交上来 receiptRetention 以后还没确认的连原图一起删；确认过的只删记录（原图跟着账目）。
+// Prune 清过期的小票：交上来 ReceiptRetention 以后还没确认的连原图一起删；确认过的只删记录（原图跟着账目）。
 func (s *Service) Prune(ctx context.Context) error {
-	stale, err := s.store.staleReceipts(ctx, s.now().Add(-receiptRetention))
+	stale, err := s.store.staleReceipts(ctx, s.now().Add(-ReceiptRetention))
 	if err != nil {
 		return err
 	}

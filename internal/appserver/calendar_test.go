@@ -84,6 +84,20 @@ func TestCalendarOverHTTP(t *testing.T) {
 	if syncs := f.list(t, "/api/v1/calendar/syncs", "zh"); len(syncs) != 1 || syncs[0]["name"] != "工作" {
 		t.Errorf("上次同步：%v", syncs)
 	}
+	if status, _ := f.call(t, "DELETE", "/api/v1/calendar/syncs/work-1", key, ""); status != 204 {
+		t.Errorf("不再同步：%d", status)
+	}
+	for _, occurrence := range f.list(t, window, "zh") {
+		if occurrence["event"].(map[string]any)["source"] == "system" {
+			t.Errorf("不再同步后它的日程应去掉：%v", occurrence)
+		}
+	}
+	if syncs := f.list(t, "/api/v1/calendar/syncs", "zh"); len(syncs) != 0 {
+		t.Errorf("同步记录应删掉：%v", syncs)
+	}
+	if status, _ := f.call(t, "DELETE", "/api/v1/calendar/syncs/work-1", key, ""); status != 404 {
+		t.Errorf("没同步过的：%d", status)
+	}
 	bad := fmt.Sprintf(`{"title":"错","start":%q,"end":%q,"all_day":false,"rrule":"FREQ=NEVER","alerts":[],"alert_terminal":true,"alert_phone":true}`,
 		start.Format(time.RFC3339), start.Format(time.RFC3339))
 	if status, body := f.call(t, "POST", "/api/v1/calendar/events", key, bad); status != 400 || body["code"] != "validation_failed" {

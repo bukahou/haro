@@ -11,6 +11,7 @@ import (
 	"github.com/bukahou/haro/internal/accounts"
 	"github.com/bukahou/haro/internal/appapi"
 	"github.com/bukahou/haro/internal/calendar"
+	"github.com/bukahou/haro/internal/expenses"
 	"github.com/bukahou/haro/internal/money"
 	"github.com/bukahou/haro/internal/spending"
 )
@@ -116,6 +117,7 @@ func (s *Server) GetClientConfig(ctx context.Context, _ appapi.GetClientConfigRe
 	config := appapi.ClientConfig{ServerVersion: serverVersion(), ApiVersion: s.spec.Info.Version, MinAppVersion: s.opts.MinAppVersion,
 		Limits: appapi.Limits{ProfileMaxChars: s.opts.ProfileMaxChars, PageSize: pageSize, AttachmentMaxBytes: attachmentMaxBytes,
 			CalendarSyncDaysBack: calendarSyncDaysBack, CalendarSyncDaysAhead: calendarSyncDaysAhead,
+			ReceiptKeepDays:     int(expenses.ReceiptRetention / (24 * time.Hour)),
 			DisplayNameMaxChars: s.maxLength("MeUpdate", "display_name"), TerminalNameMaxChars: s.maxLength("TerminalUpdate", "name")},
 		CalendarAlertOptions: make([]int, 0, len(calendar.AlertChoices))}
 	for _, lead := range calendar.AlertChoices {

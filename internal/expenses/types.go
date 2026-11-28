@@ -31,8 +31,9 @@ const (
 	parseConcurrency = 2  // 同时解析几张（所有人一起）
 	MaxPending       = 10 // 一个人同时在解析的小票最多几张
 	parseTimeout     = 2 * time.Minute
-	// receiptRetention：交上来以后这么久还没确认的小票连原图一起删；确认过的小票记录也删（原图跟着账目走，留着）
-	receiptRetention = 30 * 24 * time.Hour
+	// ReceiptRetention：交上来以后这么久还没确认的小票连原图一起删；确认过的小票记录也删（原图跟着账目走，留着）。
+	// App 经 client-config 拿到它（按天）
+	ReceiptRetention = 30 * 24 * time.Hour
 	pruneEvery       = 24 * time.Hour
 )
 
