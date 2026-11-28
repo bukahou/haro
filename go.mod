@@ -5,20 +5,25 @@ go 1.27
 require (
 	github.com/anthropics/anthropic-sdk-go/v2 v2.13.0
 	github.com/blackjack/webcam v0.6.2
+	github.com/bukahou/akasha/pkg/oidcrp v0.1.0
 	github.com/caarlos0/env/v11 v11.4.2
 	github.com/coder/websocket v1.8.15
 	github.com/failsafe-go/failsafe-go v0.9.8
 	github.com/gen2brain/malgo v0.11.28
+	github.com/getkin/kin-openapi v0.153.0
 	github.com/go-audio/audio v1.0.0
 	github.com/go-audio/wav v1.1.0
 	github.com/google/jsonschema-go v0.4.3
 	github.com/k2-fsa/sherpa-onnx-go/v2 v2.0.2
 	github.com/modelcontextprotocol/go-sdk v1.8.0
+	github.com/oapi-codegen/nethttp-middleware v1.3.1
+	github.com/oapi-codegen/runtime v1.9.1
 	github.com/openai/openai-go/v3 v3.105.0
 	github.com/pion/mediadevices v0.10.1
 	github.com/pressly/goose/v3 v3.30.1
 	github.com/rickar/cal/v2 v2.1.34
 	github.com/rivo/uniseg v0.4.7
+	github.com/rs/cors v1.11.1
 	github.com/teambition/rrule-go v1.8.2
 	github.com/yalue/onnxruntime_go v1.32.1
 	go.opentelemetry.io/otel v1.47.0
@@ -32,6 +37,7 @@ require (
 	golang.org/x/image v0.48.0
 	golang.org/x/sync v0.25.0
 	golang.org/x/text v0.44.0
+	golang.org/x/time v0.15.0
 	gonum.org/v1/gonum v0.17.0
 	modernc.org/sqlite v1.62.0
 )
@@ -41,12 +47,10 @@ require (
 	github.com/bahlo/generic-list-go v0.2.0 // indirect
 	github.com/bits-and-blooms/bitset v1.24.4 // indirect
 	github.com/buger/jsonparser v1.1.2 // indirect
-	github.com/bukahou/akasha/pkg/oidcrp v0.1.0 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/coreos/go-oidc/v3 v3.20.0 // indirect
 	github.com/dustin/go-humanize v1.1.0 // indirect
-	github.com/getkin/kin-openapi v0.153.0 // indirect
 	github.com/go-audio/riff v1.0.0 // indirect
 	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
 	github.com/go-logr/logr v1.4.4 // indirect
@@ -62,9 +66,7 @@ require (
 	github.com/mattn/go-isatty v0.0.24 // indirect
 	github.com/mfridman/interpolate v0.2.0 // indirect
 	github.com/ncruces/go-strftime v1.1.0 // indirect
-	github.com/oapi-codegen/nethttp-middleware v1.3.1 // indirect
 	github.com/oapi-codegen/oapi-codegen/v2 v2.9.0 // indirect
-	github.com/oapi-codegen/runtime v1.9.1 // indirect
 	github.com/oasdiff/yaml v0.1.3 // indirect
 	github.com/oasdiff/yaml3 v0.0.16 // indirect
 	github.com/pb33f/ordered-map/v2 v2.3.1 // indirect
@@ -91,7 +93,6 @@ require (
 	golang.org/x/net v0.63.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
 	golang.org/x/sys v0.50.0 // indirect
-	golang.org/x/time v0.15.0 // indirect
 	golang.org/x/tools v0.53.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20261110000943-09e21b237f2c // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20261110000943-09e21b237f2c // indirect

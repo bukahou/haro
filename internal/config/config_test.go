@@ -565,3 +565,20 @@ func TestToolGroupsFromEnvironment(t *testing.T) {
 		t.Errorf("HARO_WEATHER=true 只是多余，不该起不来：%v", err)
 	}
 }
+
+// 网页版的地址：要开着 App 的接口，只写 http(s)://主机[:端口]。
+func TestValidateAppWebURL(t *testing.T) {
+	app := ServerSettings{AppPublicURL: "https://api.example.com", OIDCIssuer: "https://id.example.com", AccountsDB: "/data/a.db",
+		OIDCClientID: "haro", OIDCClientSecret: "secret", OIDCCookieSecret: strings.Repeat("x", 32)}
+	for webURL, wantErr := range map[string]bool{"": false, "https://web.example.com": false, "https://web.example.com/": false,
+		"http://localhost:3000": false, "https://web.example.com/app": true, "web.example.com": true, "https://web.example.com/?x=1": true} {
+		settings := app
+		settings.AppWebURL = webURL
+		if err := settings.validateAppAPI(); (err != nil) != wantErr {
+			t.Errorf("%q: %v", webURL, err)
+		}
+	}
+	if err := (ServerSettings{AppWebURL: "https://web.example.com"}).validateAppAPI(); err == nil {
+		t.Error("没开 App 的接口却设了网页版应报错")
+	}
+}

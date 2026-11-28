@@ -52,7 +52,7 @@ func buildAppAPI(ctx context.Context, settings config.ServerSettings, deps servi
 	go pruneTokens(ctx, store, logger)
 	options := appserver.Options{Accounts: store, Spending: deps.guard, Terminals: online, DefaultCurrency: settings.Currency(),
 		MinAppVersion: settings.AppMinVersion, CapOptions: settings.MonthlyCapOptions(), ProfileMaxChars: profile.MaxRunes,
-		Logger: logger.With("component", "app-api"),
+		WebURL: settings.AppWebURL, Logger: logger.With("component", "app-api"),
 		Login: &appserver.LoginOptions{Issuer: settings.OIDCIssuer, ClientID: settings.OIDCClientID,
 			ClientSecret: settings.OIDCClientSecret, CookieSecret: settings.OIDCCookieSecret, PublicURL: settings.AppPublicURL}}
 	if kit.memory != nil {
@@ -65,7 +65,8 @@ func buildAppAPI(ctx context.Context, settings config.ServerSettings, deps servi
 	if err != nil {
 		return nil, err
 	}
-	logger.Info("App 的接口：/api/v1/（登录经 akasha）", "public_url", settings.AppPublicURL, "issuer", settings.OIDCIssuer)
+	logger.Info("App 的接口：/api/v1/（登录经 akasha）", "public_url", settings.AppPublicURL, "issuer", settings.OIDCIssuer,
+		"web_url", settings.AppWebURL)
 	return handler, nil
 }
 

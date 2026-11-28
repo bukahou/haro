@@ -204,6 +204,7 @@ type ServerSettings struct {
 	OIDCClientID      string `env:"HARO_OIDC_CLIENT_ID"`                     // 在 akasha 注册的 haro 客户端
 	OIDCClientSecret  string `env:"HARO_OIDC_CLIENT_SECRET"`                 // 凭证
 	OIDCCookieSecret  string `env:"HARO_OIDC_COOKIE_SECRET"`                 // 给登录流程的状态 cookie 签名（凭证，至少 32 个字符）
+	AppWebURL         string `env:"HARO_APP_WEB_URL"`                        // 网页版的公开根地址（例如 https://haro-web.example.com）：放行它跨域调接口、登录完回它；空 = 没有网页版
 	AdminSubject      string `env:"HARO_ADMIN_SUBJECT"`                      // 管理员在 akasha 的 sub（信任的根）；不知道时先空着，第一次登录的日志里有
 	AdminPerson       string `env:"HARO_ADMIN_PERSON"`                       // 管理员原来的声纹名（现有的对话、记忆按它存）；设了 HARO_ADMIN_SUBJECT 就必须设
 	AdminName         string `env:"HARO_ADMIN_NAME"`                         // 管理员的显示名；空 = 用声纹名
@@ -593,6 +594,21 @@ func requireHTTPURL(name, value, what string) error {
 	return nil
 }
 
+// requireWebOrigin 检查网页版的地址：空（没有网页版），或只有 http(s)://主机[:端口]（跨域按它放行，回调页接在它后面）。
+func requireWebOrigin(value string) error {
+	if value == "" {
+		return nil
+	}
+	if err := requireHTTPURL("HARO_APP_WEB_URL", value, "网页版的公开根地址"); err != nil {
+		return err
+	}
+	parsed, _ := url.Parse(value)
+	if (parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.User != nil {
+		return fmt.Errorf("HARO_APP_WEB_URL 只写 http(s)://主机[:端口]（不带路径、参数），现在是 %q", value)
+	}
+	return nil
+}
+
 // cloudLLMReady 按接口格式检查云端模型的配置齐不齐；返回的说明接在「…时」后面。
 func (s ServerSettings) cloudLLMReady() error {
 	switch s.CloudLLMAPI {
@@ -692,7 +708,13 @@ func (s ServerSettings) MonthlyCapOptions() []float64 {
 // validateAppAPI 检查 App 接口的配置：开了就要有账号库、akasha 的地址和凭证；设了管理员就要有他原来的声纹名。
 func (s ServerSettings) validateAppAPI() error {
 	if !s.AppAPIEnabled() {
+		if s.AppWebURL != "" {
+			return fmt.Errorf("设了 HARO_APP_WEB_URL 就要开 App 的接口（HARO_APP_PUBLIC_URL）：网页版调的是它")
+		}
 		return nil
+	}
+	if err := requireWebOrigin(s.AppWebURL); err != nil {
+		return err
 	}
 	if err := requireHTTPURL("HARO_APP_PUBLIC_URL", s.AppPublicURL, "App 连的公网根地址"); err != nil {
 		return err

@@ -1,6 +1,6 @@
 // Package appserver 是 App 接口的服务端（契约 api/openapi.yaml，接口代码由 internal/appapi 生成）。
 //
-// 入口的顺序（G9）：先限量（请求体上限、限流）→ 再按契约校验请求、对要登录的接口验令牌 → 再做事。
+// 入口的顺序（G9）：先限量（请求体上限、限流）→ 再按契约校验请求、对要登录的接口验令牌 → 再做事；网页版的跨域在限流外面一层。
 // 每个请求先解析成账号，接口只用这个账号的「人」取数据（隔离只在这一处做，见 internal/accounts）。
 package appserver
 
@@ -74,6 +74,7 @@ type Options struct {
 	CapOptions      []float64     // 管理员定月上限的可选档位（默认货币）
 	ProfileMaxChars int           // 主人资料最多多少字
 	Login           *LoginOptions // nil = 不开登录（测试）
+	WebURL          string        // 网页版的公开根地址：放行它跨域调接口、登录完回它的回调页；空 = 没有网页版
 	Logger          *slog.Logger
 }
 
@@ -129,7 +130,12 @@ func NewHandler(ctx context.Context, opts Options) (http.Handler, error) {
 	})
 	generated := appapi.HandlerWithOptions(strict, appapi.StdHTTPServerOptions{BaseRouter: http.NewServeMux()})
 	mux.Handle(PathPrefix, limiter.wrap(validator(generated), server))
-	return server.outermost(mux), nil
+	// 跨域套在限流外面：被限流、出错的回答也带上跨域的头，网页版才读得到 429 / problem（预检由 cors 直接回）
+	withCrossOrigin, err := crossOrigin(spec, opts.WebURL, mux)
+	if err != nil {
+		return nil, err
+	}
+	return server.outermost(withCrossOrigin), nil
 }
 
 // outermost 是最外层：请求体上限、放一个空的 caller。
