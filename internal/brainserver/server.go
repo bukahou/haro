@@ -78,6 +78,10 @@ type Options struct {
 	Online      *OnlineTerminals // 记现在连着的 haro 终端（nil = 不记）
 	// Terminals 验设备凭证；nil = 没有账号库：带了凭证的连接一律拒绝（不能当成没带）
 	Terminals Authenticator
+	// RequireCredential：这个入口（公网的）只收带着有效设备凭证的 haro 终端：没带凭证的、普通 Realtime 客户端一律拒绝
+	RequireCredential bool
+	// MaxOnlinePerAccount 是一个账号同时连着几台终端（管理员不限）；0 = 不限。多了握手回 too_many_sessions
+	MaxOnlinePerAccount int
 }
 
 // haroProtocolPrefix 是 haro 各版本子协议名的共同开头。
@@ -200,11 +204,11 @@ func serveConversation(w http.ResponseWriter, r *http.Request, newSession Sessio
 	}
 
 	if protocol == realtimeproto.Protocol && opts.Online != nil {
-		terminalID := ""
+		terminalID, accountID := "", ""
 		if identity != nil {
-			terminalID = identity.TerminalID
+			terminalID, accountID = identity.TerminalID, identity.AccountID
 		}
-		id := opts.Online.add(terminalVersion, terminalID, func() {
+		id := opts.Online.add(terminalVersion, terminalID, accountID, func() {
 			_ = conn.Close(websocket.StatusPolicyViolation, "这台终端已在 App 里移除")
 			cancel()
 		})
@@ -279,6 +283,12 @@ func serveConversation(w http.ResponseWriter, r *http.Request, newSession Sessio
 func authenticate(w http.ResponseWriter, r *http.Request, opts Options, version string, logger *slog.Logger) (*Identity, bool) {
 	header := r.Header.Get("Authorization")
 	if header == "" || !slices.Contains(websocketProtocols(r), realtimeproto.Protocol) {
+		if opts.RequireCredential {
+			logger.Warn("拒绝连接：这个入口要设备凭证（没带、或者不是 haro 终端）", "remote", r.RemoteAddr)
+			writeHTTPError(w, http.StatusUnauthorized, realtimeproto.NewHTTPError(http.StatusUnauthorized,
+				realtimeproto.CodeInvalidCredential, "这个入口要设备凭证：先配对这台终端（haro -pair）"))
+			return nil, false
+		}
 		return nil, true
 	}
 	credential, found := strings.CutPrefix(header, "Bearer ")
@@ -300,6 +310,13 @@ func authenticate(w http.ResponseWriter, r *http.Request, opts Options, version 
 		logger.Error("验设备凭证出错", "remote", r.RemoteAddr, "err", err)
 		writeHTTPError(w, http.StatusInternalServerError, realtimeproto.NewHTTPError(http.StatusInternalServerError,
 			realtimeproto.CodeServerError, "服务端验设备凭证出错：稍后再连"))
+		return nil, false
+	}
+	if limit := opts.MaxOnlinePerAccount; limit > 0 && !identity.Admin && opts.Online != nil &&
+		opts.Online.AccountCount(identity.AccountID) >= limit { // 握手前查（不是精确的锁：同时连进来的几台可能多出一台）
+		logger.Warn("拒绝连接：这个账号同时连着的终端到了上限", "remote", r.RemoteAddr, "account", identity.AccountID, "limit", limit)
+		writeHTTPError(w, http.StatusTooManyRequests, realtimeproto.NewHTTPError(http.StatusTooManyRequests,
+			realtimeproto.CodeTooManySessions, "这个账号同时连着的终端太多了：过一会儿再连"))
 		return nil, false
 	}
 	logger.Info("终端带着设备凭证连进来", "remote", r.RemoteAddr, "terminal", identity.TerminalID, "account", identity.AccountID)

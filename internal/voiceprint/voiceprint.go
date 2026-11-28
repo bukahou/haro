@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"math"
 	"os"
 	"path/filepath"
@@ -191,4 +192,15 @@ func Cosine(a, b []float32) float64 {
 		return 0
 	}
 	return dot / (math.Sqrt(normA) * math.Sqrt(normB))
+}
+
+// Remove 删掉 dir/<名字>.json（彻底删账号时）；本来就没有不算错。
+func Remove(dir, name string) error {
+	if err := CheckName(name); err != nil {
+		return err
+	}
+	if err := os.Remove(filepath.Join(dir, name+".json")); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return nil
 }

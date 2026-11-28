@@ -29,3 +29,14 @@ func TestResidents(t *testing.T) {
 		t.Error("没认出的照旧")
 	}
 }
+
+// 别的账号的终端：声纹报的是本人的声纹名（account-<编号>）时算本人、算声纹确认；别的声音算访客。
+func TestResidentsOwnerVoice(t *testing.T) {
+	r := Residents{Owner: "account:a1", Guest: "account:a1:guest", OwnerVoice: "account-a1"}
+	if got := r.personFor("account-a1"); got != "account:a1" || !r.verified("account-a1") {
+		t.Errorf("本人：%q %v", got, r.verified("account-a1"))
+	}
+	if got := r.personFor("主人"); got != "account:a1:guest" || r.verified("主人") {
+		t.Errorf("别人：%q %v", got, r.verified("主人"))
+	}
+}

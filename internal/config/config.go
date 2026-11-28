@@ -289,7 +289,11 @@ type ServerSettings struct {
 	MaxSegmentRunes      int `env:"HARO_MAX_SEGMENT_RUNES" envDefault:"40"`      // 超过这么多词还没断开就切（要大于 0）
 
 	// 终端 ↔ 服务端：默认都在本机，服务端只监听本机；终端在别的机器上时改监听地址（只在可信网络里）
-	ServerListen string `env:"HARO_SERVER_LISTEN" envDefault:"127.0.0.1:59130"` // haro-server 监听地址
+	ServerListen string `env:"HARO_SERVER_LISTEN" envDefault:"127.0.0.1:59130"` // haro-server 监听地址（局域网的入口：没配对的旧终端照旧能连）
+	// 公网的入口（例如 :59131；空 = 不开）：公网的路由只指它。这里语音连接、登记声纹都要设备凭证；登记终端、App 的接口照常
+	PublicListen string `env:"HARO_PUBLIC_LISTEN"`
+	// 一个账号同时连着几台终端（管理员不限）；0 = 不限
+	TerminalMaxOnline int `env:"HARO_TERMINAL_MAX_ONLINE" envDefault:"3"`
 
 	// 其他：普通 HTTP 请求、每次模型请求的总期限（要大于 0）
 	RequestTimeout time.Duration `env:"HARO_REQUEST_TIMEOUT" envDefault:"120s"`
@@ -562,6 +566,15 @@ func (settings ServerSettings) validateResearch() error {
 func (settings ServerSettings) validateListen() error {
 	if settings.ServerListen == "" {
 		return fmt.Errorf("必须设 HARO_SERVER_LISTEN（haro-server 的监听地址）")
+	}
+	if settings.PublicListen != "" && settings.PublicListen == settings.ServerListen {
+		return fmt.Errorf("HARO_PUBLIC_LISTEN 和 HARO_SERVER_LISTEN 不能是同一个地址（公网的入口要单独一个）")
+	}
+	if settings.PublicListen != "" && settings.AccountsDB == "" {
+		return fmt.Errorf("开公网的入口（HARO_PUBLIC_LISTEN）要有账号库（HARO_ACCOUNTS_DB）：那里只收配对过的终端")
+	}
+	if settings.TerminalMaxOnline < 0 {
+		return fmt.Errorf("HARO_TERMINAL_MAX_ONLINE 不能是负数，现在是 %d", settings.TerminalMaxOnline)
 	}
 	return nil
 }

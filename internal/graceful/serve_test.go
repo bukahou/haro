@@ -103,3 +103,45 @@ func TestServeReportsServeFailure(t *testing.T) {
 		t.Errorf("提供不了服务时应返回错误、没有会话：drained=%v err=%v", drained, err)
 	}
 }
+
+// 两个入口：都能用；有一个提供不了服务时另一个也关掉、返回那个错误。
+func TestServeAllEndpoints(t *testing.T) {
+	first, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	served := make(chan error, 1)
+	go func() {
+		_, err := ServeAll(ctx, []Endpoint{{Listener: first, Handler: http.NotFoundHandler()},
+			{Listener: second, Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusTeapot) })}},
+			Timing{Shutdown: time.Second, Drain: time.Second}, discard)
+		served <- err
+	}()
+	for address, want := range map[string]int{first.Addr().String(): http.StatusNotFound, second.Addr().String(): http.StatusTeapot} {
+		response, err := http.Get("http://" + address)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		if response.StatusCode != want {
+			t.Errorf("%s：%d", address, response.StatusCode)
+		}
+	}
+	cancel()
+	if err := <-served; err != nil {
+		t.Errorf("正常关停：%v", err)
+	}
+
+	broken, _ := net.Listen("tcp", "127.0.0.1:0")
+	broken.Close()
+	working, _ := net.Listen("tcp", "127.0.0.1:0")
+	if _, err := ServeAll(context.Background(), []Endpoint{{Listener: working, Handler: http.NotFoundHandler()},
+		{Listener: broken, Handler: http.NotFoundHandler()}}, Timing{Shutdown: time.Second, Drain: time.Second}, discard); err == nil {
+		t.Error("有一个提供不了服务时应返回错误")
+	}
+}

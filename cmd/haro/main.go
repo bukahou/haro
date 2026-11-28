@@ -209,7 +209,11 @@ func enroll(logger *slog.Logger, name string, appendMode bool, seconds time.Dura
 		return err
 	}
 	fmt.Printf("🎤 麦克风：%s（%s）\n服务端：%s\n", microphone.Name, microphone.Reason, settings.ServerURL)
-	return enrollment.Run(ctx, enrollment.Options{ServerURL: settings.ServerURL, Name: name,
+	credential, err := deviceCredential(settings, logger)
+	if err != nil {
+		return err
+	}
+	return enrollment.Run(ctx, enrollment.Options{ServerURL: settings.ServerURL, Credential: credential, Name: name,
 		Append: appendMode, Seconds: seconds, Recorder: local.OpenRecorder(microphone.ID), In: os.Stdin, Out: os.Stdout,
 		Client: &http.Client{Timeout: 60 * time.Second}})
 }

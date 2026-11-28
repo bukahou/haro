@@ -29,14 +29,16 @@ import (
 // Options 是一次登记的参数。要读的句子向服务端要（第一句以 haro-asr 关键词文件里的唤醒词开头，终端不配唤醒词）。
 type Options struct {
 	ServerURL string // 服务端的地址（同 HARO_SERVER_URL）
-	Name      string
-	Append    bool          // 补录（换了麦克风、换了位置时）
-	Seconds   time.Duration // 每句录多久
-	MinLevel  float64       // 一句的音量（RMS，0–1）低于这个就让用户重读；0 = DefaultMinLevel
-	Recorder  assistant.AudioRecorder
-	In        io.Reader // 按回车开始录（一般是 os.Stdin）
-	Out       io.Writer
-	Client    *http.Client
+	// Credential 是配对后存下的设备凭证（空 = 没配对：只有局域网的入口收）。别的账号的终端登记时，名字由服务端定（这里填的不算）
+	Credential string
+	Name       string
+	Append     bool          // 补录（换了麦克风、换了位置时）
+	Seconds    time.Duration // 每句录多久
+	MinLevel   float64       // 一句的音量（RMS，0–1）低于这个就让用户重读；0 = DefaultMinLevel
+	Recorder   assistant.AudioRecorder
+	In         io.Reader // 按回车开始录（一般是 os.Stdin）
+	Out        io.Writer
+	Client     *http.Client
 }
 
 // DefaultMinLevel 是默认的音量门槛（RMS）。定值，没有单独实测：约 -46 dBFS，只拦下几乎没录到声音的情况
@@ -121,6 +123,9 @@ func fetchSentences(ctx context.Context, opts Options) ([]string, error) {
 	}
 	request.Header.Set("User-Agent", buildinfo.UserAgent())
 	request.Header.Set(buildinfo.Header, buildinfo.Version)
+	if opts.Credential != "" {
+		request.Header.Set("Authorization", "Bearer "+opts.Credential)
+	}
 	response, err := opts.Client.Do(request)
 	if err != nil {
 		return nil, fmt.Errorf("连不上服务端 %s: %w", opts.ServerURL, err)
@@ -166,6 +171,9 @@ func upload(ctx context.Context, opts Options, clips []string) (realtimeproto.Vo
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("User-Agent", buildinfo.UserAgent())
 	request.Header.Set(buildinfo.Header, buildinfo.Version)
+	if opts.Credential != "" {
+		request.Header.Set("Authorization", "Bearer "+opts.Credential)
+	}
 	response, err := opts.Client.Do(request)
 	if err != nil {
 		return none, fmt.Errorf("连不上服务端 %s: %w", opts.ServerURL, err)

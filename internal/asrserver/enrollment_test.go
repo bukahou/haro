@@ -192,3 +192,37 @@ func TestEnrollmentScriptStartsWithWakePhrase(t *testing.T) {
 		t.Errorf("没有唤醒词时应 503：%d", recorder.Code)
 	}
 }
+
+// 删一份声纹（彻底删账号时服务端调）：盘上的删掉、立刻不再认；本来就没有也是 204；名字不合法 400。
+func TestVoiceprintDelete(t *testing.T) {
+	embedder := &switchableEmbedder{}
+	embedder.current.Store([]float32{1, 0, 0})
+	dir := t.TempDir()
+	speakers := &SpeakerCheck{Embedder: embedder, Threshold: 0.5, Dir: dir, Model: "campplus.onnx"}
+	handler := NewHandler(Dependencies{Speakers: speakers, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	clip := base64.StdEncoding.EncodeToString(make([]byte, 3200))
+	if response, _ := postEnrollment(t, handler, "account-a1", realtimeproto.VoiceprintEnrollment{Append: new(false),
+		Clips: []string{clip, clip}}); response.StatusCode != http.StatusOK {
+		t.Fatalf("登记：%d", response.StatusCode)
+	}
+	remove := func(name string) int {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodDelete, realtimeproto.VoiceprintPath+name, nil))
+		return recorder.Code
+	}
+	if status := remove("account-a1"); status != http.StatusNoContent {
+		t.Fatalf("删：%d", status)
+	}
+	if speakers.enabled() {
+		t.Error("删了以后不该再认")
+	}
+	if _, err := voiceprint.Load(dir, "account-a1"); err == nil {
+		t.Error("盘上的应删掉")
+	}
+	if status := remove("account-a1"); status != http.StatusNoContent {
+		t.Errorf("再删一次：%d", status)
+	}
+	if status := remove("a:b"); status != http.StatusBadRequest {
+		t.Errorf("名字不合法：%d", status)
+	}
+}

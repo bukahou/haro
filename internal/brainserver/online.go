@@ -17,6 +17,7 @@ type OnlineTerminals struct {
 type onlineTerminal struct {
 	version    string
 	terminalID string // 空 = 没带设备凭证
+	accountID  string // 空 = 没带设备凭证（过渡期，算管理员的）
 	disconnect func()
 }
 
@@ -26,12 +27,25 @@ func NewOnlineTerminals() *OnlineTerminals {
 }
 
 // add 记下一台连上的终端，返回去掉它用的编号。disconnect 断开这条连接。
-func (o *OnlineTerminals) add(version, terminalID string, disconnect func()) int {
+func (o *OnlineTerminals) add(version, terminalID, accountID string, disconnect func()) int {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.next++
-	o.terminals[o.next] = onlineTerminal{version: version, terminalID: terminalID, disconnect: disconnect}
+	o.terminals[o.next] = onlineTerminal{version: version, terminalID: terminalID, accountID: accountID, disconnect: disconnect}
 	return o.next
+}
+
+// AccountCount 是这个账号现在连着几台（带着设备凭证的）。
+func (o *OnlineTerminals) AccountCount(accountID string) int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	count := 0
+	for _, terminal := range o.terminals {
+		if terminal.terminalID != "" && terminal.accountID == accountID {
+			count++
+		}
+	}
+	return count
 }
 
 func (o *OnlineTerminals) remove(id int) {

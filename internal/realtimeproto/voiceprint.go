@@ -12,6 +12,9 @@ const VoiceprintPath = "/v1/voiceprints/"
 // VoiceprintRoute 是服务端注册路由用的写法（Go ServeMux 的模式）。
 const VoiceprintRoute = "POST " + VoiceprintPath + "{name}"
 
+// VoiceprintDeleteRoute 是删一份声纹（只在 haro-asr 上、只给同一个 Pod 里的服务端用：彻底删账号时；服务端不往外转）。成功 204。
+const VoiceprintDeleteRoute = "DELETE " + VoiceprintPath + "{name}"
+
 // EnrollmentScriptPath 是登记要读的句子（GET）。句子由 haro-asr 按它认的唤醒词生成：唤醒词只在它的关键词文件里写一处。
 const EnrollmentScriptPath = "/v1/voiceprint-enrollment/sentences"
 

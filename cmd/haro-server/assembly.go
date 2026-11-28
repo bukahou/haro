@@ -377,13 +377,26 @@ func serve(ctx context.Context, settings config.ServerSettings, components brain
 	}
 	monitor := readiness.NewMonitor(checks, readinessInterval, readinessTimeout, logger)
 	go monitor.Run(ctx)
-	handler, err := brainHandler(settings, newSession, monitor, entry, logger)
+	handler, err := brainHandler(settings, newSession, monitor, entry, logger, false)
 	if err != nil {
 		return err
 	}
-	logger.Info("haro-server 启动", "version", buildinfo.Version, "listen", listener.Addr().String(), "model", activeModel(settings), "tts", settings.TTS,
-		"personas", len(options.Personas))
-	if _, err := graceful.Serve(ctx, listener, handler, graceful.Timing{Shutdown: shutdownRequests, Drain: shutdownSessions},
+	endpoints := []graceful.Endpoint{{Listener: listener, Handler: handler}}
+	public := ""
+	if settings.PublicListen != "" { // 公网的入口：只收配对过的终端
+		publicListener, err := net.Listen("tcp", settings.PublicListen)
+		if err != nil {
+			return err
+		}
+		publicHandler, err := brainHandler(settings, newSession, monitor, entry, logger, true)
+		if err != nil {
+			return err
+		}
+		endpoints, public = append(endpoints, graceful.Endpoint{Listener: publicListener, Handler: publicHandler}), publicListener.Addr().String()
+	}
+	logger.Info("haro-server 启动", "version", buildinfo.Version, "listen", listener.Addr().String(), "public", public,
+		"model", activeModel(settings), "tts", settings.TTS, "personas", len(options.Personas), "terminal_max_online", settings.TerminalMaxOnline)
+	if _, err := graceful.ServeAll(ctx, endpoints, graceful.Timing{Shutdown: shutdownRequests, Drain: shutdownSessions},
 		logger); err != nil {
 		return err
 	}

@@ -73,5 +73,6 @@ func residentsOf(terminal brainserver.Terminal) brain.Residents {
 	if terminal.Identity == nil || terminal.Identity.Admin {
 		return brain.Residents{}
 	}
-	return brain.Residents{Owner: terminal.Identity.Owner, Guest: terminal.Identity.Guest}
+	return brain.Residents{Owner: terminal.Identity.Owner, Guest: terminal.Identity.Guest,
+		OwnerVoice: accounts.VoiceprintNameOf(terminal.Identity.Owner)}
 }

@@ -34,3 +34,15 @@ func BillingAccountOf(person string) string {
 	}
 	return ""
 }
+
+// voiceprintPrefix 是别的账号的本人登记声纹时的名字开头（声纹的名字做文件名，不收冒号）。
+const voiceprintPrefix = "account-"
+
+// VoiceprintNameOf 是这个人登记声纹、被认出时用的名字：PersonsOf 写出来的本人是「account-<编号>」（访客不登记声纹）；
+// 别的（管理员沿用的声纹名）照原样。
+func VoiceprintNameOf(person string) string {
+	if id, owner, ok := ParsePerson(person); ok && owner {
+		return voiceprintPrefix + id
+	}
+	return person
+}

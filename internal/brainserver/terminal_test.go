@@ -75,6 +75,45 @@ func TestTerminalCredentialAtHandshake(t *testing.T) {
 	waitFor(t, func() bool { on, _ := online.Status("t1"); return !on })
 }
 
+// 公网的入口（RequireCredential）：没带凭证的 haro 终端、普通 Realtime 客户端都 401；带了有效凭证的照常。
+// 一个账号同时连着的终端到了上限（MaxOnlinePerAccount）：再来的 429 too_many_sessions；断开一台后又能连。
+func TestPublicEntryAndPerAccountLimit(t *testing.T) {
+	online := brainserver.NewOnlineTerminals()
+	handler := brainserver.NewHandler(func(brainserver.Terminal) brainserver.Session { return newFakeSession() },
+		brainserver.Options{Online: online, Terminals: &fakeAuthenticator{}, RequireCredential: true, MaxOnlinePerAccount: 1}, quiet)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	dial := func(credential string, protocols ...string) (*websocket.Conn, *http.Response, error) {
+		header := http.Header{}
+		if credential != "" {
+			header.Set("Authorization", "Bearer "+credential)
+		}
+		return websocket.Dial(context.Background(), wsURL(server), &websocket.DialOptions{Subprotocols: protocols, HTTPHeader: header})
+	}
+	if _, response, err := dial("", realtimeproto.Protocol); err == nil || response == nil || response.StatusCode != http.StatusUnauthorized {
+		t.Errorf("没带凭证的终端：%v", err)
+	}
+	if _, response, err := dial(""); err == nil || response == nil || response.StatusCode != http.StatusUnauthorized {
+		t.Errorf("普通 Realtime 客户端：%v", err)
+	}
+	first, _, err := dial("good", realtimeproto.Protocol)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return online.AccountCount("a1") == 1 })
+	if _, response, err := dial("good", realtimeproto.Protocol); err == nil || response == nil || response.StatusCode != http.StatusTooManyRequests {
+		t.Errorf("同一个账号第二台：%v", err)
+	}
+	first.Close(websocket.StatusNormalClosure, "")
+	waitFor(t, func() bool { return online.AccountCount("a1") == 0 })
+	again, _, err := dial("good", realtimeproto.Protocol)
+	if err != nil {
+		t.Errorf("断开一台后：%v", err)
+	} else {
+		again.CloseNow()
+	}
+}
+
 func waitFor(t *testing.T, condition func() bool) {
 	t.Helper()
 	for range 100 {

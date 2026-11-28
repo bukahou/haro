@@ -95,6 +95,9 @@ func NewHandler(deps Dependencies) http.Handler {
 	mux.HandleFunc(realtimeproto.VoiceprintRoute, func(w http.ResponseWriter, r *http.Request) {
 		handleEnrollment(w, r, deps.Speakers) // 远程登记声纹
 	})
+	mux.HandleFunc(realtimeproto.VoiceprintDeleteRoute, func(w http.ResponseWriter, r *http.Request) {
+		handleVoiceprintDelete(w, r, deps.Speakers) // 删一份声纹（彻底删账号时，服务端调）
+	})
 	mux.HandleFunc(realtimeproto.EnrollmentScriptRoute, func(w http.ResponseWriter, _ *http.Request) {
 		handleEnrollmentScript(w, deps.WakePhrases) // 登记要读的句子（第一句以唤醒词开头）
 	})
