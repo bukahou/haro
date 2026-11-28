@@ -144,3 +144,29 @@ func TestIncognitoAndLimit(t *testing.T) {
 		t.Errorf("放不下时从最旧的起不放：%d 字", len([]rune(block)))
 	}
 }
+
+// 第一次建背景记录池：只从最近 firstBackfill 轮开始并（更早的不并）。
+func TestFirstBackfillIsBounded(t *testing.T) {
+	ctx := context.Background()
+	store, err := conversationstore.OpenSQLite(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	seqs := make([]int, 0, firstBackfill+20)
+	for seq := 1; seq <= firstBackfill+20; seq++ {
+		seqs = append(seqs, seq)
+	}
+	saveTurns(t, store, "主人", brain.VoiceThread, seqs...)
+	merger := &fakeMerger{}
+	service, err := Open(ctx, store, merger, time.Minute, quiet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.now = func() time.Time { return turnAt(len(seqs)).Add(time.Hour) }
+	service.Tick(ctx)
+	view, _, _ := service.View(ctx, "主人")
+	if want := int64(20 + mergeBatch); view.MergedSeq != want { // 从第 21 轮起并一批
+		t.Errorf("第一次只从最近 %d 轮起并：并到了第 %d 轮，应是第 %d 轮", firstBackfill, view.MergedSeq, want)
+	}
+}

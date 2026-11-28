@@ -31,6 +31,8 @@ const (
 	mergeBatch = 40
 	// mergeTimeout 是一次合并、整理最多等多久。
 	mergeTimeout = 2 * time.Minute
+	// firstBackfill 是一个人第一次建背景记录池时，往回并最近几轮（更早的不并：只是近况，也免得上线时把多年的对话一次并完）。
+	firstBackfill = 3 * mergeBatch
 )
 
 // Store 是背景记录池的存储（conversationstore.SQLiteStore 实现）。
@@ -158,7 +160,7 @@ func (s *Service) Tick(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		if err := s.mergeNew(ctx, pending.Person); err != nil {
+		if err := s.mergeNew(ctx, pending.Person, pending.LastSeq); err != nil {
 			s.logger.Warn("并入背景记录池没成（下一轮再试）", "person", pending.Person, "err", err)
 		}
 		merged[pending.Person] = true
@@ -178,15 +180,20 @@ func (s *Service) Tick(ctx context.Context) {
 	}
 }
 
-// mergeNew 把这个人还没并的轮次（一次最多 mergeBatch 轮）并进去。
-func (s *Service) mergeNew(ctx context.Context, person string) error {
+// mergeNew 把这个人还没并的轮次（一次最多 mergeBatch 轮）并进去；lastSeq 是这个人最新一轮的编号。
+// 第一次（还什么都没有）只从最近 firstBackfill 轮开始。
+func (s *Service) mergeNew(ctx context.Context, person string, lastSeq int64) error {
 	ctx, cancel := context.WithTimeout(ctx, mergeTimeout)
 	defer cancel()
 	backstory, err := s.store.BackstoryOf(ctx, person)
 	if err != nil || !backstory.Enabled {
 		return err
 	}
-	turns, err := s.store.TurnsAfter(ctx, person, backstory.MergedSeq, mergeBatch)
+	after := backstory.MergedSeq
+	if after == 0 && len(backstory.Items) == 0 {
+		after = max(0, lastSeq-firstBackfill)
+	}
+	turns, err := s.store.TurnsAfter(ctx, person, after, mergeBatch)
 	if err != nil || len(turns) == 0 {
 		return err
 	}
