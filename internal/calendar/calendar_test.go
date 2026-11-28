@@ -41,7 +41,9 @@ func newFixture(t *testing.T) *fixture {
 	clock := func() time.Time { return f.now }
 	f.scheduler = reminders.NewScheduler(reminderStore, silentAnnouncer{}, reminders.SchedulerOptions{Location: time.UTC, Now: clock}, quiet)
 	f.calendar = NewService(store, Options{Scheduler: f.scheduler, Location: time.UTC, Now: clock, Logger: quiet, AlertKey: "ahead",
-		Phrases: func(_, _ string, values map[string]string) string { return values["title"] + " 还有 " + values["minutes"] + " 分钟" }})
+		Phrases: func(_, _ string, values map[string]string) string {
+			return values["title"] + " 还有 " + values["minutes"] + " 分钟"
+		}})
 	f.scheduler.UseEvents(f.calendar)
 	return f
 }
