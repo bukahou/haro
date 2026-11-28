@@ -103,7 +103,7 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	entry := entrypoints{online: brainserver.NewOnlineTerminals()}
+	entry := entrypoints{online: brainserver.NewOnlineTerminals(), accounts: deps.accounts.store}
 	if entry.app, err = buildAppAPI(ctx, settings, deps, kit, entry.online, logger); err != nil {
 		return err
 	}
@@ -129,7 +129,12 @@ func brainHandler(settings config.ServerSettings, newSession brainserver.Session
 		return nil, fmt.Errorf("HARO_ASR_URL: %w", err)
 	}
 	mux := http.NewServeMux()
-	mux.Handle("/", brainserver.NewHandler(newSession, brainserver.Options{Online: entry.online}, logger))
+	connections := brainserver.Options{Online: entry.online}
+	if store := entry.accounts; store != nil { // 有账号库：终端可以登记、带设备凭证连进来（登记接口和声纹登记一样只在局域网）
+		connections.Terminals = terminalAuthenticator{store: store, logger: logger}
+		brainserver.RegisterRegistrationRoutes(mux, terminalRegistrar{store: store}, logger)
+	}
+	mux.Handle("/", brainserver.NewHandler(newSession, connections, logger))
 	if entry.app != nil { // App 的接口（公网上只放行这一段；终端的 /v1/... 只在局域网）
 		mux.Handle(appserver.PathPrefix, entry.app)
 	}
@@ -306,7 +311,7 @@ func weatherHome(ctx context.Context, settings config.ServerSettings, httpClient
 			logger.Warn("天气：按 IP 定位家的位置失败（问天气时再试）", "err", err)
 		} else {
 			logger.Info("天气：按 IP 推定家在这附近（城市级；偏了就在 HARO_WEATHER_HOME 填坐标）",
-				"place", place.Name, "region", place.Region, "country", place.Country)
+				"place", place.Name, "region", place.Region, "country", place.CountryCode)
 		}
 		return locator
 	default:

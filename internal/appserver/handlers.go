@@ -170,10 +170,11 @@ func (s *Server) GetOverview(ctx context.Context, _ appapi.GetOverviewRequestObj
 	}
 	var overview appapi.Overview
 	overview.Account.DisplayName, overview.Account.Role = account.DisplayName, appapi.Role(account.Role)
-	if account.Role == accounts.RoleAdmin && s.opts.Terminals != nil { // 终端配对之前，在线的终端都算管理员的
-		overview.Terminals.Online, overview.Terminals.NeedsUpgrade = s.opts.Terminals.Count()
-		overview.Terminals.Total = overview.Terminals.Online
+	terminals, err := s.terminalCounts(ctx, account)
+	if err != nil {
+		return s.internalError(ctx, "数终端", err), nil
 	}
+	overview.Terminals.Total, overview.Terminals.Online, overview.Terminals.NeedsUpgrade = terminals.total, terminals.online, terminals.needsUpgrade
 	if s.opts.Memory != nil {
 		resident, notes, err := s.opts.Memory.Counts(ctx, account.OwnerPerson)
 		if err != nil {
@@ -287,9 +288,11 @@ func (s *Server) ListAccounts(ctx context.Context, _ appapi.ListAccountsRequestO
 		row := appapi.AccountSummary{AccountId: each.ID, DisplayName: each.DisplayName, Role: appapi.Role(each.Role),
 			Status: appapi.AccountStatus(each.Status), JoinedVia: appapi.JoinedVia(each.JoinedVia),
 			SpentThisMonth: s.moneyTotal(ctx, summary.Month), Cap: optionalMoney(summary.MonthCap)}
-		if each.Role == accounts.RoleAdmin && s.opts.Terminals != nil {
-			row.TerminalsOnline, _ = s.opts.Terminals.Count()
+		terminals, err := s.terminalCounts(ctx, each)
+		if err != nil {
+			return s.internalError(ctx, "数终端", err), nil
 		}
+		row.TerminalsOnline = terminals.online
 		if !each.LastUsedAt.IsZero() {
 			lastUsed := each.LastUsedAt
 			row.LastUsedAt = &lastUsed
@@ -330,48 +333,4 @@ func (s *Server) Logout(ctx context.Context, request appapi.LogoutRequestObject)
 		return s.internalError(ctx, "登出", err), nil
 	}
 	return appapi.Logout204Response{}, nil
-}
-
-// ListPendingTerminals 实现 appapi.StrictServerInterface：终端配对（15c）之前没有「待批准」这回事，列表是空的。
-func (s *Server) ListPendingTerminals(ctx context.Context, _ appapi.ListPendingTerminalsRequestObject) (appapi.ListPendingTerminalsResponseObject, error) {
-	account, denied := s.me(ctx)
-	if denied != nil {
-		return *denied, nil
-	}
-	if account.Role != accounts.RoleAdmin {
-		return s.fail(ctx, http.StatusForbidden, appapi.ErrorCodeForbidden, nil), nil
-	}
-	return appapi.ListPendingTerminals200JSONResponse{}, nil
-}
-
-// 下面这些在 15c（终端）做。
-
-// ApproveTerminal 实现 appapi.StrictServerInterface。
-func (s *Server) ApproveTerminal(ctx context.Context, _ appapi.ApproveTerminalRequestObject) (appapi.ApproveTerminalResponseObject, error) {
-	return s.notImplemented(ctx), nil
-}
-
-// RejectTerminal 实现 appapi.StrictServerInterface。
-func (s *Server) RejectTerminal(ctx context.Context, _ appapi.RejectTerminalRequestObject) (appapi.RejectTerminalResponseObject, error) {
-	return s.notImplemented(ctx), nil
-}
-
-// ListTerminals 实现 appapi.StrictServerInterface。
-func (s *Server) ListTerminals(ctx context.Context, _ appapi.ListTerminalsRequestObject) (appapi.ListTerminalsResponseObject, error) {
-	return s.notImplemented(ctx), nil
-}
-
-// PairTerminal 实现 appapi.StrictServerInterface。
-func (s *Server) PairTerminal(ctx context.Context, _ appapi.PairTerminalRequestObject) (appapi.PairTerminalResponseObject, error) {
-	return s.notImplemented(ctx), nil
-}
-
-// RenameTerminal 实现 appapi.StrictServerInterface。
-func (s *Server) RenameTerminal(ctx context.Context, _ appapi.RenameTerminalRequestObject) (appapi.RenameTerminalResponseObject, error) {
-	return s.notImplemented(ctx), nil
-}
-
-// RemoveTerminal 实现 appapi.StrictServerInterface。
-func (s *Server) RemoveTerminal(ctx context.Context, _ appapi.RemoveTerminalRequestObject) (appapi.RemoveTerminalResponseObject, error) {
-	return s.notImplemented(ctx), nil
 }

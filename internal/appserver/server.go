@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/getkin/kin-openapi/openapi3filter"
@@ -54,7 +55,20 @@ type Memory interface {
 
 // Terminals 是现在在线的终端（brainserver.OnlineTerminals 实现）。
 type Terminals interface {
-	Count() (online, needsUpgrade int)
+	Unidentified() (online, needsUpgrade int)               // 没带设备凭证、连着的（过渡期：都归管理员账号）
+	Status(terminalID string) (online bool, version string) // 这台现在连没连着、连着时报的版本
+	Disconnect(terminalID string)                           // 断开这台正连着的会话（移除之后）
+}
+
+// TerminalRegistry 是终端的登记和归属（accounts.Store 实现）。
+type TerminalRegistry interface {
+	TerminalsOf(ctx context.Context, accountID string) ([]accounts.Terminal, error)
+	PairRegistration(ctx context.Context, accountID, code string) (accounts.Terminal, error)
+	RenameTerminal(ctx context.Context, accountID, terminalID, name string) (accounts.Terminal, error)
+	RemoveTerminal(ctx context.Context, accountID, terminalID string) error
+	PendingRegistrations(ctx context.Context) ([]accounts.PendingRegistration, error)
+	ApproveRegistration(ctx context.Context, registrationID string) (accounts.Terminal, error)
+	RejectRegistration(ctx context.Context, registrationID string) error
 }
 
 // Research 是某个人进行中（排队、在查）的调查有几个。
@@ -68,15 +82,16 @@ type Options struct {
 	Spending        Spending
 	Memory          Memory
 	Research        Research
-	Terminals       Terminals     // nil = 不知道（不显示在线的终端）
-	DefaultCurrency string        // 服务端的默认货币（账号没改时用）
-	MinAppVersion   string        // 支持的最低 App 版本
-	CapOptions      []float64     // 管理员定月上限的可选档位（默认货币）
-	ProfileMaxChars int           // 主人资料最多多少字
-	Login           *LoginOptions // nil = 不开登录（测试）
-	Household       Household     // 每个账号的主人资料和家；nil = 没有（那几个接口回 501）
-	Places          PlaceFinder   // 搜地名；nil = 没有（天气的工具组关着）
-	WebURL          string        // 网页版的公开根地址：放行它跨域调接口、登录完回它的回调页；空 = 没有网页版
+	Terminals       Terminals        // 现在连着的终端；nil = 不知道（都当成不在线）
+	Registry        TerminalRegistry // 终端的登记和归属；nil = 没有（终端的接口回 501）
+	DefaultCurrency string           // 服务端的默认货币（账号没改时用）
+	MinAppVersion   string           // 支持的最低 App 版本
+	CapOptions      []float64        // 管理员定月上限的可选档位（默认货币）
+	ProfileMaxChars int              // 主人资料最多多少字
+	Login           *LoginOptions    // nil = 不开登录（测试）
+	Household       Household        // 每个账号的主人资料和家；nil = 没有（那几个接口回 501）
+	Places          PlaceFinder      // 搜地名；nil = 没有（天气的工具组关着）
+	WebURL          string           // 网页版的公开根地址：放行它跨域调接口、登录完回它的回调页；空 = 没有网页版
 	Logger          *slog.Logger
 }
 
@@ -87,6 +102,7 @@ type Server struct {
 	texts    *texts
 	spec     *openapi3.T
 	logger   *slog.Logger
+	pairing  pairFailures
 }
 
 var _ appapi.StrictServerInterface = (*Server)(nil)
@@ -102,7 +118,8 @@ func NewHandler(ctx context.Context, opts Options) (http.Handler, error) {
 		return nil, fmt.Errorf("读契约: %w", err)
 	}
 	spec.Servers = nil // 按路径匹配，不按契约里占位的地址
-	server := &Server{opts: opts, accounts: opts.Accounts, texts: loadedTexts, spec: spec, logger: opts.Logger}
+	server := &Server{opts: opts, accounts: opts.Accounts, texts: loadedTexts, spec: spec, logger: opts.Logger,
+		pairing: pairFailures{failures: map[string][]time.Time{}}}
 
 	mux := http.NewServeMux()
 	limiter := newRateLimiter(ctx)

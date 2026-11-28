@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: haro App API
-  version: 0.4.0
+  version: 0.5.0
   description: |
     haro 手机 App 和网页版用的接口（第一批：账号、登录、我、花费、终端、管理员）。
     服务端和 App 都从这份契约生成代码；⛔ 两边都不绕过契约私下约定字段。契约每改一次升版本号。
@@ -450,13 +450,7 @@ paths:
     post:
       tags: [admin]
       operationId: approveTerminal
-      summary: 批准新终端（它成为一个匿名账号的终端）
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/TerminalApproval'
+      summary: 批准新终端（它成为一个匿名账号的终端；每台的月上限在第 20 段加）
       responses:
         '204':
           description: 已批准
@@ -967,7 +961,7 @@ components:
       enum: [lan, internet]
     Terminal:
       type: object
-      required: [terminal_id, name, online, version, needs_upgrade, network, recognizes]
+      required: [terminal_id, name, online, version, needs_upgrade, network]
       properties:
         terminal_id:
           type: string
@@ -989,11 +983,6 @@ components:
           nullable: true
         network:
           $ref: '#/components/schemas/TerminalNetwork'
-        recognizes:
-          type: array
-          description: 这台终端认得谁的声音（显示名）
-          items:
-            type: string
     TerminalUpdate:
       type: object
       required: [name]
@@ -1040,7 +1029,7 @@ components:
           description: 终端自报的名字
         short_id:
           type: string
-          description: 短编号（和终端上显示的对得上）
+          description: 短编号（终端登记时也显示这个编号，对得上就是它）
         requested_at:
           type: string
           format: date-time
@@ -1048,14 +1037,6 @@ components:
           $ref: '#/components/schemas/TerminalNetwork'
         version:
           type: string
-    TerminalApproval:
-      type: object
-      properties:
-        monthly_cap:
-          allOf:
-            - $ref: '#/components/schemas/Money'
-          nullable: true
-          description: 这台匿名终端每月的上限；null = 按默认档位
     AccountSummary:
       type: object
       required: [account_id, display_name, role, status, joined_via, spent_this_month, terminals_online]

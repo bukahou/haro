@@ -22,6 +22,9 @@ const (
 	CodeUnsupportedProtocolVersion ErrorCode = "unsupported_protocol_version" // 握手时报的协议版本不受支持
 	CodeTooManySessions            ErrorCode = "too_many_sessions"            // 对端同时进行的会话到了上限：过一会儿再试
 	CodeServerError                ErrorCode = "server_error"                 // 服务端自己的问题
+	CodeInvalidCredential          ErrorCode = "invalid_credential"           // 握手带的设备凭证无效（多半是在 App 里移除了这台终端）：重新配对
+	CodeRegistrationNotFound       ErrorCode = "registration_not_found"       // 登记的轮询凭据不认得（已经取走凭证、或太久没来问被清掉了）：重新登记
+	CodeRateLimited                ErrorCode = "rate_limited"                 // 请求太频繁：过一会儿再试
 )
 
 // errorType 是 Realtime 错误事件里的 error.type：请求有问题，还是服务端自己的问题。
@@ -70,6 +73,9 @@ func ErrorEventFor(eventType string, err error) Error {
 // ErrIncompatibleProtocol 表示两端的协议版本不兼容（握手被拒，或者对端没有选我们的版本）：
 // 重连没用，要把终端和服务端升到同一版本。
 var ErrIncompatibleProtocol = errors.New("协议版本和对端不兼容")
+
+// ErrInvalidCredential 表示终端带的设备凭证被拒了（多半是在 App 里移除了这台终端）：重连没用，要重新配对（haro -pair）。
+var ErrInvalidCredential = errors.New("设备凭证被服务端拒绝")
 
 // HTTPError 是 HTTP 接口出错时的响应体，形状同 Realtime 错误事件里的 error。
 type HTTPError struct {
