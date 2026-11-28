@@ -170,7 +170,7 @@ func TestSpending(t *testing.T) {
 func TestAdminOnly(t *testing.T) {
 	f := newFixture(t)
 	ctx := t.Context()
-	if _, err := f.store.ResolveLogin(ctx, "sub-guest", "客人"); err == nil {
+	if _, err := f.store.ResolveLogin(ctx, "sub-guest", "客人", ""); err == nil {
 		t.Fatal("新账号应等同意")
 	}
 	status, body := f.call(t, "GET", "/api/v1/admin/accounts", f.adminKey.AccessToken, "")

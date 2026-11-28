@@ -10,6 +10,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/bukahou/haro/internal/accounts"
 	"github.com/bukahou/haro/internal/agents"
 	"github.com/bukahou/haro/internal/backstory"
 	"github.com/bukahou/haro/internal/brain"
@@ -159,6 +160,8 @@ type tooling struct {
 	household    *household.Service       // 每个账号的主人资料、家的位置、节假日（大脑、天气、App 都从这里取）
 	places       *weather.OpenMeteoClient // 搜地名（App 设家的位置用）；天气那组工具关着时为 nil
 	calendar     *calendar.Service        // 日历；提醒那组工具关着时为 nil
+	// personData 是按人存数据的地方（彻底删账号时逐个删）：每建好一处就登记在这里（App 的接口那边再加对话、账目）
+	personData []accounts.NamedData
 }
 
 // buildTooling 准备工具：自研工具内置（长期记忆（记事已并进来）、提醒直接连数据库；天气；联网搜索与后台调查），MCP 只接第三方（现在还没有）。
@@ -192,6 +195,7 @@ func buildTooling(ctx context.Context, settings config.ServerSettings, catalog a
 			return kit, err
 		}
 		shutdown.add("记事库", store.Close)
+		kit.personData = append(kit.personData, accounts.NamedData{Name: dataMemory, Data: store})
 		keeper, stopMemory := startMemory(ctx, settings, store, deps, logger)
 		kit.memory = keeper
 		shutdown.add("长期记忆", stopMemory)
@@ -205,6 +209,8 @@ func buildTooling(ctx context.Context, settings config.ServerSettings, catalog a
 		}
 		shutdown.add("提醒", stopReminders)
 		kit.calendar = calendarService
+		kit.personData = append(kit.personData, accounts.NamedData{Name: dataReminders, Data: scheduler},
+			accounts.NamedData{Name: dataCalendar, Data: calendarService})
 		// 语音的提醒工具接在日历上：定提醒同时建日程（App 里看得到）；「查日程」给模型
 		builtins = append(builtins, tools.ReminderTools(calendar.ReminderDesk{Calendar: calendarService, Scheduler: scheduler}, logger),
 			tools.CalendarTools(calendarService, scheduler.Location(), logger))
@@ -234,6 +240,7 @@ func buildTooling(ctx context.Context, settings config.ServerSettings, catalog a
 				return kit, err
 			}
 			kit.research = runner
+			kit.personData = append(kit.personData, accounts.NamedData{Name: dataResearch, Data: runner})
 			shutdown.add("后台调查", closeRunner)
 			builtins = append(builtins, tools.ResearchTools(runner))
 			kit.briefers = append(kit.briefers, runner)

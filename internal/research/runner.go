@@ -328,3 +328,8 @@ func (r *Runner) Running(ctx context.Context, person string) (int, error) {
 	}
 	return count, nil
 }
+
+// ErasePerson 删掉这个人的全部调查任务（彻底删账号时用；软删除 30 天后，那时不会有在查的）。
+func (r *Runner) ErasePerson(ctx context.Context, person string) error {
+	return r.store.ErasePerson(ctx, person)
+}

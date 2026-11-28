@@ -38,6 +38,8 @@ type Store interface {
 	CancelForEvent(ctx context.Context, eventID string, at time.Time) error
 	// Unadopted 是还没挂到日程上的在用提醒；Adopt 把一条挂到日程上（规则清掉，之后下一次到点问日历）。
 	Unadopted(ctx context.Context) ([]Reminder, error)
+	// ErasePerson 删掉这个人的全部提醒（含取消了的），彻底删账号时用。
+	ErasePerson(ctx context.Context, person string) error
 	Adopt(ctx context.Context, id int64, eventID string) error
 	Close() error
 }

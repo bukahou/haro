@@ -182,8 +182,11 @@ func (l *login) authenticated(_ http.ResponseWriter, r *http.Request, result oid
 	if name == "" {
 		name = identity.PreferredUsername
 	}
-	account, err := l.server.accounts.ResolveLogin(ctx, identity.Subject, name)
+	account, err := l.server.accounts.ResolveLogin(ctx, identity.Subject, name, target.invite)
 	switch {
+	case errors.Is(err, accounts.ErrInviteInvalid):
+		l.server.logger.Warn("App 登录：邀请码不对、过期了或者用过了，没建账号", "web", target.web)
+		return l.callbackError(target, appapi.OidcErrorInviteInvalid), nil
 	case errors.Is(err, accounts.ErrPendingApproval):
 		// 管理员要先在配置里写上自己的 sub（HARO_ADMIN_SUBJECT）：第一次登录时从这行日志里取
 		l.server.logger.Warn("App 登录：账号在等管理员同意", "subject", identity.Subject, "name", name,

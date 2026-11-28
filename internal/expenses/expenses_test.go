@@ -318,3 +318,46 @@ func TestPrune(t *testing.T) {
 		t.Errorf("账目的原图应留着：%v", err)
 	}
 }
+
+// 彻底删账号：删掉这个人的账目、小票（连原图）、自己加的分类，别人的不动。
+func TestErasePerson(t *testing.T) {
+	service, files := newService(t, fakeParser{})
+	ctx := context.Background()
+	var kept Receipt
+	for _, person := range []string{"走的人", "别人"} {
+		receipt, err := service.Upload(ctx, person, pngBytes(t), Hint{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := service.Confirm(ctx, person, receipt.ID, *waitParsed(t, service, person, receipt.ID).Draft); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := service.AddCategory(ctx, person, "猫"); err != nil {
+			t.Fatal(err)
+		}
+		if person == "别人" {
+			kept = receipt
+		} else {
+			defer func(image string) {
+				if _, err := files.Read(image); err == nil {
+					t.Error("走的人的原图应删掉")
+				}
+			}(receipt.AttachmentID)
+		}
+	}
+	if err := service.ErasePerson(ctx, "走的人"); err != nil {
+		t.Fatal(err)
+	}
+	month := Filter{From: time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC), To: time.Date(2026, 12, 1, 0, 0, 0, 0, time.UTC)}
+	for person, want := range map[string]int{"走的人": 0, "别人": 1} {
+		if list, _ := service.Expenses(ctx, person, month); len(list) != want {
+			t.Errorf("%s 的账目：%d", person, len(list))
+		}
+		if categories, _ := service.Categories(ctx, person); len(categories) != len(BuiltinCategories)+want {
+			t.Errorf("%s 的分类：%d", person, len(categories))
+		}
+	}
+	if _, err := files.Read(kept.AttachmentID); err != nil {
+		t.Errorf("别人的原图：%v", err)
+	}
+}

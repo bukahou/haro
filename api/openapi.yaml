@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: haro App API
-  version: 0.10.0
+  version: 0.11.0
   description: |
     haro 手机 App 和网页版用的接口（第一批：账号、登录、我、花费、终端、管理员）。
     服务端和 App 都从这份契约生成代码；⛔ 两边都不绕过契约私下约定字段。契约每改一次升版本号。
@@ -64,7 +64,7 @@ paths:
         - name: invite
           in: query
           required: false
-          description: 管理员发的邀请码（没有账号时用）
+          description: 管理员发的邀请码（没有账号时用：有效的码直接是正常账号；不对、过期、用过的回 `oidc_error=invite_invalid`，不建账号）
           schema:
             type: string
             maxLength: 64
@@ -1349,6 +1349,164 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+  /api/v1/admin/accounts/{accountId}:
+    parameters:
+      - $ref: '#/components/parameters/AccountId'
+    delete:
+      tags: [admin]
+      operationId: deleteAccount
+      summary: 删除账号（软删除：马上停用，30 天后连同这个账号的全部数据彻底删掉；到期前 enableAccount 可以撤销）。管理员的账号删不了（409）
+      parameters:
+        - $ref: '#/components/parameters/AcceptLanguage'
+      responses:
+        '200':
+          description: 已软删除（deletion_scheduled_at 是彻底删的时间）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/admin/accounts/{accountId}/approve:
+    parameters:
+      - $ref: '#/components/parameters/AccountId'
+    post:
+      tags: [admin]
+      operationId: approveAccount
+      summary: 同意一个在等的账号（等待批准 → 正常）；不是在等的回 409
+      parameters:
+        - $ref: '#/components/parameters/AcceptLanguage'
+      responses:
+        '200':
+          description: 已同意
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/admin/accounts/{accountId}/disable:
+    parameters:
+      - $ref: '#/components/parameters/AccountId'
+    post:
+      tags: [admin]
+      operationId: disableAccount
+      summary: 停用账号：它的登录令牌全部作废、终端断开（数据都留着）。管理员的账号停用不了（409）
+      parameters:
+        - $ref: '#/components/parameters/AcceptLanguage'
+      responses:
+        '200':
+          description: 已停用
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/admin/accounts/{accountId}/enable:
+    parameters:
+      - $ref: '#/components/parameters/AccountId'
+    post:
+      tags: [admin]
+      operationId: enableAccount
+      summary: 恢复停用了的账号（停用 → 正常）；软删除了、还没到期的也恢复（撤销删除）。不是停用的回 409
+      parameters:
+        - $ref: '#/components/parameters/AcceptLanguage'
+      responses:
+        '200':
+          description: 已恢复
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/admin/invites:
+    get:
+      tags: [admin]
+      operationId: listInvites
+      summary: 全部邀请码（新的在前；码本身不在里面）
+      responses:
+        '200':
+          description: 邀请码
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Invite'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      tags: [admin]
+      operationId: createInvite
+      summary: 生成一个邀请码（用一次、有时效）：码只在这次的回答里给，之后看不到
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InviteInput'
+      responses:
+        '201':
+          description: 生成了
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreatedInvite'
+        '400':
+          $ref: '#/components/responses/ValidationFailed'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/v1/admin/invites/{inviteId}:
+    parameters:
+      - name: inviteId
+        in: path
+        required: true
+        schema:
+          type: string
+          maxLength: 64
+    delete:
+      tags: [admin]
+      operationId: revokeInvite
+      summary: 撤销一个还没用的邀请码（用过、撤销过的回 404）
+      responses:
+        '204':
+          description: 撤销了
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
   /api/v1/admin/terminals/pending:
     get:
       tags: [admin]
@@ -1449,6 +1607,13 @@ components:
         maxLength: 64
     TerminalId:
       name: terminalId
+      in: path
+      required: true
+      schema:
+        type: string
+        maxLength: 64
+    AccountId:
+      name: accountId
       in: path
       required: true
       schema:
@@ -1889,6 +2054,60 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/ExpenseGroup'
+    InviteStatus:
+      type: string
+      description: unused = 还没用；used = 用过了（used_by_name 是谁）；expired = 过期了；revoked = 撤销了
+      enum: [unused, used, expired, revoked]
+    Invite:
+      type: object
+      required: [invite_id, status, created_at, expires_at]
+      properties:
+        invite_id:
+          type: string
+        note:
+          type: string
+          nullable: true
+        status:
+          $ref: '#/components/schemas/InviteStatus'
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        used_at:
+          type: string
+          format: date-time
+          nullable: true
+        used_by_name:
+          type: string
+          nullable: true
+          description: 用它进来的账号的显示名（那个账号彻底删了以后为 null）
+    InviteInput:
+      type: object
+      properties:
+        expires_in_hours:
+          type: integer
+          minimum: 1
+          maximum: 720
+          description: 多少小时后过期；不带 = 168（7 天）
+        note:
+          type: string
+          maxLength: 200
+          description: 备注（给谁的）
+    CreatedInvite:
+      type: object
+      required: [invite, code]
+      properties:
+        invite:
+          $ref: '#/components/schemas/Invite'
+        code:
+          type: string
+          description: 邀请码（显示形式，例如 ABCD-EFGH-JKMN；只给这一次）。登录时作为 startLogin 的 invite 参数
+        share_url:
+          type: string
+          nullable: true
+          description: 发给对方的登录地址（浏览器打开就用这个码登录、登录完到网页版）；没有网页版时为 null
     ClientConfig:
       type: object
       required: [server_version, api_version, min_app_version, limits]

@@ -192,3 +192,8 @@ func (s *Store) query(ctx context.Context, query string, args ...any) ([]Event, 
 	}
 	return events, rows.Err()
 }
+
+// ErasePerson 删掉这个人的全部日程和同步记录（彻底删账号时用；终端那边的提醒由提醒的调度自己删）。
+func (s *Store) ErasePerson(ctx context.Context, person string) error {
+	return sqliteschema.ErasePerson(ctx, s.db, person, `DELETE FROM calendar_syncs WHERE person = ?`, `DELETE FROM events WHERE person = ?`)
+}

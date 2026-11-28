@@ -49,23 +49,23 @@ func TestResolveLogin(t *testing.T) {
 	if _, err := store.EnsureAdmin(ctx, testAdmin); err != nil {
 		t.Fatal(err)
 	}
-	if account, err := store.ResolveLogin(ctx, "sub-owner", ""); err != nil || account.Role != RoleAdmin {
+	if account, err := store.ResolveLogin(ctx, "sub-owner", "", ""); err != nil || account.Role != RoleAdmin {
 		t.Errorf("管理员登录：%+v %v", account, err)
 	}
-	if _, err := store.ResolveLogin(ctx, "sub-guest", "客人"); !errors.Is(err, ErrPendingApproval) {
+	if _, err := store.ResolveLogin(ctx, "sub-guest", "客人", ""); !errors.Is(err, ErrPendingApproval) {
 		t.Fatalf("新的 sub 应等同意：%v", err)
 	}
 	pending, err := store.BySubject(ctx, "sub-guest")
 	if err != nil || pending.Status != StatusPendingApproval || pending.OwnerPerson == "主人" || pending.OwnerPerson == pending.GuestPerson {
 		t.Errorf("等同意的账号：%+v %v", pending, err)
 	}
-	if _, err := store.ResolveLogin(ctx, "sub-guest", "客人"); !errors.Is(err, ErrPendingApproval) {
+	if _, err := store.ResolveLogin(ctx, "sub-guest", "客人", ""); !errors.Is(err, ErrPendingApproval) {
 		t.Errorf("再登录还是等同意：%v", err)
 	}
 	if _, err := store.db.Exec(`UPDATE accounts SET status = ? WHERE id = ?`, StatusDisabled, pending.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.ResolveLogin(ctx, "sub-guest", "客人"); !errors.Is(err, ErrDisabled) {
+	if _, err := store.ResolveLogin(ctx, "sub-guest", "客人", ""); !errors.Is(err, ErrDisabled) {
 		t.Errorf("停用的账号：%v", err)
 	}
 }
@@ -134,7 +134,7 @@ func TestTokens(t *testing.T) {
 func TestTokensOfUnusableAccounts(t *testing.T) {
 	ctx := context.Background()
 	store := openTest(t)
-	if _, err := store.ResolveLogin(ctx, "sub-guest", "客人"); !errors.Is(err, ErrPendingApproval) {
+	if _, err := store.ResolveLogin(ctx, "sub-guest", "客人", ""); !errors.Is(err, ErrPendingApproval) {
 		t.Fatal(err)
 	}
 	pending, _ := store.BySubject(ctx, "sub-guest")
@@ -154,7 +154,7 @@ func TestTokensOfUnusableAccounts(t *testing.T) {
 func TestEnsureAdminAfterFirstLogin(t *testing.T) {
 	ctx := context.Background()
 	store := openTest(t)
-	if _, err := store.ResolveLogin(ctx, "sub-owner", "主人"); !errors.Is(err, ErrPendingApproval) {
+	if _, err := store.ResolveLogin(ctx, "sub-owner", "主人", ""); !errors.Is(err, ErrPendingApproval) {
 		t.Fatal(err)
 	}
 	pending, _ := store.BySubject(ctx, "sub-owner")
@@ -163,7 +163,7 @@ func TestEnsureAdminAfterFirstLogin(t *testing.T) {
 		admin.OwnerPerson != "主人" || admin.GuestPerson != "" || admin.JoinedVia != JoinedViaAdmin {
 		t.Errorf("等同意的账号变成管理员：%+v %v", admin, err)
 	}
-	if _, err := store.ResolveLogin(ctx, "sub-owner", "主人"); err != nil {
+	if _, err := store.ResolveLogin(ctx, "sub-owner", "主人", ""); err != nil {
 		t.Errorf("之后能正常登录：%v", err)
 	}
 }

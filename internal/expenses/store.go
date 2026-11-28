@@ -359,3 +359,28 @@ func (s *Store) deleteCategory(ctx context.Context, person, key string) error {
 	}
 	return nil
 }
+
+// erasePerson 删掉这个人的全部账目、小票、自己加的分类，返回原图的编号（文件由调用方删）。
+func (s *Store) erasePerson(ctx context.Context, person string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT attachment_id FROM receipts WHERE person = ? UNION
+		SELECT attachment_id FROM expenses WHERE person = ? AND attachment_id IS NOT NULL`, person, person)
+	if err != nil {
+		return nil, fmt.Errorf("读原图: %w", err)
+	}
+	var images []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		images = append(images, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	err = sqliteschema.ErasePerson(ctx, s.db, person, `DELETE FROM receipts WHERE person = ?`, `DELETE FROM expenses WHERE person = ?`,
+		`DELETE FROM categories WHERE person = ?`)
+	return images, err
+}

@@ -91,3 +91,11 @@ func (p problemReply) VisitAddExpenseCategoryResponse(w http.ResponseWriter) err
 func (p problemReply) VisitDeleteExpenseCategoryResponse(w http.ResponseWriter) error {
 	return p.write(w)
 }
+
+func (p problemReply) VisitApproveAccountResponse(w http.ResponseWriter) error { return p.write(w) }
+func (p problemReply) VisitDisableAccountResponse(w http.ResponseWriter) error { return p.write(w) }
+func (p problemReply) VisitEnableAccountResponse(w http.ResponseWriter) error  { return p.write(w) }
+func (p problemReply) VisitDeleteAccountResponse(w http.ResponseWriter) error  { return p.write(w) }
+func (p problemReply) VisitListInvitesResponse(w http.ResponseWriter) error    { return p.write(w) }
+func (p problemReply) VisitCreateInviteResponse(w http.ResponseWriter) error   { return p.write(w) }
+func (p problemReply) VisitRevokeInviteResponse(w http.ResponseWriter) error   { return p.write(w) }

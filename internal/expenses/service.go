@@ -532,3 +532,17 @@ func randomID() (string, error) {
 	}
 	return hex.EncodeToString(buf), nil
 }
+
+// ErasePerson 删掉这个人的全部账目、小票（连原图）、自己加的分类（彻底删账号时用）。
+func (s *Service) ErasePerson(ctx context.Context, person string) error {
+	images, err := s.store.erasePerson(ctx, person)
+	if err != nil {
+		return err
+	}
+	for _, id := range images {
+		if err := s.images.Remove(id); err != nil {
+			s.logger.Warn("删原图出错（记录已删）", "image", id, "err", err)
+		}
+	}
+	return nil
+}

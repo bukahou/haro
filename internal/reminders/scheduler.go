@@ -506,3 +506,12 @@ var (
 	spoken      = telemetry.MustCounter(meter, "haro.reminders.spoken", "到点说出来的提醒（chimed = 合成用不了改播提示音；caught_up = 晚了才补说）")
 	missedCount = telemetry.MustCounter(meter, "haro.reminders.missed", "错过的提醒（到点后一直没有在线的终端，超过补说的时间）")
 )
+
+// ErasePerson 删掉这个人的全部提醒（彻底删账号时用），调度马上重新看一遍（不会再响）。
+func (s *Scheduler) ErasePerson(ctx context.Context, person string) error {
+	if err := s.store.ErasePerson(ctx, person); err != nil {
+		return err
+	}
+	s.Poke()
+	return nil
+}

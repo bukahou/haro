@@ -118,7 +118,7 @@ func buildAppAPI(ctx context.Context, settings config.ServerSettings, deps servi
 		return nil, nil
 	}
 	go pruneTokens(ctx, store, logger)
-	options := appserver.Options{Accounts: store, Spending: deps.guard, Terminals: online, Registry: store, DefaultCurrency: settings.Currency(),
+	options := appserver.Options{Accounts: store, Admin: store, Spending: deps.guard, Terminals: online, Registry: store, DefaultCurrency: settings.Currency(),
 		MinAppVersion: settings.AppMinVersion, CapOptions: settings.MonthlyCapOptions(), ProfileMaxChars: profile.MaxRunes,
 		Household: kit.household, WebURL: settings.AppWebURL, Logger: logger.With("component", "app-api"),
 		Login: &appserver.LoginOptions{Issuer: settings.OIDCIssuer, ClientID: settings.OIDCClientID,
@@ -148,6 +148,11 @@ func buildAppAPI(ctx context.Context, settings config.ServerSettings, deps servi
 		}
 		options.Chat = chat.NewService(ctx, chatOptions)
 	}
+	personData := kit.personData
+	if deps.conversations != nil {
+		personData = append(personData, accounts.NamedData{Name: dataConversations,
+			Data: conversationEraser{book: assembled.components.Conversations, store: deps.conversations, images: images, logger: logger}})
+	}
 	if kit.memory != nil {
 		options.Memory = kit.memory
 	}
@@ -171,8 +176,10 @@ func buildAppAPI(ctx context.Context, settings config.ServerSettings, deps servi
 			Parser: expenses.AgentParser{Agent: *assembled.receipt}, Logger: logger})
 		go service.Run(ctx)
 		options.Expenses, options.Rates = service, deps.rates
+		personData = append(personData, accounts.NamedData{Name: dataExpenses, Data: service})
 		logger.Info("记账：交小票由代理读成草稿，主人确认才入账", "db", settings.ExpensesDB)
 	}
+	go accounts.Purger{Store: store, Data: personData, Logger: logger.With("component", "account-purge")}.Run(ctx)
 	handler, err := appserver.NewHandler(ctx, options)
 	if err != nil {
 		return nil, err

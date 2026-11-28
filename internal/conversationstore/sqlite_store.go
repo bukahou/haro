@@ -203,3 +203,29 @@ type TranscriptKeptError struct {
 func (e *TranscriptKeptError) Error() string {
 	return fmt.Sprintf("完整的对话记录里 %s 的第 %v 轮已经是另一轮（说话的时间不同），没有覆盖；这份对话照样存下了", e.Person, e.Seqs)
 }
+
+// ErasePerson 删掉这个人的全部对话（各条线程、完整记录和向量、背景记录池、附件的记录），返回附件的编号（文件由调用方删）。彻底删账号时用。
+func (s *SQLiteStore) ErasePerson(ctx context.Context, person string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM attachments WHERE person = ?`, person)
+	if err != nil {
+		return nil, fmt.Errorf("读附件: %w", err)
+	}
+	var attachmentIDs []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		attachmentIDs = append(attachmentIDs, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	err = sqliteschema.ErasePerson(ctx, s.db, person,
+		`DELETE FROM transcript_vectors WHERE person = ?`, `DELETE FROM transcript WHERE person = ?`,
+		`DELETE FROM turns WHERE person = ?`, `DELETE FROM conversations WHERE person = ?`, `DELETE FROM threads WHERE person = ?`,
+		`DELETE FROM attachments WHERE person = ?`, `DELETE FROM backstory_items WHERE person = ?`, `DELETE FROM backstory_state WHERE person = ?`)
+	return attachmentIDs, err
+}

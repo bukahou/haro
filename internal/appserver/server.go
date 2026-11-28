@@ -41,7 +41,7 @@ type Accounts interface {
 	Refresh(ctx context.Context, refreshToken string) (accounts.TokenPair, error)
 	Revoke(ctx context.Context, refreshToken string) error
 	IssueTokens(ctx context.Context, accountID string) (accounts.TokenPair, error)
-	ResolveLogin(ctx context.Context, subject, displayName string) (accounts.Account, error)
+	ResolveLogin(ctx context.Context, subject, displayName, invite string) (accounts.Account, error)
 	ByID(ctx context.Context, id string) (accounts.Account, error)
 	List(ctx context.Context) ([]accounts.Account, error)
 	Touch(ctx context.Context, id, appVersion string) error
@@ -106,6 +106,7 @@ type Options struct {
 	Backstory       Backstory        // 背景记录池；nil = 没有（那几个接口回 501）
 	Calendar        Calendar         // 日历；nil = 没有（日历的接口回 501）
 	Expenses        Expenses         // 记账；nil = 没有（记账的接口回 501）
+	Admin           AccountAdmin     // 管理员管账号、邀请码；nil = 没有（那几个接口回 501）
 	Rates           money.Converter  // 汇总记账时换成默认货币用的汇率；nil = 只认同一种币种
 	DefaultCurrency string           // 服务端的默认货币（账号没改时用）
 	MinAppVersion   string           // 支持的最低 App 版本

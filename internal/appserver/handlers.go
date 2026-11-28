@@ -295,25 +295,9 @@ func (s *Server) ListAccounts(ctx context.Context, _ appapi.ListAccountsRequestO
 	}
 	reply := appapi.ListAccounts200JSONResponse{}
 	for _, each := range list {
-		summary, err := s.spendingFor(ctx, each)
+		row, err := s.accountSummary(ctx, each)
 		if err != nil {
-			return s.internalError(ctx, "花费", err), nil
-		}
-		row := appapi.AccountSummary{AccountId: each.ID, DisplayName: each.DisplayName, Role: appapi.Role(each.Role),
-			Status: appapi.AccountStatus(each.Status), JoinedVia: appapi.JoinedVia(each.JoinedVia),
-			SpentThisMonth: s.moneyTotal(ctx, summary.Month), Cap: optionalMoney(summary.MonthCap)}
-		terminals, err := s.terminalCounts(ctx, each)
-		if err != nil {
-			return s.internalError(ctx, "数终端", err), nil
-		}
-		row.TerminalsOnline = terminals.online
-		if !each.LastUsedAt.IsZero() {
-			lastUsed := each.LastUsedAt
-			row.LastUsedAt = &lastUsed
-		}
-		if each.AppVersion != "" {
-			version := each.AppVersion
-			row.AppVersion = &version
+			return s.internalError(ctx, "读账号", err), nil
 		}
 		reply = append(reply, row)
 	}

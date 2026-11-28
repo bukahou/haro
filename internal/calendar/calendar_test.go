@@ -208,3 +208,38 @@ func mustEventID(t *testing.T, f *fixture, id int64) string {
 	t.Fatalf("没找到提醒 %d", id)
 	return ""
 }
+
+// 彻底删账号：删掉这个人的日程（日历这边）和终端那边的提醒（提醒的调度），别人的不动。
+func TestErasePerson(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	start := time.Date(2026, 12, 1, 10, 0, 0, 0, time.UTC)
+	for _, person := range []string{"主人", "别人"} {
+		if _, err := f.calendar.Create(ctx, person, Input{Title: "吃药", Start: start, End: start.Add(time.Hour), Rule: "FREQ=DAILY",
+			Alerts: []time.Duration{0}, AlertTerminal: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := f.calendar.ErasePerson(ctx, "主人"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.scheduler.ErasePerson(ctx, "主人"); err != nil {
+		t.Fatal(err)
+	}
+	window := func(person string) int {
+		occurrences, err := f.calendar.Occurrences(ctx, person, start, start.AddDate(0, 0, 3))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(occurrences)
+	}
+	if window("主人") != 0 || window("别人") != 3 {
+		t.Errorf("日程：主人 %d、别人 %d", window("主人"), window("别人"))
+	}
+	if listing, _ := f.scheduler.List(ctx, "主人", true); len(listing.Active)+len(listing.Cancelled) != 0 {
+		t.Errorf("主人的提醒：%+v", listing)
+	}
+	if listing, _ := f.scheduler.List(ctx, "别人", false); len(listing.Active) != 1 {
+		t.Errorf("别人的提醒：%+v", listing)
+	}
+}
