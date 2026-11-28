@@ -549,3 +549,8 @@ func randomID() (string, error) {
 	}
 	return hex.EncodeToString(buf), nil
 }
+
+// ErasePerson 删掉这个人的全部日程和同步记录（彻底删账号时用；终端那边的提醒由提醒的调度自己删）。
+func (s *Service) ErasePerson(ctx context.Context, person string) error {
+	return s.store.ErasePerson(ctx, person)
+}

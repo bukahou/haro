@@ -45,7 +45,7 @@ func newFixture(t *testing.T) fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	member, err := store.ResolveLogin(t.Context(), "sub-member", "别人")
+	member, err := store.ResolveLogin(t.Context(), "sub-member", "别人", "")
 	if !errors.Is(err, accounts.ErrPendingApproval) {
 		t.Fatalf("新账号应在等同意：%v", err)
 	}

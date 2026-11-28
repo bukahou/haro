@@ -211,3 +211,10 @@ func (s *SQLiteStore) query(ctx context.Context, sqlText string, args ...any) ([
 	}
 	return notes, rows.Err()
 }
+
+// ErasePerson 实现 Repository。
+func (s *SQLiteStore) ErasePerson(ctx context.Context, person string) error {
+	return sqliteschema.ErasePerson(ctx, s.db, person,
+		`DELETE FROM note_vectors WHERE note_id IN (SELECT id FROM notes WHERE person = ?)`,
+		`DELETE FROM notes WHERE person = ?`)
+}

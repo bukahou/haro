@@ -13,6 +13,7 @@ import (
 	"github.com/bukahou/haro/internal/brain"
 	"github.com/bukahou/haro/internal/chat"
 	"github.com/bukahou/haro/internal/config"
+	"github.com/bukahou/haro/internal/expenses"
 	"github.com/bukahou/haro/internal/llm"
 	"github.com/bukahou/haro/internal/research"
 	"github.com/bukahou/haro/internal/spending"
@@ -69,6 +70,7 @@ type conversationAgents struct {
 	summary   *brain.Agent      // 写滚动摘要；没开时为 nil
 	title     *brain.Agent      // App 里的对话起标题
 	backstory *brain.Agent      // 背景记录池
+	receipt   *brain.Agent      // 记账：看小票读成草稿
 	// overBudget：月度上限到了以后判断主人要不要临时提高（不受额度管、按天限次数）；不能口头提高时为 nil
 	overBudget *brain.Agent
 	// breaker：前台和接手的模型共用的「连不上」熔断；刚恢复时由它告诉模型断过多久（每轮的情况说明）
@@ -156,6 +158,18 @@ func (a agentAssembly) build(toolbox brain.Toolbox, expertSearch vision.Search) 
 		return built, err
 	}
 	built.backstory = &pool
+	if s.ExpensesDB != "" {
+		receiptDefinition := a.catalog[agents.Receipt]
+		receiptModel, _, err := a.metered(receiptDefinition)
+		if err != nil {
+			return built, err
+		}
+		receipt, err := a.agent(receiptDefinition, spending.NewBudgetedChatModel(receiptModel, a.guard, a.logger), expenses.PromptValues(), nil)
+		if err != nil {
+			return built, err
+		}
+		built.receipt = &receipt
+	}
 
 	if s.ConversationSummary {
 		definition := a.catalog[agents.Summary]

@@ -202,7 +202,8 @@ type ServerSettings struct {
 	// App 不直接调 akasha。下面的地址、凭证都跟部署有关，没有默认值；凭证只来自环境变量（K8s Secret）
 	AppPublicURL      string `env:"HARO_APP_PUBLIC_URL"`                     // 公网上 App 连的根地址（例如 https://haro.example.com），登录回调 = 它 + /api/v1/auth/oidc/callback
 	AccountsDB        string `env:"HARO_ACCOUNTS_DB"`                        // 账号库（SQLite 文件）
-	AttachmentsDir    string `env:"HARO_ATTACHMENTS_DIR"`                    // App 里发的图片存在哪（目录）；空 = 不收图片
+	AttachmentsDir    string `env:"HARO_ATTACHMENTS_DIR"`                    // App 里发的图片、小票的原图存在哪（目录）；空 = 不收图片
+	ExpensesDB        string `env:"HARO_EXPENSES_DB"`                        // 记账（主人自己的账目、小票）：SQLite 文件路径；空 = 没有记账。要 HARO_ATTACHMENTS_DIR 存小票的原图
 	OIDCIssuer        string `env:"HARO_OIDC_ISSUER"`                        // akasha 的 issuer
 	OIDCClientID      string `env:"HARO_OIDC_CLIENT_ID"`                     // 在 akasha 注册的 haro 客户端
 	OIDCClientSecret  string `env:"HARO_OIDC_CLIENT_SECRET"`                 // 凭证
@@ -511,6 +512,9 @@ func (settings ServerSettings) validateSpending() error {
 
 // validateStorage 检查记事库、主人资料的目录。
 func (settings ServerSettings) validateStorage() error {
+	if settings.ExpensesDB != "" && settings.AttachmentsDir == "" {
+		return errors.New("设了 HARO_EXPENSES_DB（记账）就必须设 HARO_ATTACHMENTS_DIR（存小票的原图）")
+	}
 	if settings.ToolGroupOn(ToolGroupMemory) && settings.NotesDB == "" {
 		return fmt.Errorf("开着记事与记忆（HARO_TOOLS 里有 %s，不设 HARO_TOOLS 时也是）就必须设 HARO_NOTES_DB", ToolGroupMemory)
 	}

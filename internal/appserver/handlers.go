@@ -69,17 +69,30 @@ func optionalMoney(amount money.Amount) *appapi.Money {
 	return &value
 }
 
-// moneyTotal 是一笔合计（换成默认货币 + 按币种的原始合计 + 有换算时的提示）。
+// moneyTotal 是一笔花费的合计。
 func (s *Server) moneyTotal(ctx context.Context, spent spending.Spent) appapi.MoneyTotal {
-	total := appapi.MoneyTotal{Total: moneyOf(spent.Total.Amount), ByCurrency: []appapi.Money{}}
-	for _, code := range spent.ByCurrency.Currencies() {
-		total.ByCurrency = append(total.ByCurrency, moneyOf(spent.ByCurrency.Amount(code)))
+	return s.convertedTotal(ctx, spent.ByCurrency, spent.Total)
+}
+
+// convertedTotal 是一笔合计（换成默认货币 + 按币种的原始合计 + 有换算、有没算进去的币种时的提示）。
+func (s *Server) convertedTotal(ctx context.Context, byCurrency money.Sum, converted money.Total) appapi.MoneyTotal {
+	total := appapi.MoneyTotal{Total: moneyOf(converted.Amount), ByCurrency: []appapi.Money{}}
+	for _, code := range byCurrency.Currencies() {
+		total.ByCurrency = append(total.ByCurrency, moneyOf(byCurrency.Amount(code)))
 	}
-	if len(spent.Total.Converted) > 0 {
-		note := s.texts.say(languageFrom(ctx), "conversion", map[string]string{"currencies": strings.Join(spent.Total.Converted, "、"),
-			"date": spent.Total.RateDate.Format(time.DateOnly), "target": spent.Total.Amount.Currency})
-		date := openapi_types.Date{Time: spent.Total.RateDate}
-		total.ConversionNote, total.RateDate = &note, &date
+	var notes []string
+	if len(converted.Converted) > 0 {
+		notes = append(notes, s.texts.say(languageFrom(ctx), "conversion", map[string]string{"currencies": strings.Join(converted.Converted, "、"),
+			"date": converted.RateDate.Format(time.DateOnly), "target": converted.Amount.Currency}))
+		date := openapi_types.Date{Time: converted.RateDate}
+		total.RateDate = &date
+	}
+	if len(converted.Missing) > 0 {
+		notes = append(notes, s.texts.say(languageFrom(ctx), "conversion_missing", map[string]string{"currencies": strings.Join(converted.Missing, "、")}))
+	}
+	if len(notes) > 0 {
+		note := strings.Join(notes, " ")
+		total.ConversionNote = &note
 	}
 	return total
 }
@@ -208,14 +221,17 @@ func (s *Server) GetOverview(ctx context.Context, _ appapi.GetOverviewRequestObj
 	return appapi.GetOverview200JSONResponse(overview), nil
 }
 
-// spendingFor 是这个账号的花费。账本还不分账号（第 20 段才分）：现在只有管理员在用，管理员 = 全部花费；
-// 别的账号（还在等同意）什么都用不了，是 0。
+// spendingFor 是这个账号看到的花费：管理员看全局的（所有账号一起、全局的上限），别的账号看自己的（管理员给它定的上限）。
 func (s *Server) spendingFor(ctx context.Context, account accounts.Account) (spending.Summary, error) {
+	return s.opts.Spending.SummaryFor(ctx, billingAccount(account))
+}
+
+// billingAccount 是账本里记这个账号用的名字：管理员为空（和 accounts.BillingAccountOf 对管理员的人给的一样）。
+func billingAccount(account accounts.Account) string {
 	if account.Role == accounts.RoleAdmin {
-		return s.opts.Spending.Summary(ctx)
+		return ""
 	}
-	empty := spending.Spent{ByCurrency: money.Sum{}, Total: money.Total{Amount: money.Amount{Currency: s.currencyOf(account)}}}
-	return spending.Summary{Currency: s.currencyOf(account), Month: empty, Status: spending.StatusOK, TodayResearch: empty}, nil
+	return account.ID
 }
 
 func (s *Server) pendingAccounts(ctx context.Context) (int, error) {
@@ -282,25 +298,9 @@ func (s *Server) ListAccounts(ctx context.Context, _ appapi.ListAccountsRequestO
 	}
 	reply := appapi.ListAccounts200JSONResponse{}
 	for _, each := range list {
-		summary, err := s.spendingFor(ctx, each)
+		row, err := s.accountSummary(ctx, each)
 		if err != nil {
-			return s.internalError(ctx, "花费", err), nil
-		}
-		row := appapi.AccountSummary{AccountId: each.ID, DisplayName: each.DisplayName, Role: appapi.Role(each.Role),
-			Status: appapi.AccountStatus(each.Status), JoinedVia: appapi.JoinedVia(each.JoinedVia),
-			SpentThisMonth: s.moneyTotal(ctx, summary.Month), Cap: optionalMoney(summary.MonthCap)}
-		terminals, err := s.terminalCounts(ctx, each)
-		if err != nil {
-			return s.internalError(ctx, "数终端", err), nil
-		}
-		row.TerminalsOnline = terminals.online
-		if !each.LastUsedAt.IsZero() {
-			lastUsed := each.LastUsedAt
-			row.LastUsedAt = &lastUsed
-		}
-		if each.AppVersion != "" {
-			version := each.AppVersion
-			row.AppVersion = &version
+			return s.internalError(ctx, "读账号", err), nil
 		}
 		reply = append(reply, row)
 	}

@@ -260,7 +260,7 @@ func (s *Service) titleThread(key turnKey, said, answer string) {
 	if err != nil || thread.Title != "" {
 		return
 	}
-	title, err := s.titler.Title(ctx, said, answer)
+	title, err := s.titler.Title(brain.WithBillingPerson(ctx, key.person), said, answer) // 花费算这条对话的人
 	if err != nil {
 		s.logger.Warn("起标题没成（下一轮再起）", "thread", key.thread, "err", err)
 		return

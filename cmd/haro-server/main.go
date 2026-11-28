@@ -23,6 +23,7 @@ import (
 	"time"
 	_ "time/tzdata" // 内置时区数据：镜像里没有 /usr/share/zoneinfo 时 TZ（例如 Asia/Tokyo）照样生效（集群里默认是 UTC）
 
+	"github.com/bukahou/haro/internal/accounts"
 	"github.com/bukahou/haro/internal/appserver"
 	"github.com/bukahou/haro/internal/brain"
 	"github.com/bukahou/haro/internal/brainserver"
@@ -95,6 +96,9 @@ func run(logger *slog.Logger) error {
 	if deps.accounts, err = openAccounts(ctx, settings, logger, &shutdown); err != nil {
 		return err
 	}
+	if deps.accounts.store != nil { // 分账号：按账号的月上限判断，全局的额度提醒、口头提高只给管理员（放行任何调用之前接上）
+		deps.guard.UseAccounts(accounts.BillingAccountOf, deps.accounts.store)
+	}
 	kit, err := buildTooling(ctx, settings, catalog, deps, logger, &shutdown)
 	if err != nil {
 		return err
@@ -104,7 +108,7 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 	entry := entrypoints{online: brainserver.NewOnlineTerminals(), accounts: deps.accounts.store}
-	if entry.app, err = buildAppAPI(ctx, settings, deps, kit, appBrain{components: components, options: options, title: extras.title, backstory: extras.backstory}, entry.online, logger); err != nil {
+	if entry.app, err = buildAppAPI(ctx, settings, deps, kit, appBrain{components: components, options: options, title: extras.title, receipt: extras.receipt, backstory: extras.backstory}, entry.online, logger, &shutdown); err != nil {
 		return err
 	}
 	return serve(ctx, settings, components, options, deps, entry, logger)

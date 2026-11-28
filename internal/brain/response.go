@@ -103,7 +103,8 @@ func (s *Session) respond(ctx context.Context, job *transcriptionJob) (done real
 	if job == nil {
 		return realtimeproto.ResponseDone{Status: realtimeproto.StatusIncomplete, Reason: realtimeproto.ReasonNoInputAudio}
 	}
-	var tools []string // 这一轮调用了哪些工具（按调用顺序）
+	ctx = WithBillingPerson(ctx, s.parts.Residents.Owner) // 认出说话的人之前（受限回答）：算这台终端所在的账号（管理员的终端为空）
+	var tools []string                                    // 这一轮调用了哪些工具（按调用顺序）
 	defer func() {
 		s.logger.Info("一轮结束", "item", job.item, "status", done.Status, "reason", done.Reason, "tools", tools,
 			"camera", slices.Contains(tools, lookAtCameraTool), "elapsed", since(job.started))
@@ -132,7 +133,9 @@ func (s *Session) respond(ctx context.Context, job *transcriptionJob) (done real
 		s.logger.Info("不是登记的人说的，不回答", "text", job.text)
 		return realtimeproto.ResponseDone{Status: realtimeproto.StatusIncomplete, Reason: realtimeproto.ReasonUnknownSpeaker}
 	}
-	s.useConversationOf(s.speakerFor(job))
+	speaker := s.speakerFor(job)
+	s.useConversationOf(speaker)
+	ctx = WithBillingPerson(ctx, speaker) // 这一轮的花费算说话的人所在的账号
 	s.rememberLanguage(job.language)
 	if !hasSpokenText(job.text) {
 		return realtimeproto.ResponseDone{Status: realtimeproto.StatusIncomplete, Reason: realtimeproto.ReasonEmptyTranscript}

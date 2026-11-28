@@ -188,3 +188,33 @@ func TestNoteVectors(t *testing.T) {
 		t.Errorf("没有这个模型的向量时为 nil：%v %v", vector, err)
 	}
 }
+
+// 彻底删账号：删掉这个人记的（含向量），别人的、全家共用的不动。
+func TestErasePerson(t *testing.T) {
+	store, err := OpenSQLite(context.Background(), filepath.Join(t.TempDir(), "notes.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	for _, person := range []string{"走的人", "别人", ""} {
+		note, err := store.Save(ctx, NewNote{Person: person, Content: "猫粮在柜子里", Source: SourceOwner})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.SaveVector(ctx, note.ID, "m", []float32{1, 0}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.ErasePerson(ctx, "走的人"); err != nil {
+		t.Fatal(err)
+	}
+	for person, want := range map[string]int{"走的人": 1, "别人": 2} { // 列出时带着全家共用的那条
+		if _, total, err := store.List(ctx, person, 10); err != nil || total != want {
+			t.Errorf("%s：%d %v", person, total, err)
+		}
+	}
+	if vectors, _ := store.Vectors(ctx, "m"); len(vectors) != 2 {
+		t.Errorf("向量：%d", len(vectors))
+	}
+}

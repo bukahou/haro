@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: haro App API
-  version: 0.9.0
+  version: 0.12.0
   description: |
     haro 手机 App 和网页版用的接口（第一批：账号、登录、我、花费、终端、管理员）。
     服务端和 App 都从这份契约生成代码；⛔ 两边都不绕过契约私下约定字段。契约每改一次升版本号。
@@ -37,6 +37,8 @@ tags:
     description: 记录：背景记录池、记过的事、后台调查
   - name: calendar
     description: 日历：haro 自己的日程和系统日历同步进来的
+  - name: expenses
+    description: 记账：主人自己的账目（和 haro 自己的花费账本分开）
 paths:
   /api/v1/auth/oidc/start:
     get:
@@ -62,7 +64,7 @@ paths:
         - name: invite
           in: query
           required: false
-          description: 管理员发的邀请码（没有账号时用）
+          description: 管理员发的邀请码（没有账号时用：有效的码直接是正常账号；不对、过期、用过的回 `oidc_error=invite_invalid`，不建账号）
           schema:
             type: string
             maxLength: 64
@@ -905,6 +907,330 @@ paths:
           $ref: '#/components/responses/ValidationFailed'
         '401':
           $ref: '#/components/responses/Unauthorized'
+  /api/v1/receipts:
+    post:
+      tags: [expenses]
+      operationId: uploadReceipt
+      summary: 交一张小票、发票、收据或订单页的截图（请求体就是图片）：存好原图，开始在后台解析；之后用 getReceipt 看草稿
+      description: |
+        一个人同时在解析的最多 10 张（多了回 409）。交上来 30 天还没确认的小票连原图一起删掉。
+      parameters:
+        - name: category
+          in: query
+          description: 主人点的分类（分类的键，见 listExpenseCategories）
+          schema:
+            type: string
+            maxLength: 64
+        - name: note
+          in: query
+          description: 主人写的一句说明
+          schema:
+            type: string
+            maxLength: 1000
+      requestBody:
+        required: true
+        content:
+          image/jpeg:
+            schema:
+              type: string
+              format: binary
+          image/png:
+            schema:
+              type: string
+              format: binary
+          image/webp:
+            schema:
+              type: string
+              format: binary
+      responses:
+        '202':
+          description: 收下了，在解析（status = parsing）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Receipt'
+        '400':
+          $ref: '#/components/responses/ValidationFailed'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/receipts/{receiptId}:
+    parameters:
+      - $ref: '#/components/parameters/ReceiptId'
+    get:
+      tags: [expenses]
+      operationId: getReceipt
+      summary: 一张小票的状态和草稿（解析中的隔几秒再取）
+      responses:
+        '200':
+          description: 小票
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Receipt'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [expenses]
+      operationId: discardReceipt
+      summary: 不要这张小票了（不入账，或者解析失败了要重拍）：连原图一起删。还在解析、已经入账的不行（409）
+      responses:
+        '204':
+          description: 删了
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/receipts/{receiptId}/image:
+    parameters:
+      - $ref: '#/components/parameters/ReceiptId'
+    get:
+      tags: [expenses]
+      operationId: getReceiptImage
+      summary: 小票的原图（存成 JPEG 的那张）
+      responses:
+        '200':
+          description: 图片
+          content:
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/receipts/{receiptId}/confirm:
+    parameters:
+      - $ref: '#/components/parameters/ReceiptId'
+    post:
+      tags: [expenses]
+      operationId: confirmReceipt
+      summary: 交回（可能改过的）草稿，入账；原图跟着这笔账。只有解析好了的（status = ready）能确认，别的回 409
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExpenseInput'
+      responses:
+        '201':
+          description: 入账了
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Expense'
+        '400':
+          $ref: '#/components/responses/ValidationFailed'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/expenses:
+    get:
+      tags: [expenses]
+      operationId: listExpenses
+      summary: 一个月的账目（新的在前）；可以只看一个分类或一家店
+      parameters:
+        - $ref: '#/components/parameters/Month'
+        - name: category
+          in: query
+          description: 只看这一个分类（分类的键）
+          schema:
+            type: string
+            maxLength: 64
+        - name: merchant
+          in: query
+          description: 店名（整个对上）
+          schema:
+            type: string
+            maxLength: 200
+      responses:
+        '200':
+          description: 账目
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Expense'
+        '400':
+          $ref: '#/components/responses/ValidationFailed'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [expenses]
+      operationId: createExpense
+      summary: 手记一笔（没有小票）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExpenseInput'
+      responses:
+        '201':
+          description: 记好了
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Expense'
+        '400':
+          $ref: '#/components/responses/ValidationFailed'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/expenses/summary:
+    get:
+      tags: [expenses]
+      operationId: summarizeExpenses
+      summary: 一个月的汇总：合计（换成默认货币 + 按币种分开 + 换算提示）、按分类、按店（各自按合计从大到小）、上个月的合计
+      parameters:
+        - $ref: '#/components/parameters/Month'
+      responses:
+        '200':
+          description: 汇总
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExpenseSummary'
+        '400':
+          $ref: '#/components/responses/ValidationFailed'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/expenses/{expenseId}:
+    parameters:
+      - $ref: '#/components/parameters/ExpenseId'
+    get:
+      tags: [expenses]
+      operationId: getExpense
+      summary: 一笔账（明细行；有原图时 has_image 为 true）
+      responses:
+        '200':
+          description: 账目
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Expense'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags: [expenses]
+      operationId: updateExpense
+      summary: 改一笔账（整笔替换；原图不变）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExpenseInput'
+      responses:
+        '200':
+          description: 改好的
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Expense'
+        '400':
+          $ref: '#/components/responses/ValidationFailed'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [expenses]
+      operationId: deleteExpense
+      summary: 删一笔账，原图跟着删
+      responses:
+        '204':
+          description: 删了
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/expenses/{expenseId}/image:
+    parameters:
+      - $ref: '#/components/parameters/ExpenseId'
+    get:
+      tags: [expenses]
+      operationId: getExpenseImage
+      summary: 一笔账的原图（手记的没有：404）
+      responses:
+        '200':
+          description: 图片
+          content:
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/expense-categories:
+    get:
+      tags: [expenses]
+      operationId: listExpenseCategories
+      summary: 能选的分类：固定的几类在前（名字按语言），主人加的在后
+      responses:
+        '200':
+          description: 分类
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ExpenseCategory'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [expenses]
+      operationId: addExpenseCategory
+      summary: 加一个自己的分类
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExpenseCategoryInput'
+      responses:
+        '201':
+          description: 加好的
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExpenseCategory'
+        '400':
+          $ref: '#/components/responses/ValidationFailed'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/expense-categories/{categoryKey}:
+    parameters:
+      - name: categoryKey
+        in: path
+        required: true
+        schema:
+          type: string
+          maxLength: 64
+    delete:
+      tags: [expenses]
+      operationId: deleteExpenseCategory
+      summary: 删一个自己加的分类（固定的几类删不了：404）；用过它的账目留着，分类显示成「已删的分类」
+      responses:
+        '204':
+          description: 删了
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
   /api/v1/spending:
     get:
       tags: [spending]
@@ -1023,6 +1349,193 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+  /api/v1/admin/accounts/{accountId}:
+    parameters:
+      - $ref: '#/components/parameters/AccountId'
+    patch:
+      tags: [admin]
+      operationId: updateAccount
+      summary: 给一个账号定月上限（默认货币；null = 不设）。到了上限，这个账号这个月的请求按「额度用完」处理，别的账号不受影响；全局的上限照旧兜底。管理员的账号用全局的上限（409）
+      parameters:
+        - $ref: '#/components/parameters/AcceptLanguage'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AccountUpdate'
+      responses:
+        '200':
+          description: 改好的
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountSummary'
+        '400':
+          $ref: '#/components/responses/ValidationFailed'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+    delete:
+      tags: [admin]
+      operationId: deleteAccount
+      summary: 删除账号（软删除：马上停用，30 天后连同这个账号的全部数据彻底删掉；到期前 enableAccount 可以撤销）。管理员的账号删不了（409）
+      parameters:
+        - $ref: '#/components/parameters/AcceptLanguage'
+      responses:
+        '200':
+          description: 已软删除（deletion_scheduled_at 是彻底删的时间）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/admin/accounts/{accountId}/approve:
+    parameters:
+      - $ref: '#/components/parameters/AccountId'
+    post:
+      tags: [admin]
+      operationId: approveAccount
+      summary: 同意一个在等的账号（等待批准 → 正常）；不是在等的回 409
+      parameters:
+        - $ref: '#/components/parameters/AcceptLanguage'
+      responses:
+        '200':
+          description: 已同意
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/admin/accounts/{accountId}/disable:
+    parameters:
+      - $ref: '#/components/parameters/AccountId'
+    post:
+      tags: [admin]
+      operationId: disableAccount
+      summary: 停用账号：它的登录令牌全部作废、终端断开（数据都留着）。管理员的账号停用不了（409）
+      parameters:
+        - $ref: '#/components/parameters/AcceptLanguage'
+      responses:
+        '200':
+          description: 已停用
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/admin/accounts/{accountId}/enable:
+    parameters:
+      - $ref: '#/components/parameters/AccountId'
+    post:
+      tags: [admin]
+      operationId: enableAccount
+      summary: 恢复停用了的账号（停用 → 正常）；软删除了、还没到期的也恢复（撤销删除）。不是停用的回 409
+      parameters:
+        - $ref: '#/components/parameters/AcceptLanguage'
+      responses:
+        '200':
+          description: 已恢复
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/admin/invites:
+    get:
+      tags: [admin]
+      operationId: listInvites
+      summary: 全部邀请码（新的在前；码本身不在里面）
+      responses:
+        '200':
+          description: 邀请码
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Invite'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      tags: [admin]
+      operationId: createInvite
+      summary: 生成一个邀请码（用一次、有时效）：码只在这次的回答里给，之后看不到
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InviteInput'
+      responses:
+        '201':
+          description: 生成了
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreatedInvite'
+        '400':
+          $ref: '#/components/responses/ValidationFailed'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/v1/admin/invites/{inviteId}:
+    parameters:
+      - name: inviteId
+        in: path
+        required: true
+        schema:
+          type: string
+          maxLength: 64
+    delete:
+      tags: [admin]
+      operationId: revokeInvite
+      summary: 撤销一个还没用的邀请码（用过、撤销过的回 404）
+      responses:
+        '204':
+          description: 撤销了
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
   /api/v1/admin/terminals/pending:
     get:
       tags: [admin]
@@ -1049,7 +1562,7 @@ paths:
     post:
       tags: [admin]
       operationId: approveTerminal
-      summary: 批准新终端（它成为一个匿名账号的终端；每台的月上限在第 20 段加）
+      summary: 批准新终端（它成为一个匿名账号的终端；它的月上限给那个账号定：updateAccount）
       responses:
         '204':
           description: 已批准
@@ -1128,6 +1641,34 @@ components:
       schema:
         type: string
         maxLength: 64
+    AccountId:
+      name: accountId
+      in: path
+      required: true
+      schema:
+        type: string
+        maxLength: 64
+    ReceiptId:
+      name: receiptId
+      in: path
+      required: true
+      schema:
+        type: string
+        maxLength: 64
+    ExpenseId:
+      name: expenseId
+      in: path
+      required: true
+      schema:
+        type: string
+        maxLength: 64
+    Month:
+      name: month
+      in: query
+      description: 哪个月（YYYY-MM，按服务端的时区）；不带 = 这个月
+      schema:
+        type: string
+        pattern: '^[0-9]{4}-(0[1-9]|1[0-2])$'
   responses:
     Unauthorized:
       description: 没登录、令牌无效或过期（`code` 区分）
@@ -1274,6 +1815,337 @@ components:
           type: string
           format: date
           nullable: true
+    ReceiptStatus:
+      type: string
+      description: parsing = 在解析；ready = 解析好了，等确认；failed = 解析失败（看 failure）；confirmed = 已经入账（看 expense_id）
+      enum: [parsing, ready, failed, confirmed]
+    ReceiptFailure:
+      type: string
+      description: unreadable = 看不出是小票、或者看不清（重拍）；unavailable = 模型暂时用不了（稍后重交）
+      enum: [unreadable, unavailable]
+    ReceiptField:
+      type: string
+      description: 草稿里的一个字段（看不清、拿不准的标出来）
+      enum: [merchant, spent_at, currency, items, subtotal, tax, total, payment_method]
+    Receipt:
+      type: object
+      required: [receipt_id, status, created_at]
+      properties:
+        receipt_id:
+          type: string
+        status:
+          $ref: '#/components/schemas/ReceiptStatus'
+        draft:
+          description: 解析出的草稿（解析好了以后有；确认后是确认时交的）
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/ExpenseDraft'
+        failure:
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/ReceiptFailure'
+        failure_message:
+          type: string
+          nullable: true
+          description: 解析失败时给人看的说明（按语言）
+        expense_id:
+          type: string
+          nullable: true
+          description: 入账以后是那笔账
+        created_at:
+          type: string
+          format: date-time
+    ExpenseDraft:
+      type: object
+      description: 解析出的草稿：金额都是十进制写法（不带货币符号），确认时可以改任何一项再交回（ExpenseInput）
+      required: [merchant, currency, items, total, uncertain]
+      properties:
+        merchant:
+          type: string
+        spent_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: 读不出时为 null（uncertain 里有 spent_at）
+        currency:
+          type: string
+          description: ISO 4217；读不出时为空
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ExpenseItemInput'
+        subtotal:
+          type: string
+          nullable: true
+        tax:
+          type: string
+          nullable: true
+        total:
+          type: string
+        payment_method:
+          type: string
+          nullable: true
+        category:
+          type: string
+          nullable: true
+          description: 建议的分类键（主人上传时点过的用主人的）
+        note:
+          type: string
+          nullable: true
+        uncertain:
+          type: array
+          description: 看不清、拿不准的字段（App 标出来请主人核对）
+          items:
+            $ref: '#/components/schemas/ReceiptField'
+    ExpenseItemInput:
+      type: object
+      required: [name, amount]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        quantity:
+          type: string
+          maxLength: 32
+          description: 十进制写法
+        unit_price:
+          type: string
+          maxLength: 32
+        amount:
+          type: string
+          maxLength: 32
+        tax_rate:
+          type: string
+          maxLength: 16
+          description: 税率的百分比（例如 8、10）
+    ExpenseInput:
+      type: object
+      description: 一笔账（手记、确认小票、改账目都用它）：金额是十进制写法，币种 ISO 4217，明细的金额和合计同一种币种
+      required: [merchant, spent_at, currency, total]
+      properties:
+        merchant:
+          type: string
+          minLength: 1
+          maxLength: 200
+        spent_at:
+          type: string
+          format: date-time
+        currency:
+          type: string
+          minLength: 3
+          maxLength: 3
+        items:
+          type: array
+          maxItems: 200
+          items:
+            $ref: '#/components/schemas/ExpenseItemInput'
+        subtotal:
+          type: string
+          maxLength: 32
+        tax:
+          type: string
+          maxLength: 32
+        total:
+          type: string
+          minLength: 1
+          maxLength: 32
+        payment_method:
+          type: string
+          maxLength: 200
+        category:
+          type: string
+          maxLength: 64
+          description: 分类键（listExpenseCategories）；不带 = 不分类
+        note:
+          type: string
+          maxLength: 1000
+    ExpenseItem:
+      type: object
+      required: [name, amount]
+      properties:
+        name:
+          type: string
+        quantity:
+          type: string
+          nullable: true
+        unit_price:
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/Money'
+        amount:
+          $ref: '#/components/schemas/Money'
+        tax_rate:
+          type: string
+          nullable: true
+    Expense:
+      type: object
+      required: [expense_id, merchant, spent_at, total, items, has_image, created_at, updated_at]
+      properties:
+        expense_id:
+          type: string
+        merchant:
+          type: string
+        spent_at:
+          type: string
+          format: date-time
+        total:
+          $ref: '#/components/schemas/Money'
+        subtotal:
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/Money'
+        tax:
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/Money'
+        payment_method:
+          type: string
+          nullable: true
+        category:
+          description: 没分类时为 null；自己加的分类删了以后 name 是「已删的分类」
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/ExpenseCategory'
+        note:
+          type: string
+          nullable: true
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ExpenseItem'
+        has_image:
+          type: boolean
+          description: 有原图（getExpenseImage）；手记的没有
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    ExpenseCategory:
+      type: object
+      required: [key, name, builtin]
+      properties:
+        key:
+          type: string
+        name:
+          type: string
+          description: 给人看的名字（固定的几类按语言）
+        builtin:
+          type: boolean
+          description: 固定的几类（删不了）
+    ExpenseCategoryInput:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+    ExpenseGroup:
+      type: object
+      description: 汇总里的一组（一个分类或一家店）
+      required: [name, count, total]
+      properties:
+        key:
+          type: string
+          nullable: true
+          description: 分类的键（按分类的组；没分类的那组为 null）；按店的组为 null
+        name:
+          type: string
+          description: 给人看的名字（分类名、「未分类」或店名）
+        count:
+          type: integer
+        total:
+          $ref: '#/components/schemas/MoneyTotal'
+    ExpenseSummary:
+      type: object
+      required: [month, count, total, previous, categories, merchants]
+      properties:
+        month:
+          type: string
+          description: YYYY-MM
+        count:
+          type: integer
+          description: 这个月几笔
+        total:
+          $ref: '#/components/schemas/MoneyTotal'
+        previous:
+          description: 上个月的合计（比较用）
+          allOf:
+            - $ref: '#/components/schemas/MoneyTotal'
+        categories:
+          type: array
+          items:
+            $ref: '#/components/schemas/ExpenseGroup'
+        merchants:
+          type: array
+          items:
+            $ref: '#/components/schemas/ExpenseGroup'
+    AccountUpdate:
+      type: object
+      required: [monthly_cap]
+      properties:
+        monthly_cap:
+          description: 月上限（币种必须是服务端的默认货币，大于 0；可选的档位在 client-config 的 monthly_cap_options）；null = 不设
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/Money'
+    InviteStatus:
+      type: string
+      description: unused = 还没用；used = 用过了（used_by_name 是谁）；expired = 过期了；revoked = 撤销了
+      enum: [unused, used, expired, revoked]
+    Invite:
+      type: object
+      required: [invite_id, status, created_at, expires_at]
+      properties:
+        invite_id:
+          type: string
+        note:
+          type: string
+          nullable: true
+        status:
+          $ref: '#/components/schemas/InviteStatus'
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        used_at:
+          type: string
+          format: date-time
+          nullable: true
+        used_by_name:
+          type: string
+          nullable: true
+          description: 用它进来的账号的显示名（那个账号彻底删了以后为 null）
+    InviteInput:
+      type: object
+      properties:
+        expires_in_hours:
+          type: integer
+          minimum: 1
+          maximum: 720
+          description: 多少小时后过期；不带 = 168（7 天）
+        note:
+          type: string
+          maxLength: 200
+          description: 备注（给谁的）
+    CreatedInvite:
+      type: object
+      required: [invite, code]
+      properties:
+        invite:
+          $ref: '#/components/schemas/Invite'
+        code:
+          type: string
+          description: 邀请码（显示形式，例如 ABCD-EFGH-JKMN；只给这一次）。登录时作为 startLogin 的 invite 参数
+        share_url:
+          type: string
+          nullable: true
+          description: 发给对方的登录地址（浏览器打开就用这个码登录、登录完到网页版）；没有网页版时为 null
     ClientConfig:
       type: object
       required: [server_version, api_version, min_app_version, limits]
@@ -2134,8 +3006,11 @@ components:
         joined_via:
           $ref: '#/components/schemas/JoinedVia'
         spent_this_month:
-          $ref: '#/components/schemas/MoneyTotal'
+          description: 这个账号自己这个月的花费（管理员那一行是管理员自己的；所有账号一起的在花费页）
+          allOf:
+            - $ref: '#/components/schemas/MoneyTotal'
         cap:
+          description: 管理员给它定的月上限；没定、管理员自己（用全局的上限）为 null
           allOf:
             - $ref: '#/components/schemas/Money'
           nullable: true

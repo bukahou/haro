@@ -91,7 +91,12 @@ func (g *Guard) Summary(ctx context.Context) (Summary, error) {
 
 // spent 合计 since 之后的花费（purposes 为空 = 所有用途）并换成默认货币。
 func (g *Guard) spent(ctx context.Context, since time.Time, purposes ...Purpose) (Spent, error) {
-	totals, err := g.spentSince(ctx, since, purposes...)
+	return g.spentFor(ctx, nil, since, purposes...)
+}
+
+// spentFor 同 spent，account 不为 nil 时只算这个账号的。
+func (g *Guard) spentFor(ctx context.Context, account *string, since time.Time, purposes ...Purpose) (Spent, error) {
+	totals, err := g.spentOf(ctx, account, since, purposes...)
 	if err != nil {
 		return Spent{}, err
 	}
@@ -100,4 +105,58 @@ func (g *Guard) spent(ctx context.Context, since time.Time, purposes ...Purpose)
 		return Spent{}, &ledgerUnavailable{err: err}
 	}
 	return Spent{ByCurrency: totals.Spent, Total: total}, nil
+}
+
+// AccountSpent 是一个账号（空 = 管理员自己）这个月花了多少（管理员的账号列表用）。
+func (g *Guard) AccountSpent(ctx context.Context, account string) (Spent, error) {
+	return g.spentFor(ctx, &account, g.startOfMonth())
+}
+
+// AccountCap 是一个账号的月上限（默认货币；管理员、没定的为零值）。
+func (g *Guard) AccountCap(ctx context.Context, account string) (money.Amount, error) {
+	return g.accountCap(ctx, account)
+}
+
+// SummaryFor 是一个账号看到的花费汇总：管理员（account 为空）看全局的（Summary，所有账号一起、全局的上限）；
+// 别的账号只看自己的：这个月、按用途、今天的调查和搜索，上限是管理员给它定的（不能口头提高；全局每天的调查、搜索上限只给管理员看）。
+func (g *Guard) SummaryFor(ctx context.Context, account string) (Summary, error) {
+	if account == "" {
+		return g.Summary(ctx)
+	}
+	summary := Summary{Currency: g.limits.Currency, Status: StatusOK}
+	month, err := g.spentFor(ctx, &account, g.startOfMonth())
+	if err != nil {
+		return Summary{}, err
+	}
+	summary.Month = month
+	limit, err := g.accountCap(ctx, account)
+	if err != nil {
+		return Summary{}, err
+	}
+	if limit.Micros > 0 {
+		summary.MonthCap = limit
+		spent := month.Total.Amount
+		switch {
+		case spent.Micros >= limit.Micros:
+			summary.Status = StatusReached
+		case g.limits.WarnRatio > 0 && spent.Value() >= limit.Value()*g.limits.WarnRatio:
+			summary.Status = StatusNear
+		}
+	}
+	for _, purpose := range summaryPurposes {
+		spent, err := g.spentFor(ctx, &account, g.startOfMonth(), purpose)
+		if err != nil {
+			return Summary{}, err
+		}
+		summary.ByPurpose = append(summary.ByPurpose, PurposeSpent{Purpose: purpose, Spent: spent})
+	}
+	if summary.TodayResearch, err = g.spentFor(ctx, &account, g.startOfDay(), PurposeResearch); err != nil {
+		return Summary{}, err
+	}
+	used, err := g.spentOf(ctx, &account, g.startOfDay(), PurposeSearch, PurposeResearch)
+	if err != nil {
+		return Summary{}, err
+	}
+	summary.SearchCredits = used.Credits
+	return summary, nil
 }

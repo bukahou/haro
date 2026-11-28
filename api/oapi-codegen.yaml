@@ -19,3 +19,7 @@ output-options:
     # 图片的上传、取回是二进制的请求体 / 响应，手写挂载（上传的请求体上限比别的接口大）
     - uploadAttachment
     - getAttachment
+    # 小票的上传、两张原图的取回同上
+    - uploadReceipt
+    - getReceiptImage
+    - getExpenseImage

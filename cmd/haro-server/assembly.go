@@ -10,6 +10,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/bukahou/haro/internal/accounts"
 	"github.com/bukahou/haro/internal/agents"
 	"github.com/bukahou/haro/internal/backstory"
 	"github.com/bukahou/haro/internal/brain"
@@ -86,6 +87,7 @@ type services struct {
 	ledger     spending.Ledger
 	guard      *spending.Guard
 	pricing    spending.Pricing
+	rates      money.Converter // 参考汇率（花费上限、记账的汇总共用）
 	// conversations 是对话库（没设 HARO_CONVERSATIONS_DB 时为 nil：对话只在内存里）：大脑存对话，长期记忆从完整记录里按意思找
 	conversations *conversationstore.SQLiteStore
 	embedder      *embedding.Client // 嵌入服务（没设 HARO_EMBEDDING_URL 时为 nil：长期记忆不按意思找）
@@ -117,7 +119,8 @@ func connectServices(ctx context.Context, settings config.ServerSettings, logger
 	if err != nil {
 		return deps, err
 	}
-	deps.ledger = spending.WithBookkeeping(ledger, logger)
+	// 最外层按 ctx 里标的人记上账号（写不进、留着补写的那笔也带着）；没开 App 的接口时只有管理员的人，都记成管理员的
+	deps.ledger = spending.WithAttribution(spending.WithBookkeeping(ledger, logger), accounts.BillingAccountOf)
 	shutdown.add("用量账本", deps.ledger.Close)
 	if settings.UsageDB == "" {
 		logger.Warn("没设 HARO_USAGE_DB：用量只记在内存里，服务端重启后额度重新计算")
@@ -130,7 +133,7 @@ func connectServices(ctx context.Context, settings config.ServerSettings, logger
 	limits := spending.Limits{Currency: currency, ResearchDaily: money.Of(settings.ResearchDailyCap, currency),
 		Monthly: money.Of(settings.MonthlyCap, currency), SearchDailyCredits: settings.SearchDailyCredits,
 		WarnRatio: spending.DefaultWarnRatio, MonthlyRaise: money.Of(settings.MonthlyRaise, currency)}
-	deps.guard = spending.NewGuard(deps.ledger, limits, rates, logger)
+	deps.guard, deps.rates = spending.NewGuard(deps.ledger, limits, rates, logger), rates
 	logger.Info("费用上限（默认货币；账本按原始币种记，判断时按参考汇率换算）", "currency", currency,
 		"research_daily", limits.ResearchDaily.String(), "monthly", limits.Monthly.String(), "search_daily_credits", settings.SearchDailyCredits)
 	if deps.conversations, err = openConversationStore(ctx, settings, shutdown); err != nil {
@@ -158,6 +161,8 @@ type tooling struct {
 	household    *household.Service       // 每个账号的主人资料、家的位置、节假日（大脑、天气、App 都从这里取）
 	places       *weather.OpenMeteoClient // 搜地名（App 设家的位置用）；天气那组工具关着时为 nil
 	calendar     *calendar.Service        // 日历；提醒那组工具关着时为 nil
+	// personData 是按人存数据的地方（彻底删账号时逐个删）：每建好一处就登记在这里（App 的接口那边再加对话、账目）
+	personData []accounts.NamedData
 }
 
 // buildTooling 准备工具：自研工具内置（长期记忆（记事已并进来）、提醒直接连数据库；天气；联网搜索与后台调查），MCP 只接第三方（现在还没有）。
@@ -191,6 +196,7 @@ func buildTooling(ctx context.Context, settings config.ServerSettings, catalog a
 			return kit, err
 		}
 		shutdown.add("记事库", store.Close)
+		kit.personData = append(kit.personData, accounts.NamedData{Name: dataMemory, Data: store})
 		keeper, stopMemory := startMemory(ctx, settings, store, deps, logger)
 		kit.memory = keeper
 		shutdown.add("长期记忆", stopMemory)
@@ -204,6 +210,8 @@ func buildTooling(ctx context.Context, settings config.ServerSettings, catalog a
 		}
 		shutdown.add("提醒", stopReminders)
 		kit.calendar = calendarService
+		kit.personData = append(kit.personData, accounts.NamedData{Name: dataReminders, Data: scheduler},
+			accounts.NamedData{Name: dataCalendar, Data: calendarService})
 		// 语音的提醒工具接在日历上：定提醒同时建日程（App 里看得到）；「查日程」给模型
 		builtins = append(builtins, tools.ReminderTools(calendar.ReminderDesk{Calendar: calendarService, Scheduler: scheduler}, logger),
 			tools.CalendarTools(calendarService, scheduler.Location(), logger))
@@ -233,6 +241,7 @@ func buildTooling(ctx context.Context, settings config.ServerSettings, catalog a
 				return kit, err
 			}
 			kit.research = runner
+			kit.personData = append(kit.personData, accounts.NamedData{Name: dataResearch, Data: runner})
 			shutdown.add("后台调查", closeRunner)
 			builtins = append(builtins, tools.ResearchTools(runner))
 			kit.briefers = append(kit.briefers, runner)
@@ -323,13 +332,14 @@ func assembleBrain(ctx context.Context, settings config.ServerSettings, catalog 
 	if settings.WakeArbitration > 0 { // 多台终端同时听到唤醒词：只让最合适的那台回答
 		components.WakeArbiter = brain.NewWakeArbiter(settings.WakeArbitration)
 	}
-	extras.title = built.title
+	extras.title, extras.receipt = built.title, built.receipt
 	return components, options, extras, nil
 }
 
-// brainExtras 是组装大脑时一起建好、App 的接口要用的：起标题的代理、背景记录池（没有时为 nil）。
+// brainExtras 是组装大脑时一起建好、App 的接口要用的：起标题、读小票的代理、背景记录池（没有时为 nil）。
 type brainExtras struct {
 	title     *brain.Agent
+	receipt   *brain.Agent
 	backstory *backstory.Service
 }
 

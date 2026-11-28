@@ -104,27 +104,34 @@ func (s *Store) StartRegistration(ctx context.Context, name, version, remote str
 func shortID(id string) string { return strings.ToUpper(id[:min(6, len(id))]) }
 
 // newPairCode 是随机配对码（不带「-」）。
-func newPairCode() (string, error) {
-	buf := make([]byte, pairCodeLength)
+func newPairCode() (string, error) { return randomCode(pairCodeLength) }
+
+// randomCode 是 length 个随机的字（配对码、邀请码共用；字表是 pairCodeAlphabet）。
+func randomCode(length int) (string, error) {
+	buf := make([]byte, length)
 	if _, err := rand.Read(buf); err != nil {
 		return "", err
 	}
-	code := make([]byte, pairCodeLength)
-	for i, b := range buf { // 256 不是字表长度的整数倍：取模有极小的偏差，对 10 分钟、用一次的配对码无所谓
+	code := make([]byte, length)
+	for i, b := range buf { // 256 不是字表长度的整数倍：取模有极小的偏差，对有时效、用一次的码无所谓
 		code[i] = pairCodeAlphabet[int(b)%len(pairCodeAlphabet)]
 	}
 	return string(code), nil
 }
 
-// FormatPairCode 是配对码的显示形式（每 4 个字中间加「-」）。
+// FormatPairCode 是配对码、邀请码的显示形式（每 4 个字中间加「-」）。
 func FormatPairCode(code string) string {
-	if len(code) <= 4 {
-		return code
+	var out strings.Builder
+	for i, r := range code {
+		if i > 0 && i%4 == 0 {
+			out.WriteByte('-')
+		}
+		out.WriteRune(r)
 	}
-	return code[:4] + "-" + code[4:]
+	return out.String()
 }
 
-// normalizePairCode 是输入的配对码去掉「-」和空白、转大写（手输时常见的写法都认）。
+// normalizePairCode 是输入的配对码、邀请码去掉「-」和空白、转大写（手输时常见的写法都认）。
 func normalizePairCode(input string) string {
 	return strings.Map(func(r rune) rune {
 		switch {

@@ -329,6 +329,7 @@ func TestValidateBrainTable(t *testing.T) {
 		}, "HARO_DEFAULT_CURRENCY"},
 		{"开着记事却没有记事库", func(s *ServerSettings) { s.ToolGroups, s.NotesDB = nil, "" }, "HARO_NOTES_DB"},
 		{"记事候选上限为零", func(s *ServerSettings) { s.ToolGroups, s.NotesDB, s.NotesListLimit = nil, "/tmp/notes.db", 0 }, "HARO_NOTES_LIST_LIMIT"},
+		{"记账没有存原图的目录", func(s *ServerSettings) { s.ExpensesDB, s.AttachmentsDir = "/tmp/expenses.db", "" }, "HARO_ATTACHMENTS_DIR"},
 		{"工具组写错", func(s *ServerSettings) { s.ToolGroups = []string{"memory", "wether"} }, "HARO_TOOLS"},
 		{"原来的 true", func(s *ServerSettings) { s.ToolGroups = []string{"true"} }, "HARO_TOOLS"},
 		{"none 和别的组一起写", func(s *ServerSettings) { s.ToolGroups = []string{"none", "weather"} }, "HARO_TOOLS"},

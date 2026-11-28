@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -170,7 +171,7 @@ func (b *ConversationBook) initialPersona() *Persona {
 // save 把一份对话写盘（出错只记日志：内存里的对话照常用）；不写盘的对话（detached）不写。
 // 同一个人的保存一个接一个：在轮到时才取快照，后取的快照一定后写，旧的不会盖掉新的（摘要和新一轮同时保存时）。
 func (b *ConversationBook) save(conversation *Conversation) {
-	if b.store == nil || conversation.detached {
+	if b.store == nil || conversation.detached || conversation.forgotten.Load() {
 		return
 	}
 	conversation.saveMu.Lock()
@@ -188,6 +189,8 @@ type Conversation struct {
 	// detached：存储读这个人的对话时出错，这一份只在内存里用：不带之前的对话、不写盘、不压缩，也不留在对话簿里
 	// （下一轮重读）。建好后不再改，不用加锁
 	detached bool
+	// forgotten：对话簿忘掉了这个人（Forget，彻底删账号时）：之后不再写盘（已经拿到这份对话的调用方可能还在用）
+	forgotten atomic.Bool
 
 	saveMu sync.Mutex // 同一个人的保存一个接一个（见 ConversationBook.save）
 
@@ -533,4 +536,20 @@ func (c *Conversation) unexpiredPendingActions(now time.Time) []pendingAction {
 	defer c.mu.Unlock()
 	c.pendingActions = slices.DeleteFunc(c.pendingActions, func(action pendingAction) bool { return now.After(action.ExpiresAt) })
 	return slices.Clone(c.pendingActions)
+}
+
+// Forget 把这个人的对话（各条线程）、轮次编号从内存里拿掉，之后不会再写盘（彻底删账号时，先忘掉再删存储里的）。
+// 正在进行的一轮照样结束，但它的对话已经不在簿子里：下一次用到时重新从存储读（那时已经删了）。
+func (b *ConversationBook) Forget(person string) {
+	b.mu.Lock()
+	for key, conversation := range b.byKey {
+		if key.person == person {
+			conversation.forgotten.Store(true) // 已经拿到它的调用方再写也不写盘
+			delete(b.byKey, key)
+		}
+	}
+	b.mu.Unlock()
+	b.seqMu.Lock()
+	delete(b.seqs, person)
+	b.seqMu.Unlock()
 }

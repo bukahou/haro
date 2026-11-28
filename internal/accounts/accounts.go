@@ -15,6 +15,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/bukahou/haro/internal/money"
+
 	"github.com/pressly/goose/v3"
 
 	"github.com/bukahou/haro/internal/sqliteschema"
@@ -64,6 +66,8 @@ type Account struct {
 	CreatedAt       time.Time
 	LastUsedAt      time.Time // 零值 = 还没用过
 	AppVersion      string
+	DeletionDueAt   time.Time    // 软删除后彻底删的时间；零值 = 没删
+	MonthlyCap      money.Amount // 管理员给它定的月上限；零值 = 不设（管理员自己用全局的上限）
 }
 
 // 出错的种类（errors.Is 判断；接口按它给稳定的错误码）。
@@ -162,13 +166,16 @@ func (s *Store) EnsureAdmin(ctx context.Context, admin Admin) (Account, error) {
 	return s.BySubject(ctx, admin.Subject)
 }
 
-// ResolveLogin 是 akasha 登录回来后找账号：有就用（停用的、在等同意的报对应的错）；没有就建一个等管理员同意的账号，报 ErrPendingApproval。
-// 邀请码（第 20 段）还没有，新账号一律等同意。
-func (s *Store) ResolveLogin(ctx context.Context, subject, displayName string) (Account, error) {
+// ResolveLogin 是 akasha 登录回来后找账号：有就用（停用的、在等同意的报对应的错；带的邀请码不用掉）。
+// 没有时：带着有效的邀请码 → 建一个正常的账号（来源 = 邀请），码标成用过（同一个事务）；带了无效 / 过期 / 用过的码 →
+// ErrInviteInvalid，不建账号；没带码 → 建一个等管理员同意的账号，报 ErrPendingApproval。
+func (s *Store) ResolveLogin(ctx context.Context, subject, displayName, invite string) (Account, error) {
 	account, err := s.BySubject(ctx, subject)
 	switch {
+	case errors.Is(err, ErrNotFound) && invite != "":
+		return s.joinByInvite(ctx, subject, displayName, invite)
 	case errors.Is(err, ErrNotFound):
-		if _, err := s.create(ctx, subject, displayName, StatusPendingApproval, JoinedViaApproval); err != nil {
+		if _, err := s.create(ctx, s.db, subject, displayName, StatusPendingApproval, JoinedViaApproval); err != nil {
 			return Account{}, err
 		}
 		return Account{}, ErrPendingApproval
@@ -190,23 +197,28 @@ func usable(account Account) error {
 	}
 }
 
-// create 建一个普通账号；它的人用账号编号生成（不会和别的账号、原来的声纹名重名）。
-func (s *Store) create(ctx context.Context, subject, displayName string, status Status, via JoinedVia) (Account, error) {
+// execer 是 *sql.DB 和 *sql.Tx 共有的：建账号在事务里、外都用同一个写法。
+type execer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+// create 建一个普通账号，返回它的编号；它的人用账号编号生成（不会和别的账号、原来的声纹名重名）。
+func (s *Store) create(ctx context.Context, db execer, subject, displayName string, status Status, via JoinedVia) (string, error) {
 	id, err := newID()
 	if err != nil {
-		return Account{}, err
+		return "", err
 	}
 	var nullableSubject any
 	if subject != "" {
 		nullableSubject = subject
 	}
 	owner, guest := PersonsOf(id)
-	if _, err := s.db.ExecContext(ctx, `INSERT INTO accounts (id, subject, display_name, role, status, joined_via, owner_person,
+	if _, err := db.ExecContext(ctx, `INSERT INTO accounts (id, subject, display_name, role, status, joined_via, owner_person,
 		guest_person, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, nullableSubject, displayName, RoleMember, status, via,
 		owner, guest, s.now().Unix()); err != nil {
-		return Account{}, fmt.Errorf("建账号: %w", err)
+		return "", fmt.Errorf("建账号: %w", err)
 	}
-	return s.ByID(ctx, id)
+	return id, nil
 }
 
 // ByID 按编号找账号。
@@ -258,15 +270,17 @@ func (s *Store) UpdateProfile(ctx context.Context, id, displayName, currency str
 }
 
 const selectAccount = `SELECT id, COALESCE(subject, ''), display_name, role, status, joined_via, default_currency, owner_person,
-	guest_person, created_at, COALESCE(last_used_at, 0), COALESCE(app_version, '') FROM accounts`
+	guest_person, created_at, COALESCE(last_used_at, 0), COALESCE(app_version, ''), COALESCE(deletion_due_at, 0),
+	COALESCE(monthly_cap_micros, 0), COALESCE(monthly_cap_currency, '') FROM accounts`
 
 type rowScanner interface{ Scan(dest ...any) error }
 
 func scanAccount(row rowScanner) (Account, error) {
 	var account Account
-	var created, lastUsed int64
+	var created, lastUsed, deletionDue int64
 	err := row.Scan(&account.ID, &account.Subject, &account.DisplayName, &account.Role, &account.Status, &account.JoinedVia,
-		&account.DefaultCurrency, &account.OwnerPerson, &account.GuestPerson, &created, &lastUsed, &account.AppVersion)
+		&account.DefaultCurrency, &account.OwnerPerson, &account.GuestPerson, &created, &lastUsed, &account.AppVersion, &deletionDue,
+		&account.MonthlyCap.Micros, &account.MonthlyCap.Currency)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Account{}, ErrNotFound
 	}
@@ -276,6 +290,9 @@ func scanAccount(row rowScanner) (Account, error) {
 	account.CreatedAt = time.Unix(created, 0).UTC()
 	if lastUsed > 0 {
 		account.LastUsedAt = time.Unix(lastUsed, 0).UTC()
+	}
+	if deletionDue > 0 {
+		account.DeletionDueAt = time.Unix(deletionDue, 0).UTC()
 	}
 	return account, nil
 }

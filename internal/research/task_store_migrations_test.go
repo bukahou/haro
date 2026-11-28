@@ -95,3 +95,26 @@ func TestSourcesMigrateToJSON(t *testing.T) {
 		t.Errorf("新建的任务没有来源：%+v %v", task, err)
 	}
 }
+
+// 彻底删账号：删掉这个人的调查任务，别人的不动。
+func TestEraseTasksOfPerson(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenTaskStore(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	for _, person := range []string{"走的人", "别人"} {
+		if _, err := store.Create(ctx, person, "查一下猫粮"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.ErasePerson(ctx, "走的人"); err != nil {
+		t.Fatal(err)
+	}
+	for person, want := range map[string]int{"走的人": 0, "别人": 1} {
+		if tasks, err := store.Recent(ctx, person, 10); err != nil || len(tasks) != want {
+			t.Errorf("%s：%d %v", person, len(tasks), err)
+		}
+	}
+}

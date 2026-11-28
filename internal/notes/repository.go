@@ -74,6 +74,8 @@ type Repository interface {
 	Vectors(ctx context.Context, model string) ([]NoteVector, error)
 	// Vector 返回一条记事这个模型的向量（删掉的也给：恢复时放回索引）；没有时为 nil。
 	Vector(ctx context.Context, id int64, model string) ([]float32, error)
+	// ErasePerson 删掉这个人记的全部（含删掉的、向量），彻底删账号时用。
+	ErasePerson(ctx context.Context, person string) error
 	Close() error
 }
 

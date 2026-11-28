@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"maps"
 	"math"
+	"math/big"
 	"slices"
 	"strconv"
 	"strings"
@@ -82,6 +83,33 @@ type Total struct {
 	Amount    Amount
 	Converted []string  // 从哪些币种换算过来的（按代码排序；都是同一种币种时为空）
 	RateDate  time.Time // 用的哪天的汇率（没换算时为零值）
+	Missing   []string  // 没有汇率、没算进合计的币种（只有 ConvertWhatCan 会给；按代码排序）
+}
+
+// ConvertWhatCan 把能换的都换成 to：没有汇率的币种不算进合计、列在 Missing 里。给汇总主人账目这类
+// 不该因为一种币种就整个算不出来的地方用（花费上限这类要算准的用 Converter.Convert，换不了就报错）。
+func ConvertWhatCan(converter Converter, sum Sum, to string) (Total, error) {
+	total, err := converter.Convert(sum, to)
+	if !errors.Is(err, ErrNoRate) {
+		return total, err
+	}
+	combined := Total{Amount: Amount{Currency: to}}
+	for _, code := range sum.Currencies() {
+		part, err := converter.Convert(Sum{code: sum[code]}, to)
+		switch {
+		case errors.Is(err, ErrNoRate):
+			combined.Missing = append(combined.Missing, code)
+			continue
+		case err != nil:
+			return Total{}, err
+		}
+		combined.Amount.Micros += part.Amount.Micros
+		combined.Converted = append(combined.Converted, part.Converted...)
+		if part.RateDate.After(combined.RateDate) {
+			combined.RateDate = part.RateDate
+		}
+	}
+	return combined, nil
 }
 
 // ErrNoRate 表示换算不了：没有这种币种的汇率。
@@ -119,4 +147,21 @@ func (s Sum) String() string {
 		return "0"
 	}
 	return strings.Join(parts, " + ")
+}
+
+// ParseAmount 把十进制写法（例如 "1234.5"、"-80"）精确地变成金额（不经过浮点）；超过 micros 精度的小数报错。币种按 ParseCurrency 校验。
+func ParseAmount(text, code string) (Amount, error) {
+	normalized, err := ParseCurrency(code)
+	if err != nil {
+		return Amount{}, err
+	}
+	value, ok := new(big.Rat).SetString(strings.TrimSpace(text))
+	if !ok || strings.ContainsAny(text, "/eE") {
+		return Amount{}, fmt.Errorf("金额 %q 不是十进制数", text)
+	}
+	micros := new(big.Rat).Mul(value, new(big.Rat).SetInt64(MicrosPerUnit))
+	if !micros.IsInt() || !micros.Num().IsInt64() {
+		return Amount{}, fmt.Errorf("金额 %q 的小数太多或数太大", text)
+	}
+	return Amount{Micros: micros.Num().Int64(), Currency: normalized}, nil
 }

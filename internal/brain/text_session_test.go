@@ -61,6 +61,9 @@ func TestTextSession(t *testing.T) {
 	if text != "好的，记下了。" || model.lastInput.Text == "" {
 		t.Errorf("回答的文字：%q（模型收到 %q）", text, model.lastInput.Text)
 	}
+	if model.billed != "主人" {
+		t.Errorf("这一轮的花费应算说话的人：%q", model.billed)
+	}
 	if record, ok, _ := store.LoadConversation("主人", "t1"); !ok || len(record.History) != 1 || record.History[0].Seq != 1 {
 		t.Errorf("这一轮应记在线程 t1 里：%+v", record)
 	}

@@ -58,6 +58,8 @@ type Charge struct {
 	// TokensUnknown：连输入也不知道（还没开始就失败了），各项 token 都记 NULL。不知道的不编成 0
 	Incomplete    bool
 	TokensUnknown bool
+	// Account 是算哪个账号的（空 = 服务端主人，即管理员）。记账时由 WithAttribution 按 ctx 里标的人填。
+	Account string
 }
 
 // Totals 是一段时间的合计：花费按币种分开（换成默认货币在判断额度、汇总时做）。
@@ -69,8 +71,10 @@ type Totals struct {
 // Ledger 是用量账本。
 type Ledger interface {
 	Record(ctx context.Context, charge Charge) error
-	// Total 合计 since 之后的花费；purposes 为空 = 所有用途。
+	// Total 合计 since 之后所有账号的花费；purposes 为空 = 所有用途。
 	Total(ctx context.Context, since time.Time, purposes ...Purpose) (Totals, error)
+	// AccountTotal 合计 since 之后一个账号的花费（account 为空 = 管理员的）；purposes 为空 = 所有用途。
+	AccountTotal(ctx context.Context, account string, since time.Time, purposes ...Purpose) (Totals, error)
 	// FlushPending 把之前写不进、留在内存里的花费补写进去（见 WithBookkeeping）；补写不成时报错：
 	// 这时合计不完整，不能拿来判断额度。不留待补写的实现（SQLite 账本写不进就直接报错）什么都不做。
 	FlushPending(ctx context.Context) error
@@ -123,16 +127,30 @@ func (l *sqliteLedger) Record(ctx context.Context, charge Charge) error {
 	outputUnknown := charge.TokensUnknown || charge.Incomplete
 	_, err := l.db.ExecContext(ctx,
 		`INSERT INTO charges (at, purpose, item, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, credits,
-		 amount_micros, currency, incomplete) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 amount_micros, currency, incomplete, account) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		charge.At.Unix(), string(charge.Purpose), charge.Item, known(charge.InputTokens, inputUnknown),
 		known(charge.OutputTokens, outputUnknown), known(charge.CacheReadTokens, inputUnknown),
-		known(charge.CacheWriteTokens, inputUnknown), charge.Credits, charge.Cost.Micros, charge.Cost.Currency, charge.Incomplete)
+		known(charge.CacheWriteTokens, inputUnknown), charge.Credits, charge.Cost.Micros, charge.Cost.Currency, charge.Incomplete,
+		charge.Account)
 	return err
 }
 
 func (l *sqliteLedger) Total(ctx context.Context, since time.Time, purposes ...Purpose) (Totals, error) {
+	return l.total(ctx, nil, since, purposes)
+}
+
+func (l *sqliteLedger) AccountTotal(ctx context.Context, account string, since time.Time, purposes ...Purpose) (Totals, error) {
+	return l.total(ctx, &account, since, purposes)
+}
+
+// total 合计 since 之后的花费：account 为 nil = 所有账号。
+func (l *sqliteLedger) total(ctx context.Context, account *string, since time.Time, purposes []Purpose) (Totals, error) {
 	query := `SELECT currency, COALESCE(SUM(amount_micros), 0), COALESCE(SUM(credits), 0) FROM charges WHERE at >= ?`
 	args := []any{since.Unix()}
+	if account != nil {
+		query += ` AND account = ?`
+		args = append(args, *account)
+	}
 	if len(purposes) > 0 {
 		query += ` AND purpose IN (?` + strings.Repeat(",?", len(purposes)-1) + `)`
 		for _, purpose := range purposes {

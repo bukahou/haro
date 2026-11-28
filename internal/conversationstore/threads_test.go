@@ -130,3 +130,41 @@ func TestSearchTurns(t *testing.T) {
 		t.Errorf("别人的图片：%v", err)
 	}
 }
+
+// 彻底删账号：删掉这个人的各条对话、完整记录、背景记录池、附件的记录（交回附件编号），别人的不动。
+func TestErasePerson(t *testing.T) {
+	store, _ := openTestStore(t)
+	ctx := context.Background()
+	for _, person := range []string{"走的人", "别人"} {
+		if err := store.SaveConversation(brain.ConversationRecord{Person: person, TurnCount: 1,
+			History: []brain.ConversationTurn{numberedTurn(1, "问", "答")}, UpdatedAt: time.Now()}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.CreateThread(ctx, person, "t-"+person, false, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.AddAttachment(ctx, Attachment{ID: "img-" + person, Person: person, Thread: "t-" + person, Width: 1, Height: 1,
+			Bytes: 1, CreatedAt: time.Now()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ids, err := store.ErasePerson(ctx, "走的人")
+	if err != nil || len(ids) != 1 || ids[0] != "img-走的人" {
+		t.Fatalf("删：%v %v", ids, err)
+	}
+	if _, ok, _ := store.LoadConversation("走的人", brain.VoiceThread); ok {
+		t.Error("对话应删掉")
+	}
+	if threads, _ := store.Threads(ctx, "走的人", true); len(threads) != 0 {
+		t.Errorf("线程：%+v", threads)
+	}
+	if last, _ := store.LastSeq("走的人"); last != 0 {
+		t.Errorf("完整记录：%d", last)
+	}
+	if _, ok, _ := store.LoadConversation("别人", brain.VoiceThread); !ok {
+		t.Error("别人的对话不动")
+	}
+	if _, err := store.AttachmentOf(ctx, "别人", "img-别人"); err != nil {
+		t.Errorf("别人的附件：%v", err)
+	}
+}

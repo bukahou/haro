@@ -311,3 +311,28 @@ func TestElapsedText(t *testing.T) {
 		}
 	}
 }
+
+// 彻底删账号：对话簿忘掉这个人以后，已经拿在手里的那份再写也不写盘；再要时重新从存储读（已经删了 = 空的）；别人的不动。
+func TestConversationBookForget(t *testing.T) {
+	store := &memoryStore{}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	book := NewConversationBook(store, Options{Personas: bookPersonas, DefaultPersona: "buddy"}, logger)
+	leaving, staying := book.Conversation("走的人"), book.Conversation("别人")
+	turn := ConversationTurn{Messages: []ChatMessage{{Role: RoleUser, Text: "你好"}, {Role: RoleAssistant, Text: "你好呀。"}}}
+	leaving.appendTurn(turn, 0, false)
+	staying.appendTurn(turn, 0, false)
+	book.Forget("走的人")
+	store.mu.Lock()
+	delete(store.records, "走的人\x00") // 存储那边删掉（彻底删账号时，忘掉之后删）
+	store.mu.Unlock()
+	leaving.appendTurn(turn, 0, false) // 手里还拿着的：照样能用，但不写盘
+	if _, ok, _ := store.LoadConversation("走的人", VoiceThread); ok {
+		t.Error("忘掉以后不该再写盘")
+	}
+	if fresh := book.Conversation("走的人"); fresh == leaving || len(fresh.messages()) != 0 {
+		t.Errorf("再要时应是新的、空的：%v", fresh.messages())
+	}
+	if book.Conversation("别人") != staying {
+		t.Error("别人的不动")
+	}
+}

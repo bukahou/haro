@@ -217,3 +217,8 @@ func cmpErr(err, fallback error) error {
 	}
 	return fallback
 }
+
+// ErasePerson 实现 Store。
+func (s *SQLiteStore) ErasePerson(ctx context.Context, person string) error {
+	return sqliteschema.ErasePerson(ctx, s.db, person, `DELETE FROM reminders WHERE person = ?`)
+}

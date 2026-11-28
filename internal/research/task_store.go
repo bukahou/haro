@@ -92,6 +92,8 @@ type TaskStore interface {
 	MarkReported(ctx context.Context, ids ...int64) error
 	// InterruptActive 把排队中、在查的都标成被中断（服务端启动时调用）；返回条数。
 	InterruptActive(ctx context.Context) (int, error)
+	// ErasePerson 删掉这个人的全部任务（彻底删账号时用）。
+	ErasePerson(ctx context.Context, person string) error
 	Close() error
 }
 
@@ -248,3 +250,8 @@ func (s *sqliteTaskStore) InterruptActive(ctx context.Context) (int, error) {
 }
 
 func (s *sqliteTaskStore) Close() error { return s.db.Close() }
+
+// ErasePerson 实现 TaskStore。
+func (s *sqliteTaskStore) ErasePerson(ctx context.Context, person string) error {
+	return sqliteschema.ErasePerson(ctx, s.db, person, `DELETE FROM research_tasks WHERE person = ?`)
+}
