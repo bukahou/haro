@@ -323,7 +323,7 @@ func prepareSearchEnv(t *testing.T, ctx context.Context, settings config.ServerS
 		if homeSetting.ByIP {
 			home = weather.NewIPHome(settings.WeatherIPLocateURL, settings.WeatherHomeName, httpClient)
 		}
-		if environment.home, err = home.Home(ctx); err != nil {
+		if environment.home, err = home.Home(ctx, ""); err != nil {
 			t.Fatalf("定位家的位置：%v", err)
 		}
 		environment.briefers = append(environment.briefers, brain.BriefLines(weather.LocationNote{Home: home}.Brief))

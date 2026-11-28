@@ -11,6 +11,7 @@ import (
 	"github.com/bukahou/haro/internal/brain"
 	"github.com/bukahou/haro/internal/brainserver"
 	"github.com/bukahou/haro/internal/config"
+	"github.com/bukahou/haro/internal/household"
 	"github.com/bukahou/haro/internal/profile"
 )
 
@@ -23,38 +24,65 @@ type entrypoints struct {
 // tokenPruneEvery 是多久清一次早就过期的登录令牌。
 const tokenPruneEvery = 24 * time.Hour
 
-// buildAppAPI 建 App 的接口（HARO_APP_PUBLIC_URL 设了才开）：账号库、按配置校正管理员、经后端代理的 akasha 登录。
-func buildAppAPI(ctx context.Context, settings config.ServerSettings, deps services, kit tooling, online *brainserver.OnlineTerminals,
-	logger *slog.Logger, shutdown *shutdownSteps) (http.Handler, error) {
+// appAccounts 是 App 接口的账号库和管理员（App 的接口没开时都是空的）。在装工具、大脑之前打开：
+// 主人资料、家的位置按账号取（internal/household），管理员先按配置校正好。
+type appAccounts struct {
+	store *accounts.Store // nil = App 的接口没开
+	admin accounts.Account
+}
+
+// household 是「家」那一层要知道的管理员（还没有管理员时为空）。
+func (a appAccounts) household() household.Admin {
+	if a.admin.ID == "" {
+		return household.Admin{}
+	}
+	return household.Admin{AccountID: a.admin.ID, OwnerPerson: a.admin.OwnerPerson, GuestPerson: a.admin.GuestPerson}
+}
+
+// openAccounts 打开账号库（HARO_APP_PUBLIC_URL 设了才开）、按配置校正管理员。
+func openAccounts(ctx context.Context, settings config.ServerSettings, logger *slog.Logger, shutdown *shutdownSteps) (appAccounts, error) {
 	if !settings.AppAPIEnabled() {
-		logger.Info("App 的接口：没设 HARO_APP_PUBLIC_URL，不开")
-		return nil, nil
+		return appAccounts{}, nil
 	}
 	store, err := accounts.Open(ctx, settings.AccountsDB)
 	if err != nil {
-		return nil, err
+		return appAccounts{}, err
 	}
 	shutdown.add("账号库", store.Close)
+	opened := appAccounts{store: store}
 	if settings.AdminSubject == "" {
 		logger.Warn("App 的接口：没设 HARO_ADMIN_SUBJECT，还没有管理员：第一次登录时日志里有自己的 sub，填进配置后重启")
-	} else {
-		name := settings.AdminName
-		if name == "" {
-			name = settings.AdminPerson
-		}
-		admin, err := store.EnsureAdmin(ctx, accounts.Admin{Subject: settings.AdminSubject, DisplayName: name,
-			Person: settings.AdminPerson, GuestPerson: brain.SharedPerson})
-		if err != nil {
-			return nil, err
-		}
-		logger.Info("App 的接口：管理员", "account", admin.ID, "person", admin.OwnerPerson)
+		return opened, nil
+	}
+	name := settings.AdminName
+	if name == "" {
+		name = settings.AdminPerson
+	}
+	if opened.admin, err = store.EnsureAdmin(ctx, accounts.Admin{Subject: settings.AdminSubject, DisplayName: name,
+		Person: settings.AdminPerson, GuestPerson: brain.SharedPerson}); err != nil {
+		return appAccounts{}, err
+	}
+	logger.Info("App 的接口：管理员", "account", opened.admin.ID, "person", opened.admin.OwnerPerson)
+	return opened, nil
+}
+
+// buildAppAPI 建 App 的接口（HARO_APP_PUBLIC_URL 设了才开）：经后端代理的 akasha 登录、各接口。
+func buildAppAPI(ctx context.Context, settings config.ServerSettings, deps services, kit tooling, online *brainserver.OnlineTerminals,
+	logger *slog.Logger) (http.Handler, error) {
+	store := deps.accounts.store
+	if store == nil {
+		logger.Info("App 的接口：没设 HARO_APP_PUBLIC_URL，不开")
+		return nil, nil
 	}
 	go pruneTokens(ctx, store, logger)
 	options := appserver.Options{Accounts: store, Spending: deps.guard, Terminals: online, DefaultCurrency: settings.Currency(),
 		MinAppVersion: settings.AppMinVersion, CapOptions: settings.MonthlyCapOptions(), ProfileMaxChars: profile.MaxRunes,
-		WebURL: settings.AppWebURL, Logger: logger.With("component", "app-api"),
+		Household: kit.household, WebURL: settings.AppWebURL, Logger: logger.With("component", "app-api"),
 		Login: &appserver.LoginOptions{Issuer: settings.OIDCIssuer, ClientID: settings.OIDCClientID,
 			ClientSecret: settings.OIDCClientSecret, CookieSecret: settings.OIDCCookieSecret, PublicURL: settings.AppPublicURL}}
+	if kit.places != nil {
+		options.Places = kit.places
+	}
 	if kit.memory != nil {
 		options.Memory = kit.memory
 	}

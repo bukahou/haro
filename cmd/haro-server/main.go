@@ -92,6 +92,9 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	if deps.accounts, err = openAccounts(ctx, settings, logger, &shutdown); err != nil {
+		return err
+	}
 	kit, err := buildTooling(ctx, settings, catalog, deps, logger, &shutdown)
 	if err != nil {
 		return err
@@ -101,7 +104,7 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 	entry := entrypoints{online: brainserver.NewOnlineTerminals()}
-	if entry.app, err = buildAppAPI(ctx, settings, deps, kit, entry.online, logger, &shutdown); err != nil {
+	if entry.app, err = buildAppAPI(ctx, settings, deps, kit, entry.online, logger); err != nil {
 		return err
 	}
 	return serve(ctx, settings, components, options, deps, entry, logger)
@@ -299,7 +302,7 @@ func weatherHome(ctx context.Context, settings config.ServerSettings, httpClient
 		return nil
 	case home.ByIP:
 		locator := weather.NewIPHome(settings.WeatherIPLocateURL, settings.WeatherHomeName, httpClient)
-		if place, err := locator.Home(ctx); err != nil {
+		if place, err := locator.Home(ctx, ""); err != nil {
 			logger.Warn("天气：按 IP 定位家的位置失败（问天气时再试）", "err", err)
 		} else {
 			logger.Info("天气：按 IP 推定家在这附近（城市级；偏了就在 HARO_WEATHER_HOME 填坐标）",
@@ -323,7 +326,7 @@ func weatherForecaster(ctx context.Context, settings config.ServerSettings, prim
 		go func() {
 			locateCtx, cancel := context.WithTimeout(ctx, time.Minute)
 			defer cancel()
-			place, err := home.Home(locateCtx)
+			place, err := home.Home(locateCtx, "") // 配置里的家对谁都一样
 			if err == nil {
 				var area weather.JMAArea
 				if area, err = jma.Locate(locateCtx, place); err == nil {

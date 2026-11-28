@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: haro App API
-  version: 0.3.0
+  version: 0.4.0
   description: |
     haro 手机 App 和网页版用的接口（第一批：账号、登录、我、花费、终端、管理员）。
     服务端和 App 都从这份契约生成代码；⛔ 两边都不绕过契约私下约定字段。契约每改一次升版本号。
@@ -292,7 +292,7 @@ paths:
     get:
       tags: [me]
       operationId: listCountries
-      summary: 可选的国家（支持节假日的那些）
+      summary: 可选的国家（支持节假日的那些；名字按 Accept-Language）
       parameters:
         - $ref: '#/components/parameters/AcceptLanguage'
       responses:
@@ -770,27 +770,38 @@ components:
               type: integer
     Profile:
       type: object
-      required: [text, max_chars, updated_at]
+      description: |
+        主人资料（Markdown，每次对话都会带给 haro）。⛔ 不写密码、银行卡和账户号、证件号码、验证码和密钥。
+        `<!-- -->` 注释（填写说明）、没填的项不会发给 haro。
+      required: [household, owner, max_chars, updated_at]
       properties:
-        text:
+        household:
           type: string
-          description: 资料正文（Markdown）。⛔ 不写密码、银行卡和账户号、证件号码、验证码和密钥
+          description: 全家：这个家里的人都会带上（终端认不出是谁时也带上）
+        owner:
+          type: string
+          description: 本人：认出是账号本人时才带上
         max_chars:
           type: integer
+          description: 每一段最多多少字
         updated_at:
           type: string
           format: date-time
           nullable: true
+          description: null = 还没在 App 里改过（管理员账号这时显示的是服务端配置里的资料文件）
     ProfileUpdate:
       type: object
-      required: [text]
+      required: [household, owner]
       properties:
-        text:
+        household:
+          type: string
+          maxLength: 10000
+        owner:
           type: string
           maxLength: 10000
     Place:
       type: object
-      required: [name, country_code, latitude, longitude]
+      required: [name, latitude, longitude]
       properties:
         name:
           type: string
@@ -799,19 +810,34 @@ components:
           type: string
           nullable: true
           description: 上一级（都道府县、州、省）
+        country:
+          type: string
+          nullable: true
+          description: 国家名
         country_code:
           type: string
+          nullable: true
           pattern: '^[A-Z]{2}$'
+          description: ISO 3166-1 两位代码（只知道坐标时为 null）
         latitude:
           type: number
           format: double
+          minimum: -90
+          maximum: 90
         longitude:
           type: number
           format: double
+          minimum: -180
+          maximum: 180
     Home:
       type: object
-      required: [place, holidays_country]
+      required: [place, holidays_country, updated_at]
       properties:
+        updated_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: null = 还没在 App 里设过（管理员账号这时显示的是服务端配置里的家）
         place:
           allOf:
             - $ref: '#/components/schemas/Place'

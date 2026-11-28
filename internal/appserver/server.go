@@ -74,6 +74,8 @@ type Options struct {
 	CapOptions      []float64     // 管理员定月上限的可选档位（默认货币）
 	ProfileMaxChars int           // 主人资料最多多少字
 	Login           *LoginOptions // nil = 不开登录（测试）
+	Household       Household     // 每个账号的主人资料和家；nil = 没有（那几个接口回 501）
+	Places          PlaceFinder   // 搜地名；nil = 没有（天气的工具组关着）
 	WebURL          string        // 网页版的公开根地址：放行它跨域调接口、登录完回它的回调页；空 = 没有网页版
 	Logger          *slog.Logger
 }

@@ -10,16 +10,20 @@ type LocationNote struct {
 }
 
 // Brief 实现 brain.Briefer。位置里没有名字、地区、国家（例如只配了坐标）时不说。
-func (n LocationNote) Brief(string) []string {
+func (n LocationNote) Brief(person string) []string {
 	if n.Home == nil {
 		return nil
 	}
-	place, byIP, ok := n.Home.Known()
+	place, byIP, ok := n.Home.Known(person)
 	if !ok {
 		return nil
 	}
+	country := place.Country
+	if country == "" {
+		country = place.CountryCode
+	}
 	var parts []string
-	for _, part := range []string{place.Name, place.Region, place.Country} {
+	for _, part := range []string{place.Name, place.Region, country} {
 		if part != "" {
 			parts = append(parts, part)
 		}

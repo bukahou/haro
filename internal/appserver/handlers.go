@@ -344,7 +344,7 @@ func (s *Server) ListPendingTerminals(ctx context.Context, _ appapi.ListPendingT
 	return appapi.ListPendingTerminals200JSONResponse{}, nil
 }
 
-// 下面这些在 15b（资料、家的位置）、15c（终端）做。
+// 下面这些在 15c（终端）做。
 
 // ApproveTerminal 实现 appapi.StrictServerInterface。
 func (s *Server) ApproveTerminal(ctx context.Context, _ appapi.ApproveTerminalRequestObject) (appapi.ApproveTerminalResponseObject, error) {
@@ -353,36 +353,6 @@ func (s *Server) ApproveTerminal(ctx context.Context, _ appapi.ApproveTerminalRe
 
 // RejectTerminal 实现 appapi.StrictServerInterface。
 func (s *Server) RejectTerminal(ctx context.Context, _ appapi.RejectTerminalRequestObject) (appapi.RejectTerminalResponseObject, error) {
-	return s.notImplemented(ctx), nil
-}
-
-// ListCountries 实现 appapi.StrictServerInterface。
-func (s *Server) ListCountries(ctx context.Context, _ appapi.ListCountriesRequestObject) (appapi.ListCountriesResponseObject, error) {
-	return s.notImplemented(ctx), nil
-}
-
-// GetHome 实现 appapi.StrictServerInterface。
-func (s *Server) GetHome(ctx context.Context, _ appapi.GetHomeRequestObject) (appapi.GetHomeResponseObject, error) {
-	return s.notImplemented(ctx), nil
-}
-
-// ReplaceHome 实现 appapi.StrictServerInterface。
-func (s *Server) ReplaceHome(ctx context.Context, _ appapi.ReplaceHomeRequestObject) (appapi.ReplaceHomeResponseObject, error) {
-	return s.notImplemented(ctx), nil
-}
-
-// GetProfile 实现 appapi.StrictServerInterface。
-func (s *Server) GetProfile(ctx context.Context, _ appapi.GetProfileRequestObject) (appapi.GetProfileResponseObject, error) {
-	return s.notImplemented(ctx), nil
-}
-
-// ReplaceProfile 实现 appapi.StrictServerInterface。
-func (s *Server) ReplaceProfile(ctx context.Context, _ appapi.ReplaceProfileRequestObject) (appapi.ReplaceProfileResponseObject, error) {
-	return s.notImplemented(ctx), nil
-}
-
-// SearchPlaces 实现 appapi.StrictServerInterface。
-func (s *Server) SearchPlaces(ctx context.Context, _ appapi.SearchPlacesRequestObject) (appapi.SearchPlacesResponseObject, error) {
 	return s.notImplemented(ctx), nil
 }
 

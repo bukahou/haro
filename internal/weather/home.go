@@ -2,6 +2,7 @@ package weather
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -9,20 +10,25 @@ import (
 	"time"
 )
 
-// HomeLocator 给出「家」在哪（查天气不说地点时用）。
+// HomeLocator 给出 person（这一轮说话的人，对话名）的「家」在哪（查天气不说地点时用）。不同的人可以在不同的家
+// （一个服务端多个账号）；配置里写的家对谁都一样。
 type HomeLocator interface {
-	Home(ctx context.Context) (Place, error)
-	// Known 返回现在已经知道的位置（不发网络请求）：byIP = 按网络位置推定的（城市级，可能不准）；还不知道时 ok = false。
-	Known() (place Place, byIP, ok bool)
+	// Home 给出家的位置；没设家时返回 ErrHomeNotSet。
+	Home(ctx context.Context, person string) (Place, error)
+	// Known 返回现在已经知道的位置（不发网络请求）：byIP = 按网络位置推定的（城市级，可能不准）；还不知道、没设时 ok = false。
+	Known(person string) (place Place, byIP, ok bool)
 }
+
+// ErrHomeNotSet 是这个人没设家的位置。
+var ErrHomeNotSet = errors.New("家的位置没有设置")
 
 // FixedHome 是配置里写死的坐标（名字可以没有）。
 type FixedHome struct{ Place Place }
 
-func (h FixedHome) Home(context.Context) (Place, error) { return h.Place, nil }
+func (h FixedHome) Home(context.Context, string) (Place, error) { return h.Place, nil }
 
 // Known 实现 HomeLocator。
-func (h FixedHome) Known() (Place, bool, bool) { return h.Place, false, true }
+func (h FixedHome) Known(string) (Place, bool, bool) { return h.Place, false, true }
 
 // IPHome 按家里的公网 IP 推定位置。精度大约是城市级：
 // 运营商有时把 IP 登记在别的城市的机房，可能偏到别的城市 ⇒ 启动时把推定结果写进日志，偏了就改用 HARO_WEATHER_HOME 填坐标。
@@ -45,13 +51,13 @@ func NewIPHome(url, name string, httpClient *http.Client) *IPHome {
 }
 
 // Known 实现 HomeLocator：已经定位好的位置（不发网络请求，过期的也算）；还没定位成功过时 ok = false。
-func (h *IPHome) Known() (Place, bool, bool) {
+func (h *IPHome) Known(string) (Place, bool, bool) {
 	place, ok := h.location.Known()
 	return place, true, ok
 }
 
 // Home 实现 HomeLocator。只有还没定位成功过、这次又定位不了时才报错。
-func (h *IPHome) Home(ctx context.Context) (Place, error) {
+func (h *IPHome) Home(ctx context.Context, _ string) (Place, error) {
 	place, err := h.location.Get(ctx)
 	if err != nil {
 		return Place{}, fmt.Errorf("按 IP 定位家的位置失败: %w", err)
@@ -83,5 +89,6 @@ func (h *IPHome) locate(ctx context.Context) (Place, error) {
 	if name == "" {
 		name = response.City
 	}
-	return Place{Name: name, Latitude: latitude, Longitude: longitude, Country: response.Country, Region: response.Region}, nil
+	// ipinfo 的 country 是两位代码（JP）：国家名留空，代码放进 CountryCode
+	return Place{Name: name, Latitude: latitude, Longitude: longitude, Region: response.Region, CountryCode: strings.ToUpper(response.Country)}, nil
 }

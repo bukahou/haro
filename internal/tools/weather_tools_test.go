@@ -141,15 +141,15 @@ func TestIPHome(t *testing.T) {
 	server := fakeOpenMeteo(t, &queried)
 	defer server.Close()
 	home := weather.NewIPHome(server.URL+"/ip", "", server.Client())
-	place, err := home.Home(context.Background())
+	place, err := home.Home(context.Background(), "")
 	if err != nil || place.Name != "Exampleville" || place.Latitude != 12.3456 || place.Longitude != 65.4321 {
 		t.Fatalf("按 IP 定位：%+v %v", place, err)
 	}
 	server.Close() // 定位服务连不上：沿用缓存
-	if again, err := home.Home(context.Background()); err != nil || again != place {
+	if again, err := home.Home(context.Background(), ""); err != nil || again != place {
 		t.Errorf("缓存：%+v %v", again, err)
 	}
-	if _, err := weather.NewIPHome(server.URL+"/ip", "家", server.Client()).Home(context.Background()); err == nil {
+	if _, err := weather.NewIPHome(server.URL+"/ip", "家", server.Client()).Home(context.Background(), ""); err == nil {
 		t.Error("第一次就连不上应报错")
 	}
 }

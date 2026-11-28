@@ -92,7 +92,8 @@ type ServerSettings struct {
 	// 代理定义的覆盖目录：里面同名的 *.md 替换程序里带的那份（internal/agents/builtin/）；空 = 用程序里带的
 	AgentsDir string `env:"HARO_AGENTS_DIR"`
 	// 主人资料：household.md（全家）+ 每人一份 *.md（开头 front matter 写 person: <声纹名字>）；空 = 不用。
-	// 设了就必须是读得到的目录（挂载没成、名字拼错时起不来，不当作「没有资料」）
+	// 设了就必须是读得到的目录（挂载没成、名字拼错时起不来，不当作「没有资料」）。
+	// 开着 App 的接口时只给管理员账号在 App 里没改过的时候用（internal/household）
 	ProfileDir string `env:"HARO_PROFILE_DIR"`
 	// 带上最近几轮对话（一问一答算一轮）；更早的压成摘要或丢掉（HARO_CONVERSATION_SUMMARY）。0 = 不按轮数截，
 	// 只在上下文到了 HARO_CONTEXT_COMPACT_TOKENS 时压缩（每轮前面带着那一轮的日期和时间，隔天的话模型分得清）；
@@ -247,7 +248,7 @@ type ServerSettings struct {
 	// 天气：Open-Meteo 公开接口，不用密钥。家的位置：「纬度,经度」（只放在配置里，不进代码），
 	// 或 "ip"（按家里的公网 IP 推定，城市级）；不设 = 查天气时必须说地名
 	// 告诉模型哪个国家的节假日（今天、明天是节假日时每轮附一行）：ISO 3166-1 两位代码（例如 JP，支持的见 internal/holidays）；
-	// 空 = 不告诉。跟部署的地方有关，没有默认值
+	// 空 = 不告诉。跟部署的地方有关，没有默认值。开着 App 的接口时，它和 HARO_WEATHER_HOME 只给管理员账号在 App 里没设过的时候用
 	Holidays            string `env:"HARO_HOLIDAYS"`
 	WeatherHome         string `env:"HARO_WEATHER_HOME"`
 	WeatherHomeName     string `env:"HARO_WEATHER_HOME_NAME"`                                         // 家的名字；空 = 坐标时不写名字，IP 定位时用城市名
