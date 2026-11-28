@@ -9,6 +9,7 @@ import (
 	"github.com/bukahou/haro/internal/accounts"
 	"github.com/bukahou/haro/internal/appserver"
 	"github.com/bukahou/haro/internal/attachments"
+	"github.com/bukahou/haro/internal/backstory"
 	"github.com/bukahou/haro/internal/brain"
 	"github.com/bukahou/haro/internal/brainserver"
 	"github.com/bukahou/haro/internal/chat"
@@ -90,7 +91,8 @@ func (m memoryRecall) RecallTurns(ctx context.Context, person, query string) ([]
 type appBrain struct {
 	components brain.Components
 	options    brain.Options
-	title      *brain.Agent // 起标题；nil = 不起
+	title      *brain.Agent       // 起标题；nil = 不起
+	backstory  *backstory.Service // 背景记录池；nil = 没有
 }
 
 // textSessions 为打字对话开会话：同一套部件，只发文字、接在指定的线程、不用摄像头；别的账号只认本人（同终端）。

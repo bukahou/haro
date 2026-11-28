@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/bukahou/haro/internal/agents"
+	"github.com/bukahou/haro/internal/backstory"
 	"github.com/bukahou/haro/internal/brain"
 	"github.com/bukahou/haro/internal/brainserver"
 	"github.com/bukahou/haro/internal/buildinfo"
@@ -260,14 +261,14 @@ func buildTooling(ctx context.Context, settings config.ServerSettings, catalog a
 
 // assembleBrain 装配大脑：代理（模型）、对话簿、主人资料、多终端仲裁、月度上限的口头提高。
 func assembleBrain(ctx context.Context, settings config.ServerSettings, catalog agents.Catalog, deps services, kit tooling,
-	logger *slog.Logger, shutdown *shutdownSteps) (brain.Components, brain.Options, *brain.Agent, error) {
+	logger *slog.Logger, shutdown *shutdownSteps) (brain.Components, brain.Options, brainExtras, error) {
 	options, err := buildBrainOptions(settings)
 	if err != nil {
-		return brain.Components{}, options, nil, err
+		return brain.Components{}, options, brainExtras{}, err
 	}
 	built, err := newAgentAssembly(settings, catalog, deps, logger).build(kit.toolbox, kit.expertSearch)
 	if err != nil {
-		return brain.Components{}, options, nil, err
+		return brain.Components{}, options, brainExtras{}, err
 	}
 	logger.Info("预热模型（本地第一次可能要几十秒；云端不用预热）", "model", activeModel(settings))
 	if err := brain.WarmUp(ctx, built.front.Model); err != nil {
@@ -298,11 +299,33 @@ func assembleBrain(ctx context.Context, settings config.ServerSettings, catalog 
 		go components.Conversations.RunIdleCompaction(ctx)
 		logger.Info("对话闲了一阵就在后台提前压缩", "idle", options.IdleCompactAfter)
 	}
-	components.Profiles = kit.household // 主人资料：按说话的人所在的账号（管理员没在 App 里改过时用资料文件）
-	if settings.WakeArbitration > 0 {   // 多台终端同时听到唤醒词：只让最合适的那台回答
+	var extras brainExtras
+	components.Profiles = kit.household                      // 主人资料：按说话的人所在的账号（管理员没在 App 里改过时用资料文件）
+	if deps.conversations != nil && built.backstory != nil { // 背景记录池：从对话压出来，接在主人资料后面
+		idle := options.IdleCompactAfter
+		if idle <= 0 {
+			idle = backstory.DefaultIdle
+		}
+		pool, err := backstory.Open(ctx, deps.conversations, backstory.AgentMerger{Agent: *built.backstory}, idle, logger)
+		if err != nil {
+			return brain.Components{}, options, brainExtras{}, err
+		}
+		go pool.Run(ctx)
+		components.Profiles = backstory.WithProfile{Profiles: kit.household, Pool: pool}
+		extras.backstory = pool
+		logger.Info("背景记录池：对话闲下来后并入、每天整理，接在主人资料后面", "idle", idle, "max_runes", backstory.MaxRunes)
+	}
+	if settings.WakeArbitration > 0 { // 多台终端同时听到唤醒词：只让最合适的那台回答
 		components.WakeArbiter = brain.NewWakeArbiter(settings.WakeArbitration)
 	}
-	return components, options, built.title, nil
+	extras.title = built.title
+	return components, options, extras, nil
+}
+
+// brainExtras 是组装大脑时一起建好、App 的接口要用的：起标题的代理、背景记录池（没有时为 nil）。
+type brainExtras struct {
+	title     *brain.Agent
+	backstory *backstory.Service
 }
 
 // openConversationStore 打开对话库（没设 HARO_CONVERSATIONS_DB 时为 nil：对话只在内存里）；打不开就不启动（不带着空历史开始）。

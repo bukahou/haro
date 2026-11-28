@@ -99,12 +99,12 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	components, options, titleAgent, err := assembleBrain(ctx, settings, catalog, deps, kit, logger, &shutdown)
+	components, options, extras, err := assembleBrain(ctx, settings, catalog, deps, kit, logger, &shutdown)
 	if err != nil {
 		return err
 	}
 	entry := entrypoints{online: brainserver.NewOnlineTerminals(), accounts: deps.accounts.store}
-	if entry.app, err = buildAppAPI(ctx, settings, deps, kit, appBrain{components: components, options: options, title: titleAgent}, entry.online, logger); err != nil {
+	if entry.app, err = buildAppAPI(ctx, settings, deps, kit, appBrain{components: components, options: options, title: extras.title, backstory: extras.backstory}, entry.online, logger); err != nil {
 		return err
 	}
 	return serve(ctx, settings, components, options, deps, entry, logger)
