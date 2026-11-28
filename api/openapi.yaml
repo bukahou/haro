@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: haro App API
-  version: 0.1.1
+  version: 0.1.2
   description: |
     haro 手机 App 用的接口（第一批：账号、登录、我、花费、终端、管理员）。
     服务端和 App 都从这份契约生成代码；⛔ 两边都不绕过契约私下约定字段。契约每改一次升版本号。
@@ -709,8 +709,17 @@ components:
           pattern: '^[A-Z]{3}$'
     Overview:
       type: object
-      required: [terminals, memory, research, spending]
+      required: [account, terminals, memory, research, spending]
       properties:
+        account:
+          type: object
+          description: 登录的这个账号（「我的」页头部用，不用再调 /v1/me）
+          required: [display_name, role]
+          properties:
+            display_name:
+              type: string
+            role:
+              $ref: '#/components/schemas/Role'
         terminals:
           type: object
           required: [total, online, needs_upgrade]
@@ -831,8 +840,15 @@ components:
       enum: [ok, near, reached]
     MonthSpending:
       type: object
-      required: [spent, status, can_raise]
+      required: [spent, status, can_raise, used_ratio]
       properties:
+        used_ratio:
+          type: number
+          format: double
+          nullable: true
+          minimum: 0
+          maximum: 1
+          description: 用了上限的几成（0–1，超过上限时是 1；进度条直接用）；不设上限时为 null
         spent:
           $ref: '#/components/schemas/MoneyTotal'
         cap:
@@ -855,8 +871,14 @@ components:
           nullable: true
     PurposeSpending:
       type: object
-      required: [purpose, label, spent]
+      required: [purpose, label, spent, share]
       properties:
+        share:
+          type: number
+          format: double
+          minimum: 0
+          maximum: 1
+          description: 占本月合计的几成（0–1，各用途加起来是 1；本月还没花钱时都是 0）
         purpose:
           type: string
           description: 用途的代码（chat、research、search、summary、vision、strong）

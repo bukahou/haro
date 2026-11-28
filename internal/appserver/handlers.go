@@ -91,7 +91,8 @@ func (s *Server) monthSpending(ctx context.Context, summary spending.Summary) ap
 	if summary.MonthCap.Micros > 0 {
 		left := money.Amount{Micros: max(summary.MonthCap.Micros-summary.Month.Total.Amount.Micros, 0), Currency: summary.Currency}
 		value := moneyOf(left)
-		month.Remaining = &value
+		ratio := min(float64(summary.Month.Total.Amount.Micros)/float64(summary.MonthCap.Micros), 1)
+		month.Remaining, month.UsedRatio = &value, &ratio
 	}
 	return month
 }
@@ -168,6 +169,7 @@ func (s *Server) GetOverview(ctx context.Context, _ appapi.GetOverviewRequestObj
 		return *denied, nil
 	}
 	var overview appapi.Overview
+	overview.Account.DisplayName, overview.Account.Role = account.DisplayName, appapi.Role(account.Role)
 	if account.Role == accounts.RoleAdmin && s.opts.Terminals != nil { // 终端配对之前，在线的终端都算管理员的
 		overview.Terminals.Online, overview.Terminals.NeedsUpgrade = s.opts.Terminals.Count()
 		overview.Terminals.Total = overview.Terminals.Online
@@ -239,9 +241,15 @@ func (s *Server) GetSpending(ctx context.Context, _ appapi.GetSpendingRequestObj
 		return s.internalError(ctx, "花费", err), nil
 	}
 	reply := appapi.Spending{Month: s.monthSpending(ctx, summary), ByPurpose: []appapi.PurposeSpending{}}
+	monthTotal := summary.Month.Total.Amount.Micros
 	for _, purpose := range summary.ByPurpose {
+		share := 0.0
+		if monthTotal > 0 {
+			share = float64(purpose.Spent.Total.Amount.Micros) / float64(monthTotal)
+		}
 		reply.ByPurpose = append(reply.ByPurpose, appapi.PurposeSpending{Purpose: string(purpose.Purpose),
-			Label: s.texts.say(languageFrom(ctx), "purpose."+string(purpose.Purpose), nil), Spent: s.moneyTotal(ctx, purpose.Spent)})
+			Label: s.texts.say(languageFrom(ctx), "purpose."+string(purpose.Purpose), nil), Spent: s.moneyTotal(ctx, purpose.Spent),
+			Share: share})
 	}
 	reply.Today.Research.Spent = s.moneyTotal(ctx, summary.TodayResearch)
 	reply.Today.Research.Cap = optionalMoney(summary.ResearchCap)

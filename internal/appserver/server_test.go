@@ -14,6 +14,7 @@ import (
 	"github.com/bukahou/akasha/pkg/oidcrp"
 
 	"github.com/bukahou/haro/internal/accounts"
+	"github.com/bukahou/haro/internal/appapi"
 	"github.com/bukahou/haro/internal/money"
 	"github.com/bukahou/haro/internal/spending"
 )
@@ -92,8 +93,12 @@ func (f fixture) call(t *testing.T, method, path, token, body string, headers ..
 // 不用登录的 client-config：服务端版本、契约版本、最低 App 版本；字数上限从契约里取，档位是默认货币。
 func TestClientConfig(t *testing.T) {
 	f := newFixture(t)
+	spec, err := appapi.GetSwagger()
+	if err != nil {
+		t.Fatal(err)
+	}
 	status, body := f.call(t, "GET", "/v1/client-config", "", "")
-	if status != 200 || body["api_version"] != "0.1.1" || body["min_app_version"] != "1.0.0" {
+	if status != 200 || body["api_version"] != spec.Info.Version || body["min_app_version"] != "1.0.0" {
 		t.Fatalf("client-config：%d %v", status, body)
 	}
 	limits := body["limits"].(map[string]any)
@@ -151,7 +156,7 @@ func TestSpending(t *testing.T) {
 	month := body["month"].(map[string]any)
 	spent := month["spent"].(map[string]any)
 	if spent["total"].(map[string]any)["amount"] != "420" || len(spent["by_currency"].([]any)) != 2 || spent["conversion_note"] == nil ||
-		month["remaining"].(map[string]any)["amount"] != "2580" || month["can_raise"] != true {
+		month["remaining"].(map[string]any)["amount"] != "2580" || month["can_raise"] != true || month["used_ratio"] != 0.14 {
 		t.Errorf("这个月：%v", month)
 	}
 	if purposes := body["by_purpose"].([]any); len(purposes) != 0 {
@@ -171,7 +176,8 @@ func TestAdminOnly(t *testing.T) {
 		t.Fatalf("%d %v", status, body)
 	}
 	status, overview := f.call(t, "GET", "/v1/me/overview", f.adminKey.AccessToken, "")
-	if status != 200 || overview["admin"].(map[string]any)["pending_accounts"] != float64(1) {
+	if status != 200 || overview["admin"].(map[string]any)["pending_accounts"] != float64(1) ||
+		overview["account"].(map[string]any)["role"] != "admin" || overview["account"].(map[string]any)["display_name"] != "主人" {
 		t.Errorf("概览里管理员看得到等同意的账号数：%d %v", status, overview)
 	}
 	guest, _ := f.store.BySubject(ctx, "sub-guest")
