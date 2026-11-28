@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: haro App API
-  version: 0.5.0
+  version: 0.6.0
   description: |
     haro 手机 App 和网页版用的接口（第一批：账号、登录、我、花费、终端、管理员）。
     服务端和 App 都从这份契约生成代码；⛔ 两边都不绕过契约私下约定字段。契约每改一次升版本号。
@@ -31,6 +31,8 @@ tags:
     description: 这个账号的终端
   - name: admin
     description: 管理员才能用（只看运维信息，看不到别人的内容）
+  - name: conversations
+    description: 聊天：语音那条对话和 App 里新建的对话
 paths:
   /api/v1/auth/oidc/start:
     get:
@@ -306,6 +308,157 @@ paths:
                   $ref: '#/components/schemas/Country'
         '401':
           $ref: '#/components/responses/Unauthorized'
+  /api/v1/conversations:
+    get:
+      tags: [conversations]
+      operationId: listConversations
+      summary: 对话列表（语音那条在最前，其余新的在前；不含删了的）
+      parameters:
+        - $ref: '#/components/parameters/AcceptLanguage'
+      responses:
+        '200':
+          description: 对话
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Conversation'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [conversations]
+      operationId: createConversation
+      summary: 新建一条对话
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConversationCreate'
+      responses:
+        '201':
+          description: 建好的对话
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Conversation'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/conversations/{conversationId}:
+    parameters:
+      - $ref: '#/components/parameters/ConversationId'
+    delete:
+      tags: [conversations]
+      operationId: deleteConversation
+      summary: 删除（软删除，能恢复；语音那条不能删）
+      responses:
+        '204':
+          description: 删了
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/conversations/{conversationId}/restore:
+    parameters:
+      - $ref: '#/components/parameters/ConversationId'
+    post:
+      tags: [conversations]
+      operationId: restoreConversation
+      summary: 恢复删了的对话
+      responses:
+        '200':
+          description: 恢复了
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Conversation'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/conversations/{conversationId}/turns:
+    parameters:
+      - $ref: '#/components/parameters/ConversationId'
+    get:
+      tags: [conversations]
+      operationId: listTurns
+      summary: 往前翻这条对话（一页 page_size 轮，旧的在前）
+      parameters:
+        - name: before
+          in: query
+          required: false
+          description: 只要编号比它小的（上一页的 next_before）；不带 = 从最新的开始
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+      responses:
+        '200':
+          description: 这一页
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TurnPage'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/conversations/{conversationId}/messages:
+    parameters:
+      - $ref: '#/components/parameters/ConversationId'
+    post:
+      tags: [conversations]
+      operationId: sendMessage
+      summary: 说一句（打字）；回答以 Server-Sent Events 流回来
+      description: |
+        响应是 `text/event-stream`：每个事件一行 `data: <ChatEvent 的 JSON>`，依次是 `started`（带这一轮的 turn_id，停止时用）、
+        若干 `text`（回答的文字片段，按顺序拼起来就是 Markdown）、最后 `done` 或 `failed`。
+        App 断开后这一轮照样做完、存好（重新打开对话时用 `turns` 翻到）；要停止用 `turns/{turnId}/stop`。
+        同一条对话同时只答一句：上一句还在答时回 409。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MessageSend'
+      responses:
+        '200':
+          description: 事件流
+          content:
+            text/event-stream:
+              schema:
+                $ref: '#/components/schemas/ChatEvent'
+        '400':
+          $ref: '#/components/responses/ValidationFailed'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/conversations/{conversationId}/turns/{turnId}/stop:
+    parameters:
+      - $ref: '#/components/parameters/ConversationId'
+      - name: turnId
+        in: path
+        required: true
+        schema:
+          type: string
+          maxLength: 64
+    post:
+      tags: [conversations]
+      operationId: stopTurn
+      summary: 停止正在答的这一轮（已经说出来的留着）
+      responses:
+        '204':
+          description: 停了（或者已经答完了）
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
   /api/v1/spending:
     get:
       tags: [spending]
@@ -491,6 +644,14 @@ components:
       schema:
         type: string
         maxLength: 100
+    ConversationId:
+      name: conversationId
+      in: path
+      required: true
+      description: 对话的编号；语音那条是 `voice`
+      schema:
+        type: string
+        maxLength: 64
     TerminalId:
       name: terminalId
       in: path
@@ -561,6 +722,7 @@ components:
         - pairing_attempts_exceeded
         - upgrade_required
         - not_implemented
+        - generation_failed
         - internal
     OidcError:
       type: string
@@ -955,6 +1117,119 @@ components:
                 cap:
                   type: integer
                   nullable: true
+    ConversationKind:
+      type: string
+      description: voice = 语音那条（终端上说的都接在这里，App 里也能接着打字）；chat = App 里新建的
+      enum: [voice, chat]
+    Conversation:
+      type: object
+      required: [conversation_id, kind, title, incognito, last_text, updated_at]
+      properties:
+        conversation_id:
+          type: string
+        kind:
+          $ref: '#/components/schemas/ConversationKind'
+        title:
+          type: string
+          nullable: true
+          description: 标题（第一轮之后后台起）；null = 还没有（语音那条的名字 App 自己写，按语言）
+        incognito:
+          type: boolean
+          description: 无痕：不进长期记忆的检索、不进背景记录池
+        last_text:
+          type: string
+          nullable: true
+          description: 最近一轮 haro 的回答（列表里显示一行）
+        updated_at:
+          type: string
+          format: date-time
+          nullable: true
+    ConversationCreate:
+      type: object
+      properties:
+        incognito:
+          type: boolean
+          default: false
+    TurnPage:
+      type: object
+      required: [turns, next_before]
+      properties:
+        turns:
+          type: array
+          items:
+            $ref: '#/components/schemas/Turn'
+        next_before:
+          type: integer
+          format: int64
+          nullable: true
+          description: 再往前翻时带的 before；null = 到头了
+    Turn:
+      type: object
+      description: 一轮：主人说的一句 + haro 的回答（工具往来只给名字）
+      required: [seq, at, said, reply]
+      properties:
+        seq:
+          type: integer
+          format: int64
+        at:
+          type: string
+          format: date-time
+          nullable: true
+        said:
+          type: string
+          nullable: true
+          description: 主人说的（这一轮没有主人的话时为 null，例如 haro 到点自己开口的提醒）
+        reply:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReplyBlock'
+    ReplyBlockType:
+      type: string
+      enum: [text, tool]
+    ReplyBlock:
+      type: object
+      required: [type]
+      properties:
+        type:
+          $ref: '#/components/schemas/ReplyBlockType'
+        text:
+          type: string
+          description: type = text：回答的文字（打字的对话里是 Markdown）
+        tool:
+          type: string
+          description: type = tool：调用了哪个工具（工具的名字）
+    MessageSend:
+      type: object
+      required: [text]
+      properties:
+        text:
+          type: string
+          minLength: 1
+          maxLength: 4000
+    ChatEventType:
+      type: string
+      enum: [started, text, done, failed]
+    ChatEvent:
+      type: object
+      required: [type]
+      properties:
+        type:
+          $ref: '#/components/schemas/ChatEventType'
+        turn_id:
+          type: string
+          description: started：这一轮的编号（停止时用）
+        text:
+          type: string
+          description: text：回答的文字片段
+        status:
+          type: string
+          enum: [completed, incomplete, cancelled]
+          description: done：怎么结束的（incomplete = 到了输出上限等没说完）
+        code:
+          $ref: '#/components/schemas/ErrorCode'
+        message:
+          type: string
+          description: failed：给人看的说明（按 Accept-Language）；code 是 generation_failed（模型出错）或 internal
     TerminalNetwork:
       type: string
       description: 从哪里连进来的

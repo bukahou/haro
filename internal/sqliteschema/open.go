@@ -32,6 +32,9 @@ const BusyTimeout = 5 * time.Second
 // 文件库统一的设置：等写锁最多 BusyTimeout；日志用 WAL（读写互不阻塞）。内存库用不着这两项。
 var filePragmas = []string{fmt.Sprintf("busy_timeout(%d)", BusyTimeout.Milliseconds()), "journal_mode(WAL)"}
 
+// BackupPath 是 path 这个库最近一次迁移之前的备份（见 backupBeforeMigrate）。
+func BackupPath(path string) string { return path + ".before-migrate" }
+
 // Open 打开（没有就建）path 上的 SQLite 库，并把表结构升到最新（migrations 是这个库的迁移文件，见 Migrate）。
 // 目录没有就建；只开一个连接：SQLite 同时只有一个写者，内存库每个连接各是一份库。path 为空 = 只在内存里（进程退出就没了）。
 func Open(ctx context.Context, path string, migrations fs.FS, options Options) (*sql.DB, error) {
@@ -44,6 +47,12 @@ func Open(ctx context.Context, path string, migrations fs.FS, options Options) (
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
+	if path != "" {
+		if err := backupBeforeMigrate(ctx, db, migrations, BackupPath(path), options.Migrate...); err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
 	if err := Migrate(ctx, db, migrations, options.Migrate...); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("升级表结构: %w", err)

@@ -44,11 +44,75 @@ func (e AccountStatus) Valid() bool {
 	}
 }
 
+// Defines values for ChatEventStatus.
+const (
+	Cancelled  ChatEventStatus = "cancelled"
+	Completed  ChatEventStatus = "completed"
+	Incomplete ChatEventStatus = "incomplete"
+)
+
+// Valid indicates whether the value is a known member of the ChatEventStatus enum.
+func (e ChatEventStatus) Valid() bool {
+	switch e {
+	case Cancelled:
+		return true
+	case Completed:
+		return true
+	case Incomplete:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ChatEventType.
+const (
+	ChatEventTypeDone    ChatEventType = "done"
+	ChatEventTypeFailed  ChatEventType = "failed"
+	ChatEventTypeStarted ChatEventType = "started"
+	ChatEventTypeText    ChatEventType = "text"
+)
+
+// Valid indicates whether the value is a known member of the ChatEventType enum.
+func (e ChatEventType) Valid() bool {
+	switch e {
+	case ChatEventTypeDone:
+		return true
+	case ChatEventTypeFailed:
+		return true
+	case ChatEventTypeStarted:
+		return true
+	case ChatEventTypeText:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ConversationKind.
+const (
+	Chat  ConversationKind = "chat"
+	Voice ConversationKind = "voice"
+)
+
+// Valid indicates whether the value is a known member of the ConversationKind enum.
+func (e ConversationKind) Valid() bool {
+	switch e {
+	case Chat:
+		return true
+	case Voice:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for ErrorCode.
 const (
 	ErrorCodeAccountDisabled         ErrorCode = "account_disabled"
 	ErrorCodeConflict                ErrorCode = "conflict"
 	ErrorCodeForbidden               ErrorCode = "forbidden"
+	ErrorCodeGenerationFailed        ErrorCode = "generation_failed"
 	ErrorCodeInternal                ErrorCode = "internal"
 	ErrorCodeInvalidToken            ErrorCode = "invalid_token"
 	ErrorCodeNotFound                ErrorCode = "not_found"
@@ -72,6 +136,8 @@ func (e ErrorCode) Valid() bool {
 	case ErrorCodeConflict:
 		return true
 	case ErrorCodeForbidden:
+		return true
+	case ErrorCodeGenerationFailed:
 		return true
 	case ErrorCodeInternal:
 		return true
@@ -149,6 +215,24 @@ func (e OidcError) Valid() bool {
 	case OidcErrorLoginFailed:
 		return true
 	case OidcErrorPendingApproval:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ReplyBlockType.
+const (
+	ReplyBlockTypeText ReplyBlockType = "text"
+	ReplyBlockTypeTool ReplyBlockType = "tool"
+)
+
+// Valid indicates whether the value is a known member of the ReplyBlockType enum.
+func (e ReplyBlockType) Valid() bool {
+	switch e {
+	case ReplyBlockTypeText:
+		return true
+	case ReplyBlockTypeTool:
 		return true
 	default:
 		return false
@@ -249,6 +333,31 @@ type AccountSummary struct {
 	TerminalsOnline int           `json:"terminals_online"`
 }
 
+// ChatEvent defines model for ChatEvent.
+type ChatEvent struct {
+	// Code 稳定的错误码（App 按它判断，不看文字）。not_implemented = 这个接口契约里有、服务端还没做（HTTP 501；分批上线时出现）
+	Code *ErrorCode `json:"code,omitempty"`
+
+	// Message failed：给人看的说明（按 Accept-Language）；code 是 generation_failed（模型出错）或 internal
+	Message *string `json:"message,omitempty"`
+
+	// Status done：怎么结束的（incomplete = 到了输出上限等没说完）
+	Status *ChatEventStatus `json:"status,omitempty"`
+
+	// Text text：回答的文字片段
+	Text *string `json:"text,omitempty"`
+
+	// TurnId started：这一轮的编号（停止时用）
+	TurnId *string       `json:"turn_id,omitempty"`
+	Type   ChatEventType `json:"type"`
+}
+
+// ChatEventStatus done：怎么结束的（incomplete = 到了输出上限等没说完）
+type ChatEventStatus string
+
+// ChatEventType defines model for ChatEventType.
+type ChatEventType string
+
 // ClientConfig defines model for ClientConfig.
 type ClientConfig struct {
 	// ApiVersion 这份契约的版本号
@@ -262,6 +371,32 @@ type ClientConfig struct {
 	MonthlyCapOptions *[]Money `json:"monthly_cap_options,omitempty"`
 	ServerVersion     string   `json:"server_version"`
 }
+
+// Conversation defines model for Conversation.
+type Conversation struct {
+	ConversationId string `json:"conversation_id"`
+
+	// Incognito 无痕：不进长期记忆的检索、不进背景记录池
+	Incognito bool `json:"incognito"`
+
+	// Kind voice = 语音那条（终端上说的都接在这里，App 里也能接着打字）；chat = App 里新建的
+	Kind ConversationKind `json:"kind"`
+
+	// LastText 最近一轮 haro 的回答（列表里显示一行）
+	LastText *string `json:"last_text"`
+
+	// Title 标题（第一轮之后后台起）；null = 还没有（语音那条的名字 App 自己写，按语言）
+	Title     *string    `json:"title"`
+	UpdatedAt *time.Time `json:"updated_at"`
+}
+
+// ConversationCreate defines model for ConversationCreate.
+type ConversationCreate struct {
+	Incognito *bool `json:"incognito,omitempty"`
+}
+
+// ConversationKind voice = 语音那条（终端上说的都接在这里，App 里也能接着打字）；chat = App 里新建的
+type ConversationKind string
 
 // Country defines model for Country.
 type Country struct {
@@ -317,6 +452,11 @@ type Me struct {
 type MeUpdate struct {
 	DefaultCurrency *string `json:"default_currency,omitempty"`
 	DisplayName     *string `json:"display_name,omitempty"`
+}
+
+// MessageSend defines model for MessageSend.
+type MessageSend struct {
+	Text string `json:"text"`
 }
 
 // Money 金额：数值（十进制字符串，按币种的最小单位）+ 币种
@@ -498,6 +638,19 @@ type RefreshRequest struct {
 	RefreshToken string `json:"refresh_token"`
 }
 
+// ReplyBlock defines model for ReplyBlock.
+type ReplyBlock struct {
+	// Text type = text：回答的文字（打字的对话里是 Markdown）
+	Text *string `json:"text,omitempty"`
+
+	// Tool type = tool：调用了哪个工具（工具的名字）
+	Tool *string        `json:"tool,omitempty"`
+	Type ReplyBlockType `json:"type"`
+}
+
+// ReplyBlockType defines model for ReplyBlockType.
+type ReplyBlockType string
+
 // Role defines model for Role.
 type Role string
 
@@ -562,8 +715,28 @@ type TokenPair struct {
 // TokenPairTokenType defines model for TokenPair.TokenType.
 type TokenPairTokenType string
 
+// Turn 一轮：主人说的一句 + haro 的回答（工具往来只给名字）
+type Turn struct {
+	At    *time.Time   `json:"at"`
+	Reply []ReplyBlock `json:"reply"`
+
+	// Said 主人说的（这一轮没有主人的话时为 null，例如 haro 到点自己开口的提醒）
+	Said *string `json:"said"`
+	Seq  int64   `json:"seq"`
+}
+
+// TurnPage defines model for TurnPage.
+type TurnPage struct {
+	// NextBefore 再往前翻时带的 before；null = 到头了
+	NextBefore *int64 `json:"next_before"`
+	Turns      []Turn `json:"turns"`
+}
+
 // AcceptLanguage defines model for AcceptLanguage.
 type AcceptLanguage = string
+
+// ConversationId defines model for ConversationId.
+type ConversationId = string
 
 // TerminalId defines model for TerminalId.
 type TerminalId = string
@@ -602,6 +775,18 @@ type ListPendingTerminalsParams struct {
 type GetClientConfigParams struct {
 	// AcceptLanguage 给人看的文字（说明、标签）用的语言；不带时用中文
 	AcceptLanguage *AcceptLanguage `json:"Accept-Language,omitempty"`
+}
+
+// ListConversationsParams defines parameters for ListConversations.
+type ListConversationsParams struct {
+	// AcceptLanguage 给人看的文字（说明、标签）用的语言；不带时用中文
+	AcceptLanguage *AcceptLanguage `json:"Accept-Language,omitempty"`
+}
+
+// ListTurnsParams defines parameters for ListTurns.
+type ListTurnsParams struct {
+	// Before 只要编号比它小的（上一页的 next_before）；不带 = 从最新的开始
+	Before *int64 `form:"before,omitempty" json:"before,omitempty"`
 }
 
 // ListCountriesParams defines parameters for ListCountries.
@@ -654,6 +839,9 @@ type LogoutJSONRequestBody = RefreshRequest
 // RefreshTokensJSONRequestBody defines body for RefreshTokens for application/json ContentType.
 type RefreshTokensJSONRequestBody = RefreshRequest
 
+// CreateConversationJSONRequestBody defines body for CreateConversation for application/json ContentType.
+type CreateConversationJSONRequestBody = ConversationCreate
+
 // UpdateMeJSONRequestBody defines body for UpdateMe for application/json ContentType.
 type UpdateMeJSONRequestBody = MeUpdate
 
@@ -692,6 +880,24 @@ type ServerInterface interface {
 	// GetClientConfig App 要用的业务参数（不用登录）
 	// (GET /api/v1/client-config)
 	GetClientConfig(w http.ResponseWriter, r *http.Request, params GetClientConfigParams)
+	// ListConversations 对话列表（语音那条在最前，其余新的在前；不含删了的）
+	// (GET /api/v1/conversations)
+	ListConversations(w http.ResponseWriter, r *http.Request, params ListConversationsParams)
+	// CreateConversation 新建一条对话
+	// (POST /api/v1/conversations)
+	CreateConversation(w http.ResponseWriter, r *http.Request)
+	// DeleteConversation 删除（软删除，能恢复；语音那条不能删）
+	// (DELETE /api/v1/conversations/{conversationId})
+	DeleteConversation(w http.ResponseWriter, r *http.Request, conversationId ConversationId)
+	// RestoreConversation 恢复删了的对话
+	// (POST /api/v1/conversations/{conversationId}/restore)
+	RestoreConversation(w http.ResponseWriter, r *http.Request, conversationId ConversationId)
+	// ListTurns 往前翻这条对话（一页 page_size 轮，旧的在前）
+	// (GET /api/v1/conversations/{conversationId}/turns)
+	ListTurns(w http.ResponseWriter, r *http.Request, conversationId ConversationId, params ListTurnsParams)
+	// StopTurn 停止正在答的这一轮（已经说出来的留着）
+	// (POST /api/v1/conversations/{conversationId}/turns/{turnId}/stop)
+	StopTurn(w http.ResponseWriter, r *http.Request, conversationId ConversationId, turnId string)
 	// ListCountries 可选的国家（支持节假日的那些；名字按 Accept-Language）
 	// (GET /api/v1/countries)
 	ListCountries(w http.ResponseWriter, r *http.Request, params ListCountriesParams)
@@ -939,6 +1145,190 @@ func (siw *ServerInterfaceWrapper) GetClientConfig(w http.ResponseWriter, r *htt
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.GetClientConfig(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListConversations operation middleware
+func (siw *ServerInterfaceWrapper) ListConversations(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ListConversationsParams
+
+	headers := r.Header
+
+	// ------------- Optional header parameter "Accept-Language" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("Accept-Language")]; found {
+		var AcceptLanguage AcceptLanguage
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "Accept-Language", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "Accept-Language", valueList[0], &AcceptLanguage, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "Accept-Language", Err: err})
+			return
+		}
+
+		params.AcceptLanguage = &AcceptLanguage
+
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListConversations(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// CreateConversation operation middleware
+func (siw *ServerInterfaceWrapper) CreateConversation(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.CreateConversation(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// DeleteConversation operation middleware
+func (siw *ServerInterfaceWrapper) DeleteConversation(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "conversationId" -------------
+	var conversationId ConversationId
+
+	err = runtime.BindStyledParameterWithOptions("simple", "conversationId", r.PathValue("conversationId"), &conversationId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "conversationId", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.DeleteConversation(w, r, conversationId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// RestoreConversation operation middleware
+func (siw *ServerInterfaceWrapper) RestoreConversation(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "conversationId" -------------
+	var conversationId ConversationId
+
+	err = runtime.BindStyledParameterWithOptions("simple", "conversationId", r.PathValue("conversationId"), &conversationId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "conversationId", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.RestoreConversation(w, r, conversationId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListTurns operation middleware
+func (siw *ServerInterfaceWrapper) ListTurns(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "conversationId" -------------
+	var conversationId ConversationId
+
+	err = runtime.BindStyledParameterWithOptions("simple", "conversationId", r.PathValue("conversationId"), &conversationId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "conversationId", Err: err})
+		return
+	}
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ListTurnsParams
+
+	// ------------- Optional query parameter "before" -------------
+
+	err = runtime.BindQueryParameterWithOptions("form", true, false, "before", r.URL.Query(), &params.Before, runtime.BindQueryParameterOptions{Type: "integer", Format: "int64"})
+	if err != nil {
+		var requiredError *runtime.RequiredParameterError
+		if errors.As(err, &requiredError) {
+			siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "before"})
+		} else {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "before", Err: err})
+		}
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListTurns(w, r, conversationId, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// StopTurn operation middleware
+func (siw *ServerInterfaceWrapper) StopTurn(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "conversationId" -------------
+	var conversationId ConversationId
+
+	err = runtime.BindStyledParameterWithOptions("simple", "conversationId", r.PathValue("conversationId"), &conversationId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "conversationId", Err: err})
+		return
+	}
+
+	// ------------- Path parameter "turnId" -------------
+	var turnId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "turnId", r.PathValue("turnId"), &turnId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "turnId", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.StopTurn(w, r, conversationId, turnId)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -1502,6 +1892,12 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/api/v1/me/home", wrapper.ReplaceHome)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/places", wrapper.SearchPlaces)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/countries", wrapper.ListCountries)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/conversations", wrapper.ListConversations)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/api/v1/conversations", wrapper.CreateConversation)
+	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/api/v1/conversations/{conversationId}", wrapper.DeleteConversation)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/api/v1/conversations/{conversationId}/restore", wrapper.RestoreConversation)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/conversations/{conversationId}/turns", wrapper.ListTurns)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/api/v1/conversations/{conversationId}/turns/{turnId}/stop", wrapper.StopTurn)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/spending", wrapper.GetSpending)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/terminals", wrapper.ListTerminals)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/api/v1/terminals/pair", wrapper.PairTerminal)
@@ -1867,6 +2263,304 @@ func (response GetClientConfig200JSONResponse) VisitGetClientConfigResponse(w ht
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListConversationsRequestObject struct {
+	Params ListConversationsParams
+}
+
+type ListConversationsResponseObject interface {
+	VisitListConversationsResponse(w http.ResponseWriter) error
+}
+
+type ListConversations200JSONResponse []Conversation
+
+func (response ListConversations200JSONResponse) VisitListConversationsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := runtime.JSONMarshalWrite(&buf, response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListConversations401ApplicationProblemPlusJSONResponse struct {
+	UnauthorizedApplicationProblemPlusJSONResponse
+}
+
+func (response ListConversations401ApplicationProblemPlusJSONResponse) VisitListConversationsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := runtime.JSONMarshalWrite(&buf, response.UnauthorizedApplicationProblemPlusJSONResponse); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CreateConversationRequestObject struct {
+	Body *CreateConversationJSONRequestBody
+}
+
+type CreateConversationResponseObject interface {
+	VisitCreateConversationResponse(w http.ResponseWriter) error
+}
+
+type CreateConversation201JSONResponse Conversation
+
+func (response CreateConversation201JSONResponse) VisitCreateConversationResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := runtime.JSONMarshalWrite(&buf, response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(201)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type CreateConversation401ApplicationProblemPlusJSONResponse struct {
+	UnauthorizedApplicationProblemPlusJSONResponse
+}
+
+func (response CreateConversation401ApplicationProblemPlusJSONResponse) VisitCreateConversationResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := runtime.JSONMarshalWrite(&buf, response.UnauthorizedApplicationProblemPlusJSONResponse); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type DeleteConversationRequestObject struct {
+	ConversationId ConversationId `json:"conversationId"`
+}
+
+type DeleteConversationResponseObject interface {
+	VisitDeleteConversationResponse(w http.ResponseWriter) error
+}
+
+type DeleteConversation204Response struct {
+}
+
+func (response DeleteConversation204Response) VisitDeleteConversationResponse(w http.ResponseWriter) error {
+	w.WriteHeader(204)
+	return nil
+}
+
+type DeleteConversation401ApplicationProblemPlusJSONResponse struct {
+	UnauthorizedApplicationProblemPlusJSONResponse
+}
+
+func (response DeleteConversation401ApplicationProblemPlusJSONResponse) VisitDeleteConversationResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := runtime.JSONMarshalWrite(&buf, response.UnauthorizedApplicationProblemPlusJSONResponse); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type DeleteConversation404ApplicationProblemPlusJSONResponse struct {
+	NotFoundApplicationProblemPlusJSONResponse
+}
+
+func (response DeleteConversation404ApplicationProblemPlusJSONResponse) VisitDeleteConversationResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := runtime.JSONMarshalWrite(&buf, response.NotFoundApplicationProblemPlusJSONResponse); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type DeleteConversation409ApplicationProblemPlusJSONResponse struct {
+	ConflictApplicationProblemPlusJSONResponse
+}
+
+func (response DeleteConversation409ApplicationProblemPlusJSONResponse) VisitDeleteConversationResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := runtime.JSONMarshalWrite(&buf, response.ConflictApplicationProblemPlusJSONResponse); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(409)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type RestoreConversationRequestObject struct {
+	ConversationId ConversationId `json:"conversationId"`
+}
+
+type RestoreConversationResponseObject interface {
+	VisitRestoreConversationResponse(w http.ResponseWriter) error
+}
+
+type RestoreConversation200JSONResponse Conversation
+
+func (response RestoreConversation200JSONResponse) VisitRestoreConversationResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := runtime.JSONMarshalWrite(&buf, response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type RestoreConversation401ApplicationProblemPlusJSONResponse struct {
+	UnauthorizedApplicationProblemPlusJSONResponse
+}
+
+func (response RestoreConversation401ApplicationProblemPlusJSONResponse) VisitRestoreConversationResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := runtime.JSONMarshalWrite(&buf, response.UnauthorizedApplicationProblemPlusJSONResponse); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type RestoreConversation404ApplicationProblemPlusJSONResponse struct {
+	NotFoundApplicationProblemPlusJSONResponse
+}
+
+func (response RestoreConversation404ApplicationProblemPlusJSONResponse) VisitRestoreConversationResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := runtime.JSONMarshalWrite(&buf, response.NotFoundApplicationProblemPlusJSONResponse); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListTurnsRequestObject struct {
+	ConversationId ConversationId `json:"conversationId"`
+	Params         ListTurnsParams
+}
+
+type ListTurnsResponseObject interface {
+	VisitListTurnsResponse(w http.ResponseWriter) error
+}
+
+type ListTurns200JSONResponse TurnPage
+
+func (response ListTurns200JSONResponse) VisitListTurnsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := runtime.JSONMarshalWrite(&buf, response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListTurns401ApplicationProblemPlusJSONResponse struct {
+	UnauthorizedApplicationProblemPlusJSONResponse
+}
+
+func (response ListTurns401ApplicationProblemPlusJSONResponse) VisitListTurnsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := runtime.JSONMarshalWrite(&buf, response.UnauthorizedApplicationProblemPlusJSONResponse); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListTurns404ApplicationProblemPlusJSONResponse struct {
+	NotFoundApplicationProblemPlusJSONResponse
+}
+
+func (response ListTurns404ApplicationProblemPlusJSONResponse) VisitListTurnsResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := runtime.JSONMarshalWrite(&buf, response.NotFoundApplicationProblemPlusJSONResponse); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type StopTurnRequestObject struct {
+	ConversationId ConversationId `json:"conversationId"`
+	TurnId         string         `json:"turnId"`
+}
+
+type StopTurnResponseObject interface {
+	VisitStopTurnResponse(w http.ResponseWriter) error
+}
+
+type StopTurn204Response struct {
+}
+
+func (response StopTurn204Response) VisitStopTurnResponse(w http.ResponseWriter) error {
+	w.WriteHeader(204)
+	return nil
+}
+
+type StopTurn401ApplicationProblemPlusJSONResponse struct {
+	UnauthorizedApplicationProblemPlusJSONResponse
+}
+
+func (response StopTurn401ApplicationProblemPlusJSONResponse) VisitStopTurnResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := runtime.JSONMarshalWrite(&buf, response.UnauthorizedApplicationProblemPlusJSONResponse); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type StopTurn404ApplicationProblemPlusJSONResponse struct {
+	NotFoundApplicationProblemPlusJSONResponse
+}
+
+func (response StopTurn404ApplicationProblemPlusJSONResponse) VisitStopTurnResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := runtime.JSONMarshalWrite(&buf, response.NotFoundApplicationProblemPlusJSONResponse); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(404)
 	_, err := buf.WriteTo(w)
 	return err
 }
@@ -2573,6 +3267,24 @@ type StrictServerInterface interface {
 	// GetClientConfig App 要用的业务参数（不用登录）
 	// (GET /api/v1/client-config)
 	GetClientConfig(ctx context.Context, request GetClientConfigRequestObject) (GetClientConfigResponseObject, error)
+	// ListConversations 对话列表（语音那条在最前，其余新的在前；不含删了的）
+	// (GET /api/v1/conversations)
+	ListConversations(ctx context.Context, request ListConversationsRequestObject) (ListConversationsResponseObject, error)
+	// CreateConversation 新建一条对话
+	// (POST /api/v1/conversations)
+	CreateConversation(ctx context.Context, request CreateConversationRequestObject) (CreateConversationResponseObject, error)
+	// DeleteConversation 删除（软删除，能恢复；语音那条不能删）
+	// (DELETE /api/v1/conversations/{conversationId})
+	DeleteConversation(ctx context.Context, request DeleteConversationRequestObject) (DeleteConversationResponseObject, error)
+	// RestoreConversation 恢复删了的对话
+	// (POST /api/v1/conversations/{conversationId}/restore)
+	RestoreConversation(ctx context.Context, request RestoreConversationRequestObject) (RestoreConversationResponseObject, error)
+	// ListTurns 往前翻这条对话（一页 page_size 轮，旧的在前）
+	// (GET /api/v1/conversations/{conversationId}/turns)
+	ListTurns(ctx context.Context, request ListTurnsRequestObject) (ListTurnsResponseObject, error)
+	// StopTurn 停止正在答的这一轮（已经说出来的留着）
+	// (POST /api/v1/conversations/{conversationId}/turns/{turnId}/stop)
+	StopTurn(ctx context.Context, request StopTurnRequestObject) (StopTurnResponseObject, error)
 	// ListCountries 可选的国家（支持节假日的那些；名字按 Accept-Language）
 	// (GET /api/v1/countries)
 	ListCountries(ctx context.Context, request ListCountriesRequestObject) (ListCountriesResponseObject, error)
@@ -2844,6 +3556,169 @@ func (sh *strictHandler) GetClientConfig(w http.ResponseWriter, r *http.Request,
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(GetClientConfigResponseObject); ok {
 		if err := validResponse.VisitGetClientConfigResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ListConversations operation middleware
+func (sh *strictHandler) ListConversations(w http.ResponseWriter, r *http.Request, params ListConversationsParams) {
+	var request ListConversationsRequestObject
+
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request any) (any, error) {
+		return sh.ssi.ListConversations(ctx, request.(ListConversationsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ListConversations")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ListConversationsResponseObject); ok {
+		if err := validResponse.VisitListConversationsResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// CreateConversation operation middleware
+func (sh *strictHandler) CreateConversation(w http.ResponseWriter, r *http.Request) {
+	var request CreateConversationRequestObject
+
+	var body CreateConversationJSONRequestBody
+	if err := runtime.BindJSONBody(r, &body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request any) (any, error) {
+		return sh.ssi.CreateConversation(ctx, request.(CreateConversationRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "CreateConversation")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(CreateConversationResponseObject); ok {
+		if err := validResponse.VisitCreateConversationResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// DeleteConversation operation middleware
+func (sh *strictHandler) DeleteConversation(w http.ResponseWriter, r *http.Request, conversationId ConversationId) {
+	var request DeleteConversationRequestObject
+
+	request.ConversationId = conversationId
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request any) (any, error) {
+		return sh.ssi.DeleteConversation(ctx, request.(DeleteConversationRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "DeleteConversation")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(DeleteConversationResponseObject); ok {
+		if err := validResponse.VisitDeleteConversationResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// RestoreConversation operation middleware
+func (sh *strictHandler) RestoreConversation(w http.ResponseWriter, r *http.Request, conversationId ConversationId) {
+	var request RestoreConversationRequestObject
+
+	request.ConversationId = conversationId
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request any) (any, error) {
+		return sh.ssi.RestoreConversation(ctx, request.(RestoreConversationRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "RestoreConversation")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(RestoreConversationResponseObject); ok {
+		if err := validResponse.VisitRestoreConversationResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ListTurns operation middleware
+func (sh *strictHandler) ListTurns(w http.ResponseWriter, r *http.Request, conversationId ConversationId, params ListTurnsParams) {
+	var request ListTurnsRequestObject
+
+	request.ConversationId = conversationId
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request any) (any, error) {
+		return sh.ssi.ListTurns(ctx, request.(ListTurnsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ListTurns")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ListTurnsResponseObject); ok {
+		if err := validResponse.VisitListTurnsResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// StopTurn operation middleware
+func (sh *strictHandler) StopTurn(w http.ResponseWriter, r *http.Request, conversationId ConversationId, turnId string) {
+	var request StopTurnRequestObject
+
+	request.ConversationId = conversationId
+	request.TurnId = turnId
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request any) (any, error) {
+		return sh.ssi.StopTurn(ctx, request.(StopTurnRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "StopTurn")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(StopTurnResponseObject); ok {
+		if err := validResponse.VisitStopTurnResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {
@@ -3245,112 +4120,135 @@ func (sh *strictHandler) RenameTerminal(w http.ResponseWriter, r *http.Request, 
 // const string: with thousands of chunks the chained `+` fold is several
 // times slower for the Go compiler than parsing a slice literal.
 var swaggerSpec = []string{
-	"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",
+	"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",
+	"rLPWONHyp4c5148omSlzxo9QxyEJ+d8DAA==",
 }
 
 // decodeSpec returns the embedded OpenAPI spec as raw JSON bytes,

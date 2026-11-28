@@ -19,9 +19,14 @@ import (
 // SharedPerson 是没开声纹（或这一轮没比对）时用的对话。声纹认不出的人不回答，不会建对话。
 const SharedPerson = "_shared"
 
+// VoiceThread 是语音那条对话（每人一条，终端上说的都接在这里）。一个人还可以有别的线程（App 里新建的对话），
+// 轮次编号是这个人所有线程共用的一套（完整的对话记录、长期记忆的索引都按（人, 编号）找）。
+const VoiceThread = ""
+
 // ConversationRecord 是存盘的一份对话。等确认的操作只在内存里（只保留一轮，重启就作废）。
 type ConversationRecord struct {
 	Person        string
+	Thread        string // 哪一条对话：VoiceThread（""）= 语音那条；App 里新建的各是一个编号
 	PersonaID     string
 	History       []ConversationTurn // 最近几轮
 	Summary       string             // 滚动摘要：掉出窗口的对话压成的一段话
@@ -43,8 +48,10 @@ type ConversationTurn struct {
 
 // ConversationStore 存取对话（Go interface，实现在 internal/conversationstore）。
 type ConversationStore interface {
-	// LoadConversation 读一个人的对话；没存过时返回 ok=false，读出错时返回 err（和「没存过」分开）。
-	LoadConversation(person string) (record ConversationRecord, ok bool, err error)
+	// LoadConversation 读一个人的一条对话；没存过时返回 ok=false，读出错时返回 err（和「没存过」分开）。
+	LoadConversation(person, thread string) (record ConversationRecord, ok bool, err error)
+	// LastSeq 是这个人用过的最大轮次编号（所有线程一起算；没有时为 0）。
+	LastSeq(person string) (int, error)
 	// SaveConversation 整份存下一个人的对话，并把编了号的轮次写进完整的对话记录（只增不删）：
 	// 记录里同一编号已经是另一轮时不覆盖它，照样存下这份对话，返回说明哪几轮没写进记录的错误。
 	SaveConversation(record ConversationRecord) error
@@ -52,36 +59,65 @@ type ConversationStore interface {
 
 // ConversationBook 管所有人的对话：第一次用到时从存储读出来，之后留在内存里；每轮结束写盘。
 type ConversationBook struct {
-	store    ConversationStore // nil = 只在内存里（测试 / 没配目录）
-	opts     Options
-	logger   *slog.Logger
-	mu       sync.Mutex
-	byPerson map[string]*Conversation
+	store  ConversationStore // nil = 只在内存里（测试 / 没配目录）
+	opts   Options
+	logger *slog.Logger
+	mu     sync.Mutex
+	byKey  map[conversationKey]*Conversation
+	seqMu  sync.Mutex     // 发轮次编号（不和 mu 一起锁：给轮次编号时可能正持有 mu 或 Conversation.mu）
+	seqs   map[string]int // 人 → 发出去的最大编号（第一次用到时从存储读）
 
 	summaryAgent *Agent // 写滚动摘要的代理（SummarizeWith）；nil = 不写摘要
 }
 
 // NewConversationBook 创建对话簿。opts 提供性格档案、默认性格与历史轮数。
 func NewConversationBook(store ConversationStore, opts Options, logger *slog.Logger) *ConversationBook {
-	return &ConversationBook{store: store, opts: opts, logger: logger, byPerson: map[string]*Conversation{}}
+	return &ConversationBook{store: store, opts: opts, logger: logger, byKey: map[conversationKey]*Conversation{}, seqs: map[string]int{}}
+}
+
+// conversationKey 是一条对话：谁的、哪一条。
+type conversationKey struct{ person, thread string }
+
+// nextSeq 给这个人发下一个轮次编号（所有线程共用一套）。known 是调用方手里这条对话已经用到的编号（存储读不出时也不会往回发）。
+// 存储读出错时按内存里知道的接着发：万一和存着的撞号，完整的对话记录不会被覆盖（见 ConversationStore.SaveConversation）。
+func (b *ConversationBook) nextSeq(person string, known int) int {
+	b.seqMu.Lock()
+	defer b.seqMu.Unlock()
+	last, loaded := b.seqs[person]
+	if !loaded && b.store != nil {
+		stored, err := b.store.LastSeq(person)
+		if err != nil {
+			b.logger.Warn("读这个人用过的轮次编号出错：按内存里知道的接着编", "person", person, "err", err)
+		}
+		last = stored
+	}
+	last = max(last, known) + 1
+	b.seqs[person] = last
+	return last
 }
 
 // Conversation 返回这个人的对话（没有就建一个：先读存储，没存过就用初始性格开始）。
 // 存储读出错时不当成「没存过」：交出一份只在内存里、不写盘的对话（见 Conversation.detached），不留在对话簿里，
 // 下一轮重读——空对话一旦写盘，就会盖掉存着的摘要和最近几轮。
 func (b *ConversationBook) Conversation(person string) *Conversation {
+	return b.ConversationIn(person, VoiceThread)
+}
+
+// ConversationIn 返回这个人的某一条对话（thread 为 VoiceThread 时就是语音那条，同 Conversation）。
+func (b *ConversationBook) ConversationIn(person, thread string) *Conversation {
 	if person == "" {
 		person = SharedPerson
 	}
+	key := conversationKey{person: person, thread: thread}
 	b.mu.Lock()
-	if conversation, ok := b.byPerson[person]; ok {
+	if conversation, ok := b.byKey[key]; ok {
 		b.mu.Unlock()
 		return conversation
 	}
-	conversation := &Conversation{person: person, book: b}
+	conversation := &Conversation{person: person, thread: thread, book: b}
 	recovered := false // 接上了上次中途重启没收尾的一轮：要写盘清掉那条记录
 	if b.store != nil {
-		record, ok, err := b.store.LoadConversation(person)
+		record, ok, err := b.store.LoadConversation(person, thread)
 		switch {
 		case err != nil:
 			b.mu.Unlock()
@@ -111,7 +147,7 @@ func (b *ConversationBook) Conversation(person string) *Conversation {
 	if conversation.persona == nil {
 		conversation.persona = b.initialPersona()
 	}
-	b.byPerson[person] = conversation
+	b.byKey[key] = conversation
 	b.mu.Unlock()
 	if recovered {
 		b.save(conversation)
@@ -144,9 +180,10 @@ func (b *ConversationBook) save(conversation *Conversation) {
 	}
 }
 
-// Conversation 是一个人的对话。方法都自己加锁，也从不反过来锁 Session（锁顺序只有 Session.mu → Conversation.mu）。
+// Conversation 是一个人的一条对话。方法都自己加锁，也从不反过来锁 Session（锁顺序只有 Session.mu → Conversation.mu）。
 type Conversation struct {
 	person string
+	thread string // VoiceThread = 语音那条
 	book   *ConversationBook
 	// detached：存储读这个人的对话时出错，这一份只在内存里用：不带之前的对话、不写盘、不压缩，也不留在对话簿里
 	// （下一轮重读）。建好后不再改，不用加锁
@@ -160,7 +197,7 @@ type Conversation struct {
 	pendingActions []pendingAction    // 等主人确认的操作（确认闸，见 confirmation.go）
 	actionCount    int                // 待确认操作编到第几个了
 	toolCallCount  int                // 用来生成对话内唯一的工具调用 ID
-	turnCount      int                // 轮次编到第几了（见 ConversationTurn.Seq）
+	turnCount      int                // 这条对话最近一轮的编号（编号是这个人所有线程共用的一套，见 ConversationBook.nextSeq）
 	summary        string             // 滚动摘要（v5 R4）
 	unsummarized   []ConversationTurn // 掉出窗口、还没压进摘要的几轮（照常带给模型，压完再去掉）
 	summarizing    bool               // 后台正在压缩
@@ -171,12 +208,15 @@ type Conversation struct {
 // Person 是这份对话属于谁。
 func (c *Conversation) Person() string { return c.person }
 
+// Thread 是哪一条对话（VoiceThread = 语音那条）。
+func (c *Conversation) Thread() string { return c.thread }
+
 // record 取一份写盘用的快照。轮次和消息都复制一份：写盘在锁外进行，期间这份对话还会被改（被打断时改回答文字），
 // 快照不能和它共用底层数组。消息里的 ToolCalls、Image 只会整体替换、不会原地改，不必再往下复制。
 func (c *Conversation) record() ConversationRecord {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	record := ConversationRecord{Person: c.person, History: cloneTurns(c.history), ToolCallCount: c.toolCallCount,
+	record := ConversationRecord{Person: c.person, Thread: c.thread, History: cloneTurns(c.history), ToolCallCount: c.toolCallCount,
 		TurnCount: c.turnCount, Summary: c.summary, Unsummarized: cloneTurns(c.unsummarized), UpdatedAt: time.Now()}
 	if c.openTurn != nil {
 		open := cloneTurns([]ConversationTurn{*c.openTurn})[0]
@@ -247,7 +287,7 @@ const unknownUsageTurns = 6
 func (c *Conversation) appendTurn(turn ConversationTurn, contextTokens int, contextUnknown bool) {
 	summarizing := c.book.summarizer() != nil // 先取：不在持有 Conversation.mu 时去锁对话簿
 	c.mu.Lock()
-	c.turnCount++
+	c.turnCount = c.nextSeqLocked()
 	turn.Seq = c.turnCount
 	c.history = append(c.history, turn)
 	c.openTurn = nil
@@ -293,8 +333,8 @@ func (b *ConversationBook) RunIdleCompaction(ctx context.Context) {
 func (b *ConversationBook) compactIdle(now time.Time) {
 	summarizing := b.summarizer() != nil
 	b.mu.Lock()
-	conversations := make([]*Conversation, 0, len(b.byPerson))
-	for _, conversation := range b.byPerson {
+	conversations := make([]*Conversation, 0, len(b.byKey))
+	for _, conversation := range b.byKey {
 		conversations = append(conversations, conversation)
 	}
 	b.mu.Unlock()
@@ -337,13 +377,22 @@ func (c *Conversation) lastTurnAt() time.Time {
 	return time.Time{}
 }
 
+// nextSeqLocked 是这条对话下一轮的编号：这个人所有线程共用的一套（对话簿发号）；不写盘的那份（detached）
+// 只在自己手里往下数，不占共用的号（它的轮次不会存下来）。
+func (c *Conversation) nextSeqLocked() int {
+	if c.detached {
+		return c.turnCount + 1
+	}
+	return c.book.nextSeq(c.person, c.turnCount)
+}
+
 // numberTurnsLocked 给还没编号的轮次补上号（按先后：掉出窗口的在前），返回补没补。调用方持有锁（或对话还没交出去）。
 func (c *Conversation) numberTurnsLocked() bool {
 	numbered := false
 	for _, turns := range [][]ConversationTurn{c.unsummarized, c.history} {
 		for i := range turns {
 			if turns[i].Seq == 0 {
-				c.turnCount++
+				c.turnCount = c.nextSeqLocked()
 				turns[i].Seq, numbered = c.turnCount, true
 			}
 		}

@@ -14,3 +14,5 @@ output-options:
   exclude-operation-ids:
     - startLogin
     - finishLogin
+    # 打字的回答是 Server-Sent Events（流），手写挂载；事件的结构（ChatEvent）照样生成
+    - sendMessage

@@ -9,6 +9,7 @@ import (
 	"github.com/getkin/kin-openapi/openapi3filter"
 
 	"github.com/bukahou/haro/internal/accounts"
+	"github.com/bukahou/haro/internal/appapi"
 )
 
 // 哪些接口要登录写在契约里（security）：按契约校验请求的中间件对要登录的接口调 authenticate，
@@ -81,4 +82,25 @@ func languageFrom(ctx context.Context) string {
 		return holder.language
 	}
 	return ""
+}
+
+// bearerAccount 是手写挂载、要登录的接口（打字的流）验令牌：和契约里要登录的接口同一套（Authenticate、错误码），
+// 不行时已经回好了 401 / 500。
+func (s *Server) bearerAccount(w http.ResponseWriter, r *http.Request) (accounts.Account, bool) {
+	token, found := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if !found || strings.TrimSpace(token) == "" {
+		s.writeProblem(w, r, http.StatusUnauthorized, appapi.ErrorCodeUnauthorized, nil)
+		return accounts.Account{}, false
+	}
+	account, err := s.accounts.Authenticate(r.Context(), strings.TrimSpace(token))
+	if err != nil {
+		status, code := accountProblem(err)
+		if status == http.StatusInternalServerError {
+			s.logger.Error("验令牌出错", "err", err)
+		}
+		s.writeProblem(w, r, status, code, nil)
+		return accounts.Account{}, false
+	}
+	_ = s.accounts.Touch(r.Context(), account.ID, appVersion(r.UserAgent()))
+	return account, true
 }

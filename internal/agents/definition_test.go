@@ -26,6 +26,7 @@ func TestBuiltinDefinitions(t *testing.T) {
 		agents.OverBudget:     {agents.ModeSubtask, agents.TierBase, "chat"},
 		agents.Research:       {agents.ModeSubtask, agents.TierBase, "research"},
 		agents.ResearchReview: {agents.ModeSubtask, agents.TierBase, "research"}, // 审查和调查记在一起，受每天的调查额度管；用哪档由配置换
+		agents.Title:          {agents.ModeSubtask, agents.TierBase, "summary"},  // 起标题也是压缩对话，记在「对话摘要」里
 	}
 	if len(catalog) != len(want) {
 		t.Errorf("程序里带了 %d 个代理，这里核对了 %d 个", len(catalog), len(want))
@@ -82,9 +83,14 @@ func TestRenderPromptNeedsEveryValue(t *testing.T) {
 		t.Fatal(err)
 	}
 	front, _ := catalog.Get(agents.Front)
-	prompt, err := front.RenderPrompt(map[string]any{"EmotionTags": "[开心] [难过]"})
+	prompt, err := front.RenderPrompt(map[string]any{"EmotionTags": "[开心] [难过]", "Medium": "voice"})
 	if err != nil || !strings.Contains(prompt, "只能用这几个：[开心] [难过]") || strings.Contains(prompt, "{{") {
 		t.Fatalf("应填好情绪标记：%v\n%s", err, prompt)
+	}
+	// 打字的：说话格式换成写给人看的（能用 Markdown、不用情绪标记），语音识别那一条不要
+	text, err := front.RenderPrompt(map[string]any{"EmotionTags": "[开心] [难过]", "Medium": "text"})
+	if err != nil || !strings.Contains(text, "Markdown（") || strings.Contains(text, "[开心]") || strings.Contains(text, "语音识别") {
+		t.Errorf("打字用的规则：%v\n%s", err, text)
 	}
 	if _, err := front.RenderPrompt(nil); err == nil {
 		t.Error("没给 EmotionTags 时应报错")

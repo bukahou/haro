@@ -119,7 +119,7 @@ func TestConversationLoadFailureDoesNotOverwriteStore(t *testing.T) {
 	if got := userTexts(second); !slices.Equal(got, []string{"旧问4", "旧问5", "车停在哪"}) || !strings.Contains(second.System(), "B2") {
 		t.Errorf("读得出来了：接上存着的对话（读失败那一轮不在里面）：%v %q", got, second.System())
 	}
-	record, ok, err := store.LoadConversation("主人")
+	record, ok, err := store.LoadConversation("主人", "")
 	if err != nil || !ok || record.TurnCount != 6 || record.History[len(record.History)-1].Seq != 6 || record.Summary != "主人的车停在 B2。" {
 		t.Fatalf("新的一轮接着编号（第 6 轮），摘要还在：%+v %v", record, err)
 	}

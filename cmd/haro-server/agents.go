@@ -10,6 +10,7 @@ import (
 
 	"github.com/bukahou/haro/internal/agents"
 	"github.com/bukahou/haro/internal/brain"
+	"github.com/bukahou/haro/internal/chat"
 	"github.com/bukahou/haro/internal/config"
 	"github.com/bukahou/haro/internal/llm"
 	"github.com/bukahou/haro/internal/research"
@@ -59,10 +60,13 @@ func newAgentAssembly(settings config.ServerSettings, catalog agents.Catalog, de
 
 // conversationAgents 是对话用的代理。
 type conversationAgents struct {
-	front   brain.Agent
-	handoff brain.Handoff     // 主人纠正时（或看画面接手时）接手的强模型；没配时为零值
-	expert  brain.FrameExpert // 看画面的专家；没配时为 nil
-	summary *brain.Agent      // 写滚动摘要；没开时为 nil
+	front brain.Agent
+	// frontText 是打字会话用的前台：同一个模型和工具，说话格式按打字渲染（能用 Markdown、不用情绪标记）
+	frontText brain.Agent
+	handoff   brain.Handoff     // 主人纠正时（或看画面接手时）接手的强模型；没配时为零值
+	expert    brain.FrameExpert // 看画面的专家；没配时为 nil
+	summary   *brain.Agent      // 写滚动摘要；没开时为 nil
+	title     *brain.Agent      // App 里的对话起标题
 	// overBudget：月度上限到了以后判断主人要不要临时提高（不受额度管、按天限次数）；不能口头提高时为 nil
 	overBudget *brain.Agent
 	// breaker：前台和接手的模型共用的「连不上」熔断；刚恢复时由它告诉模型断过多久（每轮的情况说明）
@@ -84,10 +88,15 @@ func (a agentAssembly) build(toolbox brain.Toolbox, expertSearch vision.Search) 
 	if err != nil {
 		return built, err
 	}
+	frontText := front
+	if frontText.Instructions, err = frontDefinition.RenderPrompt(brain.PromptValuesFor(brain.MediumText)); err != nil {
+		return built, fmt.Errorf("前台（打字）: %w", err)
+	}
 	if s.ExtraSystemPrompt != "" {
 		front.Instructions += "\n\n" + s.ExtraSystemPrompt
+		frontText.Instructions += "\n\n" + s.ExtraSystemPrompt
 	}
-	built.front = front
+	built.front, built.frontText = front, frontText
 
 	if correction, frames := s.StrongLLMFor(config.StrongForCorrection), s.VisionTakeover(); correction || frames {
 		definition := a.catalog[agents.Strong]
@@ -124,6 +133,17 @@ func (a agentAssembly) build(toolbox brain.Toolbox, expertSearch vision.Search) 
 		built.expert = expert
 		a.logger.Info("代理：看画面交给幕后专家，判断由前台转述", "agent", rules.Name, "model", model, "search", expertSearch != nil)
 	}
+
+	titleDefinition := a.catalog[agents.Title]
+	titleModel, _, err := a.metered(titleDefinition)
+	if err != nil {
+		return built, err
+	}
+	title, err := a.agent(titleDefinition, spending.NewBudgetedChatModel(titleModel, a.guard, a.logger), chat.TitlePromptValues(), nil)
+	if err != nil {
+		return built, err
+	}
+	built.title = &title
 
 	if s.ConversationSummary {
 		definition := a.catalog[agents.Summary]

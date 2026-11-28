@@ -55,11 +55,15 @@ type TurnVector struct {
 // （播放中被打断时改成听到的部分），更早的不会再变，不用每次全表核对；定值
 const recheckRecentTurns = 50
 
+// notIncognito 是「不在无痕线程里」的条件（t 是 transcript）：无痕线程的轮次不算向量，长期记忆按意思找不到它们。
+const notIncognito = `NOT EXISTS (SELECT 1 FROM threads h WHERE h.person = t.person AND h.thread = t.thread AND h.incognito = 1)`
+
 // UnindexedTurns 返回要算向量的轮次（旧的在前），最多 limit 轮：还没有这个模型的向量的，加上最近几轮里文字已经变了的。
+// 无痕线程的不算。
 func (s *SQLiteStore) UnindexedTurns(ctx context.Context, model string, limit int) ([]TranscriptTurn, error) {
 	missing, err := s.turns(ctx, `SELECT t.person, t.seq, t.at, t.messages FROM transcript t
 		LEFT JOIN transcript_vectors v ON v.person = t.person AND v.seq = t.seq AND v.model = ?
-		WHERE v.seq IS NULL ORDER BY t.at, t.person, t.seq LIMIT ?`, model, limit)
+		WHERE v.seq IS NULL AND `+notIncognito+` ORDER BY t.at, t.person, t.seq LIMIT ?`, model, limit)
 	if err != nil || len(missing) >= limit {
 		return missing, err
 	}

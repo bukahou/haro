@@ -19,12 +19,18 @@ type Components struct {
 	// Front 是前台：主对话的代理（模型、基础规则、能用的工具、步数）
 	Front Agent
 	// Handoff 是接手（可选）：哪些情况把这一轮剩下的部分交给更强的代理回答
-	Handoff      Handoff
-	Synthesizer  SpeechSynthesizer
-	Tools        Toolbox              // 可选：工具（内置 + MCP）
-	FrameExpert  FrameExpert          // 可选：看画面的幕后专家；nil = 画面直接交给前台模型
-	Camera       TerminalCamera       // 可选：终端经 MCP 提供的摄像头；nil 或拍不了时不给模型看画面的工具
-	Residents    Residents            // 这台终端所属账号的两个人；零值 = 不分账号（声纹名照用）
+	Handoff     Handoff
+	Synthesizer SpeechSynthesizer
+	Tools       Toolbox        // 可选：工具（内置 + MCP）
+	FrameExpert FrameExpert    // 可选：看画面的幕后专家；nil = 画面直接交给前台模型
+	Camera      TerminalCamera // 可选：终端经 MCP 提供的摄像头；nil 或拍不了时不给模型看画面的工具
+	Residents   Residents      // 这台终端所属账号的两个人；零值 = 不分账号（声纹名照用）
+	// Thread 是这条会话接在这个人的哪一条对话；VoiceThread（零值）= 语音那条
+	Thread string
+	// TextOnly：打字会话（App 的打字入口）—— 不开识别流、不合成语音、只发文字，说的话由 SubmitText 交进来
+	TextOnly bool
+	// TextFront 是打字会话用的前台（同一个模型和工具，说话格式是写给人看的，见 PromptValuesFor）；没有模型时用 Front
+	TextFront    Agent
 	NewSegmenter func() TextSegmenter // 每次回答新建一个
 	// Conversations 是所有终端连接共用的对话簿；nil = 每条连接自己一份、只在内存里
 	Conversations *ConversationBook
@@ -135,7 +141,13 @@ func NewSession(parts Components, opts Options, logger *slog.Logger) *Session {
 	if parts.Conversations == nil {
 		parts.Conversations = NewConversationBook(nil, opts, logger)
 	}
-	conversation := parts.Conversations.Conversation(parts.Residents.shared()) // 第一句话认出是谁之前先用全家的（分账号时是访客的）
+	if parts.TextOnly && parts.TextFront.Model != nil {
+		parts.Front = parts.TextFront
+	}
+	if parts.TextOnly { // 打字：模型写的原样发出（不按念出来的要求切句、去掉 Markdown）
+		parts.NewSegmenter = func() TextSegmenter { return &wholeText{} }
+	}
+	conversation := parts.Conversations.ConversationIn(parts.Residents.shared(), parts.Thread) // 第一句话认出是谁之前先用全家的（分账号时是访客的）
 	if persona := conversation.currentPersona(); persona != nil {
 		logger.Info("当前性格", "persona", persona.Name, "available", len(opts.Personas))
 	}
@@ -143,9 +155,9 @@ func NewSession(parts Components, opts Options, logger *slog.Logger) *Session {
 	session := &Session{
 		parts: parts, opts: opts, logger: logger, conversation: conversation, truncateAtMs: -1,
 		events: make(chan realtimeproto.ServerEvent, 32),
-		closed: make(chan struct{}), lifetime: lifetime, endLifetime: endLifetime,
+		closed: make(chan struct{}), lifetime: lifetime, endLifetime: endLifetime, noSpeaker: parts.TextOnly,
 	}
-	if parts.Notices != nil {
+	if parts.Notices != nil && !parts.TextOnly { // 打字会话不收终端的提示、不自己开口（到点的提醒在终端上说）
 		parts.Notices.join(session)
 	}
 	return session
@@ -351,7 +363,7 @@ func (s *Session) currentConversation() *Conversation {
 
 // useConversationOf 换成这个人的对话（每轮认出说话人之后调用；没比对声纹时用全家的）。
 func (s *Session) useConversationOf(person string) {
-	conversation := s.parts.Conversations.Conversation(person)
+	conversation := s.parts.Conversations.ConversationIn(person, s.parts.Thread)
 	s.mu.Lock()
 	changed := s.conversation != conversation
 	s.conversation = conversation

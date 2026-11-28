@@ -187,11 +187,23 @@ type latestStore struct {
 	records map[string]brain.ConversationRecord
 }
 
-func (s *latestStore) LoadConversation(person string) (brain.ConversationRecord, bool, error) {
+func (s *latestStore) LoadConversation(person, thread string) (brain.ConversationRecord, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	record, ok := s.records[person]
+	record, ok := s.records[person+"\x00"+thread]
 	return record, ok, nil
+}
+
+func (s *latestStore) LastSeq(person string) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	last := 0
+	for _, record := range s.records {
+		if record.Person == person {
+			last = max(last, record.TurnCount)
+		}
+	}
+	return last, nil
 }
 
 func (s *latestStore) SaveConversation(record brain.ConversationRecord) error {
@@ -200,14 +212,14 @@ func (s *latestStore) SaveConversation(record brain.ConversationRecord) error {
 	if s.records == nil {
 		s.records = map[string]brain.ConversationRecord{}
 	}
-	s.records[record.Person] = record
+	s.records[record.Person+"\x00"+record.Thread] = record
 	return nil
 }
 
 func (s *latestStore) openTurn(person string) *brain.ConversationTurn {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.records[person].OpenTurn
+	return s.records[person+"\x00"+brain.VoiceThread].OpenTurn
 }
 
 // 工具一做完就先存一份这一轮（按「服务端重启、没说完」整理好）：模型还在生成时服务端重启，重启后能接上；这一轮收尾后清掉。
@@ -253,7 +265,7 @@ func TestCloseWaitsForTheTurnToBeRecorded(t *testing.T) {
 	_ = k.session.Close()
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	if history := store.records[brain.SharedPerson].History; len(history) != 1 {
+	if history := store.records[brain.SharedPerson+"\x00"+brain.VoiceThread].History; len(history) != 1 {
 		t.Errorf("Close 返回时这一轮应已写进历史：%+v", history)
 	}
 }

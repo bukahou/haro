@@ -10,6 +10,7 @@ import (
 	"github.com/bukahou/haro/internal/appserver"
 	"github.com/bukahou/haro/internal/brain"
 	"github.com/bukahou/haro/internal/brainserver"
+	"github.com/bukahou/haro/internal/chat"
 	"github.com/bukahou/haro/internal/config"
 	"github.com/bukahou/haro/internal/household"
 	"github.com/bukahou/haro/internal/profile"
@@ -67,9 +68,28 @@ func openAccounts(ctx context.Context, settings config.ServerSettings, logger *s
 	return opened, nil
 }
 
+// appBrain 是 App 的打字对话要用的大脑（和终端的会话同一套部件）。
+type appBrain struct {
+	components brain.Components
+	options    brain.Options
+	title      *brain.Agent // 起标题；nil = 不起
+}
+
+// textSessions 为打字对话开会话：同一套部件，只发文字、接在指定的线程、不用摄像头；别的账号只认本人（同终端）。
+func (b appBrain) textSessions(logger *slog.Logger) chat.SessionFactory {
+	return func(speaker chat.Speaker, thread string) chat.TextSession {
+		parts := b.components
+		parts.TextOnly, parts.Thread, parts.Camera, parts.Residents = true, thread, nil, brain.Residents{}
+		if !speaker.Admin {
+			parts.Residents = brain.Residents{Owner: speaker.Owner, Guest: speaker.Guest}
+		}
+		return brain.NewSession(parts, b.options, logger.With("component", "chat-session"))
+	}
+}
+
 // buildAppAPI 建 App 的接口（HARO_APP_PUBLIC_URL 设了才开）：经后端代理的 akasha 登录、各接口。
-func buildAppAPI(ctx context.Context, settings config.ServerSettings, deps services, kit tooling, online *brainserver.OnlineTerminals,
-	logger *slog.Logger) (http.Handler, error) {
+func buildAppAPI(ctx context.Context, settings config.ServerSettings, deps services, kit tooling, assembled appBrain,
+	online *brainserver.OnlineTerminals, logger *slog.Logger) (http.Handler, error) {
 	store := deps.accounts.store
 	if store == nil {
 		logger.Info("App 的接口：没设 HARO_APP_PUBLIC_URL，不开")
@@ -83,6 +103,13 @@ func buildAppAPI(ctx context.Context, settings config.ServerSettings, deps servi
 			ClientSecret: settings.OIDCClientSecret, CookieSecret: settings.OIDCCookieSecret, PublicURL: settings.AppPublicURL}}
 	if kit.places != nil {
 		options.Places = kit.places
+	}
+	if deps.conversations != nil { // 打字对话要对话库（线程、完整记录）
+		var titler chat.Titler
+		if assembled.title != nil {
+			titler = chat.AgentTitler{Agent: *assembled.title}
+		}
+		options.Chat = chat.NewService(ctx, deps.conversations, assembled.textSessions(logger), titler, logger)
 	}
 	if kit.memory != nil {
 		options.Memory = kit.memory

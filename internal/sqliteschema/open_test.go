@@ -110,3 +110,41 @@ func TestOpenFailsWhenMigrationFails(t *testing.T) {
 		t.Error("迁移写错了应打开失败")
 	}
 }
+
+// 有待跑的迁移时先备份：第一次建库不备份；加了新迁移再打开，备份里是迁移之前的样子（有原来的数据、没有新表）、只有自己能读。
+func TestBackupBeforeMigrate(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "x.db")
+	db, err := Open(context.Background(), path, testMigrations, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO items (name) VALUES ('原来的')`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	if _, err := os.Stat(BackupPath(path)); !os.IsNotExist(err) {
+		t.Errorf("第一次建库不该有备份：%v", err)
+	}
+	more := fstest.MapFS{"migrations/00001_items.sql": testMigrations["migrations/00001_items.sql"],
+		"migrations/00002_more.sql": {Data: []byte("-- +goose Up\nCREATE TABLE more (id INTEGER PRIMARY KEY);")}}
+	db, err = Open(context.Background(), path, more, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	backup, err := sql.Open("sqlite", BackupPath(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer backup.Close()
+	var name string
+	if err := backup.QueryRow(`SELECT name FROM items`).Scan(&name); err != nil || name != "原来的" {
+		t.Errorf("备份里的数据：%q %v", name, err)
+	}
+	if err := backup.QueryRow(`SELECT name FROM sqlite_master WHERE name = 'more'`).Scan(&name); err == nil {
+		t.Error("备份是迁移之前的：不该有新表")
+	}
+	if info, err := os.Stat(BackupPath(path)); err != nil || info.Mode().Perm() != 0o600 {
+		t.Errorf("备份的权限：%v %v", info.Mode(), err)
+	}
+}
