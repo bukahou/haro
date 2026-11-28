@@ -313,3 +313,18 @@ func (r *Runner) notifyFinished(ctx context.Context, id int64) {
 	}
 	callback(task)
 }
+
+// Running 是 person 排队中、在查的调查有几个（App 的概览用）。
+func (r *Runner) Running(ctx context.Context, person string) (int, error) {
+	active, err := r.store.Active(ctx)
+	if err != nil {
+		return 0, err
+	}
+	count := 0
+	for _, task := range active {
+		if task.Person == person {
+			count++
+		}
+	}
+	return count, nil
+}

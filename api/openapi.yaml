@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: haro App API
-  version: 0.1.0
+  version: 0.1.1
   description: |
     haro 手机 App 用的接口（第一批：账号、登录、我、花费、终端、管理员）。
     服务端和 App 都从这份契约生成代码；⛔ 两边都不绕过契约私下约定字段。契约每改一次升版本号。
@@ -539,7 +539,8 @@ components:
   schemas:
     ErrorCode:
       type: string
-      description: 稳定的错误码（App 按它判断，不看文字）
+      description: |
+        稳定的错误码（App 按它判断，不看文字）。not_implemented = 这个接口契约里有、服务端还没做（HTTP 501；分批上线时出现）
       enum:
         - unauthorized
         - token_expired
@@ -555,6 +556,7 @@ components:
         - pairing_code_expired
         - pairing_attempts_exceeded
         - upgrade_required
+        - not_implemented
         - internal
     OidcError:
       type: string
@@ -783,8 +785,10 @@ components:
           pattern: '^[A-Z]{2}$'
         latitude:
           type: number
+          format: double
         longitude:
           type: number
+          format: double
     Home:
       type: object
       required: [place, holidays_country]

@@ -99,7 +99,11 @@ func run(logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	return serve(ctx, settings, components, options, deps, logger)
+	entry := entrypoints{online: brainserver.NewOnlineTerminals()}
+	if entry.app, err = buildAppAPI(ctx, settings, deps, kit, entry.online, logger, &shutdown); err != nil {
+		return err
+	}
+	return serve(ctx, settings, components, options, deps, entry, logger)
 }
 
 // 关停各步的期限（加起来 10 秒，比 k8s 的宽限期 30 秒短）：停止接新连接、等普通请求 2 秒 → 会话收尾 5 秒 →
@@ -115,13 +119,16 @@ const (
 // brainHandler 是服务端的全部 HTTP 入口：对话（WebSocket）+ 远程登记声纹（要读的句子和登记都转给 haro-asr）+ 存活 / 就绪检查。
 // 终端只认识服务端的地址；haro-asr 只监听本机（集群里在同一个 Pod）。
 func brainHandler(settings config.ServerSettings, newSession brainserver.SessionFactory, monitor *readiness.Monitor,
-	logger *slog.Logger) (http.Handler, error) {
+	entry entrypoints, logger *slog.Logger) (http.Handler, error) {
 	asrURL, err := url.Parse(settings.ASRURL)
 	if err != nil {
 		return nil, fmt.Errorf("HARO_ASR_URL: %w", err)
 	}
 	mux := http.NewServeMux()
-	mux.Handle("/", brainserver.NewHandler(newSession, brainserver.Options{}, logger))
+	mux.Handle("/", brainserver.NewHandler(newSession, brainserver.Options{Online: entry.online}, logger))
+	if entry.app != nil { // App 的接口（公网上只放行 /v1/）
+		mux.Handle("/v1/", entry.app)
+	}
 	toASR := httputil.NewSingleHostReverseProxy(asrURL)
 	mux.Handle(realtimeproto.VoiceprintRoute, toASR)
 	mux.Handle(realtimeproto.EnrollmentScriptRoute, toASR)

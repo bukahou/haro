@@ -7,3 +7,10 @@ generate:
   strict-server: true
   models: true
   embedded-spec: true
+output-options:
+  # 契约里没被接口直接引用的类型也要（例如 OidcError：登录回调地址上的错误码）
+  skip-prune: true
+  # 登录的两个跳转（浏览器导航，不是 JSON）由 akasha 的 oidcrp 直接处理，手写挂载：契约里照样写着（App 要知道地址），这里不生成
+  exclude-operation-ids:
+    - startLogin
+    - finishLogin
