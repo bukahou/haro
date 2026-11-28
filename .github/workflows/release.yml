@@ -7,13 +7,14 @@
 ##   ③ server    模型（本仓库 Release models-v1，按 models.lock 校验）→ 构建服务端镜像（和 ci 的 image 是同一个
 ##               action：.github/actions/server-image）→ Trivy 扫描（有可修的 CRITICAL 就不推）
 ##               → 推 Docker Hub（版本号 + latest）→ 来源证明
-##   ④ deploy    ②③ 都成功后，改部署仓库里的镜像标签（bot 提交），再把这次的终端 Release 设为 latest
+##   ③′ web      网页版镜像（web/Dockerfile；接口地址来自仓库变量 HARO_WEB_API_URL）→ Trivy 扫描 → 推（x86 + arm）→ 来源证明
+##   ④ deploy    ②③③′ 都成功后，改部署仓库里的镜像标签（bot 提交；网页的在部署仓库有它的部署时才改），再把这次的终端 Release 设为 latest
 ##               （安装脚本默认装 latest：服务端镜像没出来时不让新终端先装上——协议不兼容的版本会连不上旧服务端）。
 ##               部署仓库开着 Argo CD 自动同步：标签一改，几分钟内线上就换成新版本
 ##
 ## 版本号 = Release 标签 = 镜像标签 = 程序里的 buildinfo.Version，例如 v0.5.0-1a2b3c4。
 ## ⛔ 部署清单不依赖 latest：部署仓库里写的不可变标签才是「线上跑的是哪个提交」的唯一答案。
-## ⛔ 需要的 secret（3 个）：DOCKERHUB_USERNAME · DOCKERHUB_TOKEN · CONFIG_REPO_TOKEN
+## ⛔ 需要的 secret（3 个）：DOCKERHUB_USERNAME · DOCKERHUB_TOKEN · CONFIG_REPO_TOKEN；仓库变量（1 个）：HARO_WEB_API_URL
 ## ============================================================
 name: release
 
@@ -37,6 +38,7 @@ permissions:
 
 env:
   IMAGE: docker.io/bukahou/haro-server
+  WEB_IMAGE: docker.io/bukahou/haro-web
 
 jobs:
   ci:
@@ -175,8 +177,96 @@ jobs:
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: false
 
+  web:
+    needs: ci
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      TAG: ${{ needs.ci.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # 接口地址在构建时写进页面：跟部署有关，放在仓库变量里（不写进仓库的文件）；没设就不发
+      - name: 接口地址（仓库变量 HARO_WEB_API_URL）和源码版本
+        id: build
+        env:
+          API_URL: ${{ vars.HARO_WEB_API_URL }}
+        run: |
+          [ -n "$API_URL" ] || { echo "::error::没设仓库变量 HARO_WEB_API_URL（网页版连的接口地址）"; exit 1; }
+          echo "api_url=${API_URL}" >> "$GITHUB_OUTPUT"
+          echo "sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: 构建（x86，先不推：给扫描用）
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: web
+          file: web/Dockerfile
+          build-args: |
+            NEXT_PUBLIC_API_URL=${{ steps.build.outputs.api_url }}
+            NEXT_PUBLIC_BUILD_SHA=${{ steps.build.outputs.sha }}
+          platforms: linux/amd64
+          provenance: false
+          load: true
+          tags: ${{ env.WEB_IMAGE }}:${{ env.TAG }}
+          cache-from: type=gha,scope=haro-web
+          cache-to: type=gha,scope=haro-web,mode=max
+      - name: Trivy 扫描（有可修的 CRITICAL 或疑似凭证就不推）
+        env:
+          TRIVY_IMAGE: aquasec/trivy:0.76.2@sha256:8f6bb947dbc528902e11f2f5be52f7b519f6a39d5d148f41166f2040499768fb
+        run: |
+          # 和服务端的扫描一样：扫描的容器只拿到镜像的 tar 包，不挂 docker.sock、不挂 ~/.docker
+          scan="$RUNNER_TEMP/trivy-web"
+          mkdir -p "$scan"
+          docker save -o "$scan/image.tar" "${WEB_IMAGE}:${TAG}"
+          docker run --rm -v "$scan:/scan" "$TRIVY_IMAGE" \
+            image --input /scan/image.tar --quiet --list-all-pkgs --format json --output /scan/trivy.json
+          report="$scan/trivy.json"
+          # 阳性对照：认出了系统、列得出系统包和 node 的包（扫不到东西时不算数）
+          jq -e '.Metadata.OS.Family == "alpine"' "$report" >/dev/null ||
+            { echo "::error::Trivy 没认出镜像的系统 —— 这次扫描不算数"; exit 1; }
+          jq -e '[.Results[]? | select(.Class == "os-pkgs") | .Packages[]?] | length > 0' "$report" >/dev/null ||
+            { echo "::error::没列出系统包 —— 这次扫描不算数"; exit 1; }
+          jq -e '[.Results[]? | select(.Type == "node-pkg") | .Packages[]?] | length > 0' "$report" >/dev/null ||
+            { echo "::error::没扫到 node 的包 —— 这次扫描不算数"; exit 1; }
+          echo "高危以上（可修的 CRITICAL 会挡住发版）："
+          jq -r '.Results[]? | .Target as $t | .Vulnerabilities[]? | select(.Severity == "CRITICAL" or .Severity == "HIGH")
+            | [.Severity, .VulnerabilityID, .PkgName, .InstalledVersion, (.FixedVersion // "-"), $t] | @tsv' "$report"
+          critical=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL" and (.FixedVersion // "") != "")] | length' "$report")
+          secrets=$(jq '[.Results[]?.Secrets[]?] | length' "$report")
+          jq -r '.Results[]? | .Target as $t | .Secrets[]? | "疑似凭证：\($t) \(.RuleID) 第 \(.StartLine) 行"' "$report"
+          [ "$critical" -eq 0 ] || { echo "::error::有 ${critical} 个可修的 CRITICAL 漏洞：升级基础镜像 / 依赖后再发"; exit 1; }
+          [ "$secrets" -eq 0 ] || { echo "::error::镜像里有 ${secrets} 处疑似凭证（公开镜像！）"; exit 1; }
+      # 推 x86 + arm（构建阶段钉在原生架构，arm 那份只复制产物）：x86 那一份命中刚才扫描过的构建缓存
+      - name: 推送（版本号 + latest）
+        id: push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: web
+          file: web/Dockerfile
+          build-args: |
+            NEXT_PUBLIC_API_URL=${{ steps.build.outputs.api_url }}
+            NEXT_PUBLIC_BUILD_SHA=${{ steps.build.outputs.sha }}
+          platforms: linux/amd64,linux/arm64
+          provenance: false
+          push: true
+          tags: ${{ env.WEB_IMAGE }}:${{ env.TAG }},${{ env.WEB_IMAGE }}:latest
+          cache-from: type=gha,scope=haro-web
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.WEB_IMAGE }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: false
+
   deploy:
-    needs: [ci, terminal, server]
+    needs: [ci, terminal, server, web]
     runs-on: ubuntu-24.04
     permissions:
       contents: write # 把终端的 Release 设为 latest
@@ -193,6 +283,7 @@ jobs:
           # 部署仓库里本应用清单的目录（与 melete / atlhyper 的发布流程同样写死；路径里的名字经判定可以公开）
           APP_PATH: clusters/requiem/apps/haro
           KUSTOMIZE_IMAGE: bukahou/haro-server # kustomization.yaml 的 images 里这个镜像的 name
+          WEB_KUSTOMIZE_IMAGE: bukahou/haro-web
         run: |
           git clone --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/bukahou/config.git" config
           manifest="config/${APP_PATH}/kustomization.yaml"
@@ -200,6 +291,14 @@ jobs:
           # 脚本按行改（保留注释和格式）；这里按 YAML 结构再核对一次：解析得出、这个镜像的 newTag 确实是这次的版本号
           yq -e '.images[] | select(.name == strenv(KUSTOMIZE_IMAGE)) | .newTag == strenv(TAG)' "$manifest" >/dev/null ||
             { echo "::error::${manifest} 里 ${KUSTOMIZE_IMAGE} 的 newTag 不是 ${TAG}"; exit 1; }
+          # 网页版：部署仓库里有它的部署（images 里有这个镜像）才改；还没有时（第一次发网页镜像）照常只改服务端的
+          if KUSTOMIZE_IMAGE=$WEB_KUSTOMIZE_IMAGE yq -e '.images[] | select(.name == strenv(KUSTOMIZE_IMAGE))' "$manifest" >/dev/null 2>&1; then
+            sh haro/scripts/set-image-tag.sh "$manifest" "$WEB_KUSTOMIZE_IMAGE" "$TAG"
+            KUSTOMIZE_IMAGE=$WEB_KUSTOMIZE_IMAGE yq -e '.images[] | select(.name == strenv(KUSTOMIZE_IMAGE)) | .newTag == strenv(TAG)' "$manifest" >/dev/null ||
+              { echo "::error::${manifest} 里 ${WEB_KUSTOMIZE_IMAGE} 的 newTag 不是 ${TAG}"; exit 1; }
+          else
+            echo "::notice::部署仓库里还没有网页版的部署（${WEB_KUSTOMIZE_IMAGE}）：这次只改服务端的镜像标签"
+          fi
           jq -nc --arg repo "$GITHUB_REPOSITORY" --arg sha "$GITHUB_SHA" --arg branch "$GITHUB_REF_NAME" --arg tag "$TAG" \
             '{repo: $repo, sha: $sha, branch: $branch, tag: $tag}' > "config/${APP_PATH}/source.json"
           cd config
@@ -227,6 +326,7 @@ jobs:
             echo "### haro ${TAG}"
             echo "- 终端：https://github.com/${GITHUB_REPOSITORY}/releases/tag/${TAG}"
             echo "- 服务端镜像：\`${IMAGE}:${TAG}\`"
+            echo "- 网页版镜像：\`${WEB_IMAGE}:${TAG}\`"
             echo "- 部署仓库的镜像标签已改成 \`${TAG}\`"
             echo "- Argo CD 自动同步，几分钟内上线；回退 = 把部署仓库的镜像标签改回上一个版本"
           } >> "$GITHUB_STEP_SUMMARY"
