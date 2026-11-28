@@ -196,9 +196,9 @@ type ServerSettings struct {
 	ToolGroups     []string `env:"HARO_TOOLS" envSeparator:","`
 	MCPServersFile string   `env:"HARO_MCP_SERVERS_FILE"`
 
-	// App 的接口（/v1/...，契约 api/openapi.yaml）：设了 HARO_APP_PUBLIC_URL 才开。登录经 haro 后端代理 akasha（OIDC，机密客户端），
+	// App 的接口（/api/v1/...，契约 api/openapi.yaml）：设了 HARO_APP_PUBLIC_URL 才开。登录经 haro 后端代理 akasha（OIDC，机密客户端），
 	// App 不直接调 akasha。下面的地址、凭证都跟部署有关，没有默认值；凭证只来自环境变量（K8s Secret）
-	AppPublicURL      string `env:"HARO_APP_PUBLIC_URL"`                     // 公网上 App 连的根地址（例如 https://haro.example.com），登录回调 = 它 + /v1/auth/oidc/callback
+	AppPublicURL      string `env:"HARO_APP_PUBLIC_URL"`                     // 公网上 App 连的根地址（例如 https://haro.example.com），登录回调 = 它 + /api/v1/auth/oidc/callback
 	AccountsDB        string `env:"HARO_ACCOUNTS_DB"`                        // 账号库（SQLite 文件）
 	OIDCIssuer        string `env:"HARO_OIDC_ISSUER"`                        // akasha 的 issuer
 	OIDCClientID      string `env:"HARO_OIDC_CLIENT_ID"`                     // 在 akasha 注册的 haro 客户端

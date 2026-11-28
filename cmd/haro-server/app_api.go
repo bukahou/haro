@@ -65,7 +65,7 @@ func buildAppAPI(ctx context.Context, settings config.ServerSettings, deps servi
 	if err != nil {
 		return nil, err
 	}
-	logger.Info("App 的接口：/v1/（登录经 akasha）", "public_url", settings.AppPublicURL, "issuer", settings.OIDCIssuer)
+	logger.Info("App 的接口：/api/v1/（登录经 akasha）", "public_url", settings.AppPublicURL, "issuer", settings.OIDCIssuer)
 	return handler, nil
 }
 

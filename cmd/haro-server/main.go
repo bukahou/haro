@@ -23,6 +23,7 @@ import (
 	"time"
 	_ "time/tzdata" // 内置时区数据：镜像里没有 /usr/share/zoneinfo 时 TZ（例如 Asia/Tokyo）照样生效（集群里默认是 UTC）
 
+	"github.com/bukahou/haro/internal/appserver"
 	"github.com/bukahou/haro/internal/brain"
 	"github.com/bukahou/haro/internal/brainserver"
 	"github.com/bukahou/haro/internal/buildinfo"
@@ -126,8 +127,8 @@ func brainHandler(settings config.ServerSettings, newSession brainserver.Session
 	}
 	mux := http.NewServeMux()
 	mux.Handle("/", brainserver.NewHandler(newSession, brainserver.Options{Online: entry.online}, logger))
-	if entry.app != nil { // App 的接口（公网上只放行 /v1/）
-		mux.Handle("/v1/", entry.app)
+	if entry.app != nil { // App 的接口（公网上只放行这一段；终端的 /v1/... 只在局域网）
+		mux.Handle(appserver.PathPrefix, entry.app)
 	}
 	toASR := httputil.NewSingleHostReverseProxy(asrURL)
 	mux.Handle(realtimeproto.VoiceprintRoute, toASR)
