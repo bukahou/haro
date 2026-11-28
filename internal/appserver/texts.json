@@ -25,7 +25,8 @@
       "problem.pairing_code_expired": "配对码过期了，请在终端上重新登记。",
       "problem.pairing_attempts_exceeded": "输错次数太多，请过一会儿再试。",
       "problem.upgrade_required": "App 版本太旧，请先更新。",
-      "terminal.upgrade_note": "在那台终端上重新运行安装脚本，升到最新版本。"
+      "terminal.upgrade_note": "在那台终端上重新运行安装脚本，升到最新版本。",
+      "problem.generation_failed": "回答出错了，请再说一次。"
     },
     "ja": {
       "purpose.chat": "会話",
@@ -51,7 +52,8 @@
       "problem.pairing_code_expired": "ペアリングコードの期限が切れました。端末でもう一度登録してください。",
       "problem.pairing_attempts_exceeded": "入力の誤りが多すぎます。しばらくしてからもう一度お試しください。",
       "problem.upgrade_required": "アプリが古すぎます。先に更新してください。",
-      "terminal.upgrade_note": "その端末でインストールスクリプトをもう一度実行して、最新版にしてください。"
+      "terminal.upgrade_note": "その端末でインストールスクリプトをもう一度実行して、最新版にしてください。",
+      "problem.generation_failed": "回答中にエラーが起きました。もう一度送ってください。"
     },
     "en": {
       "purpose.chat": "Chat",
@@ -77,7 +79,8 @@
       "problem.pairing_code_expired": "The pairing code has expired. Register the terminal again.",
       "problem.pairing_attempts_exceeded": "Too many wrong attempts. Please try again later.",
       "problem.upgrade_required": "This app version is too old. Please update it first.",
-      "terminal.upgrade_note": "Run the install script again on that terminal to update it to the latest version."
+      "terminal.upgrade_note": "Run the install script again on that terminal to update it to the latest version.",
+      "problem.generation_failed": "Something went wrong while answering. Please send it again."
     }
   }
 }

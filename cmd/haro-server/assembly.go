@@ -274,7 +274,7 @@ func assembleBrain(ctx context.Context, settings config.ServerSettings, catalog 
 		logger.Warn("模型预热失败，第一轮对话会比较慢", "err", err)
 	}
 	components := brain.Components{
-		Streaming: deps.streaming, Front: built.front, Handoff: built.handoff, FrameExpert: built.expert,
+		Streaming: deps.streaming, Front: built.front, TextFront: built.frontText, Handoff: built.handoff, FrameExpert: built.expert,
 		Synthesizer: deps.synthesis, Tools: kit.toolbox, Notices: kit.notices,
 		Briefers: append(kit.briefers, built.breaker), // 连不上之后刚恢复时，告诉模型断过多久
 		NewSegmenter: func() brain.TextSegmenter {

@@ -104,7 +104,7 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 	entry := entrypoints{online: brainserver.NewOnlineTerminals(), accounts: deps.accounts.store}
-	if entry.app, err = buildAppAPI(ctx, settings, deps, kit, entry.online, logger); err != nil {
+	if entry.app, err = buildAppAPI(ctx, settings, deps, kit, appBrain{components: components, options: options}, entry.online, logger); err != nil {
 		return err
 	}
 	return serve(ctx, settings, components, options, deps, entry, logger)

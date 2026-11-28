@@ -42,3 +42,12 @@ func (p problemReply) VisitReplaceHomeResponse(w http.ResponseWriter) error    {
 func (p problemReply) VisitReplaceProfileResponse(w http.ResponseWriter) error { return p.write(w) }
 func (p problemReply) VisitSearchPlacesResponse(w http.ResponseWriter) error   { return p.write(w) }
 func (p problemReply) VisitUpdateMeResponse(w http.ResponseWriter) error       { return p.write(w) }
+
+func (p problemReply) VisitListConversationsResponse(w http.ResponseWriter) error  { return p.write(w) }
+func (p problemReply) VisitCreateConversationResponse(w http.ResponseWriter) error { return p.write(w) }
+func (p problemReply) VisitDeleteConversationResponse(w http.ResponseWriter) error { return p.write(w) }
+func (p problemReply) VisitRestoreConversationResponse(w http.ResponseWriter) error {
+	return p.write(w)
+}
+func (p problemReply) VisitListTurnsResponse(w http.ResponseWriter) error { return p.write(w) }
+func (p problemReply) VisitStopTurnResponse(w http.ResponseWriter) error  { return p.write(w) }

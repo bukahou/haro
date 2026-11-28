@@ -2,10 +2,8 @@ package brain
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -30,7 +28,9 @@ type Components struct {
 	// Thread 是这条会话接在这个人的哪一条对话；VoiceThread（零值）= 语音那条
 	Thread string
 	// TextOnly：打字会话（App 的打字入口）—— 不开识别流、不合成语音、只发文字，说的话由 SubmitText 交进来
-	TextOnly     bool
+	TextOnly bool
+	// TextFront 是打字会话用的前台（同一个模型和工具，说话格式是写给人看的，见 PromptValuesFor）；没有模型时用 Front
+	TextFront    Agent
 	NewSegmenter func() TextSegmenter // 每次回答新建一个
 	// Conversations 是所有终端连接共用的对话簿；nil = 每条连接自己一份、只在内存里
 	Conversations *ConversationBook
@@ -141,6 +141,12 @@ func NewSession(parts Components, opts Options, logger *slog.Logger) *Session {
 	if parts.Conversations == nil {
 		parts.Conversations = NewConversationBook(nil, opts, logger)
 	}
+	if parts.TextOnly && parts.TextFront.Model != nil {
+		parts.Front = parts.TextFront
+	}
+	if parts.TextOnly { // 打字：模型写的原样发出（不按念出来的要求切句、去掉 Markdown）
+		parts.NewSegmenter = func() TextSegmenter { return &wholeText{} }
+	}
 	conversation := parts.Conversations.ConversationIn(parts.Residents.shared(), parts.Thread) // 第一句话认出是谁之前先用全家的（分账号时是访客的）
 	if persona := conversation.currentPersona(); persona != nil {
 		logger.Info("当前性格", "persona", persona.Name, "available", len(opts.Personas))
@@ -155,28 +161,6 @@ func NewSession(parts Components, opts Options, logger *slog.Logger) *Session {
 		parts.Notices.join(session)
 	}
 	return session
-}
-
-// textItems 给打字会话交进来的话编号（日志里的 item）。
-var textItems atomic.Int64
-
-// SubmitText 是打字会话收到的一句话：person 是登录的账号本人（App 里登录过，等同声纹确认），language 是 App 的语言
-// （固定的话按它选）。回答经 Events() 发出（文字，不合成语音）。同一时间只答一句：上一句还在答时返回 CodeResponseInProgress。
-func (s *Session) SubmitText(text, person, language string) error {
-	if !s.parts.TextOnly {
-		return realtimeproto.ProtocolErrorf(realtimeproto.CodeUnsupportedFeature, "语音会话不收打字的话")
-	}
-	done := make(chan struct{})
-	close(done) // 打的字不用等识别
-	job := &transcriptionJob{item: fmt.Sprintf("text-%d", textItems.Add(1)), done: done, text: text, started: time.Now(),
-		speaker: person, speakerChecked: true, language: language}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.cancelResponse != nil {
-		return realtimeproto.ProtocolErrorf(realtimeproto.CodeResponseInProgress, "已有进行中的回答")
-	}
-	s.transcription = job
-	return s.startResponseLocked()
 }
 
 // Events 返回服务端事件流（会话期间不关闭）。

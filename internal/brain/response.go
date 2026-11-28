@@ -259,7 +259,7 @@ func (s *Session) speakAnswer(ctx context.Context, history []ChatMessage, input 
 	group.Go(func() error {
 		index := 0
 		for next := range sentences {
-			if !hasSpokenText(next.text) { // 只剩标点：不念
+			if !hasSpokenText(next.text) && !s.parts.TextOnly { // 只剩标点：不念（打字的照样发）
 				continue
 			}
 			if tag, ok := leadingUnknownTag(next.text); ok {

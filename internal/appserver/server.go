@@ -84,6 +84,7 @@ type Options struct {
 	Research        Research
 	Terminals       Terminals        // 现在连着的终端；nil = 不知道（都当成不在线）
 	Registry        TerminalRegistry // 终端的登记和归属；nil = 没有（终端的接口回 501）
+	Chat            Chat             // 打字对话；nil = 没有（对话的接口回 501）
 	DefaultCurrency string           // 服务端的默认货币（账号没改时用）
 	MinAppVersion   string           // 支持的最低 App 版本
 	CapOptions      []float64        // 管理员定月上限的可选档位（默认货币）
@@ -148,6 +149,7 @@ func NewHandler(ctx context.Context, opts Options) (http.Handler, error) {
 		},
 	})
 	generated := appapi.HandlerWithOptions(strict, appapi.StdHTTPServerOptions{BaseRouter: http.NewServeMux()})
+	mux.Handle(sendMessagePattern, limiter.wrap(http.HandlerFunc(server.sendMessage), server)) // 回答是流：不经生成的代码
 	mux.Handle(PathPrefix, limiter.wrap(validator(generated), server))
 	// 跨域套在限流外面：被限流、出错的回答也带上跨域的头，网页版才读得到 429 / problem（预检由 cors 直接回）
 	withCrossOrigin, err := crossOrigin(spec, opts.WebURL, mux)
