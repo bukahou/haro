@@ -14,7 +14,7 @@ require (
 	github.com/go-audio/audio v1.0.0
 	github.com/go-audio/wav v1.1.0
 	github.com/google/jsonschema-go v0.4.3
-	github.com/k2-fsa/sherpa-onnx-go/v2 v2.0.2
+	github.com/k2-fsa/sherpa-onnx-go/v2 v2.0.3
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/oapi-codegen/nethttp-middleware v1.3.1
 	github.com/oapi-codegen/runtime v1.9.1
@@ -60,9 +60,9 @@ require (
 	github.com/gorilla/mux v1.8.1 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.30.0 // indirect
 	github.com/invopop/jsonschema v0.14.0 // indirect
-	github.com/k2-fsa/sherpa-onnx-go-linux/v2 v2.0.2 // indirect
-	github.com/k2-fsa/sherpa-onnx-go-macos/v2 v2.0.2 // indirect
-	github.com/k2-fsa/sherpa-onnx-go-windows/v2 v2.0.2 // indirect
+	github.com/k2-fsa/sherpa-onnx-go-linux/v2 v2.0.3 // indirect
+	github.com/k2-fsa/sherpa-onnx-go-macos/v2 v2.0.3 // indirect
+	github.com/k2-fsa/sherpa-onnx-go-windows/v2 v2.0.3 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
 	github.com/mfridman/interpolate v0.2.0 // indirect
 	github.com/ncruces/go-strftime v1.1.0 // indirect
