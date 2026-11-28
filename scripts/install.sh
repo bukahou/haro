@@ -45,6 +45,7 @@ haro 终端的安装脚本（装在自己的用户目录里，不需要 root）�
 
 选项：
   --server-url URL   服务端地址（第一次安装时必填；配置文件已经有了就不改它）
+  --invite CODE      管理员发的邀请码：装好后直接用它配对这台终端（不用等批准）。从外网连、归到自己的账号都要配对过
   --version TAG      装指定版本，例如 v0.5.0-1a2b3c4（默认最新）
   --no-service       只装程序和配置，不装开机自启
   --uninstall        卸载程序和开机自启（配置文件留着）
@@ -60,6 +61,7 @@ EOF
 }
 
 server_url=
+invite=
 version=latest
 with_service=true
 action=install
@@ -71,6 +73,12 @@ while [ $# -gt 0 ]; do
 		shift
 		;;
 	--server-url=*) server_url=${1#*=} ;;
+	--invite)
+		[ $# -ge 2 ] || die "--invite 后面要跟邀请码"
+		invite=$2
+		shift
+		;;
+	--invite=*) invite=${1#*=} ;;
 	--version)
 		[ $# -ge 2 ] || die "--version 后面要跟版本，例如 v0.5.0-1a2b3c4"
 		version=$2
@@ -320,6 +328,18 @@ EOF
 	say "已装成 LaunchAgent 并启动：${launchd_label}（日志：tail -f ${log_file}）"
 	say "第一次运行时 macOS 会问能不能用麦克风；没弹窗时到「系统设置 → 隐私与安全性 → 麦克风」里允许"
 }
+
+# 配对：带了邀请码就直接配（服务端认了码马上批准）；没配对过、也没带码时只提示。设备凭证存在配置目录里（haro 读的默认位置）
+credential_file=$config_dir/device-credential
+if [ -n "$invite" ] && [ -f "$credential_file" ]; then
+	say "这台终端已经配对过（${credential_file}），不再用邀请码配对"
+elif [ -n "$invite" ]; then
+	say "用邀请码配对这台终端……"
+	sh -c 'set -a; . "$1"; exec "$2" -pair -invite "$3"' haro "$env_file" "$binary" "$invite" ||
+		warn "配对没成：之后可以手动运行 haro -pair（不带邀请码时等管理员批准，或在 App 里输配对码）"
+elif [ ! -f "$credential_file" ]; then
+	say "提示：这台终端还没配对。要从外网连、或者归到自己的账号：运行 haro -pair"
+fi
 
 if [ "$with_service" = true ]; then
 	case $os in

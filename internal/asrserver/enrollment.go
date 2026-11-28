@@ -139,3 +139,41 @@ func (c *SpeakerCheck) enroll(name string, clips [][]float32, appendMode bool) (
 	}
 	return result, nil
 }
+
+// handleVoiceprintDelete 删一份声纹、重新加载（立刻不再认）；本来就没有也回 204。
+func handleVoiceprintDelete(w http.ResponseWriter, r *http.Request, speakers *SpeakerCheck) {
+	if speakers == nil || speakers.Dir == "" {
+		w.WriteHeader(http.StatusNoContent) // 没开声纹：没有可删的
+		return
+	}
+	if err := speakers.remove(r.PathValue("name")); err != nil {
+		var badRequest badEnrollment
+		if errors.As(err, &badRequest) {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// remove 删盘上的一份声纹、重新加载所有声纹（和登记同一把锁）。
+func (c *SpeakerCheck) remove(name string) error {
+	if err := voiceprint.CheckName(name); err != nil {
+		return badEnrollment{err}
+	}
+	c.enrollMu.Lock()
+	defer c.enrollMu.Unlock()
+	if err := voiceprint.Remove(c.Dir, name); err != nil {
+		return fmt.Errorf("删声纹: %w", err)
+	}
+	all, _, err := voiceprint.LoadAll(c.Dir, c.Model)
+	if err != nil {
+		return fmt.Errorf("已删，但重新加载声纹失败（重启 haro-asr 后生效）: %w", err)
+	}
+	c.mu.Lock()
+	c.Voiceprints = all
+	c.mu.Unlock()
+	return nil
+}

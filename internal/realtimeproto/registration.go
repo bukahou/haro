@@ -26,6 +26,8 @@ const MaxTerminalNameRunes = 40
 // RegistrationRequest 是开始登记：终端报自己的名字（默认主机名，App 里能改）。版本在 buildinfo 的请求头里。
 type RegistrationRequest struct {
 	Name string `json:"name"`
+	// Invite 是管理员发的邀请码（可以不带）：有效时直接建一个匿名账号、终端归它（不用等批准），问结果时第一次就是 approved
+	Invite string `json:"invite,omitempty"`
 }
 
 // RegistrationStarted 是登记开始了：Code 给人看（App 里输入），PollToken 终端自己留着问结果。

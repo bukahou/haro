@@ -133,28 +133,30 @@ func (s *Store) joinByInvite(ctx context.Context, subject, displayName, code str
 		return Account{}, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	var inviteID string
-	err = tx.QueryRowContext(ctx, `SELECT id FROM invites WHERE code_hash = ? AND used_at IS NULL AND revoked_at IS NULL AND expires_at > ?`,
-		hashToken(normalizePairCode(code)), s.now().Unix()).Scan(&inviteID)
-	switch {
-	case errors.Is(err, sql.ErrNoRows):
-		return Account{}, ErrInviteInvalid
-	case err != nil:
-		return Account{}, fmt.Errorf("查邀请码: %w", err)
-	}
 	id, err := s.create(ctx, tx, subject, displayName, StatusActive, JoinedViaInvite)
 	if err != nil {
 		return Account{}, err
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE invites SET used_at = ?, used_by = ? WHERE id = ? AND used_at IS NULL`, s.now().Unix(), id, inviteID)
-	if err != nil {
-		return Account{}, fmt.Errorf("用掉邀请码: %w", err)
-	}
-	if affected, err := result.RowsAffected(); err != nil || affected == 0 {
-		return Account{}, errors.Join(ErrInviteInvalid, err)
+	if err := s.useInvite(ctx, tx, code, id); err != nil {
+		return Account{}, err
 	}
 	if err := tx.Commit(); err != nil {
 		return Account{}, err
 	}
 	return s.ByID(ctx, id)
+}
+
+// useInvite 在事务 tx 里用掉一个邀请码（记下用它建的账号）：码不对、过期、用过、撤销了报 ErrInviteInvalid（调用方回滚）。
+func (s *Store) useInvite(ctx context.Context, tx *sql.Tx, code, accountID string) error {
+	result, err := tx.ExecContext(ctx, `UPDATE invites SET used_at = ?, used_by = ? WHERE code_hash = ? AND used_at IS NULL AND
+		revoked_at IS NULL AND expires_at > ?`, s.now().Unix(), accountID, hashToken(normalizePairCode(code)), s.now().Unix())
+	if err != nil {
+		return fmt.Errorf("用掉邀请码: %w", err)
+	}
+	if affected, err := result.RowsAffected(); err != nil {
+		return err
+	} else if affected == 0 {
+		return ErrInviteInvalid
+	}
+	return nil
 }

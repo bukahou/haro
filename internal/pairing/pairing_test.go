@@ -72,3 +72,43 @@ func TestPairRejected(t *testing.T) {
 		t.Errorf("没配对：%q %v", credential, err)
 	}
 }
+
+// 带邀请码：码交给服务端、不显示配对码；码不对时报 ErrInviteInvalid（按错误码认）。
+func TestPairWithInvite(t *testing.T) {
+	var sent string
+	mux := http.NewServeMux()
+	mux.HandleFunc(realtimeproto.RegistrationRoute, func(w http.ResponseWriter, r *http.Request) {
+		var request realtimeproto.RegistrationRequest
+		_ = json.NewDecoder(r.Body).Decode(&request)
+		sent = request.Invite
+		if request.Invite != "GOOD" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(realtimeproto.NewHTTPError(http.StatusBadRequest, realtimeproto.CodeInviteInvalid, "x"))
+			return
+		}
+		_ = json.NewEncoder(w).Encode(realtimeproto.RegistrationStarted{Code: "ABCD-EFGH", ShortID: "A1B2C3", PollToken: "p", ExpiresIn: 600, Interval: 1})
+	})
+	mux.HandleFunc(realtimeproto.RegistrationPollRoute, func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(realtimeproto.RegistrationOutcome{Status: realtimeproto.RegistrationApproved, TerminalID: "t1", Credential: "secret"})
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	path := filepath.Join(t.TempDir(), "device-credential")
+	var out bytes.Buffer
+	if err := Run(context.Background(), Options{ServerURL: server.URL, Name: "客厅", Invite: "GOOD", CredentialFile: path, Out: &out,
+		Client: server.Client()}); err != nil {
+		t.Fatal(err)
+	}
+	if sent != "GOOD" || strings.Contains(out.String(), "ABCD-EFGH") {
+		t.Errorf("交的码 %q，显示的：%s", sent, out.String())
+	}
+	if credential, _ := LoadCredential(path); credential != "secret" {
+		t.Errorf("凭证：%q", credential)
+	}
+	err := Run(context.Background(), Options{ServerURL: server.URL, Name: "客厅", Invite: "BAD", CredentialFile: path, Out: &bytes.Buffer{},
+		Client: server.Client()})
+	if !errors.Is(err, ErrInviteInvalid) {
+		t.Errorf("码不对：%v", err)
+	}
+}

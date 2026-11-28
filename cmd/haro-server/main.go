@@ -98,6 +98,7 @@ func run(logger *slog.Logger) error {
 	}
 	if deps.accounts.store != nil { // 分账号：按账号的月上限判断，全局的额度提醒、口头提高只给管理员（放行任何调用之前接上）
 		deps.guard.UseAccounts(accounts.BillingAccountOf, deps.accounts.store)
+		deps.accounts.store.SetAnonymousMonthlyCap(money.Of(settings.TerminalMonthlyCap, settings.Currency()))
 	}
 	kit, err := buildTooling(ctx, settings, catalog, deps, logger, &shutdown)
 	if err != nil {
@@ -124,27 +125,29 @@ const (
 	shutdownMemory    = 2 * time.Second
 )
 
-// brainHandler 是服务端的全部 HTTP 入口：对话（WebSocket）+ 远程登记声纹（要读的句子和登记都转给 haro-asr）+ 存活 / 就绪检查。
-// 终端只认识服务端的地址；haro-asr 只监听本机（集群里在同一个 Pod）。
+// brainHandler 是服务端一个入口的全部 HTTP 路由：对话（WebSocket）+ 终端登记 + 远程登记声纹（要读的句子和登记都转给 haro-asr，
+// 登记前 enrollmentGate 核对是谁）+ App 的接口 + 存活 / 就绪检查。终端只认识服务端的地址；haro-asr 只监听本机（集群里在同一个 Pod）。
+// public = 公网的入口：语音连接、登记声纹都要设备凭证（局域网的入口照旧收没配对的旧终端）。
 func brainHandler(settings config.ServerSettings, newSession brainserver.SessionFactory, monitor *readiness.Monitor,
-	entry entrypoints, logger *slog.Logger) (http.Handler, error) {
+	entry entrypoints, logger *slog.Logger, public bool) (http.Handler, error) {
 	asrURL, err := url.Parse(settings.ASRURL)
 	if err != nil {
 		return nil, fmt.Errorf("HARO_ASR_URL: %w", err)
 	}
 	mux := http.NewServeMux()
-	connections := brainserver.Options{Online: entry.online}
-	if store := entry.accounts; store != nil { // 有账号库：终端可以登记、带设备凭证连进来（登记接口和声纹登记一样只在局域网）
+	connections := brainserver.Options{Online: entry.online, RequireCredential: public, MaxOnlinePerAccount: settings.TerminalMaxOnline}
+	if store := entry.accounts; store != nil { // 有账号库：终端可以登记、带设备凭证连进来
 		connections.Terminals = terminalAuthenticator{store: store, logger: logger}
 		brainserver.RegisterRegistrationRoutes(mux, terminalRegistrar{store: store}, logger)
 	}
 	mux.Handle("/", brainserver.NewHandler(newSession, connections, logger))
-	if entry.app != nil { // App 的接口（公网上只放行这一段；终端的 /v1/... 只在局域网）
+	if entry.app != nil {
 		mux.Handle(appserver.PathPrefix, entry.app)
 	}
 	toASR := httputil.NewSingleHostReverseProxy(asrURL)
-	mux.Handle(realtimeproto.VoiceprintRoute, toASR)
-	mux.Handle(realtimeproto.EnrollmentScriptRoute, toASR)
+	mux.Handle(realtimeproto.VoiceprintRoute, enrollmentGate{asr: toASR, terminals: connections.Terminals, requireCredential: public,
+		logger: logger})
+	mux.Handle(realtimeproto.EnrollmentScriptRoute, toASR) // 只是要读的句子
 	mux.HandleFunc("GET /livez", readiness.Alive)
 	mux.Handle("GET /readyz", monitor)
 	return mux, nil

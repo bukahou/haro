@@ -33,7 +33,13 @@ haro 是一个家用语音助手：家里每个房间放一台**终端**（麦�
   响应里给错误码和它支持的版本；什么都不报的当普通 Realtime 客户端（只用标准事件）。终端被拒后提示一次，隔几分钟才再试；
 - **终端的身份**：配对过的终端握手时带设备凭证（`Authorization: Bearer`，haro 发的随机串、库里只存 SHA-256），服务端认出是哪台、属于哪个账号；
   凭证无效（在 App 里移除了）回 401（错误码 `invalid_credential`），⛔ 不退回成「没带」，终端提示重新配对、隔几分钟才再试。
-  没带凭证的终端照旧能连、归管理员账号（过渡期，只在局域网；第 21 段把语音连接开到公网时改成必须带）。普通 Realtime 客户端的 `Authorization` 是它自己的 API key，不看。
+  没带凭证的终端照旧能连、归管理员账号（过渡期，只在局域网的入口）。普通 Realtime 客户端的 `Authorization` 是它自己的 API key，不看。
+  **公网的入口单独一个端口**（`HARO_PUBLIC_LISTEN`，公网的路由只指它）：语音连接只收带着有效设备凭证的 haro 终端（没带的、普通 Realtime 客户端都 401），
+  登记声纹也要凭证；登记终端、App 的接口和局域网一样。一个账号同时连着的终端有上限（`HARO_TERMINAL_MAX_ONLINE`，默认 3，管理员不限），
+  多了握手回 `too_many_sessions`。
+  **登记声纹**（`/v1/voiceprints/{名字}`，转给 haro-asr 之前经 `enrollmentGate`）：管理员的终端照旧用填的名字；别的账号的终端只能登记成这个账号的本人
+  （声纹名 `account-<编号>`，`accounts.VoiceprintNameOf`，终端填的不算），回给它的「认得哪些人」只有它自己；没带凭证的只有局域网的入口收。
+  彻底删账号时经 haro-asr 删掉本人的声纹（`DELETE /v1/voiceprints/{名字}`，只在 haro-asr 上，服务端不往外转）。
   配对照 RFC 8628：`haro -pair` 调 `POST /v1/terminal-registration` 拿配对码（8 位、10 分钟、用一次）和轮询凭据、显示配对码，
   定时 `POST /v1/terminal-registration/poll` 问结果；人在 App 里输入配对码 = 绑到自己的账号，管理员批准 = 归一个新的匿名账号。
   批准后终端第一次来问时才生成设备凭证、只交出一次（库里不存明文），存进 `~/.config/haro/device-credential`（600）。
@@ -297,8 +303,8 @@ v10（2026-11-22 裁定）：记住的事和以前的对话都能按意思找回
 
 ## App 的接口（`internal/appserver`）
 
-手机 App 和网页版（`web/`）用的 HTTP 接口，挂在服务端同一个端口的 `/api/v1/` 下（`appserver.PathPrefix`；公网上只放行这一段）。终端的语音连接、声纹登记在 `/v1/...` 下，
-只在局域网：两段不能重叠（有测试守着），否则开放 App 接口时会把不鉴权的语音连接一起开出去。设了 `HARO_APP_PUBLIC_URL` 才开。
+手机 App 和网页版（`web/`）用的 HTTP 接口，挂在 `/api/v1/` 下（`appserver.PathPrefix`），局域网和公网的入口都有。终端的语音连接、声纹登记在 `/v1/...` 下：
+两段不能重叠（有测试守着）。局域网的入口收没配对的旧终端，所以只能经公网的入口（`HARO_PUBLIC_LISTEN`）开到公网。设了 `HARO_APP_PUBLIC_URL` 才开。
 
 - **契约**：`api/openapi.yaml`（OpenAPI 3.0.3）。服务端的接口代码由 oapi-codegen 生成（`internal/appapi`，`go generate ./internal/appapi/`，⛔ 不手改），
   App 用 swift-openapi-generator 从同一份生成客户端；两边都不绕过契约私下约定字段。

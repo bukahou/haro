@@ -2,9 +2,13 @@ package accounts
 
 import (
 	"errors"
+	"io"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/bukahou/haro/internal/money"
 )
 
 // 配对：终端登记 → App 里输入配对码（大小写、「-」随便）→ 终端轮询拿到凭证（只拿一次）→ 用凭证连进来是这个账号；移除后凭证作废。
@@ -15,7 +19,7 @@ func TestPairTerminal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registration, err := store.StartRegistration(ctx, "客厅", "v1", "192.0.2.1")
+	registration, err := store.StartRegistration(ctx, "客厅", "v1", "192.0.2.1", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,8 +69,8 @@ func TestPairTerminal(t *testing.T) {
 func TestApproveRejectExpire(t *testing.T) {
 	store := openTest(t)
 	ctx := t.Context()
-	approved, _ := store.StartRegistration(ctx, "书房", "v1", "")
-	rejected, _ := store.StartRegistration(ctx, "门口", "v1", "")
+	approved, _ := store.StartRegistration(ctx, "书房", "v1", "", "")
+	rejected, _ := store.StartRegistration(ctx, "门口", "v1", "", "")
 	if pending, err := store.PendingRegistrations(ctx); err != nil || len(pending) != 2 {
 		t.Fatalf("等着的：%+v %v", pending, err)
 	}
@@ -84,7 +88,7 @@ func TestApproveRejectExpire(t *testing.T) {
 	if result, err := store.PollRegistration(ctx, rejected.PollToken); err != nil || result.Status != RegistrationRejected || result.Credential != "" {
 		t.Errorf("被拒绝：%+v %v", result, err)
 	}
-	late, _ := store.StartRegistration(ctx, "阳台", "v1", "")
+	late, _ := store.StartRegistration(ctx, "阳台", "v1", "", "")
 	store.now = func() time.Time { return time.Now().Add(RegistrationTTL + time.Minute) }
 	if _, err := store.PairRegistration(ctx, "x", late.Code); !errors.Is(err, ErrPairCodeExpired) {
 		t.Errorf("过期的配对码：%v", err)
@@ -94,5 +98,75 @@ func TestApproveRejectExpire(t *testing.T) {
 	}
 	if pending, _ := store.PendingRegistrations(ctx); len(pending) != 0 {
 		t.Errorf("过期的不再列出：%+v", pending)
+	}
+}
+
+// 终端带邀请码登记：直接建一个匿名账号（带默认的月上限）、终端归它，第一次问结果就拿到凭证，码用掉；
+// 码不对时不建、登记也不留（管理员的「新终端」里看不到）。
+func TestRegistrationWithInvite(t *testing.T) {
+	store := openTest(t)
+	ctx := t.Context()
+	admin, _ := store.EnsureAdmin(ctx, testAdmin)
+	store.SetAnonymousMonthlyCap(money.Of(500, "JPY"))
+	_, code, err := store.CreateInvite(ctx, admin.ID, "给爸爸的终端", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registration, err := store.StartRegistration(ctx, "爸爸家", "v1", "", code)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := store.PollRegistration(ctx, registration.PollToken)
+	if err != nil || result.Status != RegistrationApproved || result.Credential == "" {
+		t.Fatalf("第一次问就批准了：%+v %v", result, err)
+	}
+	_, account, err := store.AuthenticateTerminal(ctx, result.Credential)
+	if err != nil || account.JoinedVia != JoinedViaTerminal || account.MonthlyCap != money.Of(500, "JPY") {
+		t.Errorf("匿名账号：%+v %v", account, err)
+	}
+	invites, _ := store.Invites(ctx)
+	if len(invites) != 1 || invites[0].UsedBy != account.ID {
+		t.Errorf("码用掉了：%+v", invites)
+	}
+	if _, err := store.StartRegistration(ctx, "别人家", "v1", "", code); !errors.Is(err, ErrInviteInvalid) {
+		t.Errorf("用过的码：%v", err)
+	}
+	if pending, _ := store.PendingRegistrations(ctx); len(pending) != 0 {
+		t.Errorf("码不对的登记不留：%+v", pending)
+	}
+}
+
+// 匿名账号的终端都很久没连过：找得出来、软删除（Purger）；最近连过的、有 akasha 账号的不算。
+func TestIdleAnonymous(t *testing.T) {
+	store := openTest(t)
+	ctx := t.Context()
+	_, _ = store.EnsureAdmin(ctx, testAdmin)
+	now := time.Now()
+	store.now = func() time.Time { return now.Add(-200 * 24 * time.Hour) }
+	idle, _ := store.StartRegistration(ctx, "旧的", "v1", "", "")
+	idleTerminal, _ := store.ApproveRegistration(ctx, idle.ID)
+	active, _ := store.StartRegistration(ctx, "常用的", "v1", "", "")
+	activeTerminal, _ := store.ApproveRegistration(ctx, active.ID)
+	_, _ = store.ResolveLogin(ctx, "sub-old", "老用户", "")
+	store.now = func() time.Time { return now }
+	if err := store.TouchTerminal(ctx, activeTerminal.ID, "v1", ""); err != nil {
+		t.Fatal(err)
+	}
+	found, err := store.IdleAnonymous(ctx, now.Add(-90*24*time.Hour))
+	if err != nil || len(found) != 1 || found[0].ID != idleTerminal.AccountID {
+		t.Fatalf("久不连接的：%+v %v", found, err)
+	}
+	purger := Purger{Store: store, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), IdleAnonymousAfter: 90 * 24 * time.Hour}
+	if err := purger.PurgeDue(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if account, _ := store.ByID(ctx, idleTerminal.AccountID); account.DeletionDueAt.IsZero() || account.Status != StatusDisabled {
+		t.Errorf("应软删除：%+v", account)
+	}
+	if account, _ := store.ByID(ctx, activeTerminal.AccountID); !account.DeletionDueAt.IsZero() {
+		t.Errorf("常用的不动：%+v", account)
+	}
+	if again, _ := store.IdleAnonymous(ctx, now.Add(-90*24*time.Hour)); len(again) != 0 {
+		t.Errorf("软删除了的不再算：%+v", again)
 	}
 }

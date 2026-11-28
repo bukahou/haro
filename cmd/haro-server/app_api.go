@@ -179,7 +179,10 @@ func buildAppAPI(ctx context.Context, settings config.ServerSettings, deps servi
 		personData = append(personData, accounts.NamedData{Name: dataExpenses, Data: service})
 		logger.Info("记账：交小票由代理读成草稿，主人确认才入账", "db", settings.ExpensesDB)
 	}
-	go accounts.Purger{Store: store, Data: personData, Logger: logger.With("component", "account-purge")}.Run(ctx)
+	personData = append(personData, accounts.NamedData{Name: dataVoiceprints,
+		Data: voiceprintEraser{asrURL: settings.ASRURL, client: deps.httpClient}})
+	go accounts.Purger{Store: store, Data: personData, Logger: logger.With("component", "account-purge"),
+		IdleAnonymousAfter: time.Duration(settings.AnonymousIdleDays) * 24 * time.Hour}.Run(ctx)
 	handler, err := appserver.NewHandler(ctx, options)
 	if err != nil {
 		return nil, err

@@ -1,11 +1,17 @@
 package main
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/bukahou/haro/internal/accounts"
+	"github.com/bukahou/haro/internal/realtimeproto"
 )
 
 // 彻底删账号的清单不能漏：每个存储的表结构里按人存的（有 person 列的）包，要么登记了「删一个人的数据」
@@ -58,5 +64,27 @@ func TestPersonDataCoverage(t *testing.T) {
 		if !strings.Contains(wiring.String(), "accounts.NamedData{Name: "+name) {
 			t.Errorf("%s（%s）没在组装时登记", pkg, name)
 		}
+	}
+}
+
+// 删声纹：别的账号的本人经 haro-asr 删 account-<编号>；访客、管理员沿用的名字不调用。
+func TestVoiceprintEraser(t *testing.T) {
+	var deleted []string
+	asr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			deleted = append(deleted, strings.TrimPrefix(r.URL.Path, realtimeproto.VoiceprintPath))
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer asr.Close()
+	eraser := voiceprintEraser{asrURL: asr.URL, client: asr.Client()}
+	owner, guest := accounts.PersonsOf("a1")
+	for _, person := range []string{owner, guest, "主人"} {
+		if err := eraser.ErasePerson(context.Background(), person); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(deleted) != 1 || deleted[0] != "account-a1" {
+		t.Errorf("删了：%v", deleted)
 	}
 }

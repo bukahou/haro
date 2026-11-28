@@ -133,3 +133,24 @@ func (s *Store) MonthlyCapOf(ctx context.Context, id string) (money.Amount, erro
 	}
 	return account.MonthlyCap, nil
 }
+
+// IdleAnonymous 是 before 之前就再没连过的匿名账号（终端建的、没有 akasha 账号）：它的终端都没在 before 之后连过
+// （没连过的按建的时间算；一台终端都没有的按账号建的时间）。已经软删除的不算。
+func (s *Store) IdleAnonymous(ctx context.Context, before time.Time) ([]Account, error) {
+	rows, err := s.db.QueryContext(ctx, selectAccount+` WHERE joined_via = ? AND subject IS NULL AND deletion_due_at IS NULL AND role != ?
+		AND created_at < ? AND NOT EXISTS (SELECT 1 FROM terminals WHERE terminals.account_id = accounts.id
+			AND COALESCE(terminals.last_seen_at, terminals.created_at) >= ?)`, JoinedViaTerminal, RoleAdmin, before.Unix(), before.Unix())
+	if err != nil {
+		return nil, fmt.Errorf("读久不连接的匿名账号: %w", err)
+	}
+	defer rows.Close()
+	var idle []Account
+	for rows.Next() {
+		account, err := scanAccount(rows)
+		if err != nil {
+			return nil, err
+		}
+		idle = append(idle, account)
+	}
+	return idle, rows.Err()
+}

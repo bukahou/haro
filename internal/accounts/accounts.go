@@ -91,7 +91,12 @@ type Admin struct {
 type Store struct {
 	db  *sql.DB
 	now func() time.Time
+	// anonymousCap 是新建的匿名账号的月上限（SetAnonymousMonthlyCap；零值 = 不设）
+	anonymousCap money.Amount
 }
+
+// SetAnonymousMonthlyCap 定新建的匿名账号（终端批准、终端带邀请码登记时建的）的月上限；零值 = 不设（靠全局的上限兜底）。启动时调用一次。
+func (s *Store) SetAnonymousMonthlyCap(cap money.Amount) { s.anonymousCap = cap }
 
 //go:embed migrations/*.sql
 var migrationFiles embed.FS

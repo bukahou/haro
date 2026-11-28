@@ -289,7 +289,15 @@ type ServerSettings struct {
 	MaxSegmentRunes      int `env:"HARO_MAX_SEGMENT_RUNES" envDefault:"40"`      // 超过这么多词还没断开就切（要大于 0）
 
 	// 终端 ↔ 服务端：默认都在本机，服务端只监听本机；终端在别的机器上时改监听地址（只在可信网络里）
-	ServerListen string `env:"HARO_SERVER_LISTEN" envDefault:"127.0.0.1:59130"` // haro-server 监听地址
+	ServerListen string `env:"HARO_SERVER_LISTEN" envDefault:"127.0.0.1:59130"` // haro-server 监听地址（局域网的入口：没配对的旧终端照旧能连）
+	// 公网的入口（例如 :59131；空 = 不开）：公网的路由只指它。这里语音连接、登记声纹都要设备凭证；登记终端、App 的接口照常
+	PublicListen string `env:"HARO_PUBLIC_LISTEN"`
+	// 一个账号同时连着几台终端（管理员不限）；0 = 不限
+	TerminalMaxOnline int `env:"HARO_TERMINAL_MAX_ONLINE" envDefault:"3"`
+	// 新建的匿名账号（终端批准、终端带邀请码登记时建的）的月上限（默认货币；0 = 不设，靠全局的上限兜底）
+	TerminalMonthlyCap float64 `env:"HARO_TERMINAL_MONTHLY_CAP" envDefault:"0"`
+	// 匿名账号的终端都这么多天没连过就软删除（30 天后彻底删）；0 = 不清
+	AnonymousIdleDays int `env:"HARO_ANONYMOUS_IDLE_DAYS" envDefault:"90"`
 
 	// 其他：普通 HTTP 请求、每次模型请求的总期限（要大于 0）
 	RequestTimeout time.Duration `env:"HARO_REQUEST_TIMEOUT" envDefault:"120s"`
@@ -562,6 +570,18 @@ func (settings ServerSettings) validateResearch() error {
 func (settings ServerSettings) validateListen() error {
 	if settings.ServerListen == "" {
 		return fmt.Errorf("必须设 HARO_SERVER_LISTEN（haro-server 的监听地址）")
+	}
+	if settings.PublicListen != "" && settings.PublicListen == settings.ServerListen {
+		return fmt.Errorf("HARO_PUBLIC_LISTEN 和 HARO_SERVER_LISTEN 不能是同一个地址（公网的入口要单独一个）")
+	}
+	if settings.PublicListen != "" && settings.AccountsDB == "" {
+		return fmt.Errorf("开公网的入口（HARO_PUBLIC_LISTEN）要有账号库（HARO_ACCOUNTS_DB）：那里只收配对过的终端")
+	}
+	if settings.TerminalMaxOnline < 0 {
+		return fmt.Errorf("HARO_TERMINAL_MAX_ONLINE 不能是负数，现在是 %d", settings.TerminalMaxOnline)
+	}
+	if settings.TerminalMonthlyCap < 0 || settings.AnonymousIdleDays < 0 {
+		return fmt.Errorf("HARO_TERMINAL_MONTHLY_CAP、HARO_ANONYMOUS_IDLE_DAYS 不能是负数")
 	}
 	return nil
 }

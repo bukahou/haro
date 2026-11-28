@@ -4,8 +4,17 @@ package brain
 // 别的声音（登记过的别人）用访客 —— 一台终端只认它所属账号的本人。
 // 零值 = 不分账号（管理员账号的终端、没带设备凭证的终端）：声纹认出的名字照用，还没认出时用全家共用（SharedPerson）。
 type Residents struct {
-	Owner string // 账号本人：声纹登记时用的就是这个名字
-	Guest string // 账号的访客
+	Owner      string // 账号本人
+	Guest      string // 账号的访客
+	OwnerVoice string // 本人的声纹名（声纹认出的说话人名字；accounts.VoiceprintNameOf）；空 = 同 Owner
+}
+
+// ownerVoice 是认出本人时声纹报的名字。
+func (r Residents) ownerVoice() string {
+	if r.OwnerVoice != "" {
+		return r.OwnerVoice
+	}
+	return r.Owner
 }
 
 // separate 判断分不分账号。
@@ -24,7 +33,7 @@ func (r Residents) personFor(speaker string) string {
 	switch {
 	case !r.separate():
 		return speaker
-	case speaker == r.Owner:
+	case speaker == r.ownerVoice():
 		return r.Owner
 	}
 	return r.Guest
@@ -32,7 +41,7 @@ func (r Residents) personFor(speaker string) string {
 
 // verified 判断这句的声纹算不算「声纹确认」（确认闸只让这样的人发起、确认会破坏的操作）：分账号时只有本人算。
 func (r Residents) verified(speaker string) bool {
-	return speaker != "" && (!r.separate() || speaker == r.Owner)
+	return speaker != "" && (!r.separate() || speaker == r.ownerVoice())
 }
 
 // speakerLine 是告诉模型现在谁在说话的那一行；访客、全家共用时没有。

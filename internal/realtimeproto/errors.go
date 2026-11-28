@@ -25,6 +25,7 @@ const (
 	CodeInvalidCredential          ErrorCode = "invalid_credential"           // 握手带的设备凭证无效（多半是在 App 里移除了这台终端）：重新配对
 	CodeRegistrationNotFound       ErrorCode = "registration_not_found"       // 登记的轮询凭据不认得（已经取走凭证、或太久没来问被清掉了）：重新登记
 	CodeRateLimited                ErrorCode = "rate_limited"                 // 请求太频繁：过一会儿再试
+	CodeInviteInvalid              ErrorCode = "invite_invalid"               // 登记带的邀请码不对、过期了、用过了或者撤销了
 )
 
 // errorType 是 Realtime 错误事件里的 error.type：请求有问题，还是服务端自己的问题。

@@ -76,7 +76,8 @@ type Terminal struct {
 }
 
 // StartRegistration 开始登记一台终端：name、version 是终端报的，remote 是从哪里连来的。
-func (s *Store) StartRegistration(ctx context.Context, name, version, remote string) (Registration, error) {
+// invite 不为空时用邀请码直接批准：建一个匿名账号、终端归它，码用掉（码不对报 ErrInviteInvalid，登记也不留）。
+func (s *Store) StartRegistration(ctx context.Context, name, version, remote, invite string) (Registration, error) {
 	id, err := newID()
 	if err != nil {
 		return Registration{}, err
@@ -95,6 +96,18 @@ func (s *Store) StartRegistration(ctx context.Context, name, version, remote str
 		expires_at, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, hashToken(code), hashToken(poll), name, version, remote,
 		now.Unix(), expires.Unix(), RegistrationPending); err != nil {
 		return Registration{}, fmt.Errorf("登记终端: %w", err)
+	}
+	if invite != "" {
+		if _, err := s.approve(ctx, `id = ?`, id, func(tx *sql.Tx) (string, error) {
+			account, err := s.createAnonymous(ctx, tx)
+			if err != nil {
+				return "", err
+			}
+			return account, s.useInvite(ctx, tx, invite, account)
+		}); err != nil {
+			_, _ = s.db.ExecContext(ctx, `DELETE FROM terminal_registrations WHERE id = ?`, id)
+			return Registration{}, err
+		}
 	}
 	return Registration{ID: id, ShortID: shortID(id), Code: FormatPairCode(code), PollToken: poll,
 		ExpiresAt: expires.UTC().Truncate(time.Second)}, nil
@@ -167,18 +180,26 @@ var (
 
 // ApproveRegistration 是管理员批准一台新终端：给它建一个新的匿名账号。
 func (s *Store) ApproveRegistration(ctx context.Context, registrationID string) (Terminal, error) {
-	return s.approve(ctx, `id = ?`, registrationID, func(tx *sql.Tx) (string, error) {
-		id, err := newID()
-		if err != nil {
-			return "", err
-		}
-		owner, guest := PersonsOf(id)
-		if _, err := tx.ExecContext(ctx, `INSERT INTO accounts (id, display_name, role, status, joined_via, owner_person, guest_person,
-			created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, id, "", RoleMember, StatusActive, JoinedViaTerminal, owner, guest, s.now().Unix()); err != nil {
-			return "", fmt.Errorf("建匿名账号: %w", err)
-		}
-		return id, nil
-	})
+	return s.approve(ctx, `id = ?`, registrationID, func(tx *sql.Tx) (string, error) { return s.createAnonymous(ctx, tx) })
+}
+
+// createAnonymous 建一个匿名账号（终端批准时、终端带邀请码登记时），月上限是 SetAnonymousMonthlyCap 定的默认值。
+func (s *Store) createAnonymous(ctx context.Context, tx *sql.Tx) (string, error) {
+	id, err := newID()
+	if err != nil {
+		return "", err
+	}
+	owner, guest := PersonsOf(id)
+	var micros, currency any
+	if s.anonymousCap.Micros > 0 {
+		micros, currency = s.anonymousCap.Micros, s.anonymousCap.Currency
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO accounts (id, display_name, role, status, joined_via, owner_person, guest_person,
+		created_at, monthly_cap_micros, monthly_cap_currency) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, "", RoleMember, StatusActive,
+		JoinedViaTerminal, owner, guest, s.now().Unix(), micros, currency); err != nil {
+		return "", fmt.Errorf("建匿名账号: %w", err)
+	}
+	return id, nil
 }
 
 // approve 找到还在等的登记（没过期），交给 accountFor 定归哪个账号，建好终端、把登记标成已批准。
