@@ -520,6 +520,55 @@ func TestBargeInDuringPlayback(t *testing.T) {
 	}
 }
 
+// 一开口就打断（interrupt_response）：醒着播放时连续说话够 BargeInSpeech 才算打断——发 speech_started、这句标上打断；
+// 短的一下（残留的回声、咳嗽）不打断。对照：没要一开口就打断时，播放中说话不上报。
+func TestVoiceBargeInDuringPlayback(t *testing.T) {
+	for _, interrupt := range []bool{true, false} {
+		transcriber := &fixedTranscriber{text: "等一下，换个话题"}
+		server := httptest.NewServer(NewHandler(Dependencies{Transcriber: transcriber,
+			NewVoiceDetector: func(VoiceDetectorConfig) (VoiceDetector, error) {
+				return &energyDetector{silenceSamples: 300 * 16}, nil
+			},
+			NewKeywordSpotter: func() (KeywordSpotter, error) { return &fakeSpotter{}, nil },
+			Logger:            slog.New(slog.NewTextHandler(io.Discard, nil))}))
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		conn, _, err := websocket.Dial(ctx, transcriptionURL(t, server.URL), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		startSession(t, ctx, conn, realtimeproto.TurnDetection{Type: "server_vad", SilenceDurationMs: 300,
+			InterruptResponse: &interrupt}, true)
+		sendKeyword(t, ctx, conn) // 先唤醒、说一句，进入对话窗口
+		sendPattern(t, ctx, conn, [2]int{500, 1}, [2]int{400, 0})
+		readEvents(t, ctx, conn, 4)
+
+		_ = wsjson.Write(ctx, conn, map[string]string{"type": "haro.playback.started"})
+		sendPattern(t, ctx, conn, [2]int{160, 1}, [2]int{400, 0}) // 短的一下：不打断
+		sendPattern(t, ctx, conn, [2]int{800, 1}, [2]int{400, 0}) // 连续说话：打断
+		if interrupt {
+			events := readEvents(t, ctx, conn, 3)
+			started, ok := events[0].(realtimeproto.InputAudioBufferSpeechStarted)
+			completed, done := events[2].(realtimeproto.InputAudioTranscriptionCompleted)
+			if !ok || !done || completed.ItemID != started.ItemID || !completed.BargeIn || completed.Wake {
+				t.Fatalf("开口打断：先 speech_started，这句标上打断（不是唤醒）：%v", events)
+			}
+			if started.AudioStartMs < 900 { // 短的一下在 0.9 s 之前：不能从它开始
+				t.Errorf("打断句应从连续说话的那段开始：%+v", started)
+			}
+		} else {
+			_ = wsjson.Write(ctx, conn, map[string]string{"type": "haro.playback.stopped"}) // 播完在 2.86 s
+			sendPattern(t, ctx, conn, [2]int{500, 1}, [2]int{400, 0})
+			events := readEvents(t, ctx, conn, 1)
+			if started, ok := events[0].(realtimeproto.InputAudioBufferSpeechStarted); !ok || started.AudioStartMs < 2860 {
+				t.Fatalf("没要一开口就打断：播放中说话不应上报，第一个开始说话应在播完之后：%v", events)
+			}
+		}
+		conn.CloseNow()
+		cancel()
+		server.Close()
+	}
+}
+
 // 播放中收到休眠：播完不能按播放前的状态又醒过来——说话不上报，要再叫唤醒词才醒。
 func TestSleepDuringPlaybackStaysAsleep(t *testing.T) {
 	conn, ctx := dialWakeSession(t, &fixedTranscriber{text: "好的"}, &fakeSpotter{})
@@ -803,7 +852,7 @@ func startSession(t *testing.T, ctx context.Context, conn *websocket.Conn, turn 
 		t.Fatalf("接受设置后第一个事件应是 session.updated：%v", events)
 	}
 	if accepted := updated.Session; accepted.Kind != realtimeproto.SessionTranscription || accepted.TurnDetection == nil ||
-		*accepted.TurnDetection != turn || accepted.WakeWord != wakeWord || accepted.InputFormat != realtimeproto.TranscriptionFormat {
+		!reflect.DeepEqual(*accepted.TurnDetection, turn) || accepted.WakeWord != wakeWord || accepted.InputFormat != realtimeproto.TranscriptionFormat {
 		t.Errorf("session.updated 应带着接受的设置：%+v", accepted)
 	}
 }

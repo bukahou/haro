@@ -236,6 +236,13 @@
                             "boolean"
                           ],
                           "description": "判定说完后服务端自己开始回答（默认 true）；false = 等客户端发 response.create"
+                        },
+                        "interrupt_response": {
+                          "type": [
+                            "null",
+                            "boolean"
+                          ],
+                          "description": "播放回答时主人开口就打断（要回声消除；不填 = false，只能喊唤醒词打断）"
                         }
                       },
                       "description": "由服务端的 VAD 判断说话开始和结束；null = 这次不改",
@@ -822,6 +829,13 @@
                             "boolean"
                           ],
                           "description": "判定说完后服务端自己开始回答（默认 true）；false = 等客户端发 response.create"
+                        },
+                        "interrupt_response": {
+                          "type": [
+                            "null",
+                            "boolean"
+                          ],
+                          "description": "播放回答时主人开口就打断（要回声消除；不填 = false，只能喊唤醒词打断）"
                         }
                       },
                       "description": "由服务端的 VAD 判断说话开始和结束；null = 这次不改",

@@ -46,6 +46,15 @@ const (
 	CameraBackendFFmpeg       = "ffmpeg"       // ffmpeg 抓一帧（备用；不预热）
 )
 
+// 回答时怎么打断（HARO_BARGE_IN）。
+const (
+	// BargeInVoice：主人一开口就停（播放时语音前端也听人声）。要终端的麦克风有回声消除（例如 PipeWire 的 echo-cancel，
+	// 见 deploy/pipewire/），否则会被自己的声音打断
+	BargeInVoice = "voice"
+	BargeInWake  = "wake" // 只有喊唤醒词才停（播放时语音前端只听唤醒词）
+	BargeInOff   = "off"  // 不能打断：播放时麦克风上传静音
+)
+
 // FrameSize 是「宽x高」写法的分辨率配置（例如 1280x720）。
 type FrameSize struct{ Width, Height int }
 
@@ -320,7 +329,7 @@ type TerminalSettings struct {
 
 	// 唤醒词（唯一的对话方式）。唤醒词本身只在 haro-asr 的关键词文件里写一处：终端从服务端拿（session.updated）
 	WakeIdle time.Duration `env:"HARO_WAKE_IDLE" envDefault:"40s"` // 对话窗口：回答播完后安静这么久就休眠（20 秒太快，接着问时已经睡了），休眠时说一声
-	BargeIn  bool          `env:"HARO_BARGE_IN" envDefault:"true"` // 回答时喊唤醒词可以打断（需要唤醒词）
+	BargeIn  string        `env:"HARO_BARGE_IN" envDefault:"wake"` // 回答时怎么打断：voice / wake / off（见 BargeInVoice 等）
 
 	// 硬件
 	// 设备一律自动检测（规则见 internal/terminal/device_rules.go）；只在要手动指定时才设，值是各系统自己的设备 ID
@@ -387,9 +396,10 @@ func LoadTerminalSettings() (TerminalSettings, error) {
 // TurnDetectionSettings 是交给 haro-asr 的说完判断（每次打开识别流时随 session.update 发出）。
 // 门槛、静音时长没设（0）时不带，由 haro-asr 用它自己的默认值。
 func (settings TerminalSettings) TurnDetectionSettings() realtimeproto.TurnDetection {
+	interrupt := settings.BargeIn == BargeInVoice
 	return realtimeproto.TurnDetection{Type: settings.TurnDetection, Eagerness: settings.TurnEagerness,
 		Threshold: settings.VADThreshold, SilenceDurationMs: int(settings.VADSilence.Milliseconds()),
-		PrefixPaddingMs: int(settings.VADPrefix.Milliseconds())}
+		PrefixPaddingMs: int(settings.VADPrefix.Milliseconds()), InterruptResponse: &interrupt}
 }
 
 func (settings TerminalSettings) validateTerminal() error {
@@ -401,6 +411,12 @@ func (settings TerminalSettings) validateTerminal() error {
 	}
 	if settings.WakeIdle <= 0 {
 		return fmt.Errorf("HARO_WAKE_IDLE 要大于 0（回答播完后安静多久就休眠），现在是 %v", settings.WakeIdle)
+	}
+	switch settings.BargeIn {
+	case BargeInVoice, BargeInWake, BargeInOff:
+	default:
+		return fmt.Errorf("HARO_BARGE_IN 只能是 %s、%s 或 %s（以前的 true 现在写 %s，false 写 %s），现在是 %q",
+			BargeInVoice, BargeInWake, BargeInOff, BargeInWake, BargeInOff, settings.BargeIn)
 	}
 	if err := errors.Join(notNegative("HARO_ECHO_GUARD", settings.EchoGuard), positive("HARO_FRAME_WIDTH", settings.FrameWidth)); err != nil {
 		return err

@@ -36,7 +36,9 @@ type Options struct {
 	TurnDetection realtimeproto.TurnDetection // 服务端怎么判断说完
 	EchoGuard     time.Duration               // 不能打断时：播完后再静音这么久才恢复上传，防止把自己的回音当成用户说话
 	WakeWord      WakeWordOptions             // 叫唤醒词才听，对话窗口结束自动休眠
-	// BargeIn 为 true 时可以用唤醒词打断回答：播放时麦克风照常上传，语音前端只听唤醒词；听到就停播、取消回答、转为听用户说。
+	// BargeIn 为 true 时可以打断回答：播放时麦克风照常上传，听到唤醒词（haro.wake_word.detected）就停播、取消回答、
+	// 转为听主人说；TurnDetection 要了一开口就打断（interrupt_response）时，收到 speech_started 也一样。
+	// false = 不能打断：播放时上传静音
 	BargeIn bool
 	// NoticeTone 是服务端发来提示（haro.notice，例如后台调查查完了）时播的一声；空 = 只写日志
 	NoticeTone realtimeproto.PCMAudio

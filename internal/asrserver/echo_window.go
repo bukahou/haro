@@ -15,6 +15,9 @@ type echoWindow struct {
 	playing bool
 	until   int
 	level   levelMeter // 播放期间的麦克风音量（排查打断用：设备会不会在放声音时把麦克风压低）
+	// voicing / voiceFrom：播放中正连续在说话、从哪开始（一开口就打断用，见 voice）
+	voicing   bool
+	voiceFrom int
 	// 采样点：剪掉回声后至少要剩多长（Timing.MinAfterEcho）、唤醒词那一段多长（WakeKeywordWindow）、
 	// 算唤醒词声纹至少要多长（MinWakeWindow）
 	minAfterEcho, keywordWindow, minWakeWindow int
@@ -30,7 +33,7 @@ func newEchoWindow(timing Timing) echoWindow {
 func (w *echoWindow) start() bool {
 	began := !w.playing
 	if began {
-		w.level = levelMeter{}
+		w.level, w.voicing = levelMeter{}, false
 	}
 	w.playing = true
 	return began
@@ -45,7 +48,19 @@ func (w *echoWindow) stop(at int) bool {
 	return true
 }
 
-// interrupt 是播放中被唤醒词打断：不再算在播放（回声到哪里由打断句的开头定，见 cutAt）。
+// voice 记播放中连续在说话从哪开始（不在说话时清掉）；从开头到 now 满 least 个采样点时返回开头和 true。
+func (w *echoWindow) voice(speaking bool, now, least int) (from int, enough bool) {
+	if !speaking {
+		w.voicing = false
+		return 0, false
+	}
+	if !w.voicing {
+		w.voicing, w.voiceFrom = true, now
+	}
+	return w.voiceFrom, now-w.voiceFrom >= least
+}
+
+// interrupt 是播放中被打断（唤醒词或开口）：不再算在播放（回声到哪里由打断句的开头定，见 cutAt）。
 func (w *echoWindow) interrupt() { w.playing = false }
 
 // cutAt 把回声的终点定在 at（打断句的开头：之前混着 haro 自己的声音）。
