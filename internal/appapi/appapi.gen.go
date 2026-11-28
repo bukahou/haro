@@ -46,19 +46,19 @@ func (e AccountStatus) Valid() bool {
 
 // Defines values for ChatEventStatus.
 const (
-	Cancelled  ChatEventStatus = "cancelled"
-	Completed  ChatEventStatus = "completed"
-	Incomplete ChatEventStatus = "incomplete"
+	ChatEventStatusCancelled  ChatEventStatus = "cancelled"
+	ChatEventStatusCompleted  ChatEventStatus = "completed"
+	ChatEventStatusIncomplete ChatEventStatus = "incomplete"
 )
 
 // Valid indicates whether the value is a known member of the ChatEventStatus enum.
 func (e ChatEventStatus) Valid() bool {
 	switch e {
-	case Cancelled:
+	case ChatEventStatusCancelled:
 		return true
-	case Completed:
+	case ChatEventStatusCompleted:
 		return true
-	case Incomplete:
+	case ChatEventStatusIncomplete:
 		return true
 	default:
 		return false
@@ -239,6 +239,39 @@ func (e ReplyBlockType) Valid() bool {
 	}
 }
 
+// Defines values for ResearchStatus.
+const (
+	ResearchStatusCancelled   ResearchStatus = "cancelled"
+	ResearchStatusDone        ResearchStatus = "done"
+	ResearchStatusFailed      ResearchStatus = "failed"
+	ResearchStatusInterrupted ResearchStatus = "interrupted"
+	ResearchStatusPartial     ResearchStatus = "partial"
+	ResearchStatusQueued      ResearchStatus = "queued"
+	ResearchStatusRunning     ResearchStatus = "running"
+)
+
+// Valid indicates whether the value is a known member of the ResearchStatus enum.
+func (e ResearchStatus) Valid() bool {
+	switch e {
+	case ResearchStatusCancelled:
+		return true
+	case ResearchStatusDone:
+		return true
+	case ResearchStatusFailed:
+		return true
+	case ResearchStatusInterrupted:
+		return true
+	case ResearchStatusPartial:
+		return true
+	case ResearchStatusQueued:
+		return true
+	case ResearchStatusRunning:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for Role.
 const (
 	RoleAdmin  Role = "admin"
@@ -338,6 +371,36 @@ type AttachmentInfo struct {
 	AttachmentId string `json:"attachment_id"`
 	Height       int    `json:"height"`
 	Width        int    `json:"width"`
+}
+
+// Backstory defines model for Backstory.
+type Backstory struct {
+	Enabled   bool            `json:"enabled"`
+	Items     []BackstoryItem `json:"items"`
+	MaxChars  int             `json:"max_chars"`
+	UsedChars int             `json:"used_chars"`
+}
+
+// BackstoryItem defines model for BackstoryItem.
+type BackstoryItem struct {
+	// Edited 主人改过（后台不改、不删）
+	Edited bool   `json:"edited"`
+	ItemId string `json:"item_id"`
+
+	// Source 从哪条对话的哪一轮来；null = 不知道
+	Source    *TurnRef  `json:"source"`
+	Text      string    `json:"text"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// BackstoryItemUpdate defines model for BackstoryItemUpdate.
+type BackstoryItemUpdate struct {
+	Text string `json:"text"`
+}
+
+// BackstoryUpdate defines model for BackstoryUpdate.
+type BackstoryUpdate struct {
+	Enabled bool `json:"enabled"`
 }
 
 // ChatEvent defines model for ChatEvent.
@@ -521,6 +584,27 @@ type MonthSpending struct {
 	UsedRatio *float64 `json:"used_ratio"`
 }
 
+// Note defines model for Note.
+type Note struct {
+	Content     string     `json:"content"`
+	CreatedAt   time.Time  `json:"created_at"`
+	ForgottenAt *time.Time `json:"forgotten_at"`
+	NoteId      int64      `json:"note_id"`
+
+	// Resident 常驻：主人明说要记住的，每轮都带给 haro
+	Resident bool `json:"resident"`
+}
+
+// NoteList defines model for NoteList.
+type NoteList struct {
+	// Forgotten 最近忘掉的（找回用）
+	Forgotten []Note `json:"forgotten"`
+	Notes     []Note `json:"notes"`
+
+	// Total 一共记了几条（notes 只给最近的一部分时比它多）
+	Total int `json:"total"`
+}
+
 // OidcError 登录失败时 `haro://auth/callback?oidc_error=` 的值
 type OidcError string
 
@@ -671,6 +755,26 @@ type ReplyBlock struct {
 // ReplyBlockType defines model for ReplyBlockType.
 type ReplyBlockType string
 
+// ResearchStatus defines model for ResearchStatus.
+type ResearchStatus string
+
+// ResearchTask defines model for ResearchTask.
+type ResearchTask struct {
+	// Conclusion 结论（Markdown）
+	Conclusion *string        `json:"conclusion"`
+	CreatedAt  time.Time      `json:"created_at"`
+	Question   string         `json:"question"`
+	Sources    []string       `json:"sources"`
+	Status     ResearchStatus `json:"status"`
+
+	// StatusLabel 给人看的状态（按 Accept-Language）
+	StatusLabel string `json:"status_label"`
+
+	// StopReason 为什么没查完 / 为什么失败
+	StopReason *string `json:"stop_reason"`
+	TaskId     int64   `json:"task_id"`
+}
+
 // Role defines model for Role.
 type Role string
 
@@ -755,11 +859,20 @@ type TurnPage struct {
 	Turns      []Turn `json:"turns"`
 }
 
+// TurnRef defines model for TurnRef.
+type TurnRef struct {
+	ConversationId string `json:"conversation_id"`
+	Seq            int64  `json:"seq"`
+}
+
 // AcceptLanguage defines model for AcceptLanguage.
 type AcceptLanguage = string
 
 // ConversationId defines model for ConversationId.
 type ConversationId = string
+
+// NoteId defines model for NoteId.
+type NoteId = int64
 
 // TerminalId defines model for TerminalId.
 type TerminalId = string
@@ -844,6 +957,18 @@ type SearchPlacesParams struct {
 	AcceptLanguage *AcceptLanguage `json:"Accept-Language,omitempty"`
 }
 
+// ListResearchTasksParams defines parameters for ListResearchTasks.
+type ListResearchTasksParams struct {
+	// AcceptLanguage 给人看的文字（说明、标签）用的语言；不带时用中文
+	AcceptLanguage *AcceptLanguage `json:"Accept-Language,omitempty"`
+}
+
+// GetResearchTaskParams defines parameters for GetResearchTask.
+type GetResearchTaskParams struct {
+	// AcceptLanguage 给人看的文字（说明、标签）用的语言；不带时用中文
+	AcceptLanguage *AcceptLanguage `json:"Accept-Language,omitempty"`
+}
+
 // GetSpendingParams defines parameters for GetSpending.
 type GetSpendingParams struct {
 	// AcceptLanguage 给人看的文字（说明、标签）用的语言；不带时用中文
@@ -878,6 +1003,12 @@ type ReplaceHomeJSONRequestBody = HomeUpdate
 
 // ReplaceProfileJSONRequestBody defines body for ReplaceProfile for application/json ContentType.
 type ReplaceProfileJSONRequestBody = ProfileUpdate
+
+// UpdateBackstoryJSONRequestBody defines body for UpdateBackstory for application/json ContentType.
+type UpdateBackstoryJSONRequestBody = BackstoryUpdate
+
+// EditBackstoryItemJSONRequestBody defines body for EditBackstoryItem for application/json ContentType.
+type EditBackstoryItemJSONRequestBody = BackstoryItemUpdate
 
 // PairTerminalJSONRequestBody defines body for PairTerminal for application/json ContentType.
 type PairTerminalJSONRequestBody = PairRequest
@@ -950,9 +1081,36 @@ type ServerInterface interface {
 	// ReplaceProfile 整份替换主人资料
 	// (PUT /api/v1/me/profile)
 	ReplaceProfile(w http.ResponseWriter, r *http.Request)
+	// GetBackstory 背景记录池（后台从对话整理的「关于主人的背景」，每轮带给 haro）
+	// (GET /api/v1/memory/backstory)
+	GetBackstory(w http.ResponseWriter, r *http.Request)
+	// UpdateBackstory 开、关背景记录池（关了就不带、也不更新）
+	// (PATCH /api/v1/memory/backstory)
+	UpdateBackstory(w http.ResponseWriter, r *http.Request)
+	// DeleteBackstoryItem 删一条
+	// (DELETE /api/v1/memory/backstory/items/{itemId})
+	DeleteBackstoryItem(w http.ResponseWriter, r *http.Request, itemId string)
+	// EditBackstoryItem 改一条（改过的以主人为准，后台整理时不再改、不删）
+	// (PATCH /api/v1/memory/backstory/items/{itemId})
+	EditBackstoryItem(w http.ResponseWriter, r *http.Request, itemId string)
+	// ListNotes 记过的事（常驻的、一般的；新的在前）和最近忘掉的（找回用）
+	// (GET /api/v1/memory/notes)
+	ListNotes(w http.ResponseWriter, r *http.Request)
+	// ForgetNote 忘掉一条（能找回）
+	// (DELETE /api/v1/memory/notes/{noteId})
+	ForgetNote(w http.ResponseWriter, r *http.Request, noteId NoteId)
+	// RestoreNote 找回忘掉的一条
+	// (POST /api/v1/memory/notes/{noteId}/restore)
+	RestoreNote(w http.ResponseWriter, r *http.Request, noteId NoteId)
 	// SearchPlaces 搜地名（只到区 / 市，设家的位置用）
 	// (GET /api/v1/places)
 	SearchPlaces(w http.ResponseWriter, r *http.Request, params SearchPlacesParams)
+	// ListResearchTasks 后台调查（新的在前）
+	// (GET /api/v1/research/tasks)
+	ListResearchTasks(w http.ResponseWriter, r *http.Request, params ListResearchTasksParams)
+	// GetResearchTask 一个调查：结论（Markdown）和来源
+	// (GET /api/v1/research/tasks/{taskId})
+	GetResearchTask(w http.ResponseWriter, r *http.Request, taskId int64, params GetResearchTaskParams)
 	// GetSpending 这个月和今天的花费（默认货币，带换算提示）
 	// (GET /api/v1/spending)
 	GetSpending(w http.ResponseWriter, r *http.Request, params GetSpendingParams)
@@ -1589,6 +1747,152 @@ func (siw *ServerInterfaceWrapper) ReplaceProfile(w http.ResponseWriter, r *http
 	handler.ServeHTTP(w, r)
 }
 
+// GetBackstory operation middleware
+func (siw *ServerInterfaceWrapper) GetBackstory(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetBackstory(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// UpdateBackstory operation middleware
+func (siw *ServerInterfaceWrapper) UpdateBackstory(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.UpdateBackstory(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// DeleteBackstoryItem operation middleware
+func (siw *ServerInterfaceWrapper) DeleteBackstoryItem(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "itemId" -------------
+	var itemId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "itemId", r.PathValue("itemId"), &itemId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "itemId", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.DeleteBackstoryItem(w, r, itemId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// EditBackstoryItem operation middleware
+func (siw *ServerInterfaceWrapper) EditBackstoryItem(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "itemId" -------------
+	var itemId string
+
+	err = runtime.BindStyledParameterWithOptions("simple", "itemId", r.PathValue("itemId"), &itemId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "string", Format: "", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "itemId", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.EditBackstoryItem(w, r, itemId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListNotes operation middleware
+func (siw *ServerInterfaceWrapper) ListNotes(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListNotes(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ForgetNote operation middleware
+func (siw *ServerInterfaceWrapper) ForgetNote(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "noteId" -------------
+	var noteId NoteId
+
+	err = runtime.BindStyledParameterWithOptions("simple", "noteId", r.PathValue("noteId"), &noteId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "integer", Format: "int64", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "noteId", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ForgetNote(w, r, noteId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// RestoreNote operation middleware
+func (siw *ServerInterfaceWrapper) RestoreNote(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "noteId" -------------
+	var noteId NoteId
+
+	err = runtime.BindStyledParameterWithOptions("simple", "noteId", r.PathValue("noteId"), &noteId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "integer", Format: "int64", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "noteId", Err: err})
+		return
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.RestoreNote(w, r, noteId)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // SearchPlaces operation middleware
 func (siw *ServerInterfaceWrapper) SearchPlaces(w http.ResponseWriter, r *http.Request) {
 
@@ -1634,6 +1938,97 @@ func (siw *ServerInterfaceWrapper) SearchPlaces(w http.ResponseWriter, r *http.R
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.SearchPlaces(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// ListResearchTasks operation middleware
+func (siw *ServerInterfaceWrapper) ListResearchTasks(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params ListResearchTasksParams
+
+	headers := r.Header
+
+	// ------------- Optional header parameter "Accept-Language" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("Accept-Language")]; found {
+		var AcceptLanguage AcceptLanguage
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "Accept-Language", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "Accept-Language", valueList[0], &AcceptLanguage, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "Accept-Language", Err: err})
+			return
+		}
+
+		params.AcceptLanguage = &AcceptLanguage
+
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.ListResearchTasks(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetResearchTask operation middleware
+func (siw *ServerInterfaceWrapper) GetResearchTask(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+	_ = err
+
+	// ------------- Path parameter "taskId" -------------
+	var taskId int64
+
+	err = runtime.BindStyledParameterWithOptions("simple", "taskId", r.PathValue("taskId"), &taskId, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationPath, Explode: false, Required: true, Type: "integer", Format: "int64", ValueIsUnescaped: true})
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "taskId", Err: err})
+		return
+	}
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params GetResearchTaskParams
+
+	headers := r.Header
+
+	// ------------- Optional header parameter "Accept-Language" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("Accept-Language")]; found {
+		var AcceptLanguage AcceptLanguage
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "Accept-Language", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "Accept-Language", valueList[0], &AcceptLanguage, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false, Type: "string", Format: ""})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "Accept-Language", Err: err})
+			return
+		}
+
+		params.AcceptLanguage = &AcceptLanguage
+
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetResearchTask(w, r, taskId, params)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -1963,6 +2358,15 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/conversations/{conversationId}/turns", wrapper.ListTurns)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/api/v1/conversations/{conversationId}/turns/{turnId}/stop", wrapper.StopTurn)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/turns/search", wrapper.SearchTurns)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/memory/backstory", wrapper.GetBackstory)
+	m.HandleFunc(http.MethodPatch+" "+options.BaseURL+"/api/v1/memory/backstory", wrapper.UpdateBackstory)
+	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/api/v1/memory/backstory/items/{itemId}", wrapper.DeleteBackstoryItem)
+	m.HandleFunc(http.MethodPatch+" "+options.BaseURL+"/api/v1/memory/backstory/items/{itemId}", wrapper.EditBackstoryItem)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/memory/notes", wrapper.ListNotes)
+	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/api/v1/memory/notes/{noteId}", wrapper.ForgetNote)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/api/v1/memory/notes/{noteId}/restore", wrapper.RestoreNote)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/research/tasks", wrapper.ListResearchTasks)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/research/tasks/{taskId}", wrapper.GetResearchTask)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/spending", wrapper.GetSpending)
 	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/terminals", wrapper.ListTerminals)
 	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/api/v1/terminals/pair", wrapper.PairTerminal)
@@ -2981,6 +3385,339 @@ func (response ReplaceProfile401ApplicationProblemPlusJSONResponse) VisitReplace
 	return err
 }
 
+type GetBackstoryRequestObject struct {
+}
+
+type GetBackstoryResponseObject interface {
+	VisitGetBackstoryResponse(w http.ResponseWriter) error
+}
+
+type GetBackstory200JSONResponse Backstory
+
+func (response GetBackstory200JSONResponse) VisitGetBackstoryResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := runtime.JSONMarshalWrite(&buf, response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetBackstory401ApplicationProblemPlusJSONResponse struct {
+	UnauthorizedApplicationProblemPlusJSONResponse
+}
+
+func (response GetBackstory401ApplicationProblemPlusJSONResponse) VisitGetBackstoryResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := runtime.JSONMarshalWrite(&buf, response.UnauthorizedApplicationProblemPlusJSONResponse); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type UpdateBackstoryRequestObject struct {
+	Body *UpdateBackstoryJSONRequestBody
+}
+
+type UpdateBackstoryResponseObject interface {
+	VisitUpdateBackstoryResponse(w http.ResponseWriter) error
+}
+
+type UpdateBackstory200JSONResponse Backstory
+
+func (response UpdateBackstory200JSONResponse) VisitUpdateBackstoryResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := runtime.JSONMarshalWrite(&buf, response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type UpdateBackstory401ApplicationProblemPlusJSONResponse struct {
+	UnauthorizedApplicationProblemPlusJSONResponse
+}
+
+func (response UpdateBackstory401ApplicationProblemPlusJSONResponse) VisitUpdateBackstoryResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := runtime.JSONMarshalWrite(&buf, response.UnauthorizedApplicationProblemPlusJSONResponse); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type DeleteBackstoryItemRequestObject struct {
+	ItemId string `json:"itemId"`
+}
+
+type DeleteBackstoryItemResponseObject interface {
+	VisitDeleteBackstoryItemResponse(w http.ResponseWriter) error
+}
+
+type DeleteBackstoryItem204Response struct {
+}
+
+func (response DeleteBackstoryItem204Response) VisitDeleteBackstoryItemResponse(w http.ResponseWriter) error {
+	w.WriteHeader(204)
+	return nil
+}
+
+type DeleteBackstoryItem401ApplicationProblemPlusJSONResponse struct {
+	UnauthorizedApplicationProblemPlusJSONResponse
+}
+
+func (response DeleteBackstoryItem401ApplicationProblemPlusJSONResponse) VisitDeleteBackstoryItemResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := runtime.JSONMarshalWrite(&buf, response.UnauthorizedApplicationProblemPlusJSONResponse); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type DeleteBackstoryItem404ApplicationProblemPlusJSONResponse struct {
+	NotFoundApplicationProblemPlusJSONResponse
+}
+
+func (response DeleteBackstoryItem404ApplicationProblemPlusJSONResponse) VisitDeleteBackstoryItemResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := runtime.JSONMarshalWrite(&buf, response.NotFoundApplicationProblemPlusJSONResponse); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type EditBackstoryItemRequestObject struct {
+	ItemId string `json:"itemId"`
+	Body   *EditBackstoryItemJSONRequestBody
+}
+
+type EditBackstoryItemResponseObject interface {
+	VisitEditBackstoryItemResponse(w http.ResponseWriter) error
+}
+
+type EditBackstoryItem200JSONResponse Backstory
+
+func (response EditBackstoryItem200JSONResponse) VisitEditBackstoryItemResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := runtime.JSONMarshalWrite(&buf, response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type EditBackstoryItem400ApplicationProblemPlusJSONResponse struct {
+	ValidationFailedApplicationProblemPlusJSONResponse
+}
+
+func (response EditBackstoryItem400ApplicationProblemPlusJSONResponse) VisitEditBackstoryItemResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := runtime.JSONMarshalWrite(&buf, response.ValidationFailedApplicationProblemPlusJSONResponse); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(400)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type EditBackstoryItem401ApplicationProblemPlusJSONResponse struct {
+	UnauthorizedApplicationProblemPlusJSONResponse
+}
+
+func (response EditBackstoryItem401ApplicationProblemPlusJSONResponse) VisitEditBackstoryItemResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := runtime.JSONMarshalWrite(&buf, response.UnauthorizedApplicationProblemPlusJSONResponse); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type EditBackstoryItem404ApplicationProblemPlusJSONResponse struct {
+	NotFoundApplicationProblemPlusJSONResponse
+}
+
+func (response EditBackstoryItem404ApplicationProblemPlusJSONResponse) VisitEditBackstoryItemResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := runtime.JSONMarshalWrite(&buf, response.NotFoundApplicationProblemPlusJSONResponse); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListNotesRequestObject struct {
+}
+
+type ListNotesResponseObject interface {
+	VisitListNotesResponse(w http.ResponseWriter) error
+}
+
+type ListNotes200JSONResponse NoteList
+
+func (response ListNotes200JSONResponse) VisitListNotesResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := runtime.JSONMarshalWrite(&buf, response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListNotes401ApplicationProblemPlusJSONResponse struct {
+	UnauthorizedApplicationProblemPlusJSONResponse
+}
+
+func (response ListNotes401ApplicationProblemPlusJSONResponse) VisitListNotesResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := runtime.JSONMarshalWrite(&buf, response.UnauthorizedApplicationProblemPlusJSONResponse); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ForgetNoteRequestObject struct {
+	NoteId NoteId `json:"noteId"`
+}
+
+type ForgetNoteResponseObject interface {
+	VisitForgetNoteResponse(w http.ResponseWriter) error
+}
+
+type ForgetNote204Response struct {
+}
+
+func (response ForgetNote204Response) VisitForgetNoteResponse(w http.ResponseWriter) error {
+	w.WriteHeader(204)
+	return nil
+}
+
+type ForgetNote401ApplicationProblemPlusJSONResponse struct {
+	UnauthorizedApplicationProblemPlusJSONResponse
+}
+
+func (response ForgetNote401ApplicationProblemPlusJSONResponse) VisitForgetNoteResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := runtime.JSONMarshalWrite(&buf, response.UnauthorizedApplicationProblemPlusJSONResponse); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ForgetNote404ApplicationProblemPlusJSONResponse struct {
+	NotFoundApplicationProblemPlusJSONResponse
+}
+
+func (response ForgetNote404ApplicationProblemPlusJSONResponse) VisitForgetNoteResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := runtime.JSONMarshalWrite(&buf, response.NotFoundApplicationProblemPlusJSONResponse); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type RestoreNoteRequestObject struct {
+	NoteId NoteId `json:"noteId"`
+}
+
+type RestoreNoteResponseObject interface {
+	VisitRestoreNoteResponse(w http.ResponseWriter) error
+}
+
+type RestoreNote200JSONResponse Note
+
+func (response RestoreNote200JSONResponse) VisitRestoreNoteResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := runtime.JSONMarshalWrite(&buf, response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type RestoreNote401ApplicationProblemPlusJSONResponse struct {
+	UnauthorizedApplicationProblemPlusJSONResponse
+}
+
+func (response RestoreNote401ApplicationProblemPlusJSONResponse) VisitRestoreNoteResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := runtime.JSONMarshalWrite(&buf, response.UnauthorizedApplicationProblemPlusJSONResponse); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type RestoreNote404ApplicationProblemPlusJSONResponse struct {
+	NotFoundApplicationProblemPlusJSONResponse
+}
+
+func (response RestoreNote404ApplicationProblemPlusJSONResponse) VisitRestoreNoteResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := runtime.JSONMarshalWrite(&buf, response.NotFoundApplicationProblemPlusJSONResponse); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(404)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
 type SearchPlacesRequestObject struct {
 	Params SearchPlacesParams
 }
@@ -3015,6 +3752,99 @@ func (response SearchPlaces401ApplicationProblemPlusJSONResponse) VisitSearchPla
 	}
 	w.Header().Set("Content-Type", "application/problem+json")
 	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListResearchTasksRequestObject struct {
+	Params ListResearchTasksParams
+}
+
+type ListResearchTasksResponseObject interface {
+	VisitListResearchTasksResponse(w http.ResponseWriter) error
+}
+
+type ListResearchTasks200JSONResponse []ResearchTask
+
+func (response ListResearchTasks200JSONResponse) VisitListResearchTasksResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := runtime.JSONMarshalWrite(&buf, response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type ListResearchTasks401ApplicationProblemPlusJSONResponse struct {
+	UnauthorizedApplicationProblemPlusJSONResponse
+}
+
+func (response ListResearchTasks401ApplicationProblemPlusJSONResponse) VisitListResearchTasksResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := runtime.JSONMarshalWrite(&buf, response.UnauthorizedApplicationProblemPlusJSONResponse); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetResearchTaskRequestObject struct {
+	TaskId int64 `json:"taskId"`
+	Params GetResearchTaskParams
+}
+
+type GetResearchTaskResponseObject interface {
+	VisitGetResearchTaskResponse(w http.ResponseWriter) error
+}
+
+type GetResearchTask200JSONResponse ResearchTask
+
+func (response GetResearchTask200JSONResponse) VisitGetResearchTaskResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := runtime.JSONMarshalWrite(&buf, response); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(200)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetResearchTask401ApplicationProblemPlusJSONResponse struct {
+	UnauthorizedApplicationProblemPlusJSONResponse
+}
+
+func (response GetResearchTask401ApplicationProblemPlusJSONResponse) VisitGetResearchTaskResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := runtime.JSONMarshalWrite(&buf, response.UnauthorizedApplicationProblemPlusJSONResponse); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(401)
+	_, err := buf.WriteTo(w)
+	return err
+}
+
+type GetResearchTask404ApplicationProblemPlusJSONResponse struct {
+	NotFoundApplicationProblemPlusJSONResponse
+}
+
+func (response GetResearchTask404ApplicationProblemPlusJSONResponse) VisitGetResearchTaskResponse(w http.ResponseWriter) error {
+
+	var buf bytes.Buffer
+	if err := runtime.JSONMarshalWrite(&buf, response.NotFoundApplicationProblemPlusJSONResponse); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(404)
 	_, err := buf.WriteTo(w)
 	return err
 }
@@ -3412,9 +4242,36 @@ type StrictServerInterface interface {
 	// ReplaceProfile 整份替换主人资料
 	// (PUT /api/v1/me/profile)
 	ReplaceProfile(ctx context.Context, request ReplaceProfileRequestObject) (ReplaceProfileResponseObject, error)
+	// GetBackstory 背景记录池（后台从对话整理的「关于主人的背景」，每轮带给 haro）
+	// (GET /api/v1/memory/backstory)
+	GetBackstory(ctx context.Context, request GetBackstoryRequestObject) (GetBackstoryResponseObject, error)
+	// UpdateBackstory 开、关背景记录池（关了就不带、也不更新）
+	// (PATCH /api/v1/memory/backstory)
+	UpdateBackstory(ctx context.Context, request UpdateBackstoryRequestObject) (UpdateBackstoryResponseObject, error)
+	// DeleteBackstoryItem 删一条
+	// (DELETE /api/v1/memory/backstory/items/{itemId})
+	DeleteBackstoryItem(ctx context.Context, request DeleteBackstoryItemRequestObject) (DeleteBackstoryItemResponseObject, error)
+	// EditBackstoryItem 改一条（改过的以主人为准，后台整理时不再改、不删）
+	// (PATCH /api/v1/memory/backstory/items/{itemId})
+	EditBackstoryItem(ctx context.Context, request EditBackstoryItemRequestObject) (EditBackstoryItemResponseObject, error)
+	// ListNotes 记过的事（常驻的、一般的；新的在前）和最近忘掉的（找回用）
+	// (GET /api/v1/memory/notes)
+	ListNotes(ctx context.Context, request ListNotesRequestObject) (ListNotesResponseObject, error)
+	// ForgetNote 忘掉一条（能找回）
+	// (DELETE /api/v1/memory/notes/{noteId})
+	ForgetNote(ctx context.Context, request ForgetNoteRequestObject) (ForgetNoteResponseObject, error)
+	// RestoreNote 找回忘掉的一条
+	// (POST /api/v1/memory/notes/{noteId}/restore)
+	RestoreNote(ctx context.Context, request RestoreNoteRequestObject) (RestoreNoteResponseObject, error)
 	// SearchPlaces 搜地名（只到区 / 市，设家的位置用）
 	// (GET /api/v1/places)
 	SearchPlaces(ctx context.Context, request SearchPlacesRequestObject) (SearchPlacesResponseObject, error)
+	// ListResearchTasks 后台调查（新的在前）
+	// (GET /api/v1/research/tasks)
+	ListResearchTasks(ctx context.Context, request ListResearchTasksRequestObject) (ListResearchTasksResponseObject, error)
+	// GetResearchTask 一个调查：结论（Markdown）和来源
+	// (GET /api/v1/research/tasks/{taskId})
+	GetResearchTask(ctx context.Context, request GetResearchTaskRequestObject) (GetResearchTaskResponseObject, error)
 	// GetSpending 这个月和今天的花费（默认货币，带换算提示）
 	// (GET /api/v1/spending)
 	GetSpending(ctx context.Context, request GetSpendingRequestObject) (GetSpendingResponseObject, error)
@@ -4053,6 +4910,196 @@ func (sh *strictHandler) ReplaceProfile(w http.ResponseWriter, r *http.Request) 
 	}
 }
 
+// GetBackstory operation middleware
+func (sh *strictHandler) GetBackstory(w http.ResponseWriter, r *http.Request) {
+	var request GetBackstoryRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request any) (any, error) {
+		return sh.ssi.GetBackstory(ctx, request.(GetBackstoryRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetBackstory")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetBackstoryResponseObject); ok {
+		if err := validResponse.VisitGetBackstoryResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// UpdateBackstory operation middleware
+func (sh *strictHandler) UpdateBackstory(w http.ResponseWriter, r *http.Request) {
+	var request UpdateBackstoryRequestObject
+
+	var body UpdateBackstoryJSONRequestBody
+	if err := runtime.BindJSONBody(r, &body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request any) (any, error) {
+		return sh.ssi.UpdateBackstory(ctx, request.(UpdateBackstoryRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "UpdateBackstory")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(UpdateBackstoryResponseObject); ok {
+		if err := validResponse.VisitUpdateBackstoryResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// DeleteBackstoryItem operation middleware
+func (sh *strictHandler) DeleteBackstoryItem(w http.ResponseWriter, r *http.Request, itemId string) {
+	var request DeleteBackstoryItemRequestObject
+
+	request.ItemId = itemId
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request any) (any, error) {
+		return sh.ssi.DeleteBackstoryItem(ctx, request.(DeleteBackstoryItemRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "DeleteBackstoryItem")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(DeleteBackstoryItemResponseObject); ok {
+		if err := validResponse.VisitDeleteBackstoryItemResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// EditBackstoryItem operation middleware
+func (sh *strictHandler) EditBackstoryItem(w http.ResponseWriter, r *http.Request, itemId string) {
+	var request EditBackstoryItemRequestObject
+
+	request.ItemId = itemId
+
+	var body EditBackstoryItemJSONRequestBody
+	if err := runtime.BindJSONBody(r, &body); err != nil {
+		sh.options.RequestErrorHandlerFunc(w, r, fmt.Errorf("can't decode JSON body: %w", err))
+		return
+	}
+	request.Body = &body
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request any) (any, error) {
+		return sh.ssi.EditBackstoryItem(ctx, request.(EditBackstoryItemRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "EditBackstoryItem")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(EditBackstoryItemResponseObject); ok {
+		if err := validResponse.VisitEditBackstoryItemResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ListNotes operation middleware
+func (sh *strictHandler) ListNotes(w http.ResponseWriter, r *http.Request) {
+	var request ListNotesRequestObject
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request any) (any, error) {
+		return sh.ssi.ListNotes(ctx, request.(ListNotesRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ListNotes")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ListNotesResponseObject); ok {
+		if err := validResponse.VisitListNotesResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ForgetNote operation middleware
+func (sh *strictHandler) ForgetNote(w http.ResponseWriter, r *http.Request, noteId NoteId) {
+	var request ForgetNoteRequestObject
+
+	request.NoteId = noteId
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request any) (any, error) {
+		return sh.ssi.ForgetNote(ctx, request.(ForgetNoteRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ForgetNote")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ForgetNoteResponseObject); ok {
+		if err := validResponse.VisitForgetNoteResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// RestoreNote operation middleware
+func (sh *strictHandler) RestoreNote(w http.ResponseWriter, r *http.Request, noteId NoteId) {
+	var request RestoreNoteRequestObject
+
+	request.NoteId = noteId
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request any) (any, error) {
+		return sh.ssi.RestoreNote(ctx, request.(RestoreNoteRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "RestoreNote")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(RestoreNoteResponseObject); ok {
+		if err := validResponse.VisitRestoreNoteResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
 // SearchPlaces operation middleware
 func (sh *strictHandler) SearchPlaces(w http.ResponseWriter, r *http.Request, params SearchPlacesParams) {
 	var request SearchPlacesRequestObject
@@ -4072,6 +5119,59 @@ func (sh *strictHandler) SearchPlaces(w http.ResponseWriter, r *http.Request, pa
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(SearchPlacesResponseObject); ok {
 		if err := validResponse.VisitSearchPlacesResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// ListResearchTasks operation middleware
+func (sh *strictHandler) ListResearchTasks(w http.ResponseWriter, r *http.Request, params ListResearchTasksParams) {
+	var request ListResearchTasksRequestObject
+
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request any) (any, error) {
+		return sh.ssi.ListResearchTasks(ctx, request.(ListResearchTasksRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "ListResearchTasks")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(ListResearchTasksResponseObject); ok {
+		if err := validResponse.VisitListResearchTasksResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetResearchTask operation middleware
+func (sh *strictHandler) GetResearchTask(w http.ResponseWriter, r *http.Request, taskId int64, params GetResearchTaskParams) {
+	var request GetResearchTaskRequestObject
+
+	request.TaskId = taskId
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request any) (any, error) {
+		return sh.ssi.GetResearchTask(ctx, request.(GetResearchTaskRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetResearchTask")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetResearchTaskResponseObject); ok {
+		if err := validResponse.VisitGetResearchTaskResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {
@@ -4252,140 +5352,157 @@ func (sh *strictHandler) SearchTurns(w http.ResponseWriter, r *http.Request, par
 // const string: with thousands of chunks the chained `+` fold is several
 // times slower for the Go compiler than parsing a slice literal.
 var swaggerSpec = []string{
-	"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",
+	"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",
 }
 
 // decodeSpec returns the embedded OpenAPI spec as raw JSON bytes,

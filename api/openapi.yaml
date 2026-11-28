@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: haro App API
-  version: 0.7.0
+  version: 0.8.0
   description: |
     haro 手机 App 和网页版用的接口（第一批：账号、登录、我、花费、终端、管理员）。
     服务端和 App 都从这份契约生成代码；⛔ 两边都不绕过契约私下约定字段。契约每改一次升版本号。
@@ -33,6 +33,8 @@ tags:
     description: 管理员才能用（只看运维信息，看不到别人的内容）
   - name: conversations
     description: 聊天：语音那条对话和 App 里新建的对话
+  - name: memory
+    description: 记录：背景记录池、记过的事、后台调查
 paths:
   /api/v1/auth/oidc/start:
     get:
@@ -542,6 +544,170 @@ paths:
                   $ref: '#/components/schemas/FoundTurn'
         '401':
           $ref: '#/components/responses/Unauthorized'
+  /api/v1/memory/backstory:
+    get:
+      tags: [memory]
+      operationId: getBackstory
+      summary: 背景记录池（后台从对话整理的「关于主人的背景」，每轮带给 haro）
+      responses:
+        '200':
+          description: 背景记录池
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Backstory'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    patch:
+      tags: [memory]
+      operationId: updateBackstory
+      summary: 开、关背景记录池（关了就不带、也不更新）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BackstoryUpdate'
+      responses:
+        '200':
+          description: 改后的
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Backstory'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/memory/backstory/items/{itemId}:
+    parameters:
+      - name: itemId
+        in: path
+        required: true
+        schema:
+          type: string
+          maxLength: 64
+    patch:
+      tags: [memory]
+      operationId: editBackstoryItem
+      summary: 改一条（改过的以主人为准，后台整理时不再改、不删）
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BackstoryItemUpdate'
+      responses:
+        '200':
+          description: 改后的背景记录池
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Backstory'
+        '400':
+          $ref: '#/components/responses/ValidationFailed'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [memory]
+      operationId: deleteBackstoryItem
+      summary: 删一条
+      responses:
+        '204':
+          description: 删了
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/memory/notes:
+    get:
+      tags: [memory]
+      operationId: listNotes
+      summary: 记过的事（常驻的、一般的；新的在前）和最近忘掉的（找回用）
+      responses:
+        '200':
+          description: 记过的事
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NoteList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/memory/notes/{noteId}:
+    parameters:
+      - $ref: '#/components/parameters/NoteId'
+    delete:
+      tags: [memory]
+      operationId: forgetNote
+      summary: 忘掉一条（能找回）
+      responses:
+        '204':
+          description: 忘了
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/memory/notes/{noteId}/restore:
+    parameters:
+      - $ref: '#/components/parameters/NoteId'
+    post:
+      tags: [memory]
+      operationId: restoreNote
+      summary: 找回忘掉的一条
+      responses:
+        '200':
+          description: 找回了
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Note'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/research/tasks:
+    get:
+      tags: [memory]
+      operationId: listResearchTasks
+      summary: 后台调查（新的在前）
+      parameters:
+        - $ref: '#/components/parameters/AcceptLanguage'
+      responses:
+        '200':
+          description: 调查
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ResearchTask'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/research/tasks/{taskId}:
+    parameters:
+      - name: taskId
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+    get:
+      tags: [memory]
+      operationId: getResearchTask
+      summary: 一个调查：结论（Markdown）和来源
+      parameters:
+        - $ref: '#/components/parameters/AcceptLanguage'
+      responses:
+        '200':
+          description: 调查
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ResearchTask'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
   /api/v1/spending:
     get:
       tags: [spending]
@@ -727,6 +893,13 @@ components:
       schema:
         type: string
         maxLength: 100
+    NoteId:
+      name: noteId
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
     ConversationId:
       name: conversationId
       in: path
@@ -1344,6 +1517,129 @@ components:
           description: 在哪条对话（语音那条是 voice）
         turn:
           $ref: '#/components/schemas/Turn'
+    Backstory:
+      type: object
+      required: [enabled, used_chars, max_chars, items]
+      properties:
+        enabled:
+          type: boolean
+        used_chars:
+          type: integer
+        max_chars:
+          type: integer
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/BackstoryItem'
+    BackstoryItem:
+      type: object
+      required: [item_id, text, edited, source, updated_at]
+      properties:
+        item_id:
+          type: string
+        text:
+          type: string
+        edited:
+          type: boolean
+          description: 主人改过（后台不改、不删）
+        source:
+          allOf:
+            - $ref: '#/components/schemas/TurnRef'
+          nullable: true
+          description: 从哪条对话的哪一轮来；null = 不知道
+        updated_at:
+          type: string
+          format: date-time
+    TurnRef:
+      type: object
+      required: [conversation_id, seq]
+      properties:
+        conversation_id:
+          type: string
+        seq:
+          type: integer
+          format: int64
+    BackstoryUpdate:
+      type: object
+      required: [enabled]
+      properties:
+        enabled:
+          type: boolean
+    BackstoryItemUpdate:
+      type: object
+      required: [text]
+      properties:
+        text:
+          type: string
+          minLength: 1
+          maxLength: 500
+    NoteList:
+      type: object
+      required: [notes, total, forgotten]
+      properties:
+        notes:
+          type: array
+          items:
+            $ref: '#/components/schemas/Note'
+        total:
+          type: integer
+          description: 一共记了几条（notes 只给最近的一部分时比它多）
+        forgotten:
+          type: array
+          description: 最近忘掉的（找回用）
+          items:
+            $ref: '#/components/schemas/Note'
+    Note:
+      type: object
+      required: [note_id, content, resident, created_at, forgotten_at]
+      properties:
+        note_id:
+          type: integer
+          format: int64
+        content:
+          type: string
+        resident:
+          type: boolean
+          description: 常驻：主人明说要记住的，每轮都带给 haro
+        created_at:
+          type: string
+          format: date-time
+        forgotten_at:
+          type: string
+          format: date-time
+          nullable: true
+    ResearchStatus:
+      type: string
+      enum: [queued, running, done, partial, failed, cancelled, interrupted]
+    ResearchTask:
+      type: object
+      required: [task_id, question, status, status_label, conclusion, sources, stop_reason, created_at]
+      properties:
+        task_id:
+          type: integer
+          format: int64
+        question:
+          type: string
+        status:
+          $ref: '#/components/schemas/ResearchStatus'
+        status_label:
+          type: string
+          description: 给人看的状态（按 Accept-Language）
+        conclusion:
+          type: string
+          nullable: true
+          description: 结论（Markdown）
+        sources:
+          type: array
+          items:
+            type: string
+        stop_reason:
+          type: string
+          nullable: true
+          description: 为什么没查完 / 为什么失败
+        created_at:
+          type: string
+          format: date-time
     TerminalNetwork:
       type: string
       description: 从哪里连进来的

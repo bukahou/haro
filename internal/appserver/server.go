@@ -20,6 +20,10 @@ import (
 	"github.com/bukahou/haro/internal/accounts"
 	"github.com/bukahou/haro/internal/appapi"
 	"github.com/bukahou/haro/internal/buildinfo"
+	"github.com/bukahou/haro/internal/conversationstore"
+	"github.com/bukahou/haro/internal/memory"
+	"github.com/bukahou/haro/internal/notes"
+	"github.com/bukahou/haro/internal/research"
 	"github.com/bukahou/haro/internal/spending"
 )
 
@@ -48,9 +52,12 @@ type Spending interface {
 	Summary(ctx context.Context) (spending.Summary, error)
 }
 
-// Memory 是某个人记着的事有几条（常驻的、一般的）。
+// Memory 是某个人记着的事（memory.Keeper 实现）：有几条、列出、忘掉、找回。
 type Memory interface {
 	Counts(ctx context.Context, person string) (resident, notes int, err error)
+	List(ctx context.Context, person string, withForgotten bool) (memory.Listing, error)
+	Forget(ctx context.Context, person string, id int64) (notes.Note, error)
+	Restore(ctx context.Context, person string, id int64) (notes.Note, error)
 }
 
 // Terminals 是现在在线的终端（brainserver.OnlineTerminals 实现）。
@@ -71,9 +78,19 @@ type TerminalRegistry interface {
 	RejectRegistration(ctx context.Context, registrationID string) error
 }
 
-// Research 是某个人进行中（排队、在查）的调查有几个。
+// Research 是某个人的后台调查（research.Runner 实现）：进行中的有几个、最近的、一个。
 type Research interface {
 	Running(ctx context.Context, person string) (int, error)
+	Tasks(ctx context.Context, person string, limit int) ([]research.Task, error)
+	Task(ctx context.Context, person string, id int64) (research.Task, error)
+}
+
+// Backstory 是背景记录池（backstory.Service 实现）。
+type Backstory interface {
+	View(ctx context.Context, person string) (conversationstore.Backstory, int, error)
+	Edit(ctx context.Context, person, id, text string) error
+	Delete(ctx context.Context, person, id string) error
+	SetEnabled(ctx context.Context, person string, enabled bool) error
 }
 
 // Options 是接口服务的依赖和设置。Memory、Research 可以是 nil（没开那组工具）。
@@ -85,6 +102,7 @@ type Options struct {
 	Terminals       Terminals        // 现在连着的终端；nil = 不知道（都当成不在线）
 	Registry        TerminalRegistry // 终端的登记和归属；nil = 没有（终端的接口回 501）
 	Chat            Chat             // 打字对话；nil = 没有（对话的接口回 501）
+	Backstory       Backstory        // 背景记录池；nil = 没有（那几个接口回 501）
 	DefaultCurrency string           // 服务端的默认货币（账号没改时用）
 	MinAppVersion   string           // 支持的最低 App 版本
 	CapOptions      []float64        // 管理员定月上限的可选档位（默认货币）

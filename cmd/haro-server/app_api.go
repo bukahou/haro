@@ -146,6 +146,9 @@ func buildAppAPI(ctx context.Context, settings config.ServerSettings, deps servi
 	if kit.memory != nil {
 		options.Memory = kit.memory
 	}
+	if assembled.backstory != nil {
+		options.Backstory = assembled.backstory
+	}
 	if kit.research != nil {
 		options.Research = kit.research
 	}

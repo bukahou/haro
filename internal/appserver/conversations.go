@@ -320,12 +320,12 @@ func (s *Server) chatEventOf(ctx context.Context, event chat.Event) appapi.ChatE
 	case chat.EventText:
 		out.Text = &event.Text
 	case chat.EventDone:
-		status := appapi.Completed
+		status := appapi.ChatEventStatusCompleted
 		switch event.Status {
 		case realtimeproto.StatusCancelled:
-			status = appapi.Cancelled
+			status = appapi.ChatEventStatusCancelled
 		case realtimeproto.StatusIncomplete:
-			status = appapi.Incomplete
+			status = appapi.ChatEventStatusIncomplete
 		}
 		out.Status = &status
 	case chat.EventFailed:
