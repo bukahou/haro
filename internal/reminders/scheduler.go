@@ -25,6 +25,13 @@ type Announcer interface {
 	Announce(announcement brain.Announcement) bool
 }
 
+// EventAlerts 是日历（internal/calendar 实现）：挂在日程上的提醒，下一次到点由它按日程的重复规则算
+// （重复规则、改过的某一次都只在日历一处）。
+type EventAlerts interface {
+	// NextAlert 是这条日程、提前 lead 的提醒在 after 之后（不含）的下一次到点；日程没了、到头了返回 false。
+	NextAlert(ctx context.Context, eventID string, lead time.Duration, after time.Time) (time.Time, bool, error)
+}
+
 // Scheduler 管提醒：定、查、取消、恢复（给工具用），到点交给 Announcer 说出来（Run），
 // 错过的在主人下次开口时附在情况说明里（Brief，实现 brain.Briefer）。
 type Scheduler struct {
@@ -36,6 +43,9 @@ type Scheduler struct {
 	logger    *slog.Logger
 
 	wake chan struct{} // 有变化（定了、取消、恢复、开口有了结果、有终端连上）：调度循环重新看一遍
+
+	eventsMu sync.RWMutex
+	events   EventAlerts // 日历（UseEvents 之后才有：日历建在调度之后）
 
 	mu       sync.Mutex
 	inFlight map[int64]time.Time // 已经交出去、还没有结果的提醒 → 交出去的是哪一次到点
@@ -68,6 +78,57 @@ func NewScheduler(store Store, announcer Announcer, opts SchedulerOptions, logge
 		now: now, retry: cmp.Or(opts.Retry, defaultRetry),
 		logger: logger.With("component", "reminders"), wake: make(chan struct{}, 1),
 		inFlight: map[int64]time.Time{}, waiting: map[int64]bool{}}
+}
+
+// UseEvents 接上日历：挂在日程上的提醒之后问它要下一次到点。
+func (s *Scheduler) UseEvents(events EventAlerts) {
+	s.eventsMu.Lock()
+	s.events = events
+	s.eventsMu.Unlock()
+}
+
+// EventAlert 是一条日程要在终端响的一个提醒：提前多久、下一次到点。
+type EventAlert struct {
+	Lead time.Duration
+	Next time.Time
+}
+
+// ArmEvent 换掉一条日程在终端响的提醒（日程新建、改了时）：原来的取消，按 alerts 重新加（text 给出到点要说的话）。
+func (s *Scheduler) ArmEvent(ctx context.Context, person, eventID string, alerts []EventAlert, text func(lead time.Duration) string) error {
+	if err := s.store.CancelForEvent(ctx, eventID, s.now()); err != nil {
+		return err
+	}
+	for _, alert := range alerts {
+		next := alert.Next.UTC().Truncate(time.Second)
+		if _, err := s.store.Add(ctx, Reminder{Person: person, Text: text(alert.Lead), StartsAt: next, NextAt: next, EventID: eventID,
+			Lead: alert.Lead}); err != nil {
+			return err
+		}
+	}
+	s.Poke()
+	return nil
+}
+
+// DisarmEvent 取消一条日程在终端响的提醒（日程删了）。
+func (s *Scheduler) DisarmEvent(ctx context.Context, eventID string) error {
+	if err := s.store.CancelForEvent(ctx, eventID, s.now()); err != nil {
+		return err
+	}
+	s.Poke()
+	return nil
+}
+
+// EventReminders 是一条日程在用的提醒。
+func (s *Scheduler) EventReminders(ctx context.Context, eventID string) ([]Reminder, error) {
+	return s.store.ForEvent(ctx, eventID)
+}
+
+// Unadopted 是还没挂到日程上的在用提醒（旧的）。日历启动时收编用。
+func (s *Scheduler) Unadopted(ctx context.Context) ([]Reminder, error) { return s.store.Unadopted(ctx) }
+
+// Adopt 把一条旧提醒挂到日程上（规则清掉，之后下一次到点问日历）。
+func (s *Scheduler) Adopt(ctx context.Context, id int64, eventID string) error {
+	return s.store.Adopt(ctx, id, eventID)
 }
 
 // Poke 让调度循环马上重新看一遍（不阻塞）。例如有终端连上了：等着终端的提醒可以说了。
@@ -171,6 +232,11 @@ func (s *Scheduler) Restore(ctx context.Context, person string, id int64) (Remin
 	}
 	now := s.now()
 	next := reminder.NextAt
+	if (next.IsZero() || !next.After(now)) && reminder.EventID != "" { // 挂在日程上的：下一次问日历
+		if next = s.nextAfter(ctx, reminder, now, now); next.IsZero() {
+			return Reminder{}, errors.New("这个提醒的日程已经没有下一次了，不能恢复：要的话重新定一个")
+		}
+	}
 	if next.IsZero() || !next.After(now) {
 		if !reminder.Repeats() {
 			return Reminder{}, errors.New("这个提醒的时间已经过了，不能恢复：要的话重新定一个")
@@ -309,7 +375,7 @@ func (s *Scheduler) finished(reminder Reminder, occurrence time.Time, outcome br
 	caughtUp = caughtUp || now.Sub(occurrence) > caughtUpLate
 	ctx, cancel := context.WithTimeout(context.Background(), storeTimeout)
 	defer cancel()
-	next := s.nextAfter(reminder, occurrence, now)
+	next := s.nextAfter(ctx, reminder, occurrence, now)
 	if err := s.store.Spoken(ctx, reminder.ID, now, next); err != nil {
 		// 没记下：下一轮会把它当成还没说、再说一遍（宁可多说一遍，不能悄悄不说）
 		s.logger.Error("记下提醒已说出失败：可能会再说一遍", "id", reminder.ID, "err", err)
@@ -323,7 +389,7 @@ func (s *Scheduler) finished(reminder Reminder, occurrence time.Time, outcome br
 
 // missed 记下这一次错过了（到点后超过 CatchUpWindow 还没说出来）：主人下次开口时告诉他；重复的接着算下一次。
 func (s *Scheduler) missed(ctx context.Context, reminder Reminder, now time.Time) {
-	next := s.nextAfter(reminder, reminder.NextAt, now)
+	next := s.nextAfter(ctx, reminder, reminder.NextAt, now)
 	if err := s.store.Missed(ctx, reminder.ID, reminder.NextAt, next); err != nil {
 		s.logger.Error("记下提醒错过了失败", "id", reminder.ID, "err", err)
 		return
@@ -337,7 +403,29 @@ func (s *Scheduler) missed(ctx context.Context, reminder Reminder, now time.Time
 }
 
 // nextAfter 是这一次（occurrence）之后、现在之后的下一次到点；一次性的、或规则到头了为零值。
-func (s *Scheduler) nextAfter(reminder Reminder, occurrence, now time.Time) time.Time {
+// 挂在日程上的问日历（重复规则在日历那边）。
+func (s *Scheduler) nextAfter(ctx context.Context, reminder Reminder, occurrence, now time.Time) time.Time {
+	from := occurrence
+	if now.After(from) {
+		from = now
+	}
+	if reminder.EventID != "" {
+		s.eventsMu.RLock()
+		events := s.events
+		s.eventsMu.RUnlock()
+		if events == nil {
+			return time.Time{}
+		}
+		next, ok, err := events.NextAlert(ctx, reminder.EventID, reminder.Lead, from)
+		if err != nil {
+			s.logger.Error("问日历下一次到点出错：这条提醒先不再响（日程改动时会重新挂上）", "id", reminder.ID, "event", reminder.EventID, "err", err)
+			return time.Time{}
+		}
+		if !ok {
+			return time.Time{}
+		}
+		return next
+	}
 	if !reminder.Repeats() {
 		return time.Time{}
 	}
@@ -345,10 +433,6 @@ func (s *Scheduler) nextAfter(reminder Reminder, occurrence, now time.Time) time
 	if err != nil { // 定的时候校验过：只会是库里的数据坏了
 		s.logger.Error("提醒的重复规则解析失败：不再重复", "id", reminder.ID, "rule", reminder.Rule, "err", err)
 		return time.Time{}
-	}
-	from := occurrence
-	if now.After(from) {
-		from = now
 	}
 	next, ok := rule.after(from)
 	if !ok {

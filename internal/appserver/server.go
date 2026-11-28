@@ -103,6 +103,7 @@ type Options struct {
 	Registry        TerminalRegistry // 终端的登记和归属；nil = 没有（终端的接口回 501）
 	Chat            Chat             // 打字对话；nil = 没有（对话的接口回 501）
 	Backstory       Backstory        // 背景记录池；nil = 没有（那几个接口回 501）
+	Calendar        Calendar         // 日历；nil = 没有（日历的接口回 501）
 	DefaultCurrency string           // 服务端的默认货币（账号没改时用）
 	MinAppVersion   string           // 支持的最低 App 版本
 	CapOptions      []float64        // 管理员定月上限的可选档位（默认货币）
@@ -183,13 +184,17 @@ func NewHandler(ctx context.Context, opts Options) (http.Handler, error) {
 var largeBodies = func() *http.ServeMux {
 	routes := http.NewServeMux()
 	routes.Handle(uploadPattern, http.NotFoundHandler())
+	routes.Handle(syncPattern, http.NotFoundHandler())
 	return routes
 }()
 
-// bodyLimit 是这个请求的请求体上限：传图片的 attachmentMaxBytes，其余 maxBodyBytes。
+// bodyLimit 是这个请求的请求体上限：传图片的 attachmentMaxBytes，同步系统日历的 syncMaxBytes，其余 maxBodyBytes。
 func bodyLimit(r *http.Request) int64 {
-	if _, pattern := largeBodies.Handler(r); pattern == uploadPattern {
+	switch _, pattern := largeBodies.Handler(r); pattern {
+	case uploadPattern:
 		return attachmentMaxBytes
+	case syncPattern:
+		return syncMaxBytes
 	}
 	return maxBodyBytes
 }

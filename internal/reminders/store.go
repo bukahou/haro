@@ -33,5 +33,11 @@ type Store interface {
 	Unannounced(ctx context.Context, person string) ([]Reminder, error)
 	// MissTold 记下错过的这几条已经告诉主人了。
 	MissTold(ctx context.Context, ids ...int64) error
+	// ForEvent 是一条日程在用的提醒；CancelForEvent 取消它们（日程改了、删了）。
+	ForEvent(ctx context.Context, eventID string) ([]Reminder, error)
+	CancelForEvent(ctx context.Context, eventID string, at time.Time) error
+	// Unadopted 是还没挂到日程上的在用提醒；Adopt 把一条挂到日程上（规则清掉，之后下一次到点问日历）。
+	Unadopted(ctx context.Context) ([]Reminder, error)
+	Adopt(ctx context.Context, id int64, eventID string) error
 	Close() error
 }
