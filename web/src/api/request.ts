@@ -13,7 +13,7 @@ import { apiBaseURL } from "./config";
 const client = axios.create({ baseURL: apiBaseURL, timeout: 30_000 });
 
 // 界面语言（服务端按它给错误说明、分类名这些文字）。先只有中文。
-const interfaceLanguage = "zh";
+export const interfaceLanguage = "zh";
 
 let refreshing: Promise<Tokens | null> | null = null;
 
@@ -26,7 +26,8 @@ async function withBrowserLock<T>(work: () => Promise<T>): Promise<T> {
 }
 
 // refreshTokens 换一对新令牌；used 是这次失败的请求用的访问令牌（已经被别人换过了就直接用新的）。
-async function refreshTokens(used: string): Promise<Tokens | null> {
+// 事件流（stream.ts）不走 axios，401 时也调它，所以导出。
+export async function refreshTokens(used: string): Promise<Tokens | null> {
   const current = useSession.getState().tokens;
   if (current && current.accessToken !== used) {
     return current;

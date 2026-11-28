@@ -27,5 +27,10 @@ export default function AuthCallback() {
     router.replace(`/login?${new URLSearchParams({ error: code }).toString()}`);
   }, [router, signIn]);
 
-  return <p className="p-6 text-muted">{t("working")}</p>;
+  return (
+    <p className="hstack sub p-6">
+      <span className="spin" aria-hidden />
+      {t("working")}
+    </p>
+  );
 }

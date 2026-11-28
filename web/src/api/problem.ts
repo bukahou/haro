@@ -3,7 +3,17 @@ import { AxiosError } from "axios";
 
 import type { Problem } from "./generated/model";
 
+// ProblemError 是不经 axios 的请求（事件流）拿到的 problem。
+export class ProblemError extends Error {
+  constructor(readonly problem: Problem) {
+    super(problem.title);
+  }
+}
+
 export function problemOf(error: unknown): Problem | null {
+  if (error instanceof ProblemError) {
+    return error.problem;
+  }
   if (error instanceof AxiosError && error.response?.data && typeof error.response.data === "object" && "code" in error.response.data) {
     return error.response.data as Problem;
   }

@@ -1,13 +1,16 @@
 "use client";
 
-// 家的位置：搜地名（后端查）→ 选一个；节假日的国家从后端给的清单里选。
+// 家的位置：搜地名（后端查）→ 选一个；节假日的国家从后端给的清单里选。只到城市，不用写门牌。
+import { MapPin, Search } from "lucide-react";
 import { useTranslations } from "next-intl";
-import { useCallback, useState } from "react";
+import { useState } from "react";
 
 import { getHome, listCountries, replaceHome, searchPlaces } from "@/api/generated/me/me";
 import type { Country, Home, Place } from "@/api/generated/model";
-import { Button, Card, Failure, Loading, Note, Page } from "@/components/ui";
-import { useAction, useApi } from "@/lib/useApi";
+import { problemMessage } from "@/api/problem";
+import { showToast } from "@/components/overlay";
+import { Button, Card, Failure, Group, Loading, Page } from "@/components/ui";
+import { useApi } from "@/lib/useApi";
 
 const loadHome = () => getHome();
 const loadCountries = () => listCountries();
@@ -18,55 +21,83 @@ function placeName(place: Place) {
 
 function HomeForm({ home, countries, reload }: { home: Home; countries: Country[]; reload: () => void }) {
   const t = useTranslations("home");
-  const tc = useTranslations("common");
   const [query, setQuery] = useState("");
   const [found, setFound] = useState<Place[] | null>(null);
-  const search = useAction(useCallback(async (q: string) => setFound(await searchPlaces({ q })), []));
-  const save = useAction(useCallback((update: { place: Place | null; holidays_country: string | null }) => replaceHome(update), []), reload);
+  const [busy, setBusy] = useState(false);
+  const run = async (work: () => Promise<unknown>, done?: string) => {
+    setBusy(true);
+    try {
+      await work();
+      if (done) showToast(done);
+    } catch (failure) {
+      showToast(problemMessage(failure));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const save = (update: { place: Place | null; holidays_country: string | null }, done: string) =>
+    run(async () => {
+      await replaceHome(update);
+      setFound(null);
+      setQuery("");
+      reload();
+    }, done);
   return (
     <>
       <Card title={t("current")}>
-        <p>{home.place ? placeName(home.place) : t("notSet")}</p>
-        {home.place && (
-          <div className="mt-2">
-            <Button onClick={() => void save.act({ place: null, holidays_country: home.holidays_country })}>{t("clear")}</Button>
-          </div>
-        )}
+        <div className="between">
+          <span className="hstack">
+            <MapPin size={18} aria-hidden />
+            {home.place ? placeName(home.place) : t("notSet")}
+          </span>
+          {home.place && (
+            <Button small kind="plain" disabled={busy} onClick={() => void save({ place: null, holidays_country: home.holidays_country }, t("cleared"))}>
+              {t("clear")}
+            </Button>
+          )}
+        </div>
       </Card>
-      <Card title={t("search")}>
+      <Card title={t("change")}>
         <form
-          className="flex gap-2"
+          className="hstack"
           onSubmit={(event) => {
             event.preventDefault();
-            if (query.trim()) void search.act(query.trim());
+            if (query.trim()) void run(async () => setFound(await searchPlaces({ q: query.trim() })));
           }}
         >
-          <input className="min-w-0 flex-1 rounded-lg border border-border bg-surface px-3 py-2" value={query} onChange={(e) => setQuery(e.target.value)} />
-          <Button type="submit" disabled={search.busy}>
+          <label className="search m-0 grow">
+            <Search size={18} aria-hidden />
+            <input placeholder={t("searchPlaceholder")} aria-label={t("search")} value={query} onChange={(event) => setQuery(event.target.value)} />
+          </label>
+          <Button small type="submit" disabled={busy || !query.trim()}>
             {t("searchButton")}
           </Button>
         </form>
         {found && (
-          <ul className="mt-3 divide-y divide-border">
-            {found.length === 0 && <Note>{tc("none")}</Note>}
-            {found.map((place) => (
-              <li key={`${place.latitude},${place.longitude}`} className="flex items-center justify-between gap-3 py-2">
-                <span className="text-sm">{placeName(place)}</span>
-                <Button disabled={save.busy} onClick={() => void save.act({ place, holidays_country: home.holidays_country })}>
-                  {t("choose")}
-                </Button>
-              </li>
-            ))}
-          </ul>
+          <div className="mt-2.5">
+            {found.length ? (
+              <Group className="bg-tile">
+                {found.map((place) => (
+                  <div key={`${place.latitude},${place.longitude}`} className="row" style={{ cursor: "default" }}>
+                    <span className="grow">{placeName(place)}</span>
+                    <Button small disabled={busy} onClick={() => void save({ place, holidays_country: home.holidays_country }, t("saved"))}>
+                      {t("choose")}
+                    </Button>
+                  </div>
+                ))}
+              </Group>
+            ) : (
+              <p className="sub p-3">{t("notFound")}</p>
+            )}
+          </div>
         )}
-        <Failure message={search.error} />
       </Card>
       <Card title={t("holidays")}>
         <select
-          className="w-full rounded-lg border border-border bg-surface px-3 py-2"
+          className="input"
           value={home.holidays_country ?? ""}
-          disabled={save.busy}
-          onChange={(e) => void save.act({ place: home.place, holidays_country: e.target.value || null })}
+          disabled={busy}
+          onChange={(event) => void save({ place: home.place, holidays_country: event.target.value || null }, event.target.value ? t("holidaysSaved") : t("holidaysOff"))}
         >
           <option value="">{t("noHolidays")}</option>
           {countries.map((country) => (
@@ -75,8 +106,8 @@ function HomeForm({ home, countries, reload }: { home: Home; countries: Country[
             </option>
           ))}
         </select>
+        <p className="cap mt-2">{t("holidaysHint")}</p>
       </Card>
-      <Failure message={save.error} />
     </>
   );
 }
@@ -86,8 +117,7 @@ export default function HomePage() {
   const home = useApi(loadHome);
   const countries = useApi(loadCountries);
   return (
-    <Page title={t("title")} back="/me">
-      <Note>{t("hint")}</Note>
+    <Page title={t("title")} back="/me" sub={t("hint")}>
       {(home.loading || countries.loading) && <Loading />}
       <Failure message={home.error ?? countries.error} />
       {home.data && countries.data && <HomeForm home={home.data} countries={countries.data} reload={home.reload} />}

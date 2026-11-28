@@ -9,6 +9,7 @@ if (!process.env.NEXT_PUBLIC_API_URL) {
 const nextConfig: NextConfig = {
   output: "standalone", // 镜像里只带运行要的文件（node server.js）
   poweredByHeader: false,
+  agentRules: false, // next dev 不在仓里生成 AGENTS.md
 };
 
 export default nextConfig;
