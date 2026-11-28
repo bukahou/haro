@@ -25,16 +25,18 @@ import (
 //   - tools：只开放这几个工具（允许名单，必填）；服务那边别的工具不交给模型
 //   - confirm：另外要主人确认才能执行的工具。服务自己标了会破坏的（按 MCP 规范，没标注、非只读的都算）本来就要确认，
 //     配置只能加、不能免
+//   - admin_only：这个服务的工具只给管理员（别的账号的终端、App 看不到；执行时按这一轮算谁的再拦一次）
 //
 // url、headers 里的 ${名字} 启动时换成环境变量的值：凭证不写进文件。
 
 // RemoteServer 是配置文件里的一个外部 MCP 服务（已校验、环境变量已展开）。
 type RemoteServer struct {
-	Name    string
-	URL     string
-	Headers map[string]string
-	Tools   []string // 允许名单
-	Confirm []string // 另外要主人确认的（都在允许名单里）
+	Name      string
+	URL       string
+	Headers   map[string]string
+	Tools     []string // 允许名单
+	Confirm   []string // 另外要主人确认的（都在允许名单里）
+	AdminOnly bool     // 只给管理员
 }
 
 type remoteServersFile struct {
@@ -42,11 +44,12 @@ type remoteServersFile struct {
 }
 
 type remoteServerEntry struct {
-	Type    string            `json:"type"`
-	URL     string            `json:"url"`
-	Headers map[string]string `json:"headers,omitempty"`
-	Tools   []string          `json:"tools"`
-	Confirm []string          `json:"confirm,omitempty"`
+	Type      string            `json:"type"`
+	URL       string            `json:"url"`
+	Headers   map[string]string `json:"headers,omitempty"`
+	Tools     []string          `json:"tools"`
+	Confirm   []string          `json:"confirm,omitempty"`
+	AdminOnly bool              `json:"admin_only,omitempty"`
 }
 
 // remoteTransportHTTP 是唯一支持的传输：Streamable HTTP。服务都单独运行，服务端不在本机拉起程序（stdio）。
@@ -128,7 +131,7 @@ func (entry remoteServerEntry) resolve(name string, lookup func(string) (string,
 			return RemoteServer{}, fmt.Errorf("confirm 里的 %s 不在 tools 里", tool)
 		}
 	}
-	server.Tools, server.Confirm = slices.Clone(entry.Tools), slices.Clone(entry.Confirm)
+	server.Tools, server.Confirm, server.AdminOnly = slices.Clone(entry.Tools), slices.Clone(entry.Confirm), entry.AdminOnly
 	return server, nil
 }
 
@@ -215,9 +218,10 @@ func (b *Toolbox) addRemote(server RemoteServer, connected *MCPServer, remote *r
 	if len(absent) > 0 {
 		b.logger.Warn("允许名单里的工具外部服务那边没有", "server", server.Name, "absent", absent)
 	}
-	if err := b.add(connected, remote, offered, server.Confirm); err != nil {
+	if err := b.add(connected, remote, offered, server.Confirm, server.AdminOnly); err != nil {
 		return err
 	}
-	b.logger.Info("外部 MCP 服务的工具已加进清单", "server", server.Name, "tools", offered, "hidden", len(connected.tools)-len(offered))
+	b.logger.Info("外部 MCP 服务的工具已加进清单", "server", server.Name, "tools", offered, "hidden", len(connected.tools)-len(offered),
+		"admin_only", server.AdminOnly)
 	return nil
 }

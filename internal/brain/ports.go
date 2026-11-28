@@ -257,6 +257,8 @@ type ToolSpec struct {
 	Description          string
 	Parameters           json.RawMessage // 参数的 JSON Schema
 	RequiresConfirmation bool            // 会删除或修改数据（MCP destructiveHint）：执行前要用户口头确认
+	// AdminOnly：只给管理员（外部 MCP 服务配了 admin_only，例如接集群的 AtlHyper）：别的账号的会话不提供，执行方也拦
+	AdminOnly bool
 }
 
 // ToolCall 是模型发起的一次工具调用。ID 在一次会话内唯一（模型没给时由服务端补上），

@@ -72,11 +72,19 @@ var directViewNote = CameraFrameCaption + "看清形状、颜色和上面的字�
 // toolSpecs 返回会话这一轮提供的工具：会话自己的（看画面、换性格、交给强模型、提高上限）+ 工具箱（内置 + MCP）
 // + 有会破坏的工具时的确认、取消（一直带着，见 sessionTool.gate）。交给哪个代理时再按它的允许名单筛（Agent.offer）。
 func (s *Session) toolSpecs() []ToolSpec {
-	specs := s.sessionToolSpecs(false)
-	if s.parts.Tools != nil {
-		specs = append(specs, s.parts.Tools.Specs()...)
+	return append(append(s.sessionToolSpecs(false), s.toolboxSpecs()...), s.sessionToolSpecs(true)...)
+}
+
+// toolboxSpecs 是工具箱里这个会话能用的：别的账号的会话（终端、App）不提供只给管理员的工具。
+func (s *Session) toolboxSpecs() []ToolSpec {
+	if s.parts.Tools == nil {
+		return nil
 	}
-	return append(specs, s.sessionToolSpecs(true)...)
+	specs := s.parts.Tools.Specs()
+	if s.parts.Residents.separate() {
+		specs = slices.DeleteFunc(specs, func(spec ToolSpec) bool { return spec.AdminOnly })
+	}
+	return specs
 }
 
 // offeredTools 是系统提示词里介绍的工具：这一轮交给前台的（按前台的允许名单筛过），不含确认、取消

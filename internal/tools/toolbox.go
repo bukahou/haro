@@ -32,7 +32,17 @@ type Toolbox struct {
 	// schemas：每个工具的参数定义（解析好的）。执行前按它校验，不对就交回 brain.ErrInvalidArguments（叫模型改参数重调），
 	// 不交给工具服务：服务那边的校验只给一段文字，分不出是参数不对还是服务出了问题
 	schemas map[string]*jsonschema.Resolved
-	closers []func() error // 关停时要断开的
+	// adminOnly：只给管理员的工具。执行方自己守门：这一轮算的人（brain.BillingPersonFrom）不是管理员就拒绝
+	adminOnly map[string]bool
+	isAdmin   func(person string) bool // nil = 没分账号：都算管理员
+	closers   []func() error           // 关停时要断开的
+}
+
+// RestrictAdminOnly 接上账号：只给管理员的工具，isAdmin(这一轮算的人) 为 false 时拒绝执行。启动时调用一次。
+func (b *Toolbox) RestrictAdminOnly(isAdmin func(person string) bool) {
+	b.mu.Lock()
+	b.isAdmin = isAdmin
+	b.mu.Unlock()
 }
 
 // toolCaller 执行一个工具调用（进程内的服务要额外经元数据带上说话人等）。
@@ -44,13 +54,13 @@ type toolCaller interface {
 // 外部的 MCP 服务之后用 AttachRemoteServers 接上（重名检查照样生效）。
 func NewToolbox(ctx context.Context, logger *slog.Logger, builtins ...Builtin) (*Toolbox, error) {
 	box := &Toolbox{logger: logger, callers: map[string]toolCaller{}, confirmed: map[string]bool{},
-		schemas: map[string]*jsonschema.Resolved{}}
+		schemas: map[string]*jsonschema.Resolved{}, adminOnly: map[string]bool{}}
 	builtin, err := startBuiltinServer(ctx, builtins, logger)
 	if err != nil {
 		return nil, err
 	}
 	box.addCloser(builtin.MCPServer.Close)
-	if err := box.add(builtin.MCPServer, builtin, nil, nil); err != nil {
+	if err := box.add(builtin.MCPServer, builtin, nil, nil, false); err != nil {
 		box.Close()
 		return nil, err
 	}
@@ -65,8 +75,8 @@ func (b *Toolbox) addCloser(closer func() error) {
 }
 
 // add 把一个服务的工具加进清单：only 不为 nil 时只加这几个（外部服务的允许名单）；confirm 里的另外要主人确认
-// （服务自己标了会破坏的本来就要）。和已有的重名就报错、一个都不加（模型看到两个同名工具，调用哪个说不清）。
-func (b *Toolbox) add(server *MCPServer, caller toolCaller, only, confirm []string) error {
+// （服务自己标了会破坏的本来就要）；adminOnly 时都只给管理员。和已有的重名就报错、一个都不加（模型看到两个同名工具，调用哪个说不清）。
+func (b *Toolbox) add(server *MCPServer, caller toolCaller, only, confirm []string, adminOnly bool) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	var added []*mcp.Tool
@@ -95,13 +105,14 @@ func (b *Toolbox) add(server *MCPServer, caller toolCaller, only, confirm []stri
 		}
 		schemas[tool.Name] = resolved
 		specs = append(specs, brain.ToolSpec{Name: tool.Name, Description: tool.Description, Parameters: parameters,
-			RequiresConfirmation: requiresConfirmation(tool.Annotations) || slices.Contains(confirm, tool.Name)})
+			RequiresConfirmation: requiresConfirmation(tool.Annotations) || slices.Contains(confirm, tool.Name), AdminOnly: adminOnly})
 	}
 	for _, spec := range specs { // 全部校验过才加：不留下加了一半的服务
 		b.specs = append(b.specs, spec)
 		b.schemas[spec.Name] = schemas[spec.Name]
 		b.callers[spec.Name] = caller
 		b.confirmed[spec.Name] = spec.RequiresConfirmation
+		b.adminOnly[spec.Name] = spec.AdminOnly
 	}
 	return nil
 }
@@ -130,10 +141,13 @@ func (b *Toolbox) Specs() []brain.ToolSpec {
 func (b *Toolbox) Call(ctx context.Context, call brain.ToolCall) (string, error) {
 	b.mu.RLock()
 	caller, ok := b.callers[call.Name]
-	schema, confirmed := b.schemas[call.Name], b.confirmed[call.Name]
+	schema, confirmed, adminOnly, isAdmin := b.schemas[call.Name], b.confirmed[call.Name], b.adminOnly[call.Name], b.isAdmin
 	b.mu.RUnlock()
 	if !ok {
 		return "", fmt.Errorf("没有叫 %s 的工具", call.Name)
+	}
+	if adminOnly && isAdmin != nil && !isAdmin(brain.BillingPersonFrom(ctx)) {
+		return "", fmt.Errorf("%s 只给管理员用", call.Name)
 	}
 	if err := checkArguments(schema, call); err != nil {
 		return "", err
