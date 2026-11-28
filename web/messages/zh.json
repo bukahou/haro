@@ -488,7 +488,7 @@
     "letHaroGuess": "让 haro 猜",
     "hintNote": "一句说明",
     "hintNotePlaceholder": "例如：周末买菜",
-    "receiptPolicy": "交上来的小票在后台读成草稿，你确认了才入账；30 天没确认的连原图一起删掉。",
+    "receiptPolicy": "交上来的小票会在后台读成草稿，你确认了才入账；{days} 天没确认的连原图一起删掉。",
     "openTitle": "还没入账的",
     "receiptUntitled": "（还没读出店名）",
     "receiptStatus": {

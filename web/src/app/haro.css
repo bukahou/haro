@@ -303,6 +303,13 @@ textarea.input { min-height: 140px; resize: vertical; line-height: 1.6; }
   .chat { grid-template-columns: 1fr; }
   .msgs { padding: 16px 14px 10px; }
   .me-msg { max-width: 86%; }
+  /* Markdown 表格：手机上每一行拆成一张卡片，格子前面写那一列的标题（data-th） */
+  .ai-msg .table-scroll { overflow: visible; }
+  .ai-msg table.cardify, .ai-msg table.cardify tbody { display: block; }
+  .ai-msg table.cardify thead { display: none; }
+  .ai-msg table.cardify tr { display: block; background: var(--card); border-radius: 12px; padding: 8px 12px; margin-top: 8px; }
+  .ai-msg table.cardify td { display: flex; justify-content: space-between; gap: 12px; border: 0; padding: 3px 0; text-align: right; }
+  .ai-msg table.cardify td::before { content: attr(data-th); color: var(--muted); text-align: left; flex: none; max-width: 45%; }
 }
 
 /* ---------- 日历 ---------- */

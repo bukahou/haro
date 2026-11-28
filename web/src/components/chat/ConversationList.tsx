@@ -11,9 +11,10 @@ import type { Conversation } from "@/api/generated/model";
 import { useTimeFormat } from "@/lib/format";
 import { useConversations } from "@/stores/conversations";
 
+// 对话的标题：后端给的；还没有标题时按种类写（语音那条的名字由 App 按语言写，见契约 Conversation.title）
 export function useConversationTitle() {
   const t = useTranslations("chat");
-  return (conversation: Conversation | undefined) =>
+  return (conversation: Pick<Conversation, "kind" | "title"> | undefined) =>
     conversation?.title ?? (conversation?.kind === "voice" ? t("voiceTitle") : t("untitled"));
 }
 
