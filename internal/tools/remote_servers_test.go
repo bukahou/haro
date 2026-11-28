@@ -198,3 +198,47 @@ func TestRemoteToolNameClashFailsAtStartup(t *testing.T) {
 		t.Errorf("重名应报错：%v", err)
 	}
 }
+
+// 只给管理员的外部服务（admin_only）：工具标上 AdminOnly；接上账号后，这一轮算的人不是管理员就不执行（执行方自己守门），管理员照常。
+func TestRemoteServerAdminOnly(t *testing.T) {
+	var ready atomic.Bool
+	ready.Store(true)
+	remote := fakeOpsServer(t, &ready)
+	box, err := NewToolbox(t.Context(), quietLogger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer box.Close()
+	box.RestrictAdminOnly(func(person string) bool { return person == "主人" || person == "" })
+	if err := box.AttachRemoteServers(t.Context(), []RemoteServer{{Name: "ops", URL: remote.URL,
+		Headers: map[string]string{"Authorization": "Bearer token-1"}, Tools: []string{"cluster_status"}, AdminOnly: true}}, &http.Client{}); err != nil {
+		t.Fatal(err)
+	}
+	specs := box.Specs()
+	if len(specs) != 1 || !specs[0].AdminOnly {
+		t.Fatalf("工具：%+v", specs)
+	}
+	call := func(person string) error {
+		_, err := box.Call(brain.WithBillingPerson(t.Context(), person), brain.ToolCall{Name: "cluster_status", Arguments: map[string]any{}})
+		return err
+	}
+	if err := call("主人"); err != nil {
+		t.Errorf("管理员：%v", err)
+	}
+	if err := call("account:a1"); err == nil {
+		t.Error("别的账号不该能执行")
+	}
+}
+
+// 配置文件里的 admin_only 读得出来。
+func TestLoadRemoteServersAdminOnly(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mcp.json")
+	if err := os.WriteFile(path, []byte(`{"mcpServers":{"atlhyper":{"type":"http","url":"http://example.com/mcp","tools":["a"],"admin_only":true}}}`),
+		0o600); err != nil {
+		t.Fatal(err)
+	}
+	servers, err := LoadRemoteServers(path, func(string) (string, bool) { return "", false })
+	if err != nil || len(servers) != 1 || !servers[0].AdminOnly {
+		t.Errorf("%+v %v", servers, err)
+	}
+}

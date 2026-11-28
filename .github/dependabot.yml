@@ -1,7 +1,8 @@
 # Dependabot（v6）：每周检查一次依赖有没有新版本，有就开 PR 到 dev ——
 # 和平时的改动走同一条路：dev 上 ci 通过 → 合并到 dev → 再开 PR 合到 main 发版。
 #   gomod           Go 依赖（安全修复也在这里：例如 golang.org/x/net）；一周合成一个 PR
-#   docker          服务端镜像的基础镜像（deploy/server/Dockerfile 钉了 digest；官方镜像重建后改 digest）
+#   docker          服务端、网页镜像的基础镜像（deploy/server/Dockerfile、web/Dockerfile 钉了 digest；官方镜像重建后改 digest）
+#   npm             网页版（web/）的依赖；一周合成一个 PR（CI 照样不运行依赖的安装脚本）
 #   github-actions  workflow 里用的 action（按提交 SHA 引用、行尾注释写版本号：Dependabot 升级时 SHA 和注释一起改）
 # 「Dependabot 安全更新」（按告警自动开 PR）没有打开：它只会开到 main，绕过 dev。告警照常在 Security 页里看。
 # ⚠️ release.yml 里 Trivy 的镜像（aquasec/trivy:x.y.z@sha256:…，按 digest 钉死）写在环境变量里，Dependabot 不会改，
@@ -33,6 +34,28 @@ updates:
       interval: weekly
     groups:
       base-images:
+        patterns: ["*"]
+    commit-message:
+      prefix: "deps(docker)"
+
+  - package-ecosystem: npm
+    directory: /web
+    target-branch: dev
+    schedule:
+      interval: weekly
+    groups:
+      web:
+        patterns: ["*"]
+    commit-message:
+      prefix: "deps(web)"
+
+  - package-ecosystem: docker
+    directory: /web
+    target-branch: dev
+    schedule:
+      interval: weekly
+    groups:
+      web-base-images:
         patterns: ["*"]
     commit-message:
       prefix: "deps(docker)"

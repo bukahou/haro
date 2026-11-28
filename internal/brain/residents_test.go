@@ -1,6 +1,9 @@
 package brain
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
 // 分账号的终端只认本人：别人的声音是访客、不算声纹确认、名字不告诉终端；不分账号时照旧。
 func TestResidents(t *testing.T) {
@@ -38,5 +41,31 @@ func TestResidentsOwnerVoice(t *testing.T) {
 	}
 	if got := r.personFor("主人"); got != "account:a1:guest" || r.verified("主人") {
 		t.Errorf("别人：%q %v", got, r.verified("主人"))
+	}
+}
+
+// adminToolbox 有一个普通工具、一个只给管理员的工具。
+type adminToolbox struct{}
+
+func (adminToolbox) Specs() []ToolSpec {
+	return []ToolSpec{{Name: "get_weather"}, {Name: "get_cluster_overview", AdminOnly: true}}
+}
+func (adminToolbox) Call(context.Context, ToolCall) (string, error) { return "", nil }
+
+// 别的账号的会话（终端、App）拿不到只给管理员的工具；管理员的会话照常。
+func TestAdminOnlyToolsHiddenFromOtherAccounts(t *testing.T) {
+	names := func(r Residents) []string {
+		s := &Session{parts: Components{Tools: adminToolbox{}, Residents: r}}
+		var got []string
+		for _, spec := range s.toolboxSpecs() {
+			got = append(got, spec.Name)
+		}
+		return got
+	}
+	if got := names(Residents{}); len(got) != 2 {
+		t.Errorf("管理员：%v", got)
+	}
+	if got := names(Residents{Owner: "account:a1", Guest: "account:a1:guest"}); len(got) != 1 || got[0] != "get_weather" {
+		t.Errorf("别的账号：%v", got)
 	}
 }

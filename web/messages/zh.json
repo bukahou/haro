@@ -1,0 +1,45 @@
+{
+  "app": {
+    "name": "haro",
+    "description": "haro 的网页版"
+  },
+  "tabs": {
+    "chat": "聊天",
+    "calendar": "日历",
+    "expenses": "记账",
+    "me": "我的"
+  },
+  "login": {
+    "title": "登录 haro",
+    "subtitle": "用 akasha 账号登录",
+    "button": "登录",
+    "invite": "邀请码：{code}"
+  },
+  "callback": {
+    "working": "正在登录……",
+    "errors": {
+      "pending_approval": "账号在等管理员同意。管理员同意后再登录一次就行。",
+      "account_disabled": "账号已停用。",
+      "invite_invalid": "邀请码不对、过期了或者用过了。可以向管理员要一个新的，或者不带邀请码登录（等管理员同意）。",
+      "login_cancelled": "登录取消了。",
+      "login_failed": "登录没成，请再试一次。",
+      "missing": "没拿到登录的结果，请再登录一次。"
+    }
+  },
+  "common": {
+    "loading": "加载中……",
+    "notYet": "这一页的画面还在做。",
+    "failed": "出错了：{message}"
+  },
+  "me": {
+    "title": "我的",
+    "displayName": "名字",
+    "role": "角色",
+    "roles": {
+      "admin": "管理员",
+      "member": "成员"
+    },
+    "currency": "默认货币",
+    "logout": "登出"
+  }
+}

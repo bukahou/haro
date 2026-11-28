@@ -1,0 +1,37 @@
+{
+  "name": "haro-web",
+  "version": "0.1.0",
+  "description": "haro 的网页版（App 的接口，契约 api/openapi.yaml）",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "gen:api": "orval"
+  },
+  "dependencies": {
+    "@tailwindcss/postcss": "4.1.18",
+    "axios": "1.21.1",
+    "clsx": "2.1.1",
+    "lucide-react": "0.562.0",
+    "next": "16.4.6",
+    "next-intl": "4.15.3",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "react-markdown": "10.1.0",
+    "remark-gfm": "4.0.1",
+    "tailwindcss": "4.1.18",
+    "zustand": "5.0.9"
+  },
+  "devDependencies": {
+    "@types/node": "22.19.3",
+    "@types/react": "19.2.7",
+    "@types/react-dom": "19.2.3",
+    "eslint": "9.39.5",
+    "eslint-config-next": "16.4.6",
+    "orval": "8.48.0",
+    "typescript": "5.9.3"
+  }
+}

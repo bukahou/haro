@@ -138,8 +138,9 @@ haro 是一个家用语音助手：家里每个房间放一台**终端**（麦�
 组名只在 `internal/config` 定义一处）。看画面的专家查资料用同一个搜索服务（设了密钥就有），不算前台的工具组。
 
 外部的 MCP 服务不改代码就能接上、拿掉：列在 `HARO_MCP_SERVERS_FILE` 里（`internal/tools/remote_servers.go`），格式照 Claude Code 的 `.mcp.json`
-（`mcpServers` → 名字 → `type` / `url` / `headers`），另加两项：`tools` 是允许名单（必填，服务那边别的工具不交给模型），
-`confirm` 是另外要主人确认的工具。`url`、`headers` 里的 `${名字}` 启动时换成环境变量的值（凭证不写进文件，没设就起不来）。
+（`mcpServers` → 名字 → `type` / `url` / `headers`），另加三项：`tools` 是允许名单（必填，服务那边别的工具不交给模型），
+`confirm` 是另外要主人确认的工具，`admin_only` 让这个服务的工具只给管理员（例如接集群的 AtlHyper：别的账号的会话不提供，
+执行时工具箱按这一轮算谁的再拦一次）。`url`、`headers` 里的 `${名字}` 启动时换成环境变量的值（凭证不写进文件，没设就起不来）。
 只支持 Streamable HTTP（服务都单独运行，服务端不在本机拉起程序）。启动时各连一次：连不上不影响启动，后台按退避重连，
 连上后它的工具才出现在清单里；用着断了，当次重连再试一次（和联网搜索共用一份连接代码）。
 要不要主人确认 = 服务标了会破坏（按 MCP 规范，没标注的、非只读的都算）**或** `confirm` 里列了；配置只能加、不能免。
@@ -300,6 +301,20 @@ v10（2026-11-22 裁定）：记住的事和以前的对话都能按意思找回
 用浮点累加有误差）+ 币种。汇率是欧洲央行每天公布的参考汇率（公开、不用密钥，`HARO_EXCHANGE_RATES_URL`）：设了费用上限才拉，
 启动时拉一次、之后每 6 小时重拉；拉到的存一份到 `HARO_EXCHANGE_RATES_CACHE`，拉不到时用它，都没有时服务端起不来（不按猜的汇率判断上限）。
 念给主人的金额按语言念币种：固定的话里写 `{名字:money}`，各语言的币种念法写在固定的话的文件里（`money` 一节，没列出的币种念「数值 代码」）。
+
+## 网页版（`web/`）
+
+App 接口的网页版（iOS 的样板和备用），单独构建、单独部署（镜像 `haro-web`），和服务端不在一个进程：
+Next.js（standalone）+ React + next-intl（先只有中文，文字在 `web/messages/`）+ Tailwind + zustand。
+
+- **接口代码从契约生成**（orval：`npm run gen:api`，生成的在 `web/src/api/generated/`，⛔ 不手改；CI 查是不是照现在的契约生成的）。
+  请求都经 `web/src/api/request.ts`：带访问令牌、`Accept-Language`；401 时用刷新令牌换一对新的、重发一次。刷新令牌用一次就作废，
+  所以整个浏览器同时只刷新一次（同一页面里共用一次，几个标签页之间用 Web Locks 排队，拿到锁后重新读令牌）。
+- **登录**：登录页把浏览器送到服务端的 `/api/v1/auth/oidc/start?client=web`（有邀请码时带上），服务端经 akasha 登录后跳回
+  网页的 `/auth/callback`，令牌在 `#` 后面（不发给服务器、不进日志）；回调页存下令牌、擦掉地址栏里的令牌。失败时带着错误码
+  （契约的 `OidcError`）回登录页说明。令牌只存在一处（zustand 持久化到 localStorage）。
+- 接口的根地址在构建时写进页面（`NEXT_PUBLIC_API_URL`，没有默认值，缺了构建失败）；服务端只放行 `HARO_APP_WEB_URL` 这一个来源跨域。
+- 依赖装的时候不运行安装脚本（`web/.npmrc` 的 `ignore-scripts=true`，CI、镜像构建都一样）。
 
 ## App 的接口（`internal/appserver`）
 

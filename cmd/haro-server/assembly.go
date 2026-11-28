@@ -261,6 +261,9 @@ func buildTooling(ctx context.Context, settings config.ServerSettings, catalog a
 	}
 	shutdown.add("工具箱", func() error { box.Close(); return nil })
 	kit.toolbox = box
+	if deps.accounts.store != nil { // 分账号：只给管理员的工具（外部服务配了 admin_only），这一轮算的人不是管理员就不执行
+		box.RestrictAdminOnly(func(person string) bool { return accounts.BillingAccountOf(person) == "" })
+	}
 	if settings.MCPServersFile != "" { // 外部的 MCP 服务：允许名单里的工具连上后加进清单（连不上的在后台接着连）
 		servers, err := tools.LoadRemoteServers(settings.MCPServersFile, os.LookupEnv)
 		if err != nil {

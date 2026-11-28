@@ -73,6 +73,34 @@ jobs:
       - run: go test ./...
       - run: make check-darwin check-windows
 
+  # 网页版（web/）：按锁文件装（不运行依赖的安装脚本，.npmrc）→ 接口代码是不是照契约最新生成的 → 类型、代码检查 → 能构建
+  web:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci --ignore-scripts
+      - name: 接口代码照契约最新生成（改了 api/openapi.yaml 要重新 npm run gen:api）
+        run: |
+          npm run gen:api
+          git diff --exit-code -- src/api/generated || { echo "::error::web/src/api/generated 不是照现在的契约生成的：在 web/ 里跑 npm run gen:api"; exit 1; }
+      - run: npm run typecheck
+      - run: npm run lint
+      - name: 构建（接口地址用占位：真的地址在发版时传）
+        run: npm run build
+        env:
+          NEXT_PUBLIC_API_URL: https://api.example.com
+          NEXT_TELEMETRY_DISABLED: "1"
+
   scripts:
     runs-on: ubuntu-24.04
     steps:
