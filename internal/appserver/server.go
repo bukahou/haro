@@ -150,6 +150,8 @@ func NewHandler(ctx context.Context, opts Options) (http.Handler, error) {
 	})
 	generated := appapi.HandlerWithOptions(strict, appapi.StdHTTPServerOptions{BaseRouter: http.NewServeMux()})
 	mux.Handle(sendMessagePattern, limiter.wrap(http.HandlerFunc(server.sendMessage), server)) // 回答是流：不经生成的代码
+	mux.Handle(uploadPattern, limiter.wrap(http.HandlerFunc(server.uploadAttachment), server)) // 请求体是图片：不经生成的代码
+	mux.Handle(attachmentPattern, limiter.wrap(http.HandlerFunc(server.getAttachment), server))
 	mux.Handle(PathPrefix, limiter.wrap(validator(generated), server))
 	// 跨域套在限流外面：被限流、出错的回答也带上跨域的头，网页版才读得到 429 / problem（预检由 cors 直接回）
 	withCrossOrigin, err := crossOrigin(spec, opts.WebURL, mux)
@@ -159,10 +161,25 @@ func NewHandler(ctx context.Context, opts Options) (http.Handler, error) {
 	return server.outermost(withCrossOrigin), nil
 }
 
+// largeBodies 是请求体上限比 maxBodyBytes 大的路由（按路由匹配，不比路径的字符串）。
+var largeBodies = func() *http.ServeMux {
+	routes := http.NewServeMux()
+	routes.Handle(uploadPattern, http.NotFoundHandler())
+	return routes
+}()
+
+// bodyLimit 是这个请求的请求体上限：传图片的 attachmentMaxBytes，其余 maxBodyBytes。
+func bodyLimit(r *http.Request) int64 {
+	if _, pattern := largeBodies.Handler(r); pattern == uploadPattern {
+		return attachmentMaxBytes
+	}
+	return maxBodyBytes
+}
+
 // outermost 是最外层：请求体上限、放一个空的 caller。
 func (s *Server) outermost(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+		r.Body = http.MaxBytesReader(w, r.Body, bodyLimit(r))
 		r, _ = withCaller(r, s.texts.pick(r.Header.Get("Accept-Language")))
 		next.ServeHTTP(w, r)
 	})

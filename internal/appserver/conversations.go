@@ -4,11 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"mime"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/bukahou/haro/internal/accounts"
 	"github.com/bukahou/haro/internal/appapi"
+	"github.com/bukahou/haro/internal/attachments"
 	"github.com/bukahou/haro/internal/brain"
 	"github.com/bukahou/haro/internal/chat"
 	"github.com/bukahou/haro/internal/conversationstore"
@@ -24,7 +28,10 @@ const sendMessagePattern = "POST " + PathPrefix + "conversations/{conversationId
 // Chat 是打字对话（chat.Service 实现）。
 type Chat interface {
 	CheckThread(ctx context.Context, person, thread string) error
-	Send(ctx context.Context, speaker chat.Speaker, thread, text, language string) (*chat.Turn, error)
+	Send(ctx context.Context, speaker chat.Speaker, thread string, message chat.Message, language string) (*chat.Turn, error)
+	Upload(ctx context.Context, person, thread string, data []byte) (conversationstore.Attachment, error)
+	Image(ctx context.Context, person, id string) ([]byte, error)
+	Search(ctx context.Context, person, query string) ([]conversationstore.FoundTurn, error)
 	Stop(ctx context.Context, person, thread, turnID string) error
 	Threads(ctx context.Context, person string) ([]conversationstore.Thread, error)
 	Create(ctx context.Context, person string, incognito bool) (conversationstore.Thread, error)
@@ -195,6 +202,12 @@ func turnOf(turn conversationstore.RecordedTurn) appapi.Turn {
 		text := strings.Join(said, "\n")
 		reply.Said = &text
 	}
+	for _, message := range turn.Messages {
+		if message.Role == brain.RoleUser && message.Attachment != "" {
+			attachment := message.Attachment
+			reply.Attachment = &attachment
+		}
+	}
 	return reply
 }
 
@@ -246,8 +259,16 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	speaker := chat.Speaker{Owner: account.OwnerPerson, Guest: account.GuestPerson, Admin: account.Role == accounts.RoleAdmin}
 	language := languageFrom(r.Context())
-	turn, err := s.opts.Chat.Send(r.Context(), speaker, threadOf(r.PathValue("conversationId")), message.Text, language)
+	attachment := ""
+	if message.Attachment != nil {
+		attachment = *message.Attachment
+	}
+	turn, err := s.opts.Chat.Send(r.Context(), speaker, threadOf(r.PathValue("conversationId")),
+		chat.Message{Text: message.Text, Attachment: attachment}, language)
 	switch {
+	case errors.Is(err, chat.ErrAttachmentNotFound), errors.Is(err, chat.ErrNoImages):
+		s.writeProblem(w, r, http.StatusBadRequest, appapi.ErrorCodeValidationFailed, map[string]string{"detail": "attachment"})
+		return
 	case errors.Is(err, chat.ErrNotFound):
 		s.writeProblem(w, r, http.StatusNotFound, appapi.ErrorCodeNotFound, nil)
 		return
@@ -316,4 +337,109 @@ func (s *Server) chatEventOf(ctx context.Context, event chat.Event) appapi.ChatE
 		out.Code, out.Message = &code, &message
 	}
 	return out
+}
+
+// 图片：上传、取回（二进制，手写挂载）。
+const (
+	uploadPattern     = "POST " + PathPrefix + "conversations/{conversationId}/attachments"
+	attachmentPattern = "GET " + PathPrefix + "attachments/{attachmentId}"
+	// attachmentMaxBytes 是上传的一张图片最多多少字节（client-config 给 App）。
+	attachmentMaxBytes = 10 << 20
+)
+
+// uploadedTypes 是收的图片格式（和契约 uploadAttachment 的请求体一致，测试守着）。
+var uploadedTypes = []string{"image/jpeg", "image/png", "image/webp"}
+
+// uploadAttachment 是在一条对话里传一张图片：请求体就是图片。
+func (s *Server) uploadAttachment(w http.ResponseWriter, r *http.Request) {
+	account, ok := s.bearerAccount(w, r)
+	if !ok {
+		return
+	}
+	if s.opts.Chat == nil {
+		s.writeProblem(w, r, http.StatusNotImplemented, appapi.ErrorCodeNotImplemented, nil)
+		return
+	}
+	media, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || !slices.Contains(uploadedTypes, media) {
+		s.writeProblem(w, r, http.StatusBadRequest, appapi.ErrorCodeValidationFailed, map[string]string{"detail": "Content-Type"})
+		return
+	}
+	data, err := io.ReadAll(r.Body)
+	var tooLarge *http.MaxBytesError
+	switch {
+	case errors.As(err, &tooLarge):
+		s.writeProblem(w, r, http.StatusBadRequest, appapi.ErrorCodeValidationFailed, map[string]string{"detail": "size"})
+		return
+	case err != nil:
+		return
+	}
+	attachment, err := s.opts.Chat.Upload(r.Context(), account.OwnerPerson, threadOf(r.PathValue("conversationId")), data)
+	switch {
+	case errors.Is(err, chat.ErrNotFound):
+		s.writeProblem(w, r, http.StatusNotFound, appapi.ErrorCodeNotFound, nil)
+		return
+	case errors.Is(err, attachments.ErrUnsupported):
+		s.writeProblem(w, r, http.StatusBadRequest, appapi.ErrorCodeValidationFailed, map[string]string{"detail": "image"})
+		return
+	case errors.Is(err, chat.ErrNoImages):
+		s.writeProblem(w, r, http.StatusNotImplemented, appapi.ErrorCodeNotImplemented, nil)
+		return
+	case err != nil:
+		s.logger.Error("存图片出错", "err", err)
+		s.writeProblem(w, r, http.StatusInternalServerError, appapi.ErrorCodeInternal, nil)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(appapi.AttachmentInfo{AttachmentId: attachment.ID, Width: attachment.Width, Height: attachment.Height})
+}
+
+// getAttachment 是取回自己的一张图片。
+func (s *Server) getAttachment(w http.ResponseWriter, r *http.Request) {
+	account, ok := s.bearerAccount(w, r)
+	if !ok {
+		return
+	}
+	if s.opts.Chat == nil {
+		s.writeProblem(w, r, http.StatusNotImplemented, appapi.ErrorCodeNotImplemented, nil)
+		return
+	}
+	data, err := s.opts.Chat.Image(r.Context(), account.OwnerPerson, r.PathValue("attachmentId"))
+	switch {
+	case errors.Is(err, chat.ErrNotFound), errors.Is(err, chat.ErrNoImages):
+		s.writeProblem(w, r, http.StatusNotFound, appapi.ErrorCodeNotFound, nil)
+		return
+	case err != nil:
+		s.logger.Error("取图片出错", "err", err)
+		s.writeProblem(w, r, http.StatusInternalServerError, appapi.ErrorCodeInternal, nil)
+		return
+	}
+	w.Header().Set("Content-Type", "image/jpeg")
+	w.Header().Set("Cache-Control", "private, max-age=86400")
+	_, _ = w.Write(data)
+}
+
+// SearchTurns 实现 appapi.StrictServerInterface。
+func (s *Server) SearchTurns(ctx context.Context, request appapi.SearchTurnsRequestObject) (appapi.SearchTurnsResponseObject, error) {
+	account, denied := s.me(ctx)
+	if denied != nil {
+		return *denied, nil
+	}
+	if s.opts.Chat == nil {
+		return s.notImplemented(ctx), nil
+	}
+	found, err := s.opts.Chat.Search(ctx, account.OwnerPerson, request.Params.Q)
+	if err != nil {
+		return s.internalError(ctx, "搜对话", err), nil
+	}
+	reply := appapi.SearchTurns200JSONResponse{}
+	for _, turn := range found {
+		id := turn.Thread
+		if id == brain.VoiceThread {
+			id = voiceConversationID
+		}
+		reply = append(reply, appapi.FoundTurn{ConversationId: id, Turn: turnOf(turn.RecordedTurn)})
+	}
+	return reply, nil
 }

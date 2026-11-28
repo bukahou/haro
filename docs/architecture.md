@@ -297,6 +297,10 @@ v10（2026-11-22 裁定）：记住的事和以前的对话都能按意思找回
   （`Session.SubmitText`，等同声纹确认），同一套前台、工具、确认闸、额度；前台的规则按 `{{.Medium}}` 渲染成打字用的（能用 Markdown、不用情绪标记）。
   回答经 `POST /conversations/{id}/messages` 以 Server-Sent Events 流回去（手写挂载，验令牌、限流同其他接口）；App 断开后这一轮照样答完、存好；
   同一条对话同时只答一句。App 里新建的对话第一轮答完后，代理「起标题」在后台起标题（记在「对话摘要」的用途里）。
+  图片：`POST /conversations/{id}/attachments`（请求体就是 JPEG / PNG / WebP，上限在 client-config）解码、长边缩到 1568 像素以内、统一存成 JPEG
+  （`internal/attachments`，文件在 `HARO_ATTACHMENTS_DIR`，对话库记谁的、哪条对话的），说一句时带附件编号：图片只交给这一轮的模型，历史里记编号
+  （和摄像头的画面一样，之后的轮次不重发）；`GET /attachments/{id}` 取回自己的。搜以前的对话（`/turns/search`）：按文字（子串）和按意思
+  （长期记忆的向量）找到的合在一起，新的在前，删了的对话里的不算。
   对话库迁移前自动备份到 `<库>.before-migrate`（`sqliteschema`：有待跑的迁移时先 `VACUUM INTO`）。
 - **终端**：`/terminals`（列表、配对、改名、移除）、`/admin/terminals/pending`（管理员批准 / 拒绝新终端）；配对码输错按来源 IP 限流，
   同一个账号 10 分钟内输错 5 次也先停一停（`pairing_attempts_exceeded`）。终端的登记、设备凭证存在账号库（`terminals`、`terminal_registrations`）。

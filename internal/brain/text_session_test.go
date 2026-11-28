@@ -13,7 +13,7 @@ import (
 // textTurn 在打字会话里说一句，收事件直到这一轮结束。
 func textTurn(t *testing.T, session *brain.Session, text, person string) []realtimeproto.ServerEvent {
 	t.Helper()
-	if err := session.SubmitText(text, person, "zh"); err != nil {
+	if err := session.SubmitText(brain.TextInput{Text: text, Person: person, Language: "zh"}); err != nil {
 		t.Fatal(err)
 	}
 	var events []realtimeproto.ServerEvent
@@ -70,17 +70,47 @@ func TestTextSession(t *testing.T) {
 	voice := brain.NewSession(brain.Components{Front: withTestSteps(brain.Agent{Model: model}), Conversations: book},
 		brain.Options{MaxHistoryTurn: 6}, quiet)
 	t.Cleanup(func() { _ = voice.Close() })
-	if err := voice.SubmitText("你好", "主人", "zh"); err == nil {
+	if err := voice.SubmitText(brain.TextInput{Text: "你好", Person: "主人", Language: "zh"}); err == nil {
 		t.Error("语音会话不该收打字的话")
 	}
 	slow := &fakeModel{tokens: []string{"慢", "慢", "答"}, delay: 200 * time.Millisecond}
 	busy := brain.NewSession(brain.Components{Front: withTestSteps(brain.Agent{Model: slow}), Conversations: book, Thread: "t2", TextOnly: true,
 		NewSegmenter: func() brain.TextSegmenter { return speech.NewSentenceSegmenter(4, 40) }}, brain.Options{MaxHistoryTurn: 6}, quiet)
 	t.Cleanup(func() { _ = busy.Close() })
-	if err := busy.SubmitText("第一句", "主人", "zh"); err != nil {
+	if err := busy.SubmitText(brain.TextInput{Text: "第一句", Person: "主人", Language: "zh"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := busy.SubmitText("第二句", "主人", "zh"); err == nil {
+	if err := busy.SubmitText(brain.TextInput{Text: "第二句", Person: "主人", Language: "zh"}); err == nil {
 		t.Error("上一句还在答时不该收下一句")
+	}
+}
+
+// 带图说一句：图片交给这一轮的模型；历史里只记附件编号，不记图片（之后的轮次不重发）。
+func TestTextSessionImage(t *testing.T) {
+	store, err := conversationstore.OpenSQLite(t.Context(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	book := brain.NewConversationBook(store, brain.Options{MaxHistoryTurn: 6}, quiet)
+	model := &fakeModel{tokens: []string{"是只橘猫。"}}
+	session := brain.NewSession(brain.Components{Front: withTestSteps(brain.Agent{Model: model}), Conversations: book, Thread: "t1", TextOnly: true},
+		brain.Options{MaxHistoryTurn: 6}, quiet)
+	t.Cleanup(func() { _ = session.Close() })
+	if err := session.SubmitText(brain.TextInput{Text: "这是什么猫", Person: "主人", Language: "zh", Image: []byte("jpeg"), Attachment: "a1"}); err != nil {
+		t.Fatal(err)
+	}
+	for event := range session.Events() {
+		if _, done := event.(realtimeproto.ResponseDone); done {
+			break
+		}
+	}
+	if string(model.lastInput.Image) != "jpeg" {
+		t.Errorf("模型这一轮应看到图片：%q", model.lastInput.Image)
+	}
+	_ = session.Close()
+	record, _, _ := store.LoadConversation("主人", "t1")
+	if len(record.History) != 1 || record.History[0].Messages[0].Attachment != "a1" || record.History[0].Messages[0].Image != nil {
+		t.Errorf("历史里记附件编号、不记图片：%+v", record.History)
 	}
 }

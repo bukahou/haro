@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -30,8 +31,8 @@ func newFakeSession() *fakeSession {
 	return &fakeSession{events: make(chan realtimeproto.ServerEvent, 8), release: make(chan struct{})}
 }
 
-func (f *fakeSession) SubmitText(text, _, _ string) error {
-	f.said = text
+func (f *fakeSession) SubmitText(input brain.TextInput) error {
+	f.said = input.Text
 	go func() {
 		f.events <- realtimeproto.ResponseCreated{}
 		f.events <- realtimeproto.ResponseOutputAudioTranscriptDelta{Delta: "好的"}
@@ -57,11 +58,11 @@ func newService(t *testing.T) (*Service, *conversationstore.SQLiteStore, chan *f
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	opened := make(chan *fakeSession, 4)
-	service := NewService(context.Background(), store, func(Speaker, string) TextSession {
+	service := NewService(context.Background(), Options{Store: store, Sessions: func(Speaker, string) TextSession {
 		session := newFakeSession()
 		opened <- session
 		return session
-	}, nil, quiet)
+	}, Logger: quiet})
 	return service, store, opened
 }
 
@@ -71,7 +72,7 @@ func TestSendDetachStop(t *testing.T) {
 	service, _, opened := newService(t)
 	ctx := context.Background()
 	speaker := Speaker{Owner: "主人", Admin: true}
-	turn, err := service.Send(ctx, speaker, brain.VoiceThread, "你好", "zh")
+	turn, err := service.Send(ctx, speaker, brain.VoiceThread, Message{Text: "你好"}, "zh")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +83,7 @@ func TestSendDetachStop(t *testing.T) {
 	if text := <-turn.Events(); text.Type != EventText || text.Text != "好的" {
 		t.Fatalf("文字：%+v", text)
 	}
-	if _, err := service.Send(ctx, speaker, brain.VoiceThread, "再说", "zh"); !errors.Is(err, ErrBusy) {
+	if _, err := service.Send(ctx, speaker, brain.VoiceThread, Message{Text: "再说"}, "zh"); !errors.Is(err, ErrBusy) {
 		t.Errorf("上一句还在答：%v", err)
 	}
 	if err := service.Stop(ctx, "主人", brain.VoiceThread, "别的"); !errors.Is(err, ErrTurnNotFound) {
@@ -100,7 +101,7 @@ func TestSendDetachStop(t *testing.T) {
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
-	if _, err := service.Send(ctx, speaker, brain.VoiceThread, "接着说", "zh"); err != nil {
+	if _, err := service.Send(ctx, speaker, brain.VoiceThread, Message{Text: "接着说"}, "zh"); err != nil {
 		t.Errorf("答完了应能接着说：%v", err)
 	}
 }
@@ -122,10 +123,38 @@ func TestThreadRules(t *testing.T) {
 	if err := service.Delete(ctx, "主人", thread.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.Send(ctx, Speaker{Owner: "主人"}, thread.ID, "还在吗", "zh"); !errors.Is(err, ErrNotFound) {
+	if _, err := service.Send(ctx, Speaker{Owner: "主人"}, thread.ID, Message{Text: "还在吗"}, "zh"); !errors.Is(err, ErrNotFound) {
 		t.Errorf("删了的不能说：%v", err)
 	}
 	if restored, err := service.Restore(ctx, "主人", thread.ID); err != nil || restored.DeletedAt != nil {
 		t.Errorf("恢复：%+v %v", restored, err)
+	}
+}
+
+// fakeRecall 按意思「找到」固定的几轮。
+type fakeRecall struct{ seqs []int64 }
+
+func (f fakeRecall) RecallTurns(context.Context, string, string) ([]int64, error) { return f.seqs, nil }
+
+// 搜：按文字找到的和按意思找到的合在一起、去重、新的在前。
+func TestSearchMergesTextAndMeaning(t *testing.T) {
+	store, err := conversationstore.OpenSQLite(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	record := brain.ConversationRecord{Person: "主人", TurnCount: 3, UpdatedAt: time.Now()}
+	for seq, pair := range map[int][2]string{1: {"猫粮买哪家", "A 店"}, 2: {"给猫买吃的", "B 店"}, 3: {"今天天气", "晴"}} {
+		record.History = append(record.History, brain.ConversationTurn{Seq: seq, At: time.Unix(int64(1_700_000_000+seq), 0),
+			Messages: []brain.ChatMessage{{Role: brain.RoleUser, Text: pair[0]}, {Role: brain.RoleAssistant, Text: pair[1]}}})
+	}
+	slices.SortFunc(record.History, func(a, b brain.ConversationTurn) int { return a.Seq - b.Seq })
+	if err := store.SaveConversation(record); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(context.Background(), Options{Store: store, Recall: fakeRecall{seqs: []int64{2, 1}}, Logger: quiet})
+	found, err := service.Search(context.Background(), "主人", "猫粮")
+	if err != nil || len(found) != 2 || found[0].Seq != 2 || found[1].Seq != 1 {
+		t.Errorf("合在一起、新的在前：%+v %v", found, err)
 	}
 }

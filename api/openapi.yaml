@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: haro App API
-  version: 0.6.0
+  version: 0.7.0
   description: |
     haro 手机 App 和网页版用的接口（第一批：账号、登录、我、花费、终端、管理员）。
     服务端和 App 都从这份契约生成代码；⛔ 两边都不绕过契约私下约定字段。契约每改一次升版本号。
@@ -459,6 +459,89 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+  /api/v1/conversations/{conversationId}/attachments:
+    parameters:
+      - $ref: '#/components/parameters/ConversationId'
+    post:
+      tags: [conversations]
+      operationId: uploadAttachment
+      summary: 在这条对话里传一张图片（请求体就是图片；服务端缩到合适的尺寸、存成 JPEG）
+      requestBody:
+        required: true
+        content:
+          image/jpeg:
+            schema:
+              type: string
+              format: binary
+          image/png:
+            schema:
+              type: string
+              format: binary
+          image/webp:
+            schema:
+              type: string
+              format: binary
+      responses:
+        '201':
+          description: 存好了
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AttachmentInfo'
+        '400':
+          $ref: '#/components/responses/ValidationFailed'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/attachments/{attachmentId}:
+    parameters:
+      - name: attachmentId
+        in: path
+        required: true
+        schema:
+          type: string
+          maxLength: 64
+    get:
+      tags: [conversations]
+      operationId: getAttachment
+      summary: 取回一张图片（只能取自己的）
+      responses:
+        '200':
+          description: 图片
+          content:
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/turns/search:
+    get:
+      tags: [conversations]
+      operationId: searchTurns
+      summary: 搜以前的对话（按文字和按意思找到的合在一起，新的在前；删了的对话里的不算）
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 200
+      responses:
+        '200':
+          description: 找到的几轮
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/FoundTurn'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
   /api/v1/spending:
     get:
       tags: [spending]
@@ -826,8 +909,11 @@ components:
             $ref: '#/components/schemas/Money'
     Limits:
       type: object
-      required: [profile_max_chars, display_name_max_chars, terminal_name_max_chars, page_size]
+      required: [profile_max_chars, display_name_max_chars, terminal_name_max_chars, page_size, attachment_max_bytes]
       properties:
+        attachment_max_bytes:
+          type: integer
+          description: 上传的一张图片最多多少字节
         profile_max_chars:
           type: integer
         display_name_max_chars:
@@ -1179,6 +1265,10 @@ components:
           type: string
           nullable: true
           description: 主人说的（这一轮没有主人的话时为 null，例如 haro 到点自己开口的提醒）
+        attachment:
+          type: string
+          nullable: true
+          description: 主人这句带的图片（attachment_id，用 /attachments/{attachmentId} 取）
         reply:
           type: array
           items:
@@ -1206,6 +1296,11 @@ components:
           type: string
           minLength: 1
           maxLength: 4000
+        attachment:
+          type: string
+          nullable: true
+          maxLength: 64
+          description: 这一句带的图片（先在这条对话里上传拿到的 attachment_id；先只收一张）
     ChatEventType:
       type: string
       enum: [started, text, done, failed]
@@ -1230,6 +1325,25 @@ components:
         message:
           type: string
           description: failed：给人看的说明（按 Accept-Language）；code 是 generation_failed（模型出错）或 internal
+    AttachmentInfo:
+      type: object
+      required: [attachment_id, width, height]
+      properties:
+        attachment_id:
+          type: string
+        width:
+          type: integer
+        height:
+          type: integer
+    FoundTurn:
+      type: object
+      required: [conversation_id, turn]
+      properties:
+        conversation_id:
+          type: string
+          description: 在哪条对话（语音那条是 voice）
+        turn:
+          $ref: '#/components/schemas/Turn'
     TerminalNetwork:
       type: string
       description: 从哪里连进来的

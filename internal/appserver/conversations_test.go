@@ -2,17 +2,26 @@ package appserver
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"image"
+	"image/jpeg"
+	"image/png"
 	"iter"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 	"unicode/utf8"
 
+	"github.com/getkin/kin-openapi/openapi3"
+
 	"github.com/bukahou/haro/internal/accounts"
+	"github.com/bukahou/haro/internal/attachments"
 	"github.com/bukahou/haro/internal/brain"
 	"github.com/bukahou/haro/internal/chat"
 	"github.com/bukahou/haro/internal/conversationstore"
@@ -65,11 +74,17 @@ func newChatFixture(t *testing.T) fixture {
 	t.Cleanup(func() { _ = conversations.Close() })
 	options := brain.Options{MaxHistoryTurn: 6}
 	book := brain.NewConversationBook(conversations, options, quietLogger)
-	service := chat.NewService(ctx, conversations, func(speaker chat.Speaker, thread string) chat.TextSession {
-		return brain.NewSession(brain.Components{Front: brain.Agent{Name: "前台", Model: echoModel{}, MaxSteps: 8, RepeatLimit: 3, RepeatWindow: 4},
-			Conversations: book, Thread: thread, TextOnly: true,
-			NewSegmenter: func() brain.TextSegmenter { return speech.NewSentenceSegmenter(4, 40) }}, options, quietLogger)
-	}, chat.AgentTitler{Agent: brain.Agent{Name: "起标题", Model: titleModel{}}}, quietLogger)
+	images, err := attachments.OpenFiles(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := chat.NewService(ctx, chat.Options{Store: conversations, Images: images, Logger: quietLogger,
+		Titler: chat.AgentTitler{Agent: brain.Agent{Name: "起标题", Model: titleModel{}}},
+		Sessions: func(speaker chat.Speaker, thread string) chat.TextSession {
+			return brain.NewSession(brain.Components{Front: brain.Agent{Name: "前台", Model: echoModel{}, MaxSteps: 8, RepeatLimit: 3, RepeatWindow: 4},
+				Conversations: book, Thread: thread, TextOnly: true,
+				NewSegmenter: func() brain.TextSegmenter { return speech.NewSentenceSegmenter(4, 40) }}, options, quietLogger)
+		}})
 	handler, err := NewHandler(ctx, Options{Accounts: store, Spending: fakeSpending{}, DefaultCurrency: "JPY", MinAppVersion: "1.0.0",
 		ProfileMaxChars: 10000, Chat: service, Logger: quietLogger})
 	if err != nil {
@@ -176,5 +191,84 @@ func TestChatOverHTTP(t *testing.T) {
 	}
 	if maxMessageRunes != 4000 {
 		t.Error("和契约 MessageSend.text 的 maxLength 对不上")
+	}
+}
+
+// upload 传一张图片。
+func (f fixture) upload(t *testing.T, conversation, contentType string, data []byte) (int, map[string]any) {
+	t.Helper()
+	request, _ := http.NewRequest("POST", f.server.URL+"/api/v1/conversations/"+conversation+"/attachments", bytes.NewReader(data))
+	request.Header.Set("Content-Type", contentType)
+	request.Header.Set("Authorization", "Bearer "+f.adminKey.AccessToken)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	body := map[string]any{}
+	_ = json.NewDecoder(response.Body).Decode(&body)
+	return response.StatusCode, body
+}
+
+// 图片：在对话里传（PNG 存成 JPEG）→ 带着它说一句 → 记录里这一轮带附件编号 → 取回是 JPEG；格式不对、别的对话的图片不收。
+// 搜以前的对话：按文字找得到（带在哪条对话）。
+func TestAttachmentsAndSearch(t *testing.T) {
+	f := newChatFixture(t)
+	key := f.adminKey.AccessToken
+	img := image.NewRGBA(image.Rect(0, 0, 40, 20))
+	var encoded bytes.Buffer
+	if err := png.Encode(&encoded, img); err != nil {
+		t.Fatal(err)
+	}
+	status, info := f.upload(t, "voice", "image/png", encoded.Bytes())
+	if status != 201 || info["width"] != float64(40) {
+		t.Fatalf("上传：%d %v", status, info)
+	}
+	id := info["attachment_id"].(string)
+	if status, _ := f.upload(t, "voice", "text/plain", []byte("x")); status != 400 {
+		t.Errorf("格式不对：%d", status)
+	}
+	if status, _ := f.upload(t, "voice", "image/png", []byte("不是图片")); status != 400 {
+		t.Errorf("解不开：%d", status)
+	}
+	status, events := f.stream(t, "voice", key, fmt.Sprintf(`{"text":"这是什么猫","attachment":%q}`, id))
+	if status != 200 || events[len(events)-1]["type"] != "done" {
+		t.Fatalf("带图说一句：%d %v", status, events)
+	}
+	status, page := f.call(t, "GET", "/api/v1/conversations/voice/turns", key, "")
+	turns, _ := page["turns"].([]any)
+	if status != 200 || len(turns) != 1 || turns[0].(map[string]any)["attachment"] != id {
+		t.Errorf("记录里带附件：%d %v", status, page)
+	}
+	request, _ := http.NewRequest("GET", f.server.URL+"/api/v1/attachments/"+id, nil)
+	request.Header.Set("Authorization", "Bearer "+key)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, decodeErr := jpeg.DecodeConfig(response.Body)
+	response.Body.Close()
+	if response.StatusCode != 200 || response.Header.Get("Content-Type") != "image/jpeg" || decodeErr != nil {
+		t.Errorf("取回：%d %s %v", response.StatusCode, response.Header.Get("Content-Type"), decodeErr)
+	}
+	_, created := f.call(t, "POST", "/api/v1/conversations", key, `{}`)
+	if status, _ := f.stream(t, created["conversation_id"].(string), key, fmt.Sprintf(`{"text":"再看看","attachment":%q}`, id)); status != 400 {
+		t.Errorf("别的对话的图片：%d", status)
+	}
+	found := f.list(t, "/api/v1/turns/search?q=%E7%8C%AB", "zh")
+	if len(found) != 1 || found[0]["conversation_id"] != "voice" {
+		t.Errorf("搜「猫」：%v", found)
+	}
+	contract, err := openapi3.NewLoader().LoadFromFile("../../api/openapi.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var types []string
+	for media := range contract.Paths.Find("/api/v1/conversations/{conversationId}/attachments").Post.RequestBody.Value.Content {
+		types = append(types, media)
+	}
+	slices.Sort(types)
+	if want := slices.Sorted(slices.Values(uploadedTypes)); !slices.Equal(types, want) {
+		t.Errorf("契约里收的图片格式 %v，代码里 %v", types, want)
 	}
 }

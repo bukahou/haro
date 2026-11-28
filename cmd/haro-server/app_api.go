@@ -8,11 +8,13 @@ import (
 
 	"github.com/bukahou/haro/internal/accounts"
 	"github.com/bukahou/haro/internal/appserver"
+	"github.com/bukahou/haro/internal/attachments"
 	"github.com/bukahou/haro/internal/brain"
 	"github.com/bukahou/haro/internal/brainserver"
 	"github.com/bukahou/haro/internal/chat"
 	"github.com/bukahou/haro/internal/config"
 	"github.com/bukahou/haro/internal/household"
+	"github.com/bukahou/haro/internal/memory"
 	"github.com/bukahou/haro/internal/profile"
 )
 
@@ -68,6 +70,22 @@ func openAccounts(ctx context.Context, settings config.ServerSettings, logger *s
 	return opened, nil
 }
 
+// memoryRecall 把长期记忆接到打字对话的搜索：按意思找到的轮次编号（没开按意思找时只给最近记的事，没有轮次）。
+type memoryRecall struct{ keeper *memory.Keeper }
+
+// RecallTurns 实现 chat.Recaller。
+func (m memoryRecall) RecallTurns(ctx context.Context, person, query string) ([]int64, error) {
+	recollection, err := m.keeper.Recall(ctx, person, query)
+	if err != nil {
+		return nil, err
+	}
+	seqs := make([]int64, 0, len(recollection.Turns))
+	for _, turn := range recollection.Turns {
+		seqs = append(seqs, turn.Seq)
+	}
+	return seqs, nil
+}
+
 // appBrain 是 App 的打字对话要用的大脑（和终端的会话同一套部件）。
 type appBrain struct {
 	components brain.Components
@@ -105,11 +123,23 @@ func buildAppAPI(ctx context.Context, settings config.ServerSettings, deps servi
 		options.Places = kit.places
 	}
 	if deps.conversations != nil { // 打字对话要对话库（线程、完整记录）
-		var titler chat.Titler
+		chatOptions := chat.Options{Store: deps.conversations, Sessions: assembled.textSessions(logger), Logger: logger}
 		if assembled.title != nil {
-			titler = chat.AgentTitler{Agent: *assembled.title}
+			chatOptions.Titler = chat.AgentTitler{Agent: *assembled.title}
 		}
-		options.Chat = chat.NewService(ctx, deps.conversations, assembled.textSessions(logger), titler, logger)
+		if kit.memory != nil {
+			chatOptions.Recall = memoryRecall{keeper: kit.memory}
+		}
+		if settings.AttachmentsDir != "" { // App 里发的图片
+			files, err := attachments.OpenFiles(settings.AttachmentsDir)
+			if err != nil {
+				return nil, err
+			}
+			chatOptions.Images = files
+		} else {
+			logger.Info("App 的打字对话：没设 HARO_ATTACHMENTS_DIR，不收图片")
+		}
+		options.Chat = chat.NewService(ctx, chatOptions)
 	}
 	if kit.memory != nil {
 		options.Memory = kit.memory

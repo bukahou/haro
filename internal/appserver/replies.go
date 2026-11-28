@@ -51,3 +51,5 @@ func (p problemReply) VisitRestoreConversationResponse(w http.ResponseWriter) er
 }
 func (p problemReply) VisitListTurnsResponse(w http.ResponseWriter) error { return p.write(w) }
 func (p problemReply) VisitStopTurnResponse(w http.ResponseWriter) error  { return p.write(w) }
+
+func (p problemReply) VisitSearchTurnsResponse(w http.ResponseWriter) error { return p.write(w) }
