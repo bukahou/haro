@@ -149,6 +149,9 @@ func buildAppAPI(ctx context.Context, settings config.ServerSettings, deps servi
 	if assembled.backstory != nil {
 		options.Backstory = assembled.backstory
 	}
+	if kit.calendar != nil {
+		options.Calendar = kit.calendar
+	}
 	if kit.research != nil {
 		options.Research = kit.research
 	}

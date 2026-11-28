@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: haro App API
-  version: 0.8.0
+  version: 0.9.0
   description: |
     haro 手机 App 和网页版用的接口（第一批：账号、登录、我、花费、终端、管理员）。
     服务端和 App 都从这份契约生成代码；⛔ 两边都不绕过契约私下约定字段。契约每改一次升版本号。
@@ -35,6 +35,8 @@ tags:
     description: 聊天：语音那条对话和 App 里新建的对话
   - name: memory
     description: 记录：背景记录池、记过的事、后台调查
+  - name: calendar
+    description: 日历：haro 自己的日程和系统日历同步进来的
 paths:
   /api/v1/auth/oidc/start:
     get:
@@ -708,6 +710,201 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+  /api/v1/calendar/occurrences:
+    get:
+      tags: [calendar]
+      operationId: listOccurrences
+      summary: 一段时间里的每一次（重复的已经展开；haro 自己的和系统日历同步进来的，开始的先后）
+      parameters:
+        - name: from
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          required: true
+          description: 不含；from 到 to 最多 92 天
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: 每一次
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Occurrence'
+        '400':
+          $ref: '#/components/responses/ValidationFailed'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/calendar/events:
+    post:
+      tags: [calendar]
+      operationId: createEvent
+      summary: 新建一条 haro 自己的日程
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EventInput'
+      responses:
+        '201':
+          description: 建好的
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CalendarEvent'
+        '400':
+          $ref: '#/components/responses/ValidationFailed'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/calendar/events/{eventId}:
+    parameters:
+      - name: eventId
+        in: path
+        required: true
+        schema:
+          type: string
+          maxLength: 64
+    get:
+      tags: [calendar]
+      operationId: getEvent
+      summary: 一条日程
+      responses:
+        '200':
+          description: 日程
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CalendarEvent'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      tags: [calendar]
+      operationId: updateEvent
+      summary: 改一条 haro 自己的日程（重复的用 scope 说改哪些；返回改后的那条 —— 只改这一次、以后都改时是新拆出来的那条）
+      parameters:
+        - $ref: '#/components/parameters/EditScope'
+        - $ref: '#/components/parameters/OccurrenceStart'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EventInput'
+      responses:
+        '200':
+          description: 改后的
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CalendarEvent'
+        '400':
+          $ref: '#/components/responses/ValidationFailed'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+    delete:
+      tags: [calendar]
+      operationId: deleteEvent
+      summary: 删一条 haro 自己的日程（重复的用 scope 说删哪些）
+      parameters:
+        - $ref: '#/components/parameters/EditScope'
+        - $ref: '#/components/parameters/OccurrenceStart'
+      responses:
+        '204':
+          description: 删了
+        '400':
+          $ref: '#/components/responses/ValidationFailed'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/calendar/alerts:
+    get:
+      tags: [calendar]
+      operationId: listPhoneAlerts
+      summary: 从现在到 until 要在手机上响的提醒（App 排本地通知用；时间先后）
+      parameters:
+        - name: until
+          in: query
+          required: true
+          description: 最多从现在往后 30 天
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: 提醒
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PhoneAlert'
+        '400':
+          $ref: '#/components/responses/ValidationFailed'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/calendar/syncs:
+    get:
+      tags: [calendar]
+      operationId: listCalendarSyncs
+      summary: 同步过的系统日历（上次同步的时间）
+      responses:
+        '200':
+          description: 同步过的
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/CalendarSync'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/calendar/syncs/{calendarId}:
+    parameters:
+      - name: calendarId
+        in: path
+        required: true
+        description: 系统给这个日历的编号
+        schema:
+          type: string
+          maxLength: 200
+    put:
+      tags: [calendar]
+      operationId: syncCalendar
+      summary: 交来一个系统日历在同步范围内的全部日程（重复的展开成每一次）；原来有、这次没交来的删掉
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CalendarSyncRequest'
+      responses:
+        '200':
+          description: 同步的结果
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CalendarSyncResult'
+        '400':
+          $ref: '#/components/responses/ValidationFailed'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
   /api/v1/spending:
     get:
       tags: [spending]
@@ -893,6 +1090,22 @@ components:
       schema:
         type: string
         maxLength: 100
+    EditScope:
+      name: scope
+      in: query
+      required: false
+      description: 重复的日程改、删哪些：all（整个系列，默认）、this（只这一次）、future（这一次和以后）；this、future 要带 occurrence
+      schema:
+        type: string
+        enum: [all, this, future]
+    OccurrenceStart:
+      name: occurrence
+      in: query
+      required: false
+      description: scope 是 this、future 时，是哪一次（那一次的开始时间，occurrences 给的 start）
+      schema:
+        type: string
+        format: date-time
     NoteId:
       name: noteId
       in: path
@@ -1082,11 +1295,18 @@ components:
             $ref: '#/components/schemas/Money'
     Limits:
       type: object
-      required: [profile_max_chars, display_name_max_chars, terminal_name_max_chars, page_size, attachment_max_bytes]
+      required: [profile_max_chars, display_name_max_chars, terminal_name_max_chars, page_size, attachment_max_bytes,
+        calendar_sync_days_back, calendar_sync_days_ahead]
       properties:
         attachment_max_bytes:
           type: integer
           description: 上传的一张图片最多多少字节
+        calendar_sync_days_back:
+          type: integer
+          description: 同步系统日历时往前交多少天的日程
+        calendar_sync_days_ahead:
+          type: integer
+          description: 同步系统日历时往后交多少天的日程
         profile_max_chars:
           type: integer
         display_name_max_chars:
@@ -1640,6 +1860,183 @@ components:
         created_at:
           type: string
           format: date-time
+    EventInput:
+      type: object
+      required: [title, start, end, all_day, alerts, alert_terminal, alert_phone]
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        location:
+          type: string
+          maxLength: 2000
+        notes:
+          type: string
+          maxLength: 2000
+        start:
+          type: string
+          format: date-time
+          description: 全天的写那一天的 00:00Z
+        end:
+          type: string
+          format: date-time
+          description: 全天的写最后一天的第二天 00:00Z（不含）
+        all_day:
+          type: boolean
+        rrule:
+          type: string
+          nullable: true
+          maxLength: 500
+          description: 重复规则（RFC 5545 RRULE 一行，例如 FREQ=WEEKLY;BYDAY=MO）；null = 一次
+        alerts:
+          type: array
+          maxItems: 5
+          description: 提醒：提前多少秒（0 = 到点时）
+          items:
+            type: integer
+            minimum: 0
+            maximum: 604800
+        alert_terminal:
+          type: boolean
+          description: 在终端响（haro 说出来）
+        alert_phone:
+          type: boolean
+          description: 在手机响（App 的本地通知）
+    CalendarSource:
+      type: string
+      description: haro = haro 自己的（能改）；system = 从系统日历同步进来的（只读）
+      enum: [haro, system]
+    CalendarEvent:
+      type: object
+      required: [event_id, title, location, notes, start, end, all_day, rrule, alerts, alert_terminal, alert_phone, source, calendar_name, editable]
+      properties:
+        event_id:
+          type: string
+        title:
+          type: string
+        location:
+          type: string
+        notes:
+          type: string
+        start:
+          type: string
+          format: date-time
+        end:
+          type: string
+          format: date-time
+        all_day:
+          type: boolean
+        rrule:
+          type: string
+          nullable: true
+        alerts:
+          type: array
+          items:
+            type: integer
+        alert_terminal:
+          type: boolean
+        alert_phone:
+          type: boolean
+        source:
+          $ref: '#/components/schemas/CalendarSource'
+        calendar_name:
+          type: string
+          nullable: true
+          description: 从哪个系统日历同步进来的
+        editable:
+          type: boolean
+    Occurrence:
+      type: object
+      required: [event, start, end, recurring]
+      properties:
+        event:
+          $ref: '#/components/schemas/CalendarEvent'
+        start:
+          type: string
+          format: date-time
+          description: 这一次的开始（改、删这一次时带回来）
+        end:
+          type: string
+          format: date-time
+        recurring:
+          type: boolean
+    PhoneAlert:
+      type: object
+      required: [event_id, title, occurrence_start, at, lead_seconds]
+      properties:
+        event_id:
+          type: string
+        title:
+          type: string
+        occurrence_start:
+          type: string
+          format: date-time
+        at:
+          type: string
+          format: date-time
+          description: 什么时候响
+        lead_seconds:
+          type: integer
+    CalendarSync:
+      type: object
+      required: [calendar_id, name, synced_at]
+      properties:
+        calendar_id:
+          type: string
+        name:
+          type: string
+        synced_at:
+          type: string
+          format: date-time
+    CalendarSyncRequest:
+      type: object
+      required: [name, events]
+      properties:
+        name:
+          type: string
+          maxLength: 200
+          description: 系统日历的名字（显示用）
+        events:
+          type: array
+          maxItems: 2000
+          items:
+            $ref: '#/components/schemas/SyncedEvent'
+    SyncedEvent:
+      type: object
+      required: [external_id, title, start, end, all_day]
+      properties:
+        external_id:
+          type: string
+          maxLength: 300
+          description: 系统给这一次的编号（重复的每一次各不相同）
+        title:
+          type: string
+          maxLength: 500
+        location:
+          type: string
+          maxLength: 2000
+        notes:
+          type: string
+          maxLength: 2000
+        start:
+          type: string
+          format: date-time
+        end:
+          type: string
+          format: date-time
+        all_day:
+          type: boolean
+    CalendarSyncResult:
+      type: object
+      required: [added, updated, removed]
+      properties:
+        added:
+          type: integer
+        updated:
+          type: integer
+        removed:
+          type: integer
     TerminalNetwork:
       type: string
       description: 从哪里连进来的

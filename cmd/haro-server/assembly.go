@@ -15,6 +15,7 @@ import (
 	"github.com/bukahou/haro/internal/brain"
 	"github.com/bukahou/haro/internal/brainserver"
 	"github.com/bukahou/haro/internal/buildinfo"
+	"github.com/bukahou/haro/internal/calendar"
 	"github.com/bukahou/haro/internal/config"
 	"github.com/bukahou/haro/internal/conversationstore"
 	"github.com/bukahou/haro/internal/embedding"
@@ -156,6 +157,7 @@ type tooling struct {
 	research     *research.Runner         // 后台调查（App 的概览数进行中的）；没开时为 nil
 	household    *household.Service       // 每个账号的主人资料、家的位置、节假日（大脑、天气、App 都从这里取）
 	places       *weather.OpenMeteoClient // 搜地名（App 设家的位置用）；天气那组工具关着时为 nil
+	calendar     *calendar.Service        // 日历；提醒那组工具关着时为 nil
 }
 
 // buildTooling 准备工具：自研工具内置（长期记忆（记事已并进来）、提醒直接连数据库；天气；联网搜索与后台调查），MCP 只接第三方（现在还没有）。
@@ -196,12 +198,15 @@ func buildTooling(ctx context.Context, settings config.ServerSettings, catalog a
 		kit.briefers = append(kit.briefers, keeper) // 常驻记忆：每轮附在情况说明里
 	}
 	if settings.ToolGroupOn(config.ToolGroupReminders) {
-		scheduler, stopReminders, err := startReminders(ctx, settings, kit.notices, logger)
+		scheduler, calendarService, stopReminders, err := startReminders(ctx, settings, kit.notices, logger)
 		if err != nil {
 			return kit, err
 		}
 		shutdown.add("提醒", stopReminders)
-		builtins = append(builtins, tools.ReminderTools(scheduler, logger))
+		kit.calendar = calendarService
+		// 语音的提醒工具接在日历上：定提醒同时建日程（App 里看得到）；「查日程」给模型
+		builtins = append(builtins, tools.ReminderTools(calendar.ReminderDesk{Calendar: calendarService, Scheduler: scheduler}, logger),
+			tools.CalendarTools(calendarService, scheduler.Location(), logger))
 		kit.briefers = append(kit.briefers, scheduler) // 错过的提醒：主人下次开口时告诉他
 	}
 	if settings.ToolGroupOn(config.ToolGroupWeather) { // 天气：Open-Meteo 为主（备用按 HARO_WEATHER_BACKUP）；都不用密钥

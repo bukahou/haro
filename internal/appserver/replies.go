@@ -65,3 +65,12 @@ func (p problemReply) VisitForgetNoteResponse(w http.ResponseWriter) error      
 func (p problemReply) VisitRestoreNoteResponse(w http.ResponseWriter) error       { return p.write(w) }
 func (p problemReply) VisitListResearchTasksResponse(w http.ResponseWriter) error { return p.write(w) }
 func (p problemReply) VisitGetResearchTaskResponse(w http.ResponseWriter) error   { return p.write(w) }
+
+func (p problemReply) VisitListOccurrencesResponse(w http.ResponseWriter) error   { return p.write(w) }
+func (p problemReply) VisitCreateEventResponse(w http.ResponseWriter) error       { return p.write(w) }
+func (p problemReply) VisitGetEventResponse(w http.ResponseWriter) error          { return p.write(w) }
+func (p problemReply) VisitUpdateEventResponse(w http.ResponseWriter) error       { return p.write(w) }
+func (p problemReply) VisitDeleteEventResponse(w http.ResponseWriter) error       { return p.write(w) }
+func (p problemReply) VisitListPhoneAlertsResponse(w http.ResponseWriter) error   { return p.write(w) }
+func (p problemReply) VisitListCalendarSyncsResponse(w http.ResponseWriter) error { return p.write(w) }
+func (p problemReply) VisitSyncCalendarResponse(w http.ResponseWriter) error      { return p.write(w) }

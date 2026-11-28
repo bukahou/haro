@@ -101,6 +101,7 @@ func (s *Server) monthSpending(ctx context.Context, summary spending.Summary) ap
 func (s *Server) GetClientConfig(ctx context.Context, _ appapi.GetClientConfigRequestObject) (appapi.GetClientConfigResponseObject, error) {
 	config := appapi.ClientConfig{ServerVersion: serverVersion(), ApiVersion: s.spec.Info.Version, MinAppVersion: s.opts.MinAppVersion,
 		Limits: appapi.Limits{ProfileMaxChars: s.opts.ProfileMaxChars, PageSize: pageSize, AttachmentMaxBytes: attachmentMaxBytes,
+			CalendarSyncDaysBack: calendarSyncDaysBack, CalendarSyncDaysAhead: calendarSyncDaysAhead,
 			DisplayNameMaxChars: s.maxLength("MeUpdate", "display_name"), TerminalNameMaxChars: s.maxLength("TerminalUpdate", "name")}}
 	if len(s.opts.CapOptions) > 0 {
 		options := make([]appapi.Money, 0, len(s.opts.CapOptions))
