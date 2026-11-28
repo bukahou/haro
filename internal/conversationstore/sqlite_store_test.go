@@ -42,14 +42,14 @@ func sampleRecord(person string) brain.ConversationRecord {
 // 存进去的读出来一模一样（时间、工具往来、系统合成的标记、没收尾的一轮）；整份替换，再存少的不留旧的；文件只有自己能读。
 func TestSQLiteStoreRoundTrip(t *testing.T) {
 	store, path := openTestStore(t)
-	if _, ok, err := store.LoadConversation("主人"); ok || err != nil {
+	if _, ok, err := store.LoadConversation("主人", ""); ok || err != nil {
 		t.Fatalf("没存过时应 ok=false：%v %v", ok, err)
 	}
 	want := sampleRecord("主人")
 	if err := store.SaveConversation(want); err != nil {
 		t.Fatal(err)
 	}
-	got, ok, err := store.LoadConversation("主人")
+	got, ok, err := store.LoadConversation("主人", "")
 	if err != nil || !ok {
 		t.Fatalf("%v %v", ok, err)
 	}
@@ -74,7 +74,7 @@ func TestSQLiteStoreRoundTrip(t *testing.T) {
 	if err := store.SaveConversation(shorter); err != nil {
 		t.Fatal(err)
 	}
-	if got, _, _ := store.LoadConversation("主人"); len(got.History) != 1 || got.Unsummarized != nil || got.OpenTurn != nil {
+	if got, _, _ := store.LoadConversation("主人", ""); len(got.History) != 1 || got.Unsummarized != nil || got.OpenTurn != nil {
 		t.Errorf("再存时应整份替换：%+v", got)
 	}
 	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o600 {
@@ -97,7 +97,7 @@ func TestSQLiteStoreConcurrentSaves(t *testing.T) {
 	}
 	wg.Wait()
 	for _, person := range []string{"主人", "家人", "客人", "_shared"} {
-		if got, ok, err := store.LoadConversation(person); !ok || err != nil || len(got.History) != 2 {
+		if got, ok, err := store.LoadConversation(person, ""); !ok || err != nil || len(got.History) != 2 {
 			t.Errorf("%s 的对话应完整：%v %v %+v", person, ok, err, got.History)
 		}
 	}

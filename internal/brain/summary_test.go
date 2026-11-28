@@ -231,7 +231,7 @@ func TestStoredUnsummarizedTurnsAreCappedOnNextTurn(t *testing.T) {
 	for seq := 1; seq <= maxUnsummarizedTurns+5; seq++ {
 		stored = append(stored, ConversationTurn{Seq: seq, Messages: []ChatMessage{{Role: RoleUser, Text: "问"}}})
 	}
-	store := &memoryStore{records: map[string]ConversationRecord{"主人": {Person: "主人", TurnCount: len(stored), Unsummarized: stored}}}
+	store := &memoryStore{records: map[string]ConversationRecord{"主人\x00": {Person: "主人", TurnCount: len(stored), Unsummarized: stored}}}
 	book := NewConversationBook(store, Options{MaxHistoryTurn: 2}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	book.SummarizeWith(Agent{Name: "摘要", Model: failingSummaryModel{}, Instructions: "写摘要。"})
 	conversation := book.Conversation("主人")
@@ -239,7 +239,7 @@ func TestStoredUnsummarizedTurnsAreCappedOnNextTurn(t *testing.T) {
 	if got := unsummarizedSeqs(conversation); !slices.Equal(got, seqRange(6, maxUnsummarizedTurns+5)) {
 		t.Errorf("记下一轮时按上限截：%v", got)
 	}
-	if saved, _, _ := store.LoadConversation("主人"); len(saved.Unsummarized) != maxUnsummarizedTurns {
+	if saved, _, _ := store.LoadConversation("主人", ""); len(saved.Unsummarized) != maxUnsummarizedTurns {
 		t.Errorf("截了要写盘：%d 轮", len(saved.Unsummarized))
 	}
 }

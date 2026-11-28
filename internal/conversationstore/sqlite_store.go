@@ -46,15 +46,15 @@ const (
 	partUnsummarized = "unsummarized"
 )
 
-// LoadConversation 读一个人的对话；没存过时 ok=false。
-func (s *SQLiteStore) LoadConversation(person string) (brain.ConversationRecord, bool, error) {
+// LoadConversation 读一个人的一条对话；没存过时 ok=false。
+func (s *SQLiteStore) LoadConversation(person, thread string) (brain.ConversationRecord, bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), operationTimeout)
 	defer cancel()
-	record := brain.ConversationRecord{Person: person}
+	record := brain.ConversationRecord{Person: person, Thread: thread}
 	var openTurn sql.NullString
 	var updated int64
-	err := s.db.QueryRowContext(ctx,
-		`SELECT persona_id, summary, tool_call_count, turn_count, open_turn, updated_at FROM conversations WHERE person = ?`, person).
+	err := s.db.QueryRowContext(ctx, `SELECT persona_id, summary, tool_call_count, turn_count, open_turn, updated_at FROM conversations
+		WHERE person = ? AND thread = ?`, person, thread).
 		Scan(&record.PersonaID, &record.Summary, &record.ToolCallCount, &record.TurnCount, &openTurn, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return brain.ConversationRecord{}, false, nil
@@ -70,7 +70,8 @@ func (s *SQLiteStore) LoadConversation(person string) (brain.ConversationRecord,
 		}
 		record.OpenTurn = &turn
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT part, seq, at, messages FROM turns WHERE person = ? ORDER BY part, position`, person)
+	rows, err := s.db.QueryContext(ctx, `SELECT part, seq, at, messages FROM turns WHERE person = ? AND thread = ? ORDER BY part, position`,
+		person, thread)
 	if err != nil {
 		return brain.ConversationRecord{}, false, err
 	}
@@ -117,15 +118,16 @@ func (s *SQLiteStore) SaveConversation(record brain.ConversationRecord) error {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO conversations (person, persona_id, summary, tool_call_count, turn_count, open_turn, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT (person) DO UPDATE SET persona_id = excluded.persona_id, summary = excluded.summary,
+	if _, err := tx.ExecContext(ctx, `INSERT INTO conversations (person, thread, persona_id, summary, tool_call_count, turn_count, open_turn,
+		updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT (person, thread) DO UPDATE SET persona_id = excluded.persona_id, summary = excluded.summary,
 			tool_call_count = excluded.tool_call_count, turn_count = excluded.turn_count, open_turn = excluded.open_turn,
 			updated_at = excluded.updated_at`,
-		record.Person, record.PersonaID, record.Summary, record.ToolCallCount, record.TurnCount, openTurn, record.UpdatedAt.Unix()); err != nil {
+		record.Person, record.Thread, record.PersonaID, record.Summary, record.ToolCallCount, record.TurnCount, openTurn,
+		record.UpdatedAt.Unix()); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM turns WHERE person = ?`, record.Person); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM turns WHERE person = ? AND thread = ?`, record.Person, record.Thread); err != nil {
 		return err
 	}
 	var kept []int64 // 完整记录里已经是另一轮、没有覆盖的编号
@@ -146,8 +148,8 @@ func (s *SQLiteStore) SaveConversation(record brain.ConversationRecord) error {
 			if turn.Seq > 0 {
 				seq = sql.NullInt64{Int64: int64(turn.Seq), Valid: true}
 			}
-			if _, err := tx.ExecContext(ctx, `INSERT INTO turns (person, part, position, seq, at, messages) VALUES (?, ?, ?, ?, ?, ?)`,
-				record.Person, part.name, position, seq, at, string(messages)); err != nil {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO turns (person, thread, part, position, seq, at, messages) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+				record.Person, record.Thread, part.name, position, seq, at, string(messages)); err != nil {
 				return err
 			}
 			if !seq.Valid { // 没编号的不进完整记录（大脑读出来时会补编号，下次保存再写）
@@ -155,9 +157,11 @@ func (s *SQLiteStore) SaveConversation(record brain.ConversationRecord) error {
 			}
 			// 完整记录：只增不删；同一轮再写一次（被打断、改成主人听到的部分）时跟着更新。
 			// 同一轮 = 说话的时间相同（IS：旧记录里都不知道时间的也算同一轮）；不同时改 0 行
-			result, err := tx.ExecContext(ctx, `INSERT INTO transcript (person, seq, at, messages) VALUES (?, ?, ?, ?)
-				ON CONFLICT (person, seq) DO UPDATE SET messages = excluded.messages WHERE transcript.at IS excluded.at`,
-				record.Person, seq, at, string(messages))
+			// 同一个人的编号所有线程共用：同一编号、同一时间、同一线程才算同一轮
+			result, err := tx.ExecContext(ctx, `INSERT INTO transcript (person, seq, thread, at, messages) VALUES (?, ?, ?, ?, ?)
+				ON CONFLICT (person, seq) DO UPDATE SET messages = excluded.messages
+				WHERE transcript.at IS excluded.at AND transcript.thread = excluded.thread`,
+				record.Person, seq, record.Thread, at, string(messages))
 			if err != nil {
 				return err
 			}
@@ -177,6 +181,16 @@ func (s *SQLiteStore) SaveConversation(record brain.ConversationRecord) error {
 		return &TranscriptKeptError{Person: record.Person, Seqs: kept}
 	}
 	return nil
+}
+
+// LastSeq 是这个人用过的最大轮次编号（所有线程、完整记录里的都算；没有时为 0）。
+func (s *SQLiteStore) LastSeq(person string) (int, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), operationTimeout)
+	defer cancel()
+	var last int
+	err := s.db.QueryRowContext(ctx, `SELECT MAX(COALESCE((SELECT MAX(seq) FROM transcript WHERE person = ?), 0),
+		COALESCE((SELECT MAX(turn_count) FROM conversations WHERE person = ?), 0))`, person, person).Scan(&last)
+	return last, err
 }
 
 // TranscriptKeptError 表示保存时有几轮没写进完整的对话记录：记录里同一编号已经是另一轮（说话的时间不同），没有覆盖它。

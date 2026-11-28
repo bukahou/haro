@@ -16,11 +16,23 @@ type memoryStore struct {
 	records map[string]ConversationRecord
 }
 
-func (m *memoryStore) LoadConversation(person string) (ConversationRecord, bool, error) {
+func (m *memoryStore) LoadConversation(person, thread string) (ConversationRecord, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	record, ok := m.records[person]
+	record, ok := m.records[person+"\x00"+thread]
 	return record, ok, nil
+}
+
+func (m *memoryStore) LastSeq(person string) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	last := 0
+	for _, record := range m.records {
+		if record.Person == person {
+			last = max(last, record.TurnCount)
+		}
+	}
+	return last, nil
 }
 
 func (m *memoryStore) SaveConversation(record ConversationRecord) error {
@@ -29,7 +41,7 @@ func (m *memoryStore) SaveConversation(record ConversationRecord) error {
 	if m.records == nil {
 		m.records = map[string]ConversationRecord{}
 	}
-	m.records[record.Person] = record
+	m.records[record.Person+"\x00"+record.Thread] = record
 	return nil
 }
 
@@ -127,30 +139,30 @@ func TestOpenTurnIsRecoveredAfterRestart(t *testing.T) {
 	if len(got) != (1+2)+(1+len(open.Messages)) || got[len(got)-2].Text != "记好了" || got[len(got)-1].Text != restartedUnfinished {
 		t.Fatalf("中途重启的那一轮应照实接进历史：%+v", got)
 	}
-	if record, _, _ := store.LoadConversation("主人"); record.OpenTurn != nil || len(record.History) != 2 {
+	if record, _, _ := store.LoadConversation("主人", ""); record.OpenTurn != nil || len(record.History) != 2 {
 		t.Errorf("接上之后应写盘、清掉没收尾的记录：%+v", record)
 	}
 	// 正常收尾的一轮会替掉没收尾的记录
 	restarted.keepOpenTurn(open)
 	restarted.appendTurn(ConversationTurn{Messages: []ChatMessage{{Role: RoleUser, Text: "再见"}, {Role: RoleAssistant, Text: "拜拜。"}}}, 0, false)
-	if record, _, _ := store.LoadConversation("主人"); record.OpenTurn != nil {
+	if record, _, _ := store.LoadConversation("主人", ""); record.OpenTurn != nil {
 		t.Errorf("正常收尾后不应留着没收尾的记录：%+v", record.OpenTurn)
 	}
 }
 
 // 每一轮编上号（这个人的第几轮），编到第几存下来；旧的记录里没编号的，读出来时按先后补上并写盘。
 func TestTurnsAreNumbered(t *testing.T) {
-	store := &memoryStore{records: map[string]ConversationRecord{"主人": {Person: "主人",
+	store := &memoryStore{records: map[string]ConversationRecord{"主人\x00": {Person: "主人",
 		Unsummarized: []ConversationTurn{{Messages: []ChatMessage{{Role: RoleUser, Text: "较早"}}}},
 		History:      []ConversationTurn{{Messages: []ChatMessage{{Role: RoleUser, Text: "最近"}}}}}}}
 	book := NewConversationBook(store, Options{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	conversation := book.Conversation("主人")
-	saved := store.records["主人"]
+	saved := store.records["主人\x00"]
 	if saved.TurnCount != 2 || saved.Unsummarized[0].Seq != 1 || saved.History[0].Seq != 2 {
 		t.Fatalf("没编号的按先后补上并写盘：%+v", saved)
 	}
 	conversation.appendTurn(ConversationTurn{Messages: []ChatMessage{{Role: RoleUser, Text: "新的"}}}, 0, false)
-	saved = store.records["主人"]
+	saved = store.records["主人\x00"]
 	if saved.TurnCount != 3 || saved.History[len(saved.History)-1].Seq != 3 {
 		t.Errorf("新的一轮接着编号：%+v", saved)
 	}

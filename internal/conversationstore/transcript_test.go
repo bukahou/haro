@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -76,7 +77,7 @@ func TestTranscriptKeepsEveryTurn(t *testing.T) {
 			t.Errorf("第 %d 轮：%q，应为 %q", seq, got[seq], answer)
 		}
 	}
-	loaded, ok, err := store.LoadConversation("主人")
+	loaded, ok, err := store.LoadConversation("主人", "")
 	if err != nil || !ok || loaded.TurnCount != 5 || loaded.History[0].Seq != 3 || loaded.History[3].Seq != 0 {
 		t.Errorf("轮次编号和编到第几都要存下：%+v %v", loaded, err)
 	}
@@ -108,7 +109,7 @@ func TestTranscriptKeepsTurnWhenSeqIsReused(t *testing.T) {
 			t.Errorf("完整记录第 %d 轮被改了：%q，应为 %q", seq, got[seq], answer)
 		}
 	}
-	if loaded, ok, err := store.LoadConversation("主人"); err != nil || !ok || loaded.TurnCount != 1 || len(loaded.History) != 1 {
+	if loaded, ok, err := store.LoadConversation("主人", ""); err != nil || !ok || loaded.TurnCount != 1 || len(loaded.History) != 1 {
 		t.Errorf("这份对话照样存下：%+v %v", loaded, err)
 	}
 }
@@ -149,7 +150,7 @@ func TestTranscriptMigrationNumbersExistingTurns(t *testing.T) {
 			t.Errorf("第 %d 轮：%q，应为 %q（全部：%v）", seq, got[seq], answer, got)
 		}
 	}
-	record, ok, err := store.LoadConversation("主人")
+	record, ok, err := store.LoadConversation("主人", "")
 	if err != nil || !ok || record.TurnCount != 4 || record.Unsummarized[0].Seq != 1 || record.History[1].Seq != 4 {
 		t.Errorf("迁移后读出来的轮次应带编号、编到第 4 轮：%+v %v", record, err)
 	}
@@ -204,5 +205,96 @@ func TestTranscriptVectors(t *testing.T) {
 	}
 	if err := store.SaveTurnVector(ctx, "主人", 99, "e5", "x", []float32{1}); err == nil {
 		t.Error("不存在的轮次不该存进向量（外键）")
+	}
+}
+
+// 分线程之前的库（第 3 版）：对话、最近几轮、完整记录、向量都原样搬到语音那条线程（”）下，一行不少；之后接着编号。
+func TestThreadMigrationKeepsEverything(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "conversations.db")
+	old, err := sql.Open("sqlite", path+"?_pragma=foreign_keys(1)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := fstest.MapFS{}
+	for _, name := range []string{"00001_conversations.sql", "00002_transcript.sql", "00003_transcript_vectors.sql"} {
+		data, err := fs.ReadFile(migrationFiles, "migrations/"+name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		previous["migrations/"+name] = &fstest.MapFile{Data: data}
+	}
+	if err := sqliteschema.Migrate(ctx, old, previous); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := old.ExecContext(ctx, `INSERT INTO conversations (person, persona_id, summary, tool_call_count, turn_count, open_turn, updated_at)
+			VALUES ('主人', 'buddy', '旧摘要', 7, 3, NULL, 100), ('老大', '', '', 0, 1, NULL, 50);
+		INSERT INTO turns (person, part, position, at, messages, seq) VALUES
+			('主人', 'unsummarized', 0, 1, '[{"role":"assistant","text":"较早"}]', 1),
+			('主人', 'history', 0, 2, '[{"role":"assistant","text":"最近一"}]', 2),
+			('主人', 'history', 1, 3, '[{"role":"assistant","text":"最近二"}]', 3),
+			('老大', 'history', 0, 4, '[{"role":"assistant","text":"老大的"}]', 1);
+		INSERT INTO transcript (person, seq, at, messages) SELECT person, seq, at, messages FROM turns;
+		INSERT INTO transcript_vectors (person, seq, model, digest, vector) VALUES ('主人', 2, 'e5', 'd', x'00000000');`); err != nil {
+		t.Fatal(err)
+	}
+	old.Close()
+
+	store, err := OpenSQLite(ctx, path)
+	if err != nil {
+		t.Fatalf("升级：%v", err)
+	}
+	defer store.Close()
+	record, ok, err := store.LoadConversation("主人", brain.VoiceThread)
+	if err != nil || !ok || record.PersonaID != "buddy" || record.Summary != "旧摘要" || record.ToolCallCount != 7 || record.TurnCount != 3 ||
+		len(record.Unsummarized) != 1 || len(record.History) != 2 || record.History[1].Seq != 3 {
+		t.Errorf("主人的对话：%+v %v", record, err)
+	}
+	if other, ok, _ := store.LoadConversation("老大", brain.VoiceThread); !ok || len(other.History) != 1 {
+		t.Errorf("老大的对话：%+v", other)
+	}
+	if got := transcriptOf(t, store, "主人"); got[1] != "较早" || got[3] != "最近二" {
+		t.Errorf("完整记录：%v", got)
+	}
+	if vectors, err := store.TurnVectors(ctx, "e5"); err != nil || len(vectors) != 1 || vectors[0].Seq != 2 {
+		t.Errorf("向量：%+v %v", vectors, err)
+	}
+	if last, err := store.LastSeq("主人"); err != nil || last != 3 {
+		t.Errorf("编号到第几了：%d %v", last, err)
+	}
+	if _, err := os.Stat(sqliteschema.BackupPath(path)); err != nil {
+		t.Errorf("迁移前应有备份：%v", err)
+	}
+}
+
+// 同一个人的两条线程：各存各的历史，编号共用一套（完整记录里不撞号）；同一编号别的线程写不进来。
+func TestThreadsShareNumbering(t *testing.T) {
+	store, _ := openTestStore(t)
+	voice := brain.ConversationRecord{Person: "主人", TurnCount: 1, UpdatedAt: time.Now(),
+		History: []brain.ConversationTurn{numberedTurn(1, "语音问", "语音答")}}
+	chat := brain.ConversationRecord{Person: "主人", Thread: "t1", TurnCount: 2, UpdatedAt: time.Now(),
+		History: []brain.ConversationTurn{numberedTurn(2, "打字问", "打字答")}}
+	for _, record := range []brain.ConversationRecord{voice, chat} {
+		if err := store.SaveConversation(record); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, _, _ := store.LoadConversation("主人", "t1"); len(got.History) != 1 || got.History[0].Seq != 2 {
+		t.Errorf("App 的线程：%+v", got)
+	}
+	if got, _, _ := store.LoadConversation("主人", brain.VoiceThread); len(got.History) != 1 || got.History[0].Seq != 1 {
+		t.Errorf("语音那条：%+v", got)
+	}
+	if last, _ := store.LastSeq("主人"); last != 2 {
+		t.Errorf("编号共用：%d", last)
+	}
+	clash := brain.ConversationRecord{Person: "主人", Thread: "t2", TurnCount: 2, UpdatedAt: time.Now(),
+		History: []brain.ConversationTurn{numberedTurn(2, "撞号", "撞号")}}
+	var kept *TranscriptKeptError
+	if err := store.SaveConversation(clash); !errors.As(err, &kept) {
+		t.Errorf("别的线程用了同一编号：不覆盖完整记录：%v", err)
+	}
+	if got := transcriptOf(t, store, "主人"); got[2] != "打字答" {
+		t.Errorf("完整记录没被盖掉：%v", got)
 	}
 }
