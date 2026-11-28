@@ -141,3 +141,20 @@ func TestParseECBRejectsGarbage(t *testing.T) {
 		}
 	}
 }
+
+// 十进制写法精确地变成金额；分数、科学计数、超过精度的、币种不对的报错。
+func TestParseAmount(t *testing.T) {
+	for text, want := range map[string]int64{"1234.5": 1_234_500_000, "-80": -80_000_000, "0.000001": 1, " 12 ": 12_000_000} {
+		if got, err := ParseAmount(text, "jpy"); err != nil || got.Micros != want || got.Currency != "JPY" {
+			t.Errorf("%q：%+v %v", text, got, err)
+		}
+	}
+	for _, bad := range []string{"1/3", "1e3", "0.0000001", "abc", ""} {
+		if _, err := ParseAmount(bad, "JPY"); err == nil {
+			t.Errorf("%q 应报错", bad)
+		}
+	}
+	if _, err := ParseAmount("1", "XYZ1"); err == nil {
+		t.Error("币种不对应报错")
+	}
+}

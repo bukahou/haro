@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"maps"
 	"math"
+	"math/big"
 	"slices"
 	"strconv"
 	"strings"
@@ -119,4 +120,21 @@ func (s Sum) String() string {
 		return "0"
 	}
 	return strings.Join(parts, " + ")
+}
+
+// ParseAmount 把十进制写法（例如 "1234.5"、"-80"）精确地变成金额（不经过浮点）；超过 micros 精度的小数报错。币种按 ParseCurrency 校验。
+func ParseAmount(text, code string) (Amount, error) {
+	normalized, err := ParseCurrency(code)
+	if err != nil {
+		return Amount{}, err
+	}
+	value, ok := new(big.Rat).SetString(strings.TrimSpace(text))
+	if !ok || strings.ContainsAny(text, "/eE") {
+		return Amount{}, fmt.Errorf("金额 %q 不是十进制数", text)
+	}
+	micros := new(big.Rat).Mul(value, new(big.Rat).SetInt64(MicrosPerUnit))
+	if !micros.IsInt() || !micros.Num().IsInt64() {
+		return Amount{}, fmt.Errorf("金额 %q 的小数太多或数太大", text)
+	}
+	return Amount{Micros: micros.Num().Int64(), Currency: normalized}, nil
 }
