@@ -78,6 +78,9 @@ func stripEmotionTags(text string) string {
 	return strings.TrimSpace(emotionTagPattern.ReplaceAllString(text, ""))
 }
 
+// WithoutEmotionTags 是给人看的文字：去掉情绪标记（历史里存的是模型的原话，App 的接口给出记录时用它）。
+func WithoutEmotionTags(text string) string { return stripEmotionTags(text) }
+
 // emotionStream 从模型的流式文字里认出情绪标记，在文字进切句器之前：标记处先把前面的文字收尾成句，
 // 之后的句子换成新的语气（切句器只看到纯文字，标记不会被分句规则切开）。
 type emotionStream struct{ pending string }

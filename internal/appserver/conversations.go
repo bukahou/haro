@@ -51,7 +51,7 @@ func threadOf(conversationID string) string {
 func conversationOf(thread conversationstore.Thread) appapi.Conversation {
 	updated := thread.UpdatedAt
 	conversation := appapi.Conversation{ConversationId: thread.ID, Kind: appapi.Chat, Incognito: thread.Incognito,
-		Title: optional(thread.Title), LastText: optional(thread.LastText), UpdatedAt: &updated}
+		Title: optional(thread.Title), LastText: optional(brain.WithoutEmotionTags(thread.LastText)), UpdatedAt: &updated}
 	return conversation
 }
 
@@ -192,8 +192,7 @@ func turnOf(turn conversationstore.RecordedTurn) appapi.Turn {
 				name := call.Name
 				reply.Reply = append(reply.Reply, appapi.ReplyBlock{Type: appapi.ReplyBlockTypeTool, Tool: &name})
 			}
-			if message.Text != "" {
-				text := message.Text
+			if text := brain.WithoutEmotionTags(message.Text); text != "" { // 历史里存的是模型的原话（含情绪标记）
 				reply.Reply = append(reply.Reply, appapi.ReplyBlock{Type: appapi.ReplyBlockTypeText, Text: &text})
 			}
 		}
@@ -211,12 +210,12 @@ func turnOf(turn conversationstore.RecordedTurn) appapi.Turn {
 	return reply
 }
 
-// lastReply 是一轮里 haro 最后的回答。
+// lastReply 是一轮里 haro 最后的回答（去掉情绪标记）。
 func lastReply(messages []brain.ChatMessage) string {
 	answer := ""
 	for _, message := range messages {
-		if message.Role == brain.RoleAssistant && message.Text != "" {
-			answer = message.Text
+		if text := brain.WithoutEmotionTags(message.Text); message.Role == brain.RoleAssistant && text != "" {
+			answer = text
 		}
 	}
 	return answer

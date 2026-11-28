@@ -190,7 +190,11 @@ func (s *Session) closeTurn(record *turnRecord, ending turnEnding) bool {
 	}
 	s.rememberTurn(record.startedAt, record.messages(ending, answer), record.contextTokens, record.contextUnknown)
 	cut := ending == turnInterrupted
-	if ending == turnCompleted && (len(record.delivered) > 0 || len(record.interrupted) > 0) { // 被打断、出错时不算告诉了，下一轮再附上
+	if ending == turnCompleted && s.parts.TextOnly { // 打字：文字发出去就是告诉了（没有播放可等；打字会话答完这一句就关，留到下一轮会丢）
+		for _, delivered := range record.delivered {
+			delivered()
+		}
+	} else if ending == turnCompleted && (len(record.delivered) > 0 || len(record.interrupted) > 0) { // 被打断、出错时不算告诉了，下一轮再附上
 		s.mu.Lock()
 		if s.truncateAtMs < 0 { // 说完了，还要等主人听完（见 pendingDelivered）
 			s.pendingDelivered, s.pendingInterrupted = record.delivered, record.interrupted

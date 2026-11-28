@@ -88,6 +88,19 @@ func TestTextSession(t *testing.T) {
 	}
 }
 
+// 打字会话里附上的情况（调查的结论之类）：这一轮答完就算告诉了。打字会话答完一句就关，不能像语音那样等下一轮开始时再确认。
+func TestTextSessionBriefingDeliveredWhenAnswered(t *testing.T) {
+	briefer := &reportBriefer{}
+	model := &fakeModel{tokens: []string{"好的。"}}
+	session := brain.NewSession(brain.Components{Front: withTestSteps(brain.Agent{Model: model}), Thread: "t1", TextOnly: true,
+		Briefers: []brain.Briefer{briefer}}, brain.Options{MaxHistoryTurn: 6}, quiet)
+	t.Cleanup(func() { _ = session.Close() })
+	textTurn(t, session, "你好", "主人")
+	if briefer.count() != 1 {
+		t.Errorf("答完这一轮应算告诉了：确认了 %d 次", briefer.count())
+	}
+}
+
 // 带图说一句：图片交给这一轮的模型；历史里只记附件编号，不记图片（之后的轮次不重发）。
 func TestTextSessionImage(t *testing.T) {
 	store, err := conversationstore.OpenSQLite(t.Context(), "")

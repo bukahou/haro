@@ -1,13 +1,13 @@
 "use client";
 
-// 登录后的外壳。宽屏：全站只有一条侧栏 —— 上面新对话、日历、记账、我的，下面就是对话列表，左下角是自己的菜单（设置、管理员、登出）；
-// 侧栏可以收成图标栏。窄屏（< 900px）：没有侧栏，底部四个标签，聊天标签里是对话列表。
+// 登录后的外壳。全站只有一条侧栏 —— 上面新对话、日历、记账、我的，下面就是对话列表，左下角是自己的菜单（设置、管理员、登出）。
+// 宽屏：侧栏常驻，可以收成图标栏。窄屏（< 900px）：和 ChatGPT / Claude 的手机网页一样，侧栏平时藏着，
+// 页头左边的菜单按钮（MenuButton）把它从左边滑出来；点了里面的链接、点旁边、按 Esc 就收回去。
 import clsx from "clsx";
 import {
   CalendarDays,
   KeyRound,
   LogOut,
-  MessageCircle,
   MoreHorizontal,
   PanelLeft,
   Plus,
@@ -29,6 +29,7 @@ import { signOut } from "@/auth/logout";
 import { ConversationList } from "@/components/chat/ConversationList";
 import { OverlayHost, confirmDialog } from "@/components/overlay";
 import { Avatar, Badge } from "@/components/ui";
+import { useWide } from "@/lib/useWide";
 import { pendingCount, useAccount } from "@/stores/account";
 import { useClientConfig } from "@/stores/clientConfig";
 import { useConversations } from "@/stores/conversations";
@@ -138,7 +139,9 @@ function Sidebar() {
   const t = useTranslations();
   const pathname = usePathname();
   const router = useRouter();
-  const collapsed = useUI((state) => state.sidebarCollapsed);
+  const wide = useWide();
+  const collapsed = useUI((state) => state.sidebarCollapsed) && wide; // 窄屏滑出来的总是整条侧栏
+  const drawerOpen = useUI((state) => state.drawerOpen);
   const toggleSidebar = useUI((state) => state.toggleSidebar);
   const expandSidebar = useUI((state) => state.expandSidebar);
   const overview = useAccount((state) => state.overview);
@@ -177,13 +180,28 @@ function Sidebar() {
   }
 
   return (
-    <nav className="side" aria-label={t("shell.nav")}>
+    <nav
+      className={clsx("side", !wide && drawerOpen && "open")}
+      aria-label={t("shell.nav")}
+      aria-hidden={!wide && !drawerOpen}
+      inert={!wide && !drawerOpen}
+      onClickCapture={(event) => {
+        // 窄屏：点了里面的链接就收回去（点的是当前这一页时地址不变，换页时收不到）
+        if (!wide && (event.target as Element).closest("a")) useUI.getState().setDrawer(false);
+      }}
+    >
       <div className="brand">
         <span className="logo">
           <Sparkles size={18} aria-hidden />
         </span>
         haro
-        <button type="button" className="icon-btn mut ml-auto" onClick={toggleSidebar} aria-label={t("shell.collapse")} title={t("shell.collapse")}>
+        <button
+          type="button"
+          className="icon-btn mut ml-auto"
+          onClick={wide ? toggleSidebar : () => useUI.getState().setDrawer(false)}
+          aria-label={wide ? t("shell.collapse") : t("shell.closeMenu")}
+          title={wide ? t("shell.collapse") : t("shell.closeMenu")}
+        >
           <PanelLeft size={20} />
         </button>
       </div>
@@ -214,7 +232,7 @@ function Sidebar() {
         />
       </label>
       <div className="conv-items">
-        <ConversationList activeId={activeConversation(pathname)} filter={filter} compact />
+        <ConversationList activeId={activeConversation(pathname)} filter={filter} />
         {filter.trim() && (
           <Link className="sec-link px-2.5 py-2" href={`/chat/search?${new URLSearchParams({ q: filter.trim() }).toString()}`}>
             <Search size={14} aria-hidden />
@@ -236,33 +254,22 @@ function Sidebar() {
   );
 }
 
-function TabBar() {
-  const t = useTranslations("tabs");
-  const pathname = usePathname();
-  const pending = pendingCount(useAccount((state) => state.overview));
-  const tabs = [{ href: "/chat", key: "chat", icon: MessageCircle }, ...sections] as const;
-  return (
-    <nav className="tabbar" aria-label={t("chat")}>
-      {tabs.map(({ href, key, icon: Icon }) => {
-        const on = pathname === href || pathname.startsWith(`${href}/`);
-        return (
-          <Link key={key} href={href} className={clsx("tab", on && "on")} aria-current={on ? "page" : undefined}>
-            <Icon size={22} aria-hidden />
-            {t(key)}
-            {key === "me" && <Badge count={pending} />}
-          </Link>
-        );
-      })}
-    </nav>
-  );
-}
-
 export function AppShell({ children }: { children: React.ReactNode }) {
+  const pathname = usePathname();
   const collapsed = useUI((state) => state.sidebarCollapsed);
+  const drawerOpen = useUI((state) => state.drawerOpen);
+  const setDrawer = useUI((state) => state.setDrawer);
   const theme = useUI((state) => state.theme);
   const refreshAccount = useAccount((state) => state.refresh);
   const loadConversations = useConversations((state) => state.load);
   useEffect(() => applyTheme(theme), [theme]);
+  useEffect(() => setDrawer(false), [pathname, setDrawer]); // 换了页就收回去
+  useEffect(() => {
+    if (!drawerOpen) return;
+    const onKey = (event: KeyboardEvent) => event.key === "Escape" && setDrawer(false);
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [drawerOpen, setDrawer]);
   useEffect(() => {
     void refreshAccount();
     void loadConversations();
@@ -277,8 +284,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   return (
     <>
       <Sidebar />
+      {drawerOpen && <div className="drawer-scrim" onClick={() => setDrawer(false)} aria-hidden />}
       <main className={clsx("main", collapsed && "collapsed")}>{children}</main>
-      <TabBar />
       <OverlayHost />
     </>
   );

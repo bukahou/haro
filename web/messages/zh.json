@@ -269,7 +269,9 @@
     "nav": "主导航",
     "collapse": "收起侧栏",
     "expand": "展开侧栏",
-    "menu": "账号菜单"
+    "menu": "账号菜单",
+    "openMenu": "打开菜单",
+    "closeMenu": "收起菜单"
   },
   "chat": {
     "title": "聊天",
