@@ -302,6 +302,20 @@ v10（2026-11-22 裁定）：记住的事和以前的对话都能按意思找回
 启动时拉一次、之后每 6 小时重拉；拉到的存一份到 `HARO_EXCHANGE_RATES_CACHE`，拉不到时用它，都没有时服务端起不来（不按猜的汇率判断上限）。
 念给主人的金额按语言念币种：固定的话里写 `{名字:money}`，各语言的币种念法写在固定的话的文件里（`money` 一节，没列出的币种念「数值 代码」）。
 
+## 网页版（`web/`）
+
+App 接口的网页版（iOS 的样板和备用），单独构建、单独部署（镜像 `haro-web`），和服务端不在一个进程：
+Next.js（standalone）+ React + next-intl（先只有中文，文字在 `web/messages/`）+ Tailwind + zustand。
+
+- **接口代码从契约生成**（orval：`npm run gen:api`，生成的在 `web/src/api/generated/`，⛔ 不手改；CI 查是不是照现在的契约生成的）。
+  请求都经 `web/src/api/request.ts`：带访问令牌、`Accept-Language`；401 时用刷新令牌换一对新的、重发一次。刷新令牌用一次就作废，
+  所以整个浏览器同时只刷新一次（同一页面里共用一次，几个标签页之间用 Web Locks 排队，拿到锁后重新读令牌）。
+- **登录**：登录页把浏览器送到服务端的 `/api/v1/auth/oidc/start?client=web`（有邀请码时带上），服务端经 akasha 登录后跳回
+  网页的 `/auth/callback`，令牌在 `#` 后面（不发给服务器、不进日志）；回调页存下令牌、擦掉地址栏里的令牌。失败时带着错误码
+  （契约的 `OidcError`）回登录页说明。令牌只存在一处（zustand 持久化到 localStorage）。
+- 接口的根地址在构建时写进页面（`NEXT_PUBLIC_API_URL`，没有默认值，缺了构建失败）；服务端只放行 `HARO_APP_WEB_URL` 这一个来源跨域。
+- 依赖装的时候不运行安装脚本（`web/.npmrc` 的 `ignore-scripts=true`，CI、镜像构建都一样）。
+
 ## App 的接口（`internal/appserver`）
 
 手机 App 和网页版（`web/`）用的 HTTP 接口，挂在 `/api/v1/` 下（`appserver.PathPrefix`），局域网和公网的入口都有。终端的语音连接、声纹登记在 `/v1/...` 下：
