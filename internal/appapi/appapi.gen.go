@@ -363,7 +363,7 @@ type OidcError string
 
 // Overview defines model for Overview.
 type Overview struct {
-	// Account 登录的这个账号（「我的」页头部用，不用再调 /v1/me）
+	// Account 登录的这个账号（「我的」页头部用，不用再调 /api/v1/me）
 	Account struct {
 		DisplayName string `json:"display_name"`
 		Role        Role   `json:"role"`
@@ -669,67 +669,67 @@ type RenameTerminalJSONRequestBody = TerminalUpdate
 // ServerInterface represents all server handlers.
 type ServerInterface interface {
 	// ListAccounts 账号列表（运维信息）
-	// (GET /v1/admin/accounts)
+	// (GET /api/v1/admin/accounts)
 	ListAccounts(w http.ResponseWriter, r *http.Request, params ListAccountsParams)
 	// ListPendingTerminals 等待批准的新终端
-	// (GET /v1/admin/terminals/pending)
+	// (GET /api/v1/admin/terminals/pending)
 	ListPendingTerminals(w http.ResponseWriter, r *http.Request, params ListPendingTerminalsParams)
 	// ApproveTerminal 批准新终端（它成为一个匿名账号的终端）
-	// (POST /v1/admin/terminals/pending/{terminalId}/approve)
+	// (POST /api/v1/admin/terminals/pending/{terminalId}/approve)
 	ApproveTerminal(w http.ResponseWriter, r *http.Request, terminalId TerminalId)
 	// RejectTerminal 拒绝新终端
-	// (POST /v1/admin/terminals/pending/{terminalId}/reject)
+	// (POST /api/v1/admin/terminals/pending/{terminalId}/reject)
 	RejectTerminal(w http.ResponseWriter, r *http.Request, terminalId TerminalId)
 	// Logout 登出（作废刷新令牌）
-	// (POST /v1/auth/logout)
+	// (POST /api/v1/auth/logout)
 	Logout(w http.ResponseWriter, r *http.Request)
 	// RefreshTokens 用刷新令牌换新的一对（刷新令牌用一次就作废）
-	// (POST /v1/auth/refresh)
+	// (POST /api/v1/auth/refresh)
 	RefreshTokens(w http.ResponseWriter, r *http.Request)
 	// GetClientConfig App 要用的业务参数（不用登录）
-	// (GET /v1/client-config)
+	// (GET /api/v1/client-config)
 	GetClientConfig(w http.ResponseWriter, r *http.Request, params GetClientConfigParams)
 	// ListCountries 可选的国家（支持节假日的那些）
-	// (GET /v1/countries)
+	// (GET /api/v1/countries)
 	ListCountries(w http.ResponseWriter, r *http.Request, params ListCountriesParams)
 	// GetMe 登录的这个账号
-	// (GET /v1/me)
+	// (GET /api/v1/me)
 	GetMe(w http.ResponseWriter, r *http.Request, params GetMeParams)
 	// UpdateMe 改显示名、默认货币
-	// (PATCH /v1/me)
+	// (PATCH /api/v1/me)
 	UpdateMe(w http.ResponseWriter, r *http.Request)
 	// GetHome 家的位置（天气用）和节假日的国家
-	// (GET /v1/me/home)
+	// (GET /api/v1/me/home)
 	GetHome(w http.ResponseWriter, r *http.Request, params GetHomeParams)
 	// ReplaceHome 改家的位置、节假日的国家
-	// (PUT /v1/me/home)
+	// (PUT /api/v1/me/home)
 	ReplaceHome(w http.ResponseWriter, r *http.Request)
 	// GetOverview 「我的」页的摘要（一个接口给齐）
-	// (GET /v1/me/overview)
+	// (GET /api/v1/me/overview)
 	GetOverview(w http.ResponseWriter, r *http.Request, params GetOverviewParams)
 	// GetProfile 主人资料（每次对话都会带给 haro）
-	// (GET /v1/me/profile)
+	// (GET /api/v1/me/profile)
 	GetProfile(w http.ResponseWriter, r *http.Request)
 	// ReplaceProfile 整份替换主人资料
-	// (PUT /v1/me/profile)
+	// (PUT /api/v1/me/profile)
 	ReplaceProfile(w http.ResponseWriter, r *http.Request)
 	// SearchPlaces 搜地名（只到区 / 市，设家的位置用）
-	// (GET /v1/places)
+	// (GET /api/v1/places)
 	SearchPlaces(w http.ResponseWriter, r *http.Request, params SearchPlacesParams)
 	// GetSpending 这个月和今天的花费（默认货币，带换算提示）
-	// (GET /v1/spending)
+	// (GET /api/v1/spending)
 	GetSpending(w http.ResponseWriter, r *http.Request, params GetSpendingParams)
 	// ListTerminals 这个账号的终端
-	// (GET /v1/terminals)
+	// (GET /api/v1/terminals)
 	ListTerminals(w http.ResponseWriter, r *http.Request, params ListTerminalsParams)
 	// PairTerminal 用终端给的配对码把它绑到这个账号
-	// (POST /v1/terminals/pair)
+	// (POST /api/v1/terminals/pair)
 	PairTerminal(w http.ResponseWriter, r *http.Request)
 	// RemoveTerminal 移除终端（它的凭证立即作废）
-	// (DELETE /v1/terminals/{terminalId})
+	// (DELETE /api/v1/terminals/{terminalId})
 	RemoveTerminal(w http.ResponseWriter, r *http.Request, terminalId TerminalId)
 	// RenameTerminal 改终端的名字
-	// (PATCH /v1/terminals/{terminalId})
+	// (PATCH /api/v1/terminals/{terminalId})
 	RenameTerminal(w http.ResponseWriter, r *http.Request, terminalId TerminalId)
 }
 
@@ -1487,27 +1487,27 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 		ErrorHandlerFunc:   options.ErrorHandlerFunc,
 	}
 
-	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/v1/auth/refresh", wrapper.RefreshTokens)
-	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/v1/auth/logout", wrapper.Logout)
-	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/client-config", wrapper.GetClientConfig)
-	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/me", wrapper.GetMe)
-	m.HandleFunc(http.MethodPatch+" "+options.BaseURL+"/v1/me", wrapper.UpdateMe)
-	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/me/overview", wrapper.GetOverview)
-	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/me/profile", wrapper.GetProfile)
-	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/v1/me/profile", wrapper.ReplaceProfile)
-	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/me/home", wrapper.GetHome)
-	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/v1/me/home", wrapper.ReplaceHome)
-	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/places", wrapper.SearchPlaces)
-	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/countries", wrapper.ListCountries)
-	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/spending", wrapper.GetSpending)
-	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/terminals", wrapper.ListTerminals)
-	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/v1/terminals/pair", wrapper.PairTerminal)
-	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/v1/terminals/{terminalId}", wrapper.RemoveTerminal)
-	m.HandleFunc(http.MethodPatch+" "+options.BaseURL+"/v1/terminals/{terminalId}", wrapper.RenameTerminal)
-	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/admin/accounts", wrapper.ListAccounts)
-	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/v1/admin/terminals/pending", wrapper.ListPendingTerminals)
-	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/v1/admin/terminals/pending/{terminalId}/approve", wrapper.ApproveTerminal)
-	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/v1/admin/terminals/pending/{terminalId}/reject", wrapper.RejectTerminal)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/api/v1/auth/refresh", wrapper.RefreshTokens)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/api/v1/auth/logout", wrapper.Logout)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/client-config", wrapper.GetClientConfig)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/me", wrapper.GetMe)
+	m.HandleFunc(http.MethodPatch+" "+options.BaseURL+"/api/v1/me", wrapper.UpdateMe)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/me/overview", wrapper.GetOverview)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/me/profile", wrapper.GetProfile)
+	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/api/v1/me/profile", wrapper.ReplaceProfile)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/me/home", wrapper.GetHome)
+	m.HandleFunc(http.MethodPut+" "+options.BaseURL+"/api/v1/me/home", wrapper.ReplaceHome)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/places", wrapper.SearchPlaces)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/countries", wrapper.ListCountries)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/spending", wrapper.GetSpending)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/terminals", wrapper.ListTerminals)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/api/v1/terminals/pair", wrapper.PairTerminal)
+	m.HandleFunc(http.MethodDelete+" "+options.BaseURL+"/api/v1/terminals/{terminalId}", wrapper.RemoveTerminal)
+	m.HandleFunc(http.MethodPatch+" "+options.BaseURL+"/api/v1/terminals/{terminalId}", wrapper.RenameTerminal)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/admin/accounts", wrapper.ListAccounts)
+	m.HandleFunc(http.MethodGet+" "+options.BaseURL+"/api/v1/admin/terminals/pending", wrapper.ListPendingTerminals)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/api/v1/admin/terminals/pending/{terminalId}/approve", wrapper.ApproveTerminal)
+	m.HandleFunc(http.MethodPost+" "+options.BaseURL+"/api/v1/admin/terminals/pending/{terminalId}/reject", wrapper.RejectTerminal)
 
 	return m
 }
@@ -2551,67 +2551,67 @@ func (response RenameTerminal404ApplicationProblemPlusJSONResponse) VisitRenameT
 // StrictServerInterface represents all server handlers.
 type StrictServerInterface interface {
 	// ListAccounts 账号列表（运维信息）
-	// (GET /v1/admin/accounts)
+	// (GET /api/v1/admin/accounts)
 	ListAccounts(ctx context.Context, request ListAccountsRequestObject) (ListAccountsResponseObject, error)
 	// ListPendingTerminals 等待批准的新终端
-	// (GET /v1/admin/terminals/pending)
+	// (GET /api/v1/admin/terminals/pending)
 	ListPendingTerminals(ctx context.Context, request ListPendingTerminalsRequestObject) (ListPendingTerminalsResponseObject, error)
 	// ApproveTerminal 批准新终端（它成为一个匿名账号的终端）
-	// (POST /v1/admin/terminals/pending/{terminalId}/approve)
+	// (POST /api/v1/admin/terminals/pending/{terminalId}/approve)
 	ApproveTerminal(ctx context.Context, request ApproveTerminalRequestObject) (ApproveTerminalResponseObject, error)
 	// RejectTerminal 拒绝新终端
-	// (POST /v1/admin/terminals/pending/{terminalId}/reject)
+	// (POST /api/v1/admin/terminals/pending/{terminalId}/reject)
 	RejectTerminal(ctx context.Context, request RejectTerminalRequestObject) (RejectTerminalResponseObject, error)
 	// Logout 登出（作废刷新令牌）
-	// (POST /v1/auth/logout)
+	// (POST /api/v1/auth/logout)
 	Logout(ctx context.Context, request LogoutRequestObject) (LogoutResponseObject, error)
 	// RefreshTokens 用刷新令牌换新的一对（刷新令牌用一次就作废）
-	// (POST /v1/auth/refresh)
+	// (POST /api/v1/auth/refresh)
 	RefreshTokens(ctx context.Context, request RefreshTokensRequestObject) (RefreshTokensResponseObject, error)
 	// GetClientConfig App 要用的业务参数（不用登录）
-	// (GET /v1/client-config)
+	// (GET /api/v1/client-config)
 	GetClientConfig(ctx context.Context, request GetClientConfigRequestObject) (GetClientConfigResponseObject, error)
 	// ListCountries 可选的国家（支持节假日的那些）
-	// (GET /v1/countries)
+	// (GET /api/v1/countries)
 	ListCountries(ctx context.Context, request ListCountriesRequestObject) (ListCountriesResponseObject, error)
 	// GetMe 登录的这个账号
-	// (GET /v1/me)
+	// (GET /api/v1/me)
 	GetMe(ctx context.Context, request GetMeRequestObject) (GetMeResponseObject, error)
 	// UpdateMe 改显示名、默认货币
-	// (PATCH /v1/me)
+	// (PATCH /api/v1/me)
 	UpdateMe(ctx context.Context, request UpdateMeRequestObject) (UpdateMeResponseObject, error)
 	// GetHome 家的位置（天气用）和节假日的国家
-	// (GET /v1/me/home)
+	// (GET /api/v1/me/home)
 	GetHome(ctx context.Context, request GetHomeRequestObject) (GetHomeResponseObject, error)
 	// ReplaceHome 改家的位置、节假日的国家
-	// (PUT /v1/me/home)
+	// (PUT /api/v1/me/home)
 	ReplaceHome(ctx context.Context, request ReplaceHomeRequestObject) (ReplaceHomeResponseObject, error)
 	// GetOverview 「我的」页的摘要（一个接口给齐）
-	// (GET /v1/me/overview)
+	// (GET /api/v1/me/overview)
 	GetOverview(ctx context.Context, request GetOverviewRequestObject) (GetOverviewResponseObject, error)
 	// GetProfile 主人资料（每次对话都会带给 haro）
-	// (GET /v1/me/profile)
+	// (GET /api/v1/me/profile)
 	GetProfile(ctx context.Context, request GetProfileRequestObject) (GetProfileResponseObject, error)
 	// ReplaceProfile 整份替换主人资料
-	// (PUT /v1/me/profile)
+	// (PUT /api/v1/me/profile)
 	ReplaceProfile(ctx context.Context, request ReplaceProfileRequestObject) (ReplaceProfileResponseObject, error)
 	// SearchPlaces 搜地名（只到区 / 市，设家的位置用）
-	// (GET /v1/places)
+	// (GET /api/v1/places)
 	SearchPlaces(ctx context.Context, request SearchPlacesRequestObject) (SearchPlacesResponseObject, error)
 	// GetSpending 这个月和今天的花费（默认货币，带换算提示）
-	// (GET /v1/spending)
+	// (GET /api/v1/spending)
 	GetSpending(ctx context.Context, request GetSpendingRequestObject) (GetSpendingResponseObject, error)
 	// ListTerminals 这个账号的终端
-	// (GET /v1/terminals)
+	// (GET /api/v1/terminals)
 	ListTerminals(ctx context.Context, request ListTerminalsRequestObject) (ListTerminalsResponseObject, error)
 	// PairTerminal 用终端给的配对码把它绑到这个账号
-	// (POST /v1/terminals/pair)
+	// (POST /api/v1/terminals/pair)
 	PairTerminal(ctx context.Context, request PairTerminalRequestObject) (PairTerminalResponseObject, error)
 	// RemoveTerminal 移除终端（它的凭证立即作废）
-	// (DELETE /v1/terminals/{terminalId})
+	// (DELETE /api/v1/terminals/{terminalId})
 	RemoveTerminal(ctx context.Context, request RemoveTerminalRequestObject) (RemoveTerminalResponseObject, error)
 	// RenameTerminal 改终端的名字
-	// (PATCH /v1/terminals/{terminalId})
+	// (PATCH /api/v1/terminals/{terminalId})
 	RenameTerminal(ctx context.Context, request RenameTerminalRequestObject) (RenameTerminalResponseObject, error)
 }
 
@@ -3250,105 +3250,107 @@ func (sh *strictHandler) RenameTerminal(w http.ResponseWriter, r *http.Request, 
 // const string: with thousands of chunks the chained `+` fold is several
 // times slower for the Go compiler than parsing a slice literal.
 var swaggerSpec = []string{
-	"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",
+	"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",
+	"WNlzIgIXwsdujP3PAA==",
 }
 
 // decodeSpec returns the embedded OpenAPI spec as raw JSON bytes,

@@ -16,6 +16,7 @@ import (
 	"github.com/bukahou/haro/internal/accounts"
 	"github.com/bukahou/haro/internal/appapi"
 	"github.com/bukahou/haro/internal/money"
+	"github.com/bukahou/haro/internal/realtimeproto"
 	"github.com/bukahou/haro/internal/spending"
 )
 
@@ -97,7 +98,7 @@ func TestClientConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	status, body := f.call(t, "GET", "/v1/client-config", "", "")
+	status, body := f.call(t, "GET", "/api/v1/client-config", "", "")
 	if status != 200 || body["api_version"] != spec.Info.Version || body["min_app_version"] != "1.0.0" {
 		t.Fatalf("client-config：%d %v", status, body)
 	}
@@ -114,18 +115,18 @@ func TestClientConfig(t *testing.T) {
 // 要登录的接口：没带令牌 unauthorized、令牌不对 invalid_token（都是 401，按 code 区分）；说明按 Accept-Language。
 func TestAuthentication(t *testing.T) {
 	f := newFixture(t)
-	if status, body := f.call(t, "GET", "/v1/me", "", ""); status != 401 || body["code"] != "unauthorized" {
+	if status, body := f.call(t, "GET", "/api/v1/me", "", ""); status != 401 || body["code"] != "unauthorized" {
 		t.Errorf("没带令牌：%d %v", status, body)
 	}
-	if status, body := f.call(t, "GET", "/v1/me", "wrong", "", "Accept-Language", "ja-JP,ja;q=0.9"); status != 401 ||
+	if status, body := f.call(t, "GET", "/api/v1/me", "wrong", "", "Accept-Language", "ja-JP,ja;q=0.9"); status != 401 ||
 		body["code"] != "invalid_token" || !strings.Contains(body["detail"].(string), "ログイン") {
 		t.Errorf("令牌不对（日语的说明）：%d %v", status, body)
 	}
-	status, body := f.call(t, "GET", "/v1/me", f.adminKey.AccessToken, "")
+	status, body := f.call(t, "GET", "/api/v1/me", f.adminKey.AccessToken, "")
 	if status != 200 || body["role"] != "admin" || body["default_currency"] != "JPY" || body["account_id"] != f.admin.ID {
 		t.Errorf("管理员：%d %v", status, body)
 	}
-	if status, body := f.call(t, "GET", "/v1/nope", f.adminKey.AccessToken, ""); status != 404 || body["code"] != "not_found" {
+	if status, body := f.call(t, "GET", "/api/v1/nope", f.adminKey.AccessToken, ""); status != 404 || body["code"] != "not_found" {
 		t.Errorf("没有的接口：%d %v", status, body)
 	}
 }
@@ -134,13 +135,13 @@ func TestAuthentication(t *testing.T) {
 func TestUpdateMeValidation(t *testing.T) {
 	f := newFixture(t)
 	long := `{"display_name": "` + strings.Repeat("长", 41) + `"}`
-	if status, body := f.call(t, "PATCH", "/v1/me", f.adminKey.AccessToken, long); status != 400 || body["code"] != "validation_failed" {
+	if status, body := f.call(t, "PATCH", "/api/v1/me", f.adminKey.AccessToken, long); status != 400 || body["code"] != "validation_failed" {
 		t.Errorf("显示名太长：%d %v", status, body)
 	}
-	if status, body := f.call(t, "PATCH", "/v1/me", f.adminKey.AccessToken, `{"default_currency": "yen"}`); status != 400 {
+	if status, body := f.call(t, "PATCH", "/api/v1/me", f.adminKey.AccessToken, `{"default_currency": "yen"}`); status != 400 {
 		t.Errorf("币种写错：%d %v", status, body)
 	}
-	if status, body := f.call(t, "PATCH", "/v1/me", f.adminKey.AccessToken, `{"display_name": "老板", "default_currency": "CNY"}`); status != 200 ||
+	if status, body := f.call(t, "PATCH", "/api/v1/me", f.adminKey.AccessToken, `{"display_name": "老板", "default_currency": "CNY"}`); status != 200 ||
 		body["display_name"] != "老板" || body["default_currency"] != "CNY" {
 		t.Errorf("改显示名、默认货币：%d %v", status, body)
 	}
@@ -149,7 +150,7 @@ func TestUpdateMeValidation(t *testing.T) {
 // 花费：默认货币的合计、按币种的原始合计、换算提示；上限、剩下多少、能不能口头提高。
 func TestSpending(t *testing.T) {
 	f := newFixture(t)
-	status, body := f.call(t, "GET", "/v1/spending", f.adminKey.AccessToken, "")
+	status, body := f.call(t, "GET", "/api/v1/spending", f.adminKey.AccessToken, "")
 	if status != 200 {
 		t.Fatalf("%d %v", status, body)
 	}
@@ -171,18 +172,18 @@ func TestAdminOnly(t *testing.T) {
 	if _, err := f.store.ResolveLogin(ctx, "sub-guest", "客人"); err == nil {
 		t.Fatal("新账号应等同意")
 	}
-	status, body := f.call(t, "GET", "/v1/admin/accounts", f.adminKey.AccessToken, "")
+	status, body := f.call(t, "GET", "/api/v1/admin/accounts", f.adminKey.AccessToken, "")
 	if status != 200 {
 		t.Fatalf("%d %v", status, body)
 	}
-	status, overview := f.call(t, "GET", "/v1/me/overview", f.adminKey.AccessToken, "")
+	status, overview := f.call(t, "GET", "/api/v1/me/overview", f.adminKey.AccessToken, "")
 	if status != 200 || overview["admin"].(map[string]any)["pending_accounts"] != float64(1) ||
 		overview["account"].(map[string]any)["role"] != "admin" || overview["account"].(map[string]any)["display_name"] != "主人" {
 		t.Errorf("概览里管理员看得到等同意的账号数：%d %v", status, overview)
 	}
 	guest, _ := f.store.BySubject(ctx, "sub-guest")
 	guestKey, _ := f.store.IssueTokens(ctx, guest.ID)
-	if status, body := f.call(t, "GET", "/v1/admin/accounts", guestKey.AccessToken, ""); status != 401 || body["code"] != "pending_approval" {
+	if status, body := f.call(t, "GET", "/api/v1/admin/accounts", guestKey.AccessToken, ""); status != 401 || body["code"] != "pending_approval" {
 		t.Errorf("等同意的账号：%d %v", status, body)
 	}
 }
@@ -190,20 +191,20 @@ func TestAdminOnly(t *testing.T) {
 // 刷新令牌换一对新的；旧的再来用被拒绝（整串作废）；还没做的接口如实回 501。
 func TestRefreshAndNotImplemented(t *testing.T) {
 	f := newFixture(t)
-	status, body := f.call(t, "POST", "/v1/auth/refresh", "", `{"refresh_token": "`+f.adminKey.RefreshToken+`"}`)
+	status, body := f.call(t, "POST", "/api/v1/auth/refresh", "", `{"refresh_token": "`+f.adminKey.RefreshToken+`"}`)
 	if status != 200 || body["token_type"] != "Bearer" || body["expires_in"] != float64(3600) {
 		t.Fatalf("刷新：%d %v", status, body)
 	}
-	if status, body := f.call(t, "POST", "/v1/auth/refresh", "", `{"refresh_token": "`+f.adminKey.RefreshToken+`"}`); status != 401 ||
+	if status, body := f.call(t, "POST", "/api/v1/auth/refresh", "", `{"refresh_token": "`+f.adminKey.RefreshToken+`"}`); status != 401 ||
 		body["code"] != "invalid_token" {
 		t.Errorf("旧的刷新令牌再来用：%d %v", status, body)
 	}
 	newKey := body["access_token"].(string)
-	if status, body := f.call(t, "GET", "/v1/terminals", newKey, ""); status != 401 {
+	if status, body := f.call(t, "GET", "/api/v1/terminals", newKey, ""); status != 401 {
 		t.Errorf("整串作废后新的访问令牌也不能用：%d %v", status, body)
 	}
 	pair, _ := f.store.IssueTokens(t.Context(), f.admin.ID)
-	if status, body := f.call(t, "GET", "/v1/me/profile", pair.AccessToken, ""); status != 501 || body["code"] != "not_implemented" {
+	if status, body := f.call(t, "GET", "/api/v1/me/profile", pair.AccessToken, ""); status != 501 || body["code"] != "not_implemented" {
 		t.Errorf("还没做的接口：%d %v", status, body)
 	}
 }
@@ -213,7 +214,7 @@ func TestRateLimit(t *testing.T) {
 	f := newFixture(t)
 	limited := false
 	for range 30 {
-		if status, _ := f.call(t, "POST", "/v1/auth/refresh", "", `{"refresh_token": "x"}`); status == 429 {
+		if status, _ := f.call(t, "POST", "/api/v1/auth/refresh", "", `{"refresh_token": "x"}`); status == 429 {
 			limited = true
 			break
 		}
@@ -247,6 +248,25 @@ func TestLoginOutcome(t *testing.T) {
 		"//evil.example": false, "/invite/abc?x=1": false} {
 		if inviteNext(next) != want {
 			t.Errorf("inviteNext(%q) 应是 %v", next, want)
+		}
+	}
+}
+
+// App 接口的前缀和终端的入口不能重叠：公网只放行 PathPrefix，重叠了就会把不鉴权的语音连接、声纹登记一起开出去。
+// 契约里的每个路径都要在 PathPrefix 下。
+func TestPathPrefixDoesNotCoverTerminalRoutes(t *testing.T) {
+	for _, path := range []string{realtimeproto.ConversationPath, realtimeproto.VoiceprintPath, realtimeproto.EnrollmentScriptPath} {
+		if strings.HasPrefix(path, PathPrefix) || strings.HasPrefix(PathPrefix, path) {
+			t.Errorf("终端的入口 %s 和 App 接口的前缀 %s 重叠", path, PathPrefix)
+		}
+	}
+	spec, err := appapi.GetSwagger()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for path := range spec.Paths.Map() {
+		if !strings.HasPrefix(path, PathPrefix) {
+			t.Errorf("契约里的 %s 不在 %s 下", path, PathPrefix)
 		}
 	}
 }

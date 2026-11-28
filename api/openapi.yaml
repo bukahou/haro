@@ -1,18 +1,19 @@
 openapi: 3.0.3
 info:
   title: haro App API
-  version: 0.1.2
+  version: 0.2.0
   description: |
     haro 手机 App 用的接口（第一批：账号、登录、我、花费、终端、管理员）。
     服务端和 App 都从这份契约生成代码；⛔ 两边都不绕过契约私下约定字段。契约每改一次升版本号。
 
     约定：
-    - 鉴权：`Authorization: Bearer <访问令牌>`（haro 自己发的令牌，登录见 `/v1/auth/oidc/start`）。
+    - 鉴权：`Authorization: Bearer <访问令牌>`（haro 自己发的令牌，登录见 `/api/v1/auth/oidc/start`）。
     - 出错：RFC 9457（`application/problem+json`），App 按 `code` 判断，`detail` 是给人看的说明（按 `Accept-Language` 的语言）。
     - 时间：ISO 8601、UTC；App 按设备时区显示。
     - 金额：`Money`（数值是十进制字符串 + ISO 4217 币种）；汇总类是 `MoneyTotal`（换成默认货币，带换算提示）。
-    - 业务参数（各种上限、可选项）由 `/v1/client-config` 下发，App 不写死。
+    - 业务参数（各种上限、可选项）由 `/api/v1/client-config` 下发，App 不写死。
     - App 请求时用 `User-Agent` 带上 App 的版本（例如 `haro-ios/1.0.0`）。
+    - App 的接口都在 `/api/v1/` 下（公网只放行这一段）；`/v1/...` 是终端的语音连接，只在局域网。
 servers:
   - url: https://haro.example.com
     description: 占位（真实地址由部署决定）
@@ -30,7 +31,7 @@ tags:
   - name: admin
     description: 管理员才能用（只看运维信息，看不到别人的内容）
 paths:
-  /v1/auth/oidc/start:
+  /api/v1/auth/oidc/start:
     get:
       tags: [auth]
       operationId: startLogin
@@ -55,7 +56,7 @@ paths:
           description: 跳到 akasha 的登录页
         '429':
           $ref: '#/components/responses/RateLimited'
-  /v1/auth/oidc/callback:
+  /api/v1/auth/oidc/callback:
     get:
       tags: [auth]
       operationId: finishLogin
@@ -75,7 +76,7 @@ paths:
       responses:
         '302':
           description: 跳到 `haro://auth/callback`（见 startLogin）
-  /v1/auth/refresh:
+  /api/v1/auth/refresh:
     post:
       tags: [auth]
       operationId: refreshTokens
@@ -98,7 +99,7 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '429':
           $ref: '#/components/responses/RateLimited'
-  /v1/auth/logout:
+  /api/v1/auth/logout:
     post:
       tags: [auth]
       operationId: logout
@@ -113,7 +114,7 @@ paths:
       responses:
         '204':
           description: 已登出（令牌本来就无效时也是 204）
-  /v1/client-config:
+  /api/v1/client-config:
     get:
       tags: [me]
       operationId: getClientConfig
@@ -128,7 +129,7 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ClientConfig'
-  /v1/me:
+  /api/v1/me:
     get:
       tags: [me]
       operationId: getMe
@@ -165,7 +166,7 @@ paths:
           $ref: '#/components/responses/ValidationFailed'
         '401':
           $ref: '#/components/responses/Unauthorized'
-  /v1/me/overview:
+  /api/v1/me/overview:
     get:
       tags: [me]
       operationId: getOverview
@@ -181,7 +182,7 @@ paths:
                 $ref: '#/components/schemas/Overview'
         '401':
           $ref: '#/components/responses/Unauthorized'
-  /v1/me/profile:
+  /api/v1/me/profile:
     get:
       tags: [me]
       operationId: getProfile
@@ -216,7 +217,7 @@ paths:
           $ref: '#/components/responses/ValidationFailed'
         '401':
           $ref: '#/components/responses/Unauthorized'
-  /v1/me/home:
+  /api/v1/me/home:
     get:
       tags: [me]
       operationId: getHome
@@ -253,7 +254,7 @@ paths:
           $ref: '#/components/responses/ValidationFailed'
         '401':
           $ref: '#/components/responses/Unauthorized'
-  /v1/places:
+  /api/v1/places:
     get:
       tags: [me]
       operationId: searchPlaces
@@ -278,7 +279,7 @@ paths:
                   $ref: '#/components/schemas/Place'
         '401':
           $ref: '#/components/responses/Unauthorized'
-  /v1/countries:
+  /api/v1/countries:
     get:
       tags: [me]
       operationId: listCountries
@@ -296,7 +297,7 @@ paths:
                   $ref: '#/components/schemas/Country'
         '401':
           $ref: '#/components/responses/Unauthorized'
-  /v1/spending:
+  /api/v1/spending:
     get:
       tags: [spending]
       operationId: getSpending
@@ -312,7 +313,7 @@ paths:
                 $ref: '#/components/schemas/Spending'
         '401':
           $ref: '#/components/responses/Unauthorized'
-  /v1/terminals:
+  /api/v1/terminals:
     get:
       tags: [terminals]
       operationId: listTerminals
@@ -330,7 +331,7 @@ paths:
                   $ref: '#/components/schemas/Terminal'
         '401':
           $ref: '#/components/responses/Unauthorized'
-  /v1/terminals/pair:
+  /api/v1/terminals/pair:
     post:
       tags: [terminals]
       operationId: pairTerminal
@@ -357,7 +358,7 @@ paths:
           $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/RateLimited'
-  /v1/terminals/{terminalId}:
+  /api/v1/terminals/{terminalId}:
     parameters:
       - $ref: '#/components/parameters/TerminalId'
     patch:
@@ -394,7 +395,7 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
-  /v1/admin/accounts:
+  /api/v1/admin/accounts:
     get:
       tags: [admin]
       operationId: listAccounts
@@ -414,7 +415,7 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
-  /v1/admin/terminals/pending:
+  /api/v1/admin/terminals/pending:
     get:
       tags: [admin]
       operationId: listPendingTerminals
@@ -434,7 +435,7 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
-  /v1/admin/terminals/pending/{terminalId}/approve:
+  /api/v1/admin/terminals/pending/{terminalId}/approve:
     parameters:
       - $ref: '#/components/parameters/TerminalId'
     post:
@@ -456,7 +457,7 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
-  /v1/admin/terminals/pending/{terminalId}/reject:
+  /api/v1/admin/terminals/pending/{terminalId}/reject:
     parameters:
       - $ref: '#/components/parameters/TerminalId'
     post:
@@ -713,7 +714,7 @@ components:
       properties:
         account:
           type: object
-          description: 登录的这个账号（「我的」页头部用，不用再调 /v1/me）
+          description: 登录的这个账号（「我的」页头部用，不用再调 /api/v1/me）
           required: [display_name, role]
           properties:
             display_name:

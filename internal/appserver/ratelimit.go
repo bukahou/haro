@@ -23,7 +23,7 @@ const (
 )
 
 // strictPaths 是用严的一档的路径（前缀）。
-var strictPaths = []string{"/v1/auth/", "/v1/terminals/pair"}
+var strictPaths = []string{PathPrefix + "auth/", PathPrefix + "terminals/pair"}
 
 type limitEntry struct {
 	limiter *rate.Limiter

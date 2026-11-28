@@ -22,6 +22,10 @@ import (
 	"github.com/bukahou/haro/internal/spending"
 )
 
+// PathPrefix 是 App 接口的路径前缀（和契约里的路径一致）：公网只放行这一段。终端的语音连接、声纹登记在 /v1/ 下，
+// 只在局域网 —— 两段 ⛔ 不能重叠，否则开放 App 接口时会把它们一起开出去。
+const PathPrefix = "/api/v1/"
+
 // maxBodyBytes 是请求体的上限（这一批的接口都是小的 JSON；以后传图片的接口另定）。
 const maxBodyBytes = 64 << 10
 
@@ -84,7 +88,7 @@ type Server struct {
 
 var _ appapi.StrictServerInterface = (*Server)(nil)
 
-// NewHandler 建 App 接口的 http.Handler（挂在 /v1/ 下）。
+// NewHandler 建 App 接口的 http.Handler（挂在 PathPrefix 下）。
 func NewHandler(ctx context.Context, opts Options) (http.Handler, error) {
 	loadedTexts, err := loadTexts()
 	if err != nil {
@@ -104,8 +108,8 @@ func NewHandler(ctx context.Context, opts Options) (http.Handler, error) {
 		if err != nil {
 			return nil, err
 		}
-		mux.Handle("GET /v1/auth/oidc/start", limiter.wrap(http.HandlerFunc(login.start), server))
-		mux.Handle("GET /v1/auth/oidc/callback", limiter.wrap(http.HandlerFunc(login.callback), server))
+		mux.Handle("GET "+startPath, limiter.wrap(http.HandlerFunc(login.start), server))
+		mux.Handle("GET "+callbackPath, limiter.wrap(http.HandlerFunc(login.callback), server))
 	}
 	strict := appapi.NewStrictHandlerWithOptions(server, nil, appapi.StrictHTTPServerOptions{
 		RequestErrorHandlerFunc: func(w http.ResponseWriter, r *http.Request, err error) {
@@ -124,7 +128,7 @@ func NewHandler(ctx context.Context, opts Options) (http.Handler, error) {
 		},
 	})
 	generated := appapi.HandlerWithOptions(strict, appapi.StdHTTPServerOptions{BaseRouter: http.NewServeMux()})
-	mux.Handle("/v1/", limiter.wrap(validator(generated), server))
+	mux.Handle(PathPrefix, limiter.wrap(validator(generated), server))
 	return server.outermost(mux), nil
 }
 

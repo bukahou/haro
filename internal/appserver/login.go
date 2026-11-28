@@ -17,14 +17,15 @@ import (
 )
 
 // 登录：照 melete，haro 后端是唯一的 akasha 客户端（机密客户端），用 akasha 的 oidcrp 走授权码 + PKCE。
-// App 用系统的网页登录框打开 /v1/auth/oidc/start；登录完 haro 换成自己的令牌，跳回固定的 nativeCallback。
+// App 用系统的网页登录框打开 startPath；登录完 haro 换成自己的令牌，跳回固定的 nativeCallback。
 //
 // 回跳只认 nativeCallback 这一个固定地址：⛔ 不回显请求里带来的地址，也不用 oidcrp 自带的回跳检查。
 // oidcrp 只会把「next」原样带过登录流程，邀请码借它带过去：next = "/invite/<码>"（inviteNext 只放行这一种写法）。
 const (
 	nativeCallback = "haro://auth/callback"
-	callbackPath   = "/v1/auth/oidc/callback"
-	cookiePath     = "/v1/auth/oidc"
+	startPath      = PathPrefix + "auth/oidc/start"
+	callbackPath   = PathPrefix + "auth/oidc/callback"
+	cookiePath     = PathPrefix + "auth/oidc"
 	invitePrefix   = "/invite/"
 )
 
