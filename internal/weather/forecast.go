@@ -18,6 +18,8 @@ type Place struct {
 	Longitude float64 `json:"longitude"`
 	Country   string  `json:"country,omitempty"`
 	Region    string  `json:"region,omitempty"`
+	// CountryCode 是 ISO 3166-1 两位代码（地名库、IP 定位给的；只知道坐标时为空）
+	CountryCode string `json:"country_code,omitempty"`
 }
 
 // PlaceQuery 是按地名找坐标的条件：Language 决定返回的名字用什么语言写；CountryCode（ISO 3166-1 两位代码，空 = 不限）

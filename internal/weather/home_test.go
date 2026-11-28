@@ -24,13 +24,13 @@ func TestIPHomeLocatesOutsideTheLock(t *testing.T) {
 
 	impatient, cancel := context.WithCancel(context.Background())
 	first := make(chan error, 1)
-	go func() { _, err := home.Home(impatient); first <- err }()
+	go func() { _, err := home.Home(impatient, ""); first <- err }()
 	time.Sleep(50 * time.Millisecond) // 第一个在等定位服务
 	second := make(chan Place, 1)
-	go func() { place, _ := home.Home(context.Background()); second <- place }()
+	go func() { place, _ := home.Home(context.Background(), ""); second <- place }()
 
 	started := time.Now()
-	if _, _, ok := home.Known(); ok || time.Since(started) > 20*time.Millisecond {
+	if _, _, ok := home.Known(""); ok || time.Since(started) > 20*time.Millisecond {
 		t.Errorf("Known 不该等定位：ok=%v 用了 %v", ok, time.Since(started))
 	}
 	cancel() // 先来的被打断
@@ -44,7 +44,7 @@ func TestIPHomeLocatesOutsideTheLock(t *testing.T) {
 	if n := requests.Load(); n != 1 {
 		t.Errorf("同时要的应只发一次请求：%d 次", n)
 	}
-	if place, byIP, ok := home.Known(); !ok || !byIP || place.Name != "Fuchu" {
+	if place, byIP, ok := home.Known(""); !ok || !byIP || place.Name != "Fuchu" {
 		t.Errorf("定位完应记下：%+v %v %v", place, byIP, ok)
 	}
 }
@@ -111,15 +111,15 @@ func TestIPHomeCoolsDownAfterFailure(t *testing.T) {
 	clock := newFakeClock()
 	home.location.now = clock.Now
 
-	if _, err := home.Home(ctx); err == nil || server.requests.Load() != 1 {
+	if _, err := home.Home(ctx, ""); err == nil || server.requests.Load() != 1 {
 		t.Fatalf("定位服务挂着：应报错：%v（问了 %d 次）", err, server.requests.Load())
 	}
-	if _, err := home.Home(ctx); err == nil || server.requests.Load() != 1 {
+	if _, err := home.Home(ctx, ""); err == nil || server.requests.Load() != 1 {
 		t.Errorf("冷却期内不再问定位服务，直接报错：%v（问了 %d 次）", err, server.requests.Load())
 	}
 	clock.Advance(lookupRetryAfter)
 	server.down.Store(false)
-	if place, err := home.Home(ctx); err != nil || place.Name != "Sapporo" || server.requests.Load() != 2 {
+	if place, err := home.Home(ctx, ""); err != nil || place.Name != "Sapporo" || server.requests.Load() != 2 {
 		t.Errorf("过了冷却期再试：%+v %v（问了 %d 次）", place, err, server.requests.Load())
 	}
 }
@@ -131,7 +131,7 @@ func TestIPHomeUsesStaleLocationWhileRefreshing(t *testing.T) {
 	home := NewIPHome(server.URL, "", server.Client())
 	clock := newFakeClock()
 	home.location.now = clock.Now
-	if _, err := home.Home(ctx); err != nil {
+	if _, err := home.Home(ctx, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -143,7 +143,7 @@ func TestIPHomeUsesStaleLocationWhileRefreshing(t *testing.T) {
 	server.gate.Store(&gate) // 重新定位卡在定位服务那里
 	server.city.Store("Otaru")
 	located := make(chan Place, 1)
-	go func() { place, _ := home.Home(ctx); located <- place }()
+	go func() { place, _ := home.Home(ctx, ""); located <- place }()
 	select {
 	case place := <-located:
 		if place.Name != "Sapporo" {
@@ -154,7 +154,7 @@ func TestIPHomeUsesStaleLocationWhileRefreshing(t *testing.T) {
 	}
 	openGate()
 	waitForRefresh(home.location)
-	if place, _, ok := home.Known(); !ok || place.Name != "Otaru" || server.requests.Load() != 2 {
+	if place, _, ok := home.Known(""); !ok || place.Name != "Otaru" || server.requests.Load() != 2 {
 		t.Errorf("后台重新定位好了应换成新的：%+v %v（问了 %d 次）", place, ok, server.requests.Load())
 	}
 }
@@ -166,17 +166,17 @@ func TestIPHomeStaleRefreshFailureCoolsDown(t *testing.T) {
 	home := NewIPHome(server.URL, "", server.Client())
 	clock := newFakeClock()
 	home.location.now = clock.Now
-	if _, err := home.Home(ctx); err != nil {
+	if _, err := home.Home(ctx, ""); err != nil {
 		t.Fatal(err)
 	}
 
 	clock.Advance(ipHomeTTL)
 	server.down.Store(true)
-	if place, err := home.Home(ctx); err != nil || place.Name != "Sapporo" {
+	if place, err := home.Home(ctx, ""); err != nil || place.Name != "Sapporo" {
 		t.Fatalf("过期后先用上次的：%+v %v", place, err)
 	}
 	waitForRefresh(home.location)
-	if place, err := home.Home(ctx); err != nil || place.Name != "Sapporo" || server.requests.Load() != 2 {
+	if place, err := home.Home(ctx, ""); err != nil || place.Name != "Sapporo" || server.requests.Load() != 2 {
 		t.Errorf("后台重新定位失败：照样用上次的，冷却期内不再问：%+v %v（问了 %d 次）", place, err, server.requests.Load())
 	}
 	waitForRefresh(home.location)
@@ -187,11 +187,11 @@ func TestIPHomeStaleRefreshFailureCoolsDown(t *testing.T) {
 	clock.Advance(lookupRetryAfter)
 	server.down.Store(false)
 	server.city.Store("Otaru")
-	if _, err := home.Home(ctx); err != nil {
+	if _, err := home.Home(ctx, ""); err != nil {
 		t.Fatal(err)
 	}
 	waitForRefresh(home.location)
-	if place, _, _ := home.Known(); place.Name != "Otaru" || server.requests.Load() != 3 {
+	if place, _, _ := home.Known(""); place.Name != "Otaru" || server.requests.Load() != 3 {
 		t.Errorf("过了冷却期在后台再试：%+v（问了 %d 次）", place, server.requests.Load())
 	}
 }

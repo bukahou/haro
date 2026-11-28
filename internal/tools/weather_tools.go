@@ -32,7 +32,7 @@ func WeatherTools(places PlaceFinder, forecaster weather.Forecaster, home weathe
 	logger *slog.Logger) Builtin {
 	description := "查天气：现在的天气和未来几天的预报（气温、降水概率）。主人问天气、要不要带伞、冷不冷时用；天气每时每刻都在变，不调用就不知道。"
 	if home != nil {
-		description += "查家里时不填地点。"
+		description += "查家里时不填地点（家的位置没有设置时会告诉你，这时要问清楚查哪里）。"
 	} else {
 		description += "必须给出地点（家的位置没有设置）。"
 	}
@@ -71,8 +71,11 @@ func pickPlace(ctx context.Context, places PlaceFinder, home weather.HomeLocator
 		if home == nil {
 			return weather.Place{}, false, brain.InvalidArguments(errors.New("家的位置没有设置（HARO_WEATHER_HOME），要说清楚查哪里"))
 		}
+		place, err := home.Home(ctx, brain.SpeakerFrom(ctx))
+		if errors.Is(err, weather.ErrHomeNotSet) {
+			return weather.Place{}, false, brain.InvalidArguments(errors.New("这位的家的位置没有设置，要说清楚查哪里"))
+		}
 		out.Home = true
-		place, err := home.Home(ctx)
 		return place, err == nil, err
 	}
 	candidates, err := places.FindPlaces(ctx, weather.PlaceQuery{Name: name, Language: language, CountryCode: in.CountryCode},

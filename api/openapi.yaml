@@ -1,9 +1,9 @@
 openapi: 3.0.3
 info:
   title: haro App API
-  version: 0.2.0
+  version: 0.4.0
   description: |
-    haro 手机 App 用的接口（第一批：账号、登录、我、花费、终端、管理员）。
+    haro 手机 App 和网页版用的接口（第一批：账号、登录、我、花费、终端、管理员）。
     服务端和 App 都从这份契约生成代码；⛔ 两边都不绕过契约私下约定字段。契约每改一次升版本号。
 
     约定：
@@ -14,6 +14,7 @@ info:
     - 业务参数（各种上限、可选项）由 `/api/v1/client-config` 下发，App 不写死。
     - App 请求时用 `User-Agent` 带上 App 的版本（例如 `haro-ios/1.0.0`）。
     - App 的接口都在 `/api/v1/` 下（公网只放行这一段）；`/v1/...` 是终端的语音连接，只在局域网。
+    - 网页版（另一个域名）从浏览器跨域调接口：服务端只放行网页版的那一个来源（CORS），令牌同样放在 `Authorization` 里，不用 cookie。
 servers:
   - url: https://haro.example.com
     description: 占位（真实地址由部署决定）
@@ -37,13 +38,21 @@ paths:
       operationId: startLogin
       summary: 开始登录（浏览器跳转）
       description: |
-        App 用系统的网页登录框（ASWebAuthenticationSession，回调 scheme `haro`）打开这个地址；haro 跳到 akasha 登录，
-        回来后跳到固定的 `haro://auth/callback`：
-        - 成功：`haro://auth/callback#access_token=…&refresh_token=…&expires_in=3600&token_type=Bearer`
-        - 失败：`haro://auth/callback?oidc_error=<OidcError>`
-        这不是 JSON 接口。
+        App 用系统的网页登录框（ASWebAuthenticationSession，回调 scheme `haro`）打开这个地址，网页版在浏览器里打开（带 `client=web`）；
+        haro 跳到 akasha 登录，回来后跳回发起的一方（只有这两个固定地址）：
+        - App：成功 `haro://auth/callback#access_token=…&refresh_token=…&expires_in=3600&token_type=Bearer`，
+          失败 `haro://auth/callback?oidc_error=<OidcError>`
+        - 网页版：同样的内容，地址换成网页版的 `/auth/callback`（`#` 后面的部分浏览器不发给服务器，网页读完立刻从地址栏清掉）
+        这不是 JSON 接口。没有网页版的服务端收到 `client=web` 回 404。
       security: []
       parameters:
+        - name: client
+          in: query
+          required: false
+          description: 谁发起的登录（决定登录完跳回哪里）；不带 = `app`
+          schema:
+            type: string
+            enum: [app, web]
         - name: invite
           in: query
           required: false
@@ -75,7 +84,7 @@ paths:
             type: string
       responses:
         '302':
-          description: 跳到 `haro://auth/callback`（见 startLogin）
+          description: 跳回发起登录的一方（App 的 `haro://auth/callback` 或网页版的 `/auth/callback`，见 startLogin）
   /api/v1/auth/refresh:
     post:
       tags: [auth]
@@ -283,7 +292,7 @@ paths:
     get:
       tags: [me]
       operationId: listCountries
-      summary: 可选的国家（支持节假日的那些）
+      summary: 可选的国家（支持节假日的那些；名字按 Accept-Language）
       parameters:
         - $ref: '#/components/parameters/AcceptLanguage'
       responses:
@@ -761,27 +770,38 @@ components:
               type: integer
     Profile:
       type: object
-      required: [text, max_chars, updated_at]
+      description: |
+        主人资料（Markdown，每次对话都会带给 haro）。⛔ 不写密码、银行卡和账户号、证件号码、验证码和密钥。
+        `<!-- -->` 注释（填写说明）、没填的项不会发给 haro。
+      required: [household, owner, max_chars, updated_at]
       properties:
-        text:
+        household:
           type: string
-          description: 资料正文（Markdown）。⛔ 不写密码、银行卡和账户号、证件号码、验证码和密钥
+          description: 全家：这个家里的人都会带上（终端认不出是谁时也带上）
+        owner:
+          type: string
+          description: 本人：认出是账号本人时才带上
         max_chars:
           type: integer
+          description: 每一段最多多少字
         updated_at:
           type: string
           format: date-time
           nullable: true
+          description: null = 还没在 App 里改过（管理员账号这时显示的是服务端配置里的资料文件）
     ProfileUpdate:
       type: object
-      required: [text]
+      required: [household, owner]
       properties:
-        text:
+        household:
+          type: string
+          maxLength: 10000
+        owner:
           type: string
           maxLength: 10000
     Place:
       type: object
-      required: [name, country_code, latitude, longitude]
+      required: [name, latitude, longitude]
       properties:
         name:
           type: string
@@ -790,19 +810,34 @@ components:
           type: string
           nullable: true
           description: 上一级（都道府县、州、省）
+        country:
+          type: string
+          nullable: true
+          description: 国家名
         country_code:
           type: string
+          nullable: true
           pattern: '^[A-Z]{2}$'
+          description: ISO 3166-1 两位代码（只知道坐标时为 null）
         latitude:
           type: number
           format: double
+          minimum: -90
+          maximum: 90
         longitude:
           type: number
           format: double
+          minimum: -180
+          maximum: 180
     Home:
       type: object
-      required: [place, holidays_country]
+      required: [place, holidays_country, updated_at]
       properties:
+        updated_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: null = 还没在 App 里设过（管理员账号这时显示的是服务端配置里的家）
         place:
           allOf:
             - $ref: '#/components/schemas/Place'

@@ -18,7 +18,7 @@ func TestLocationNote(t *testing.T) {
 	if lines := note.Brief("主人"); lines != nil {
 		t.Errorf("还没定位过：不该发网络请求，也不说位置：%v", lines)
 	}
-	if _, err := home.Home(context.Background()); err != nil {
+	if _, err := home.Home(context.Background(), ""); err != nil {
 		t.Fatal(err)
 	}
 	lines := note.Brief("主人")

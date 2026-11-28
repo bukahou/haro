@@ -200,9 +200,10 @@ func (s *Store) create(ctx context.Context, subject, displayName string, status 
 	if subject != "" {
 		nullableSubject = subject
 	}
+	owner, guest := PersonsOf(id)
 	if _, err := s.db.ExecContext(ctx, `INSERT INTO accounts (id, subject, display_name, role, status, joined_via, owner_person,
 		guest_person, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, nullableSubject, displayName, RoleMember, status, via,
-		"account:"+id, "account:"+id+":guest", s.now().Unix()); err != nil {
+		owner, guest, s.now().Unix()); err != nil {
 		return Account{}, fmt.Errorf("建账号: %w", err)
 	}
 	return s.ByID(ctx, id)

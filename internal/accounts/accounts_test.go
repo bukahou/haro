@@ -167,3 +167,19 @@ func TestEnsureAdminAfterFirstLogin(t *testing.T) {
 		t.Errorf("之后能正常登录：%v", err)
 	}
 }
+
+// 账号的两个人：PersonsOf 写出来的 ParsePerson 认得出；沿用的声纹名、别的写法认不出。
+func TestPersonsRoundTrip(t *testing.T) {
+	owner, guest := PersonsOf("abc")
+	if id, isOwner, ok := ParsePerson(owner); !ok || id != "abc" || !isOwner {
+		t.Errorf("本人：%q %v %v", id, isOwner, ok)
+	}
+	if id, isOwner, ok := ParsePerson(guest); !ok || id != "abc" || isOwner {
+		t.Errorf("访客：%q %v %v", id, isOwner, ok)
+	}
+	for _, person := range []string{"主人", "", "account:", "account::guest", "account:a:b", "account:a:b:guest"} {
+		if _, _, ok := ParsePerson(person); ok {
+			t.Errorf("%q 不是账号的人", person)
+		}
+	}
+}

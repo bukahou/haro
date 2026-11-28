@@ -34,11 +34,12 @@ func (c *OpenMeteoClient) FindPlaces(ctx context.Context, place PlaceQuery, limi
 	}
 	var response struct {
 		Results []struct {
-			Name      string  `json:"name"`
-			Latitude  float64 `json:"latitude"`
-			Longitude float64 `json:"longitude"`
-			Country   string  `json:"country"`
-			Admin1    string  `json:"admin1"`
+			Name        string  `json:"name"`
+			Latitude    float64 `json:"latitude"`
+			Longitude   float64 `json:"longitude"`
+			Country     string  `json:"country"`
+			CountryCode string  `json:"country_code"`
+			Admin1      string  `json:"admin1"`
 		} `json:"results"`
 	}
 	address, err := endpoint.Join(c.geocodingURL, "", query)
@@ -51,7 +52,7 @@ func (c *OpenMeteoClient) FindPlaces(ctx context.Context, place PlaceQuery, limi
 	places := make([]Place, 0, len(response.Results))
 	for _, found := range response.Results {
 		places = append(places, Place{Name: found.Name, Latitude: found.Latitude, Longitude: found.Longitude,
-			Country: found.Country, Region: found.Admin1})
+			Country: found.Country, Region: found.Admin1, CountryCode: strings.ToUpper(found.CountryCode)})
 	}
 	return places, nil
 }

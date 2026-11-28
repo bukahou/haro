@@ -5,6 +5,7 @@ package holidays
 
 import (
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -118,17 +119,23 @@ type Calendar struct {
 	now     func() time.Time
 }
 
+// Countries 是支持的国家代码（按代码排序）。
+func Countries() []string {
+	return slices.Sorted(maps.Keys(countries))
+}
+
+// Supported 判断支不支持这个国家代码（大小写都行）。
+func Supported(code string) bool {
+	_, ok := countries[strings.ToUpper(strings.TrimSpace(code))]
+	return ok
+}
+
 // ForCountry 按国家代码（大小写都行）建日历；不支持的代码报错（写明支持哪些）。
 func ForCountry(code string) (*Calendar, error) {
 	code = strings.ToUpper(strings.TrimSpace(code))
 	holidays, ok := countries[code]
 	if !ok {
-		supported := make([]string, 0, len(countries))
-		for known := range countries {
-			supported = append(supported, known)
-		}
-		slices.Sort(supported)
-		return nil, fmt.Errorf("不支持的国家代码 %q（支持：%s）", code, strings.Join(supported, "、"))
+		return nil, fmt.Errorf("不支持的国家代码 %q（支持：%s）", code, strings.Join(Countries(), "、"))
 	}
 	calendar := &cal.Calendar{}
 	calendar.AddHoliday(holidays...)

@@ -264,7 +264,7 @@ v10（2026-11-22 裁定）：记住的事和以前的对话都能按意思找回
 
 ## App 的接口（`internal/appserver`）
 
-手机 App 用的 HTTP 接口，挂在服务端同一个端口的 `/api/v1/` 下（`appserver.PathPrefix`；公网上只放行这一段）。终端的语音连接、声纹登记在 `/v1/...` 下，
+手机 App 和网页版（`web/`）用的 HTTP 接口，挂在服务端同一个端口的 `/api/v1/` 下（`appserver.PathPrefix`；公网上只放行这一段）。终端的语音连接、声纹登记在 `/v1/...` 下，
 只在局域网：两段不能重叠（有测试守着），否则开放 App 接口时会把不鉴权的语音连接一起开出去。设了 `HARO_APP_PUBLIC_URL` 才开。
 
 - **契约**：`api/openapi.yaml`（OpenAPI 3.0.3）。服务端的接口代码由 oapi-codegen 生成（`internal/appapi`，`go generate ./internal/appapi/`，⛔ 不手改），
@@ -275,9 +275,16 @@ v10（2026-11-22 裁定）：记住的事和以前的对话都能按意思找回
   每个请求先解析成账号，接口只用它的人取数据（隔离只在这一处做）。管理员是谁写在配置里（`HARO_ADMIN_SUBJECT`），启动时校正；
   管理员账号的人就是原来的声纹名（`HARO_ADMIN_PERSON`）和全家共用，现有数据不用改。新的 akasha 账号第一次登录时进「等管理员同意」。
 - **登录**：haro 后端是唯一的 akasha 客户端（机密客户端，`HARO_OIDC_*`），用 akasha 的 `pkg/oidcrp` 走授权码 + PKCE；
-  App 用系统的网页登录框打开 `/api/v1/auth/oidc/start`，登录完 haro 换成自己的令牌，跳回固定的 `haro://auth/callback`（令牌在 fragment 里；
-  失败时 `?oidc_error=`）。回跳只认这一个地址。haro 的令牌是随机串、库里只存 SHA-256：访问令牌 1 小时，刷新令牌 90 天、用一次换新，
+  App 用系统的网页登录框、网页版在浏览器里（带 `client=web`）打开 `/api/v1/auth/oidc/start`，登录完 haro 换成自己的令牌，跳回发起的一方：
+  App 是固定的 `haro://auth/callback`，网页版是 `HARO_APP_WEB_URL` 的 `/auth/callback`（令牌在 fragment 里；失败时 `?oidc_error=`）。
+  回跳只认这两个固定地址，回哪一方、邀请码编进 oidcrp 带过登录流程的 next，只放行自己编出来的写法。haro 的令牌是随机串、库里只存 SHA-256：访问令牌 1 小时，刷新令牌 90 天、用一次换新，
   用过的再来用时整串作废。
+- **主人资料和家**（`internal/household`）：每个账号一份 —— 资料两段（全家的、本人的）、家的位置、节假日的国家，存在账号库里；
+  大脑（资料）、天气（家在哪、每轮的「家大约在哪」）、节假日的提醒都按这一轮说话的人找到账号再取，App 的接口（`/me/profile`、`/me/home`、
+  `/places`、`/countries`）在这里改，改了下一轮就生效。管理员账号在 App 里没设过的项用服务端的配置（`HARO_PROFILE_DIR`、`HARO_WEATHER_HOME`、
+  `HARO_HOLIDAYS`），和没有账号时一样；别的账号没设时就是没有。终端上声纹认出的别的名字归管理员账号、只带「全家」那段（终端配对之前都归管理员）。
+- **网页版跨域**：网页版在另一个域名，设了 `HARO_APP_WEB_URL` 才放行它这一个来源（`rs/cors`，方法从契约里取）；令牌在 `Authorization` 里，不用 cookie。
+  跨域在限流外面一层，被限流、出错的回答也带跨域的头。
 - **金额**：数值是十进制字符串 + 币种；汇总换成默认货币，带按币种的原始合计和换算提示。
 
 ## 终端（`internal/terminal` 与 `internal/platform`）

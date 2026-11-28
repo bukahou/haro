@@ -109,8 +109,15 @@ func TestHolidaysBriefing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(with.briefers) != len(without.briefers)+1 {
-		t.Errorf("设了 HARO_HOLIDAYS 应多一份说明：%d / %d", len(with.briefers), len(without.briefers))
+	// 节假日的说明一直挂着（每个账号可以自己设国家）；没有账号库时用 HARO_HOLIDAYS 的国家
+	if got, want := with.household.HomeOf("").HolidaysCountry, "JP"; got != want {
+		t.Errorf("设了 HARO_HOLIDAYS：节假日的国家是 %q", got)
+	}
+	if got := without.household.HomeOf("").HolidaysCountry; got != "" {
+		t.Errorf("没设 HARO_HOLIDAYS：节假日的国家应为空，是 %q", got)
+	}
+	if len(with.briefers) != len(without.briefers) {
+		t.Errorf("节假日的说明设没设都在：%d / %d", len(with.briefers), len(without.briefers))
 	}
 	if _, err := buildTooling(t.Context(), config.ServerSettings{ToolGroups: noTools, Holidays: "XX"}, catalog, deps, logger, &shutdown); err == nil ||
 		!strings.Contains(err.Error(), "HARO_HOLIDAYS") {

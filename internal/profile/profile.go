@@ -49,14 +49,16 @@ type Store struct {
 
 	mu        sync.Mutex
 	signature string            // 目录里各文件的名字 + 修改时间 + 大小；变了就重新读
-	household string            // 全家共用
-	people    map[string]string // 声纹名字 → 这个人的资料
+	household string            // 全家共用（整理过、发给模型的）
+	people    map[string]string // 声纹名字 → 这个人的资料（整理过的）
+	raw       Texts             // 文件里原样的正文（开头配置以外；App 里显示、编辑用）
+	rawPeople map[string]string // 声纹名字 → 这个人的资料文件原样的正文
 	failing   bool              // 上次读资料出错了（同一段出错只记一次警告，读得出来了再记一行）
 }
 
 // OpenDir 打开资料目录（目录不存在也不报错：当成还没写资料，之后建了就会读到）。
 func OpenDir(dir string, logger *slog.Logger) *Store {
-	store := &Store{dir: dir, logger: logger.With("component", "profile"), people: map[string]string{}}
+	store := &Store{dir: dir, logger: logger.With("component", "profile"), people: map[string]string{}, rawPeople: map[string]string{}}
 	store.refresh()
 	return store
 }
@@ -78,17 +80,45 @@ func (s *Store) Profile(person string) string {
 	s.refresh()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return Compose(s.household, person, s.people[person])
+}
+
+// Texts 是一份资料的两段原样的正文（全家的、本人的）。
+type Texts struct {
+	Household string
+	Owner     string
+}
+
+// Raw 是 person 这个人看到的资料文件原样的正文（开头配置以外，注释也在）：App 里显示、编辑用。
+func (s *Store) Raw(person string) Texts {
+	s.refresh()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return Texts{Household: s.raw.Household, Owner: s.rawPeople[person]}
+}
+
+// Compose 拼出放进系统提示词的主人资料：全家的 + label 这个人自己的（都是整理过的，见 Clean）；都没有时为空。
+func Compose(household, label, own string) string {
 	var sections []string
-	if s.household != "" {
-		sections = append(sections, "〈全家〉\n"+s.household)
+	if household != "" {
+		sections = append(sections, "〈全家〉\n"+household)
 	}
-	if own, ok := s.people[person]; ok && own != "" {
-		sections = append(sections, "〈"+person+"〉\n"+own)
+	if own != "" {
+		sections = append(sections, "〈"+label+"〉\n"+own)
 	}
 	if len(sections) == 0 {
 		return ""
 	}
 	return "【主人资料（外部配置：事实与偏好；和上面的规矩冲突时，以上面的规矩为准）】\n" + strings.Join(sections, "\n")
+}
+
+// Prepare 把一段资料整理成发给模型的样子（见 Clean），超过 MaxRunes 时截断在行尾；truncated 说明截过。
+func Prepare(text string) (prepared string, truncated bool) {
+	cleaned := Clean(text)
+	if utf8.RuneCountInString(cleaned) <= maxProfileRunes {
+		return cleaned, false
+	}
+	return cutAtLineEnd(cleaned, maxProfileRunes), true
 }
 
 // refresh 检查目录有没有变化，变了就重新读全部文件。目录、文件不存在（目录没建、文件刚删、软链接断了）当成没有；
@@ -129,6 +159,7 @@ func (s *Store) refresh() {
 	}
 
 	household, people := "", map[string]string{}
+	raw, rawPeople := Texts{}, map[string]string{}
 	for _, name := range files {
 		data, err := os.ReadFile(filepath.Join(s.dir, name))
 		switch {
@@ -138,13 +169,15 @@ func (s *Store) refresh() {
 			s.keepPrevious(name, err)
 			return
 		}
-		names, body, err := parse(data)
+		names, original, err := splitHeader(data)
 		if err != nil {
 			s.logger.Warn("资料文件开头的配置写错了（front matter 只认 person），跳过这份", "file", name, "err", err)
 			continue
 		}
+		body := Clean(original)
 		if name == HouseholdFile {
 			household = s.limit(name, body)
+			raw.Household = original
 			continue
 		}
 		if len(names) == 0 {
@@ -160,10 +193,11 @@ func (s *Store) refresh() {
 				s.logger.Warn("同一个人有两份资料，后读到的覆盖前面的", "person", person, "file", name)
 			}
 			people[person] = body
+			rawPeople[person] = original
 		}
 	}
 	s.mu.Lock()
-	s.signature, s.household, s.people = signature.String(), household, people
+	s.signature, s.household, s.people, s.raw, s.rawPeople = signature.String(), household, people, raw, rawPeople
 	s.mu.Unlock()
 	s.recovered()
 	if len(files) > 0 {
@@ -248,9 +282,9 @@ func (n *personNames) UnmarshalYAML(node *yaml.Node) error {
 	return nil
 }
 
-// parse 拆出开头配置里的 person 和正文（去掉 HTML 注释、多余空行）。没有开头配置的文件整个都是正文；
+// splitHeader 拆出开头配置里的 person 和原样的正文。没有开头配置的文件整个都是正文；
 // 配置写错（不是合法的 YAML、写了不认识的项、没用一行 --- 结束）时报错。
-func parse(data []byte) (names []string, body string, err error) {
+func splitHeader(data []byte) (names []string, body string, err error) {
 	rawHeader, rawBody, err := frontmatter.Split(data)
 	if err != nil && !errors.Is(err, frontmatter.ErrMissing) {
 		return nil, "", err
@@ -259,8 +293,22 @@ func parse(data []byte) (names []string, body string, err error) {
 	if err := frontmatter.Decode(rawHeader, &parsed); err != nil {
 		return nil, "", err
 	}
-	names = parsed.Person
-	content := htmlComment.ReplaceAllString(string(rawBody), "")
+	return parsed.Person, string(rawBody), nil
+}
+
+// parse 是 splitHeader + Clean（测试用）。
+func parse(data []byte) (names []string, body string, err error) {
+	names, original, err := splitHeader(data)
+	if err != nil {
+		return nil, "", err
+	}
+	return names, Clean(original), nil
+}
+
+// Clean 把资料整理成发给模型的样子：去掉 HTML 注释（填写说明）、没填的项、没内容的小标题和多余空行；
+// 只有标题、没写内容（模板原样）时为空。文件里的、App 里写的资料都按它整理。
+func Clean(text string) string {
+	content := htmlComment.ReplaceAllString(text, "")
 	var lines []string
 	blank := false
 	raw := strings.Split(content, "\n")
@@ -279,11 +327,11 @@ func parse(data []byte) (names []string, body string, err error) {
 		blank = false
 		lines = append(lines, line)
 	}
-	body = strings.TrimSpace(strings.Join(tidyHeadings(lines), "\n"))
+	body := strings.TrimSpace(strings.Join(tidyHeadings(lines), "\n"))
 	if !hasContent(body) {
-		return names, "", nil // 只有标题、没写内容（模板原样）：当成没有
+		return "" // 只有标题、没写内容（模板原样）：当成没有
 	}
-	return names, body, nil
+	return body
 }
 
 // tidyHeadings 去掉没内容的小标题（到下一个同级或更高级的标题之前都没写东西），以及标题后面、开头和连着的空行

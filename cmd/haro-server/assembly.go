@@ -18,7 +18,7 @@ import (
 	"github.com/bukahou/haro/internal/conversationstore"
 	"github.com/bukahou/haro/internal/embedding"
 	"github.com/bukahou/haro/internal/graceful"
-	"github.com/bukahou/haro/internal/holidays"
+	"github.com/bukahou/haro/internal/household"
 	"github.com/bukahou/haro/internal/llm"
 	"github.com/bukahou/haro/internal/memory"
 	"github.com/bukahou/haro/internal/money"
@@ -87,6 +87,7 @@ type services struct {
 	// conversations 是对话库（没设 HARO_CONVERSATIONS_DB 时为 nil：对话只在内存里）：大脑存对话，长期记忆从完整记录里按意思找
 	conversations *conversationstore.SQLiteStore
 	embedder      *embedding.Client // 嵌入服务（没设 HARO_EMBEDDING_URL 时为 nil：长期记忆不按意思找）
+	accounts      appAccounts       // App 接口的账号库和管理员（没开时为空）
 }
 
 // connectServices 准备外部服务（语音合成、识别、模型的客户端）和费用的刹车：先有刹车，再接搜索、后台调查。
@@ -146,12 +147,14 @@ func connectServices(ctx context.Context, settings config.ServerSettings, logger
 
 // tooling 是工具，以及每轮补充给模型的情况说明、给终端的提示。
 type tooling struct {
-	toolbox      brain.Toolbox    // 没开工具时为 nil
-	briefers     []brain.Briefer  // 每轮补充给模型的即时情况：现在几号几点、额度提醒、主人家大致在哪、任务板
-	notices      *brain.NoticeHub // 给终端的提示（后台调查查完了让终端响一声）和服务端自己开口（到点的提醒）
-	expertSearch vision.Search    // 看画面的专家联网查：和主对话的快查同一套搜索与额度；不能查时为 nil
-	memory       *memory.Keeper   // 长期记忆（App 的概览数条数）；没开那组工具时为 nil
-	research     *research.Runner // 后台调查（App 的概览数进行中的）；没开时为 nil
+	toolbox      brain.Toolbox            // 没开工具时为 nil
+	briefers     []brain.Briefer          // 每轮补充给模型的即时情况：现在几号几点、额度提醒、主人家大致在哪、任务板
+	notices      *brain.NoticeHub         // 给终端的提示（后台调查查完了让终端响一声）和服务端自己开口（到点的提醒）
+	expertSearch vision.Search            // 看画面的专家联网查：和主对话的快查同一套搜索与额度；不能查时为 nil
+	memory       *memory.Keeper           // 长期记忆（App 的概览数条数）；没开那组工具时为 nil
+	research     *research.Runner         // 后台调查（App 的概览数进行中的）；没开时为 nil
+	household    *household.Service       // 每个账号的主人资料、家的位置、节假日（大脑、天气、App 都从这里取）
+	places       *weather.OpenMeteoClient // 搜地名（App 设家的位置用）；天气那组工具关着时为 nil
 }
 
 // buildTooling 准备工具：自研工具内置（长期记忆（记事已并进来）、提醒直接连数据库；天气；联网搜索与后台调查），MCP 只接第三方（现在还没有）。
@@ -159,15 +162,26 @@ type tooling struct {
 func buildTooling(ctx context.Context, settings config.ServerSettings, catalog agents.Catalog, deps services, logger *slog.Logger,
 	shutdown *shutdownSteps) (tooling, error) {
 	kit := tooling{briefers: []brain.Briefer{brain.ClockBriefer{}, deps.guard}, notices: brain.NewNoticeHub()}
-	if settings.Holidays != "" { // 今天、明天是节假日时告诉模型（不是工具：关掉工具时照样有）
-		calendar, err := holidays.ForCountry(settings.Holidays)
-		if err != nil {
-			return kit, fmt.Errorf("HARO_HOLIDAYS：%w", err)
-		}
-		kit.briefers = append(kit.briefers, brain.BriefLines(calendar.Brief))
-		logger.Info("节假日：今天、明天是节假日时告诉模型", "country", calendar.Country())
+	defaults := household.Defaults{Holidays: settings.Holidays}
+	if settings.ProfileDir != "" { // 主人资料文件：管理员账号没在 App 里改过时用它，改了文件下一轮就生效
+		defaults.Profiles = profile.OpenDir(settings.ProfileDir, logger)
+		householdRunes, people := defaults.Profiles.Summary()
+		logger.Info("主人资料文件", "dir", settings.ProfileDir, "household_runes", householdRunes, "people", people)
 	}
-	var builtins []tools.Builtin // 内置工具按组开（HARO_TOOLS，不设 = 全开）
+	var weatherHTTP *http.Client
+	if settings.ToolGroupOn(config.ToolGroupWeather) {
+		weatherHTTP = weather.NewHTTPClient() // 连接等得短：连不上就早点交给备用
+		defaults.Home = weatherHome(ctx, settings, weatherHTTP, logger)
+	}
+	var err error
+	if kit.household, err = household.Open(ctx, householdStore(deps.accounts), deps.accounts.household(), defaults, logger); err != nil {
+		return kit, err
+	}
+	if settings.Holidays != "" {
+		logger.Info("节假日：今天、明天是节假日时告诉模型（没在 App 里设过的管理员账号用这个国家）", "country", settings.Holidays)
+	}
+	kit.briefers = append(kit.briefers, brain.BriefLines(kit.household.HolidayNote)) // 不是工具：关掉工具时照样有
+	var builtins []tools.Builtin                                                     // 内置工具按组开（HARO_TOOLS，不设 = 全开）
 	if settings.ToolGroupOn(config.ToolGroupMemory) {
 		store, err := notes.Open(ctx, settings.NotesDB)
 		if err != nil {
@@ -190,14 +204,12 @@ func buildTooling(ctx context.Context, settings config.ServerSettings, catalog a
 		kit.briefers = append(kit.briefers, scheduler) // 错过的提醒：主人下次开口时告诉他
 	}
 	if settings.ToolGroupOn(config.ToolGroupWeather) { // 天气：Open-Meteo 为主（备用按 HARO_WEATHER_BACKUP）；都不用密钥
-		weatherHTTP := weather.NewHTTPClient() // 连接等得短：连不上就早点交给备用
-		home := weatherHome(ctx, settings, weatherHTTP, logger)
 		openMeteo := weather.NewOpenMeteoClient(settings.WeatherForecastURL, settings.WeatherGeocodingURL, weatherHTTP)
-		forecaster := weatherForecaster(ctx, settings, openMeteo, home, weatherHTTP, logger)
-		builtins = append(builtins, tools.WeatherTools(openMeteo, forecaster, home, settings.WeatherGeocodingLanguage, logger))
-		if home != nil {
-			kit.briefers = append(kit.briefers, brain.BriefLines(weather.LocationNote{Home: home}.Brief)) // 每轮告诉模型主人家大致在哪（城市级）
-		}
+		kit.places = openMeteo
+		forecaster := weatherForecaster(ctx, settings, openMeteo, defaults.Home, weatherHTTP, logger)
+		// 家按这一轮说话的人所在的账号取（kit.household）
+		builtins = append(builtins, tools.WeatherTools(openMeteo, forecaster, kit.household, settings.WeatherGeocodingLanguage, logger))
+		kit.briefers = append(kit.briefers, brain.BriefLines(weather.LocationNote{Home: kit.household}.Brief)) // 每轮告诉模型主人家大致在哪（城市级）
 	}
 	// 联网搜索服务：设了密钥就有。前台的搜索工具、后台调查各是一组；看画面的专家查资料也用它（不算前台的工具组）
 	if searcher := connectWebSearch(settings, deps.httpClient, logger); searcher != nil {
@@ -286,13 +298,8 @@ func assembleBrain(ctx context.Context, settings config.ServerSettings, catalog 
 		go components.Conversations.RunIdleCompaction(ctx)
 		logger.Info("对话闲了一阵就在后台提前压缩", "idle", options.IdleCompactAfter)
 	}
-	if settings.ProfileDir != "" { // 主人资料：外部注入，改了文件下一轮就生效
-		profiles := profile.OpenDir(settings.ProfileDir, logger)
-		household, people := profiles.Summary()
-		logger.Info("主人资料", "dir", settings.ProfileDir, "household_runes", household, "people", people)
-		components.Profiles = profiles
-	}
-	if settings.WakeArbitration > 0 { // 多台终端同时听到唤醒词：只让最合适的那台回答
+	components.Profiles = kit.household // 主人资料：按说话的人所在的账号（管理员没在 App 里改过时用资料文件）
+	if settings.WakeArbitration > 0 {   // 多台终端同时听到唤醒词：只让最合适的那台回答
 		components.WakeArbiter = brain.NewWakeArbiter(settings.WakeArbitration)
 	}
 	return components, options, nil
@@ -342,4 +349,12 @@ func serve(ctx context.Context, settings config.ServerSettings, components brain
 		return err
 	}
 	return ctx.Err()
+}
+
+// householdStore 是「家」那一层存设置的地方：App 的接口没开（没有账号库）时为 nil，只用服务端的配置。
+func householdStore(opened appAccounts) household.Store {
+	if opened.store == nil {
+		return nil
+	}
+	return opened.store
 }

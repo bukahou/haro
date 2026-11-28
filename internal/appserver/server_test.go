@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/bukahou/akasha/pkg/oidcrp"
+	"github.com/getkin/kin-openapi/openapi3"
 
 	"github.com/bukahou/haro/internal/accounts"
 	"github.com/bukahou/haro/internal/appapi"
@@ -225,12 +226,13 @@ func TestRateLimit(t *testing.T) {
 }
 
 // akasha 登录回来后：管理员拿到 haro 的令牌（在固定回调地址的 fragment 里）；新账号等同意（错误码在 query 里）；
-// 邀请码只认「/invite/<码>」这一种写法。
+// 网页版发起的回网页版的回调页。
 func TestLoginOutcome(t *testing.T) {
 	f := newFixture(t)
 	loadedTexts, _ := loadTexts()
 	server := &Server{accounts: f.store, texts: loadedTexts, logger: quietLogger}
-	handler := &login{server: server}
+	const webCallback = "https://web.example.com/auth/callback"
+	handler := &login{server: server, webCallback: webCallback}
 	request := httptest.NewRequest("GET", callbackPath, nil)
 	to, err := handler.authenticated(nil, request, oidcrp.Result{Identity: oidcrp.Identity{Subject: "sub-owner"}})
 	if err != nil || !strings.HasPrefix(to, nativeCallback+"#") {
@@ -244,11 +246,121 @@ func TestLoginOutcome(t *testing.T) {
 		to != nativeCallback+"?oidc_error=pending_approval" {
 		t.Errorf("新账号：%q %v", to, err)
 	}
-	for next, want := range map[string]bool{"": true, "/invite/abc-123": true, "/invite/": false, "/\t/evil.example": false,
-		"//evil.example": false, "/invite/abc?x=1": false} {
-		if inviteNext(next) != want {
-			t.Errorf("inviteNext(%q) 应是 %v", next, want)
+	web := loginTarget{web: true}.next()
+	if to, err := handler.authenticated(nil, request, oidcrp.Result{Identity: oidcrp.Identity{Subject: "sub-owner"}, Next: web}); err != nil ||
+		!strings.HasPrefix(to, webCallback+"#access_token=") {
+		t.Errorf("网页版登录：%q %v", to, err)
+	}
+	if to, _ := handler.authenticated(nil, request, oidcrp.Result{Identity: oidcrp.Identity{Subject: "sub-new2"}, Next: web}); to != webCallback+"?oidc_error=pending_approval" {
+		t.Errorf("网页版、新账号：%q", to)
+	}
+	recorder := httptest.NewRecorder()
+	handler.failed(recorder, request, oidcrp.ReasonCancelled, web)
+	if location := recorder.Header().Get("Location"); location != webCallback+"?oidc_error=login_cancelled" {
+		t.Errorf("网页版取消登录回：%q", location)
+	}
+	noWeb := &login{server: server}
+	if to, _ := noWeb.authenticated(nil, request, oidcrp.Result{Identity: oidcrp.Identity{Subject: "sub-owner"}, Next: web}); !strings.HasPrefix(to, nativeCallback+"#") {
+		t.Errorf("没有网页版时回 App：%q", to)
+	}
+}
+
+// next 只认 loginTarget 自己编出来的写法：别的路径、别的主机、多余或重复的参数、写错的邀请码都不认。
+func TestLoginTargetNext(t *testing.T) {
+	for _, target := range []loginTarget{{}, {web: true}, {invite: "abc-123"}, {web: true, invite: "abc-123"}} {
+		if parsed, ok := parseLoginTarget(target.next()); !ok || parsed != target {
+			t.Errorf("%+v 编成 %q 再解出来是 %+v %v", target, target.next(), parsed, ok)
 		}
+	}
+	for _, next := range []string{"/invite/abc", "/?client=app", "/?client=web&client=web", "/?client=web&x=1",
+		"/?invite=a%20b", "/?invite=", "//evil.example/?client=web", "https://evil.example/?client=web", "/x?client=web",
+		"/\t/evil.example", "/?invite=abc&client=web", "/?client=web#x"} {
+		if safeNext(next) {
+			t.Errorf("safeNext(%q) 应不认", next)
+		}
+	}
+}
+
+// 开始登录：client 不认识的给 400；要网页版而这里没有网页版的给 404（都在跳到 akasha 之前）。契约里 client 的取值和代码一致。
+func TestStartLoginClient(t *testing.T) {
+	loadedTexts, _ := loadTexts()
+	server := &Server{texts: loadedTexts, logger: quietLogger}
+	handler := &login{server: server}
+	for query, want := range map[string]int{"client=desktop": http.StatusBadRequest, "client=web": http.StatusNotFound} {
+		recorder := httptest.NewRecorder()
+		handler.start(recorder, httptest.NewRequest("GET", startPath+"?"+query, nil))
+		if recorder.Code != want {
+			t.Errorf("%s 应回 %d，回了 %d", query, want, recorder.Code)
+		}
+	}
+	// 登录的两个跳转不生成代码（内嵌的契约里也没有），直接读契约文件
+	spec, err := openapi3.NewLoader().LoadFromFile("../../api/openapi.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := spec.Paths.Find(startPath)
+	if item == nil || item.Get == nil {
+		t.Fatal("契约里没有 startLogin")
+	}
+	parameter := item.Get.Parameters.GetByInAndName("query", "client")
+	if parameter == nil {
+		t.Fatal("契约的 startLogin 没有 client 参数")
+	}
+	var enum []string
+	for _, value := range parameter.Schema.Value.Enum {
+		enum = append(enum, value.(string))
+	}
+	if strings.Join(enum, ",") != strings.Join(loginClients, ",") {
+		t.Errorf("契约里 client 的取值 %v，代码里 %v", enum, loginClients)
+	}
+}
+
+// 网页版跨域：只放行设好的那一个来源（预检、普通请求、被拒的回答都带头）；别的来源、没有网页版时不带。
+func TestCrossOrigin(t *testing.T) {
+	store, err := accounts.Open(t.Context(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	build := func(webURL string) *httptest.Server {
+		handler, err := NewHandler(t.Context(), Options{Accounts: store, Spending: fakeSpending{}, DefaultCurrency: "JPY",
+			MinAppVersion: "1.0.0", ProfileMaxChars: 10000, WebURL: webURL, Logger: quietLogger})
+		if err != nil {
+			t.Fatal(err)
+		}
+		server := httptest.NewServer(handler)
+		t.Cleanup(server.Close)
+		return server
+	}
+	const web = "https://web.example.com"
+	send := func(server *httptest.Server, method, path, origin string, headers ...string) *http.Response {
+		request, _ := http.NewRequest(method, server.URL+path, nil)
+		request.Header.Set("Origin", origin)
+		for i := 0; i+1 < len(headers); i += 2 {
+			request.Header.Set(headers[i], headers[i+1])
+		}
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = response.Body.Close()
+		return response
+	}
+	withWeb := build(web)
+	preflight := send(withWeb, "OPTIONS", "/api/v1/me", web, "Access-Control-Request-Method", "PATCH",
+		"Access-Control-Request-Headers", "authorization,content-type")
+	if preflight.Header.Get("Access-Control-Allow-Origin") != web || !strings.Contains(preflight.Header.Get("Access-Control-Allow-Methods"), "PATCH") {
+		t.Errorf("预检：%d %v", preflight.StatusCode, preflight.Header)
+	}
+	if response := send(withWeb, "GET", "/api/v1/me", web); response.StatusCode != http.StatusUnauthorized ||
+		response.Header.Get("Access-Control-Allow-Origin") != web {
+		t.Errorf("没登录的回答也要带跨域的头：%d %v", response.StatusCode, response.Header)
+	}
+	if response := send(withWeb, "GET", "/api/v1/client-config", "https://evil.example"); response.Header.Get("Access-Control-Allow-Origin") != "" {
+		t.Error("别的来源不放行")
+	}
+	if response := send(build(""), "GET", "/api/v1/client-config", web); response.Header.Get("Access-Control-Allow-Origin") != "" {
+		t.Error("没有网页版时不放行跨域")
 	}
 }
 
