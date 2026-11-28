@@ -19,7 +19,13 @@
       "problem.validation_failed": "请求的内容不对：{detail}",
       "problem.rate_limited": "太频繁了，请稍后再试。",
       "problem.not_implemented": "这项功能还没上线。",
-      "problem.internal": "服务端出了问题，请稍后再试。"
+      "problem.internal": "服务端出了问题，请稍后再试。",
+      "problem.conflict": "现在的状态不允许这样做。",
+      "problem.pairing_code_invalid": "配对码不对，请对照终端上显示的再输一次。",
+      "problem.pairing_code_expired": "配对码过期了，请在终端上重新登记。",
+      "problem.pairing_attempts_exceeded": "输错次数太多，请过一会儿再试。",
+      "problem.upgrade_required": "App 版本太旧，请先更新。",
+      "terminal.upgrade_note": "在那台终端上重新运行安装脚本，升到最新版本。"
     },
     "ja": {
       "purpose.chat": "会話",
@@ -39,7 +45,13 @@
       "problem.validation_failed": "リクエストの内容が正しくありません：{detail}",
       "problem.rate_limited": "リクエストが多すぎます。しばらくしてからもう一度お試しください。",
       "problem.not_implemented": "この機能はまだ使えません。",
-      "problem.internal": "サーバーで問題が起きました。しばらくしてからもう一度お試しください。"
+      "problem.internal": "サーバーで問題が起きました。しばらくしてからもう一度お試しください。",
+      "problem.conflict": "今の状態ではこの操作はできません。",
+      "problem.pairing_code_invalid": "ペアリングコードが違います。端末に表示されているコードをもう一度入力してください。",
+      "problem.pairing_code_expired": "ペアリングコードの期限が切れました。端末でもう一度登録してください。",
+      "problem.pairing_attempts_exceeded": "入力の誤りが多すぎます。しばらくしてからもう一度お試しください。",
+      "problem.upgrade_required": "アプリが古すぎます。先に更新してください。",
+      "terminal.upgrade_note": "その端末でインストールスクリプトをもう一度実行して、最新版にしてください。"
     },
     "en": {
       "purpose.chat": "Chat",
@@ -59,7 +71,13 @@
       "problem.validation_failed": "The request is not valid: {detail}",
       "problem.rate_limited": "Too many requests. Please try again later.",
       "problem.not_implemented": "This feature is not available yet.",
-      "problem.internal": "Something went wrong on the server. Please try again later."
+      "problem.internal": "Something went wrong on the server. Please try again later.",
+      "problem.conflict": "This cannot be done in the current state.",
+      "problem.pairing_code_invalid": "The pairing code is wrong. Enter the code shown on the terminal again.",
+      "problem.pairing_code_expired": "The pairing code has expired. Register the terminal again.",
+      "problem.pairing_attempts_exceeded": "Too many wrong attempts. Please try again later.",
+      "problem.upgrade_required": "This app version is too old. Please update it first.",
+      "terminal.upgrade_note": "Run the install script again on that terminal to update it to the latest version."
     }
   }
 }

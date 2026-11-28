@@ -17,7 +17,7 @@ haro 是一个家用语音助手：家里每个房间放一台**终端**（麦�
 
 | 程序 | 作用 | 编译 |
 |---|---|---|
-| `cmd/haro` | 终端。`haro -enroll <名字>` 登记声纹（要读的句子和录音都经服务端交给 haro-asr） | cgo（音频库 miniaudio 随源码编译，不用装系统库）；摄像头在 macOS 上要 ffmpeg（Linux 不用） |
+| `cmd/haro` | 终端。`haro -enroll <名字>` 登记声纹（要读的句子和录音都经服务端交给 haro-asr）；`haro -pair` 配对这台终端（存下设备凭证） | cgo（音频库 miniaudio 随源码编译，不用装系统库）；摄像头在 macOS 上要 ffmpeg（Linux 不用） |
 | `cmd/haro-server` | 服务端 | 纯 Go |
 | `cmd/haro-asr` | 本地语音识别服务（流式转写，协议照 OpenAI Realtime 的转写会话）。单独运行：集群里和服务端是同一个 Pod 的两个容器，开发机上各一个 systemd 用户单元；服务端按 `HARO_ASR_URL` 连它 | cgo（sherpa-onnx） |
 
@@ -31,6 +31,14 @@ haro 是一个家用语音助手：家里每个房间放一台**终端**（麦�
 - 错误事件带稳定的错误码（`errors.go`），调用方按码判断，不看说明文字。
 - 握手时用 WebSocket 子协议协商版本（`haro.realtime.v4`）：报了不认识的 haro 版本、或者旧版终端没报版本，服务端拒绝握手，
   响应里给错误码和它支持的版本；什么都不报的当普通 Realtime 客户端（只用标准事件）。终端被拒后提示一次，隔几分钟才再试；
+- **终端的身份**：配对过的终端握手时带设备凭证（`Authorization: Bearer`，haro 发的随机串、库里只存 SHA-256），服务端认出是哪台、属于哪个账号；
+  凭证无效（在 App 里移除了）回 401（错误码 `invalid_credential`），⛔ 不退回成「没带」，终端提示重新配对、隔几分钟才再试。
+  没带凭证的终端照旧能连、归管理员账号（过渡期，只在局域网；第 21 段把语音连接开到公网时改成必须带）。普通 Realtime 客户端的 `Authorization` 是它自己的 API key，不看。
+  配对照 RFC 8628：`haro -pair` 调 `POST /v1/terminal-registration` 拿配对码（8 位、10 分钟、用一次）和轮询凭据、显示配对码，
+  定时 `POST /v1/terminal-registration/poll` 问结果；人在 App 里输入配对码 = 绑到自己的账号，管理员批准 = 归一个新的匿名账号。
+  批准后终端第一次来问时才生成设备凭证、只交出一次（库里不存明文），存进 `~/.config/haro/device-credential`（600）。
+  别的账号的终端只认本人的声音：别的声音是这个账号的访客，不算声纹确认，别人的声纹名也不发给这台终端（`brain.Residents`）。
+  App 里移除 = 凭证作废 + 断开它正连着的会话。
 - 两端各自每 10 秒 ping 一次，5 秒内等不到 pong 就断开（`internal/heartbeat`），终端的看守随即重连。
 - 服务端的对话会话、haro-asr 的转写会话同时最多 `realtimeproto.MaxSessions` 条（两边同一个数：每条对话会话在 haro-asr 占一个转写会话），满了新连接在握手前回 503（错误码 `too_many_sessions`）。
 - 照办不了的请求整条拒绝、不悄悄忽略：`session.update` 声明的输入格式不是 16 kHz 单声道，或识别流打开以后再改说完判断、唤醒门；
@@ -283,6 +291,8 @@ v10（2026-11-22 裁定）：记住的事和以前的对话都能按意思找回
   大脑（资料）、天气（家在哪、每轮的「家大约在哪」）、节假日的提醒都按这一轮说话的人找到账号再取，App 的接口（`/me/profile`、`/me/home`、
   `/places`、`/countries`）在这里改，改了下一轮就生效。管理员账号在 App 里没设过的项用服务端的配置（`HARO_PROFILE_DIR`、`HARO_WEATHER_HOME`、
   `HARO_HOLIDAYS`），和没有账号时一样；别的账号没设时就是没有。终端上声纹认出的别的名字归管理员账号、只带「全家」那段（终端配对之前都归管理员）。
+- **终端**：`/terminals`（列表、配对、改名、移除）、`/admin/terminals/pending`（管理员批准 / 拒绝新终端）；配对码输错按来源 IP 限流，
+  同一个账号 10 分钟内输错 5 次也先停一停（`pairing_attempts_exceeded`）。终端的登记、设备凭证存在账号库（`terminals`、`terminal_registrations`）。
 - **网页版跨域**：网页版在另一个域名，设了 `HARO_APP_WEB_URL` 才放行它这一个来源（`rs/cors`，方法从契约里取）；令牌在 `Authorization` 里，不用 cookie。
   跨域在限流外面一层，被限流、出错的回答也带跨域的头。
 - **金额**：数值是十进制字符串 + 币种；汇总换成默认货币，带按币种的原始合计和换算提示。

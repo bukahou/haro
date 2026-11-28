@@ -23,6 +23,7 @@ import (
 	"github.com/bukahou/haro/internal/buildinfo"
 	"github.com/bukahou/haro/internal/config"
 	"github.com/bukahou/haro/internal/enrollment"
+	"github.com/bukahou/haro/internal/pairing"
 	"github.com/bukahou/haro/internal/platform"
 	"github.com/bukahou/haro/internal/realtimeproto"
 	"github.com/bukahou/haro/internal/telemetry"
@@ -35,6 +36,8 @@ func main() {
 	enrollName := flag.String("enroll", "", "登记声纹：在这台终端上照着念几句话，发给服务端登记，例如 -enroll 主人")
 	enrollAppend := flag.Bool("append", false, "和 -enroll 一起用：补录（换了麦克风、换了位置时），加进原来的声纹")
 	enrollSeconds := flag.Duration("seconds", 5*time.Second, "和 -enroll 一起用：每句录多久")
+	pair := flag.Bool("pair", false, "配对这台终端：显示配对码，在 App 的「添加终端」里输入（或请管理员批准），配好后存下设备凭证")
+	pairName := flag.String("name", "", "和 -pair 一起用：这台终端的名字（App 里显示、能改）；不填 = 主机名")
 	showVersion := flag.Bool("version", false, "打印版本号后退出")
 	versionJSON := flag.Bool("json", false, "和 -version 一起用：输出一行 JSON（program、version、os、arch、go），给安装脚本、CI 读")
 	flag.Parse()
@@ -47,6 +50,13 @@ func main() {
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	slog.SetDefault(logger)
+	if *pair {
+		if err := pairTerminal(*pairName); err != nil {
+			fmt.Fprintln(os.Stderr, "配对失败：", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if *enrollName != "" {
 		if err := enroll(logger, *enrollName, *enrollAppend, *enrollSeconds); err != nil {
 			fmt.Fprintln(os.Stderr, "登记失败：", err)
@@ -62,6 +72,10 @@ func main() {
 
 func run(logger *slog.Logger) error {
 	settings, err := config.LoadTerminalSettings()
+	if err != nil {
+		return err
+	}
+	credential, err := deviceCredential(settings, logger)
 	if err != nil {
 		return err
 	}
@@ -104,7 +118,8 @@ func run(logger *slog.Logger) error {
 	// 看守：连服务端 → 等麦克风 → 运行；出什么错都退回去重来，只有关机信号才退出
 	supervisor := terminal.NewSupervisor(terminal.SupervisorDependencies{
 		Dial: func(ctx context.Context) (terminal.Connection, error) {
-			return brainclient.Dial(ctx, brainclient.DialOptions{BaseURL: settings.ServerURL, InputFormat: local.MicrophoneFormat()}, logger)
+			return brainclient.Dial(ctx, brainclient.DialOptions{BaseURL: settings.ServerURL, Credential: credential,
+				InputFormat: local.MicrophoneFormat()}, logger)
 		},
 		Catalog:            local,
 		MicrophoneOverride: settings.AudioSource,
@@ -130,6 +145,46 @@ func run(logger *slog.Logger) error {
 		Online:   sounds.Online,
 	}, terminal.DefaultTiming, logger)
 	return supervisor.Run(ctx)
+}
+
+// deviceCredential 读配对后存下的设备凭证；没配对时为空（过渡期照旧能连，只在局域网）。
+func deviceCredential(settings config.TerminalSettings, logger *slog.Logger) (string, error) {
+	path, err := settings.DeviceCredentialPath()
+	if err != nil {
+		return "", err
+	}
+	credential, err := pairing.LoadCredential(path)
+	if err != nil {
+		return "", err
+	}
+	if credential == "" {
+		logger.Info("这台终端还没配对（haro -pair）：照旧不带设备凭证连服务端", "credential_file", path)
+	} else {
+		logger.Info("带着设备凭证连服务端", "credential_file", path)
+	}
+	return credential, nil
+}
+
+// pairTerminal 是 haro -pair：向服务端登记这台终端，显示配对码，等到批准后存下设备凭证。
+func pairTerminal(name string) error {
+	settings, err := config.LoadTerminalSettings()
+	if err != nil {
+		return err
+	}
+	path, err := settings.DeviceCredentialPath()
+	if err != nil {
+		return err
+	}
+	if name == "" {
+		if name, err = os.Hostname(); err != nil {
+			return fmt.Errorf("取主机名（用 -name 给个名字）: %w", err)
+		}
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	fmt.Printf("服务端：%s\n这台终端：%s\n", settings.ServerURL, name)
+	return pairing.Run(ctx, pairing.Options{ServerURL: settings.ServerURL, Name: name, CredentialFile: path, Out: os.Stdout,
+		Client: &http.Client{Timeout: 30 * time.Second}})
 }
 
 // enroll 是 haro -enroll：用这台终端的麦克风录音，发给服务端登记声纹（服务端要在线）。

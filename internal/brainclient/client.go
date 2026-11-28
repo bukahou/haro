@@ -60,6 +60,7 @@ type Client struct {
 // DialOptions 是连接服务端的设置。
 type DialOptions struct {
 	BaseURL     string                    // 服务端地址：http(s)://host:port（也认 ws(s)://）
+	Credential  string                    // 设备凭证（haro -pair 配对后存下的）；空 = 没配对
 	InputFormat realtimeproto.AudioFormat // 之后发送的麦克风音频格式，会声明在 session.update 里
 	Heartbeat   heartbeat.Timing          // 零值 = heartbeat.Default
 	// EventBacklog 是事件队列满了以后最多等多久：终端一直腾不出地方收，就当它卡住了，断开连接让看守重连
@@ -86,8 +87,14 @@ func Dial(ctx context.Context, opts DialOptions, logger *slog.Logger) (*Client, 
 		Subprotocols: []string{realtimeproto.Protocol},
 		HTTPHeader:   http.Header{"User-Agent": {buildinfo.UserAgent()}, buildinfo.Header: {buildinfo.Version}},
 	}
+	if opts.Credential != "" {
+		options.HTTPHeader.Set("Authorization", "Bearer "+opts.Credential)
+	}
 	conn, response, err := websocket.Dial(ctx, address, options)
 	if err != nil {
+		if rejection, ok := handshakeRejection(response, http.StatusUnauthorized, realtimeproto.CodeInvalidCredential); ok {
+			return nil, fmt.Errorf("%w：%s", realtimeproto.ErrInvalidCredential, rejection.Message)
+		}
 		if rejection, ok := protocolRejection(response); ok {
 			return nil, fmt.Errorf("%w：%s（服务端支持 %s）", realtimeproto.ErrIncompatibleProtocol, rejection.Message,
 				strings.Join(rejection.SupportedProtocols, ", "))
@@ -131,12 +138,17 @@ func conversationURL(base string) (string, error) {
 // protocolRejection 从被拒的握手响应里取出「协议版本不兼容」的说明；不是这种拒绝时 ok = false。
 // （WebSocket 库只保证能读响应体的前 1024 字节，说明都在这个范围里。）
 func protocolRejection(response *http.Response) (realtimeproto.HTTPErrorDetail, bool) {
-	if response == nil || response.StatusCode != http.StatusBadRequest || response.Body == nil {
+	return handshakeRejection(response, http.StatusBadRequest, realtimeproto.CodeUnsupportedProtocolVersion)
+}
+
+// handshakeRejection 从被拒的握手响应里取出状态是 status、错误码是 code 的说明；不是这种拒绝时 ok = false。
+// 按错误码判断，不看文字。
+func handshakeRejection(response *http.Response, status int, code realtimeproto.ErrorCode) (realtimeproto.HTTPErrorDetail, bool) {
+	if response == nil || response.StatusCode != status || response.Body == nil {
 		return realtimeproto.HTTPErrorDetail{}, false
 	}
 	var body realtimeproto.HTTPError
-	if err := json.NewDecoder(io.LimitReader(response.Body, 1024)).Decode(&body); err != nil ||
-		body.Error.Code != realtimeproto.CodeUnsupportedProtocolVersion {
+	if err := json.NewDecoder(io.LimitReader(response.Body, 1024)).Decode(&body); err != nil || body.Error.Code != code {
 		return realtimeproto.HTTPErrorDetail{}, false
 	}
 	return body.Error, true

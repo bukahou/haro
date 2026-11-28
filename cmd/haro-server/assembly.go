@@ -323,7 +323,8 @@ func serve(ctx context.Context, settings config.ServerSettings, components brain
 	entry entrypoints, logger *slog.Logger) error {
 	newSession := func(terminal brainserver.Terminal) brainserver.Session {
 		parts := components
-		if terminal.DeviceTools != nil { // haro 终端：它的摄像头经 MCP 用（普通 Realtime 客户端没有）
+		parts.Residents = residentsOf(terminal) // 别的账号的终端只认它的本人
+		if terminal.DeviceTools != nil {        // haro 终端：它的摄像头经 MCP 用（普通 Realtime 客户端没有）
 			parts.Camera = terminaltools.ConnectCamera(terminal.DeviceTools, buildinfo.Version, logger)
 		}
 		return brain.NewSession(parts, options, logger)

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -327,6 +328,20 @@ type TerminalSettings struct {
 	FrameWidth int `env:"HARO_FRAME_WIDTH" envDefault:"1280"`
 
 	ServerURL string `env:"HARO_SERVER_URL" envDefault:"http://127.0.0.1:59130"` // 终端连服务端的地址
+	// 设备凭证（haro -pair 配对后存下的）放在哪；空 = ~/.config/haro/device-credential。没有这个文件 = 没配对（过渡期照旧能连）
+	DeviceCredentialFile string `env:"HARO_DEVICE_CREDENTIAL_FILE"`
+}
+
+// DeviceCredentialPath 是设备凭证的文件：HARO_DEVICE_CREDENTIAL_FILE，没设时在用户的配置目录下。
+func (s TerminalSettings) DeviceCredentialPath() (string, error) {
+	if s.DeviceCredentialFile != "" {
+		return s.DeviceCredentialFile, nil
+	}
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return "", fmt.Errorf("找不到用户的配置目录（设 HARO_DEVICE_CREDENTIAL_FILE）: %w", err)
+	}
+	return filepath.Join(dir, "haro", "device-credential"), nil
 }
 
 // parseSettings 从环境变量读出一种配置，并记下环境里还写着、但已经删掉的配置项（提醒记在 RemovedSettingNotes 里）。

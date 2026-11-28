@@ -47,7 +47,26 @@ type Terminal struct {
 	// DeviceTools 是 haro 终端经 MCP 提供设备能力（拍一帧等）的通道，服务端是 MCP 客户端；
 	// nil = 普通 Realtime 客户端，没有这条通道。
 	DeviceTools mcp.Transport
+	// Identity 是带设备凭证连进来的终端是谁；nil = 没带（过渡期：归管理员账号，和以前一样）。
+	Identity *Identity
 }
+
+// Identity 是带设备凭证连进来的终端：哪台、属于哪个账号、账号的两个人。
+type Identity struct {
+	TerminalID string
+	AccountID  string
+	Owner      string // 账号本人（声纹认出是他时）
+	Guest      string // 账号的访客（别的声音、认不出时）
+	Admin      bool   // 管理员账号：声纹名照用、认不出时全家共用（和没带凭证时一样）
+}
+
+// Authenticator 验终端握手时带的设备凭证；凭证不对（多半是在 App 里移除了）时返回 ErrInvalidCredential。
+type Authenticator interface {
+	Authenticate(ctx context.Context, credential, version, remote string) (Identity, error)
+}
+
+// ErrInvalidCredential 是设备凭证无效。
+var ErrInvalidCredential = errors.New("设备凭证无效")
 
 // SessionFactory 为每条连接新建一个会话。
 type SessionFactory func(terminal Terminal) Session
@@ -57,6 +76,8 @@ type Options struct {
 	Heartbeat   heartbeat.Timing // 零值 = heartbeat.Default
 	MaxSessions int              // 同时最多几条对话会话；零值 = realtimeproto.MaxSessions（和 haro-asr 的转写会话同一个数）
 	Online      *OnlineTerminals // 记现在连着的 haro 终端（nil = 不记）
+	// Terminals 验设备凭证；nil = 没有账号库：带了凭证的连接一律拒绝（不能当成没带）
+	Terminals Authenticator
 }
 
 // haroProtocolPrefix 是 haro 各版本子协议名的共同开头。
@@ -89,14 +110,20 @@ func writeHTTPError(w http.ResponseWriter, status int, body realtimeproto.HTTPEr
 	_ = json.NewEncoder(w).Encode(body)
 }
 
-// negotiate 按终端在握手里报的子协议决定接不接这条连接；拒绝时 reason 说明原因。
-func negotiate(r *http.Request) (reason string, ok bool) {
+// websocketProtocols 是握手里报的子协议。
+func websocketProtocols(r *http.Request) []string {
 	var offered []string
 	for _, header := range r.Header.Values("Sec-WebSocket-Protocol") {
 		for _, protocol := range strings.Split(header, ",") {
 			offered = append(offered, strings.TrimSpace(protocol))
 		}
 	}
+	return offered
+}
+
+// negotiate 按终端在握手里报的子协议决定接不接这条连接；拒绝时 reason 说明原因。
+func negotiate(r *http.Request) (reason string, ok bool) {
+	offered := websocketProtocols(r)
 	haroOffered := slices.ContainsFunc(offered, func(protocol string) bool {
 		return strings.HasPrefix(protocol, haroProtocolPrefix)
 	})
@@ -127,6 +154,10 @@ func serveConversation(w http.ResponseWriter, r *http.Request, newSession Sessio
 		logger.Warn("拒绝连接：协议版本不兼容", "remote", r.RemoteAddr, "reason", reason,
 			"terminal", buildinfo.Reported(terminalVersion), "server", buildinfo.Version)
 		reject(w, reason)
+		return
+	}
+	identity, ok := authenticate(w, r, opts, terminalVersion, logger)
+	if !ok {
 		return
 	}
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{Subprotocols: []string{realtimeproto.Protocol}})
@@ -169,11 +200,18 @@ func serveConversation(w http.ResponseWriter, r *http.Request, newSession Sessio
 	}
 
 	if protocol == realtimeproto.Protocol && opts.Online != nil {
-		id := opts.Online.add(terminalVersion)
+		terminalID := ""
+		if identity != nil {
+			terminalID = identity.TerminalID
+		}
+		id := opts.Online.add(terminalVersion, terminalID, func() {
+			_ = conn.Close(websocket.StatusPolicyViolation, "这台终端已在 App 里移除")
+			cancel()
+		})
 		defer opts.Online.remove(id)
 	}
 
-	var terminal Terminal
+	terminal := Terminal{Identity: identity}
 	var tools *mcpbridge.Transport // haro 终端的设备能力（MCP）；普通客户端没有
 	if protocol == realtimeproto.Protocol {
 		tools = mcpbridge.NewTransport(func(_ context.Context, message json.RawMessage) error {
@@ -233,4 +271,37 @@ func serveConversation(w http.ResponseWriter, r *http.Request, newSession Sessio
 			inputFormat = update.InputFormat
 		}
 	}
+}
+
+// authenticate 验 haro 终端握手带的设备凭证（Authorization: Bearer）：没带时 identity 为 nil（过渡期照旧放行）；
+// 带了就必须有效 —— 无效回 401（终端据此提示重新配对），⛔ 不退回成「没带」。
+// 普通 Realtime 客户端（没报 haro 的子协议）的 Authorization 是它自己的 API key，不是设备凭证：不看。
+func authenticate(w http.ResponseWriter, r *http.Request, opts Options, version string, logger *slog.Logger) (*Identity, bool) {
+	header := r.Header.Get("Authorization")
+	if header == "" || !slices.Contains(websocketProtocols(r), realtimeproto.Protocol) {
+		return nil, true
+	}
+	credential, found := strings.CutPrefix(header, "Bearer ")
+	credential = strings.TrimSpace(credential)
+	if !found || credential == "" || opts.Terminals == nil {
+		logger.Warn("拒绝连接：设备凭证的写法不对、或服务端没有账号库", "remote", r.RemoteAddr)
+		writeHTTPError(w, http.StatusUnauthorized, realtimeproto.NewHTTPError(http.StatusUnauthorized,
+			realtimeproto.CodeInvalidCredential, "设备凭证不对：重新配对这台终端"))
+		return nil, false
+	}
+	identity, err := opts.Terminals.Authenticate(r.Context(), credential, version, remoteHost(r))
+	switch {
+	case errors.Is(err, ErrInvalidCredential):
+		logger.Warn("拒绝连接：设备凭证无效（多半是在 App 里移除了这台终端）", "remote", r.RemoteAddr)
+		writeHTTPError(w, http.StatusUnauthorized, realtimeproto.NewHTTPError(http.StatusUnauthorized,
+			realtimeproto.CodeInvalidCredential, "这台终端的设备凭证无效（可能已在 App 里移除）：重新配对"))
+		return nil, false
+	case err != nil:
+		logger.Error("验设备凭证出错", "remote", r.RemoteAddr, "err", err)
+		writeHTTPError(w, http.StatusInternalServerError, realtimeproto.NewHTTPError(http.StatusInternalServerError,
+			realtimeproto.CodeServerError, "服务端验设备凭证出错：稍后再连"))
+		return nil, false
+	}
+	logger.Info("终端带着设备凭证连进来", "remote", r.RemoteAddr, "terminal", identity.TerminalID, "account", identity.AccountID)
+	return &identity, true
 }

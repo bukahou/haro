@@ -24,6 +24,7 @@ type Components struct {
 	Tools        Toolbox              // 可选：工具（内置 + MCP）
 	FrameExpert  FrameExpert          // 可选：看画面的幕后专家；nil = 画面直接交给前台模型
 	Camera       TerminalCamera       // 可选：终端经 MCP 提供的摄像头；nil 或拍不了时不给模型看画面的工具
+	Residents    Residents            // 这台终端所属账号的两个人；零值 = 不分账号（声纹名照用）
 	NewSegmenter func() TextSegmenter // 每次回答新建一个
 	// Conversations 是所有终端连接共用的对话簿；nil = 每条连接自己一份、只在内存里
 	Conversations *ConversationBook
@@ -134,7 +135,7 @@ func NewSession(parts Components, opts Options, logger *slog.Logger) *Session {
 	if parts.Conversations == nil {
 		parts.Conversations = NewConversationBook(nil, opts, logger)
 	}
-	conversation := parts.Conversations.Conversation(SharedPerson) // 第一句话认出是谁之前先用全家的
+	conversation := parts.Conversations.Conversation(parts.Residents.shared()) // 第一句话认出是谁之前先用全家的（分账号时是访客的）
 	if persona := conversation.currentPersona(); persona != nil {
 		logger.Info("当前性格", "persona", persona.Name, "available", len(opts.Personas))
 	}

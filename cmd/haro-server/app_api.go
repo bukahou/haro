@@ -17,8 +17,9 @@ import (
 
 // entrypoints 是服务端 HTTP 入口要的东西：在线的终端（App 的概览看）、App 的接口（没开时为 nil）。
 type entrypoints struct {
-	online *brainserver.OnlineTerminals
-	app    http.Handler
+	online   *brainserver.OnlineTerminals
+	app      http.Handler
+	accounts *accounts.Store // 账号库（终端的登记、设备凭证）；App 的接口没开时为 nil
 }
 
 // tokenPruneEvery 是多久清一次早就过期的登录令牌。
@@ -75,7 +76,7 @@ func buildAppAPI(ctx context.Context, settings config.ServerSettings, deps servi
 		return nil, nil
 	}
 	go pruneTokens(ctx, store, logger)
-	options := appserver.Options{Accounts: store, Spending: deps.guard, Terminals: online, DefaultCurrency: settings.Currency(),
+	options := appserver.Options{Accounts: store, Spending: deps.guard, Terminals: online, Registry: store, DefaultCurrency: settings.Currency(),
 		MinAppVersion: settings.AppMinVersion, CapOptions: settings.MonthlyCapOptions(), ProfileMaxChars: profile.MaxRunes,
 		Household: kit.household, WebURL: settings.AppWebURL, Logger: logger.With("component", "app-api"),
 		Login: &appserver.LoginOptions{Issuer: settings.OIDCIssuer, ClientID: settings.OIDCClientID,
@@ -98,7 +99,7 @@ func buildAppAPI(ctx context.Context, settings config.ServerSettings, deps servi
 	return handler, nil
 }
 
-// pruneTokens 每天清一次早就过期的登录令牌，随 ctx 结束。
+// pruneTokens 每天清一次早就过期的登录令牌、终端不再来问的登记，随 ctx 结束。
 func pruneTokens(ctx context.Context, store *accounts.Store, logger *slog.Logger) {
 	ticker := time.NewTicker(tokenPruneEvery)
 	defer ticker.Stop()
@@ -109,6 +110,9 @@ func pruneTokens(ctx context.Context, store *accounts.Store, logger *slog.Logger
 		case <-ticker.C:
 			if err := store.PruneTokens(ctx); err != nil {
 				logger.Warn("清过期的登录令牌失败", "err", err)
+			}
+			if err := store.PruneRegistrations(ctx); err != nil {
+				logger.Warn("清过期的终端登记失败", "err", err)
 			}
 		}
 	}

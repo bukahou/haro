@@ -174,6 +174,11 @@ func (s *Supervisor) connect(ctx context.Context, offline *offlineState) (Connec
 				s.logger.Error("和服务端的协议版本不兼容：把终端和服务端升到同一版本", "err", event.LastError(), "retry_in", event.Delay)
 				return
 			}
+			if errors.Is(event.LastError(), realtimeproto.ErrInvalidCredential) {
+				s.logger.Error("服务端不认这台终端的设备凭证（多半是在 App 里移除了）：运行 haro -pair 重新配对，或删掉凭证文件按没配对连",
+					"err", event.LastError(), "retry_in", event.Delay)
+				return
+			}
 			s.logger.Warn("连不上服务端", "err", event.LastError(), "retry_in", event.Delay)
 		}).
 		Build()
@@ -190,6 +195,9 @@ func (s *Supervisor) connect(ctx context.Context, offline *offlineState) (Connec
 		case errors.Is(err, realtimeproto.ErrIncompatibleProtocol):
 			offline.announced = true
 			s.playTone(ctx, s.deps.Offline, "协议版本不兼容")
+		case errors.Is(err, realtimeproto.ErrInvalidCredential):
+			offline.announced = true
+			s.playTone(ctx, s.deps.Offline, "设备凭证被拒")
 		case time.Since(offline.since) >= s.timing.OfflineNotice:
 			offline.announced = true
 			s.playTone(ctx, s.deps.Offline, "服务端断开超过提示时间")
@@ -199,12 +207,12 @@ func (s *Supervisor) connect(ctx context.Context, offline *offlineState) (Connec
 }
 
 // reconnectDelay 是下一次重连服务端前等多久（retries = 已经重试过几次）：
-//   - 协议版本不兼容：隔 IncompatibleRetry（要等人把两端升到同一版本，频繁重试没用）；
+//   - 协议版本不兼容、设备凭证被拒：隔 IncompatibleRetry（要等人升级 / 重新配对，频繁重试没用）；
 //   - 其余从 BackoffMin 翻倍，最长 BackoffMax；
 //   - 还没提示断开时不越过提示时间：到提示时间先再连一次 —— 服务端可能正好在两次重试之间起来了
 //     （make deploy 时服务端启动要好几秒，而间隔在翻倍），还连不上才提示，躲开这类重启。
 func (s *Supervisor) reconnectDelay(lastErr error, retries int, offline *offlineState) time.Duration {
-	if errors.Is(lastErr, realtimeproto.ErrIncompatibleProtocol) {
+	if errors.Is(lastErr, realtimeproto.ErrIncompatibleProtocol) || errors.Is(lastErr, realtimeproto.ErrInvalidCredential) {
 		return s.timing.IncompatibleRetry
 	}
 	delay := min(s.timing.BackoffMin<<min(retries, 20), s.timing.BackoffMax)

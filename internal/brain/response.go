@@ -45,8 +45,8 @@ func (s *Session) speakerFor(job *transcriptionJob) string {
 	defer s.mu.Unlock()
 	switch {
 	case job.speakerChecked:
-		s.lastSpeaker = job.speaker
-		return job.speaker
+		s.lastSpeaker = s.parts.Residents.personFor(job.speaker)
+		return s.lastSpeaker
 	case job.speakerCheckFailed && s.lastSpeaker != "":
 		s.logger.Info("这句的声纹没算出来：沿用这次醒着期间最近认出的人（不算声纹确认）", "item", job.item,
 			"person", s.lastSpeaker, "speaker_check_failed", true)
@@ -55,7 +55,7 @@ func (s *Session) speakerFor(job *transcriptionJob) string {
 		s.logger.Warn("这句的声纹没算出来，这次醒着期间也还没认出过谁：进全家共用的对话", "item", job.item,
 			"speaker_check_failed", true)
 	}
-	return SharedPerson
+	return s.parts.Residents.shared()
 }
 
 // runResponse 执行一次回答：开始时发 response.created，结束时恰好发出一个 response.done。
@@ -119,7 +119,8 @@ func (s *Session) respond(ctx context.Context, job *transcriptionJob) (done real
 	if job.err != nil {
 		return s.failed(realtimeproto.ReasonTranscriptionFailed, "语音转文字", job.err)
 	}
-	s.emit(realtimeproto.InputAudioTranscriptionCompleted{Transcript: job.text, Speaker: job.speaker,
+	// 分账号时别人的声纹名不发给这台终端（只说是访客）
+	s.emit(realtimeproto.InputAudioTranscriptionCompleted{Transcript: job.text, Speaker: s.parts.Residents.reported(job.speaker),
 		SpeakerChecked: job.speakerChecked})
 	if job.speakerChecked && job.speaker == "" { // 不是登记的人说的
 		if job.tentative != "" && job.wake && job.audio <= unverifiedShortUtterance { // 叫醒的短句：受限回答
@@ -135,7 +136,7 @@ func (s *Session) respond(ctx context.Context, job *transcriptionJob) (done real
 	}
 	// 画面不直接附在这句话上：模型需要看时调用 look_at_camera，闲聊时手里就没有画面
 	record := newTurnRecord(job.text)
-	record.voiceVerified = job.speakerChecked && job.speaker != ""
+	record.voiceVerified = job.speakerChecked && s.parts.Residents.verified(job.speaker)
 	record.extraNotes = s.wakeNotes(job)
 	situation, input := s.userTurn(job.text, record) // 现在的情况单独成一条、不进历史；历史里只存原话
 	defer func() {
