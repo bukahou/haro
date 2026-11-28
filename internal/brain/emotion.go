@@ -140,5 +140,20 @@ func unfinishedTagStart(text string) int {
 	return len(text)
 }
 
-// PromptValues 是代理正文里可以引用的、由 brain 定义的值（{{.EmotionTags}}：情绪标记的列表只在这里定义一处）。
-func PromptValues() map[string]any { return map[string]any{"EmotionTags": emotionTagList()} }
+// Medium 是主人和 haro 怎么说话：语音（终端上说）还是打字（App 里）。前台的说话格式按它分开。
+type Medium string
+
+// 两种说话方式。
+const (
+	MediumVoice Medium = "voice"
+	MediumText  Medium = "text"
+)
+
+// PromptValuesFor 是代理正文里可以引用的、由 brain 定义的值：{{.EmotionTags}}（情绪标记的列表只在这里定义一处）、
+// {{.Medium}}（语音还是打字）。
+func PromptValuesFor(medium Medium) map[string]any {
+	return map[string]any{"EmotionTags": emotionTagList(), "Medium": string(medium)}
+}
+
+// PromptValues 是语音用的 PromptValuesFor。
+func PromptValues() map[string]any { return PromptValuesFor(MediumVoice) }

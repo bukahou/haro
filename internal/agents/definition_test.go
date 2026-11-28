@@ -82,9 +82,14 @@ func TestRenderPromptNeedsEveryValue(t *testing.T) {
 		t.Fatal(err)
 	}
 	front, _ := catalog.Get(agents.Front)
-	prompt, err := front.RenderPrompt(map[string]any{"EmotionTags": "[开心] [难过]"})
+	prompt, err := front.RenderPrompt(map[string]any{"EmotionTags": "[开心] [难过]", "Medium": "voice"})
 	if err != nil || !strings.Contains(prompt, "只能用这几个：[开心] [难过]") || strings.Contains(prompt, "{{") {
 		t.Fatalf("应填好情绪标记：%v\n%s", err, prompt)
+	}
+	// 打字的：说话格式换成写给人看的（能用 Markdown、不用情绪标记），语音识别那一条不要
+	text, err := front.RenderPrompt(map[string]any{"EmotionTags": "[开心] [难过]", "Medium": "text"})
+	if err != nil || !strings.Contains(text, "Markdown（") || strings.Contains(text, "[开心]") || strings.Contains(text, "语音识别") {
+		t.Errorf("打字用的规则：%v\n%s", err, text)
 	}
 	if _, err := front.RenderPrompt(nil); err == nil {
 		t.Error("没给 EmotionTags 时应报错")

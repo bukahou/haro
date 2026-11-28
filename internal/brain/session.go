@@ -2,8 +2,10 @@ package brain
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -19,12 +21,16 @@ type Components struct {
 	// Front 是前台：主对话的代理（模型、基础规则、能用的工具、步数）
 	Front Agent
 	// Handoff 是接手（可选）：哪些情况把这一轮剩下的部分交给更强的代理回答
-	Handoff      Handoff
-	Synthesizer  SpeechSynthesizer
-	Tools        Toolbox              // 可选：工具（内置 + MCP）
-	FrameExpert  FrameExpert          // 可选：看画面的幕后专家；nil = 画面直接交给前台模型
-	Camera       TerminalCamera       // 可选：终端经 MCP 提供的摄像头；nil 或拍不了时不给模型看画面的工具
-	Residents    Residents            // 这台终端所属账号的两个人；零值 = 不分账号（声纹名照用）
+	Handoff     Handoff
+	Synthesizer SpeechSynthesizer
+	Tools       Toolbox        // 可选：工具（内置 + MCP）
+	FrameExpert FrameExpert    // 可选：看画面的幕后专家；nil = 画面直接交给前台模型
+	Camera      TerminalCamera // 可选：终端经 MCP 提供的摄像头；nil 或拍不了时不给模型看画面的工具
+	Residents   Residents      // 这台终端所属账号的两个人；零值 = 不分账号（声纹名照用）
+	// Thread 是这条会话接在这个人的哪一条对话；VoiceThread（零值）= 语音那条
+	Thread string
+	// TextOnly：打字会话（App 的打字入口）—— 不开识别流、不合成语音、只发文字，说的话由 SubmitText 交进来
+	TextOnly     bool
 	NewSegmenter func() TextSegmenter // 每次回答新建一个
 	// Conversations 是所有终端连接共用的对话簿；nil = 每条连接自己一份、只在内存里
 	Conversations *ConversationBook
@@ -135,7 +141,7 @@ func NewSession(parts Components, opts Options, logger *slog.Logger) *Session {
 	if parts.Conversations == nil {
 		parts.Conversations = NewConversationBook(nil, opts, logger)
 	}
-	conversation := parts.Conversations.Conversation(parts.Residents.shared()) // 第一句话认出是谁之前先用全家的（分账号时是访客的）
+	conversation := parts.Conversations.ConversationIn(parts.Residents.shared(), parts.Thread) // 第一句话认出是谁之前先用全家的（分账号时是访客的）
 	if persona := conversation.currentPersona(); persona != nil {
 		logger.Info("当前性格", "persona", persona.Name, "available", len(opts.Personas))
 	}
@@ -143,12 +149,34 @@ func NewSession(parts Components, opts Options, logger *slog.Logger) *Session {
 	session := &Session{
 		parts: parts, opts: opts, logger: logger, conversation: conversation, truncateAtMs: -1,
 		events: make(chan realtimeproto.ServerEvent, 32),
-		closed: make(chan struct{}), lifetime: lifetime, endLifetime: endLifetime,
+		closed: make(chan struct{}), lifetime: lifetime, endLifetime: endLifetime, noSpeaker: parts.TextOnly,
 	}
-	if parts.Notices != nil {
+	if parts.Notices != nil && !parts.TextOnly { // 打字会话不收终端的提示、不自己开口（到点的提醒在终端上说）
 		parts.Notices.join(session)
 	}
 	return session
+}
+
+// textItems 给打字会话交进来的话编号（日志里的 item）。
+var textItems atomic.Int64
+
+// SubmitText 是打字会话收到的一句话：person 是登录的账号本人（App 里登录过，等同声纹确认），language 是 App 的语言
+// （固定的话按它选）。回答经 Events() 发出（文字，不合成语音）。同一时间只答一句：上一句还在答时返回 CodeResponseInProgress。
+func (s *Session) SubmitText(text, person, language string) error {
+	if !s.parts.TextOnly {
+		return realtimeproto.ProtocolErrorf(realtimeproto.CodeUnsupportedFeature, "语音会话不收打字的话")
+	}
+	done := make(chan struct{})
+	close(done) // 打的字不用等识别
+	job := &transcriptionJob{item: fmt.Sprintf("text-%d", textItems.Add(1)), done: done, text: text, started: time.Now(),
+		speaker: person, speakerChecked: true, language: language}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cancelResponse != nil {
+		return realtimeproto.ProtocolErrorf(realtimeproto.CodeResponseInProgress, "已有进行中的回答")
+	}
+	s.transcription = job
+	return s.startResponseLocked()
 }
 
 // Events 返回服务端事件流（会话期间不关闭）。
@@ -351,7 +379,7 @@ func (s *Session) currentConversation() *Conversation {
 
 // useConversationOf 换成这个人的对话（每轮认出说话人之后调用；没比对声纹时用全家的）。
 func (s *Session) useConversationOf(person string) {
-	conversation := s.parts.Conversations.Conversation(person)
+	conversation := s.parts.Conversations.ConversationIn(person, s.parts.Thread)
 	s.mu.Lock()
 	changed := s.conversation != conversation
 	s.conversation = conversation
