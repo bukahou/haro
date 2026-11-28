@@ -1,25 +1,22 @@
 "use client";
 
-// 「我的」：W1 先显示这个账号是谁、登出（证明登录、令牌、接口这一整条通了）；概览、花费、终端、管理员这些在 W2。
+// 「我的」：概览（后端一次算好：账号、终端、记录、调查、这个月的花费、管理员的待处理）+ 各个设置页的入口 + 登出。
 import { useTranslations } from "next-intl";
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
 
 import { logout } from "@/api/generated/auth/auth";
-import { getMe } from "@/api/generated/me/me";
-import type { Me } from "@/api/generated/model";
-import { problemMessage } from "@/api/problem";
+import { getOverview } from "@/api/generated/me/me";
 import { useSession } from "@/auth/session";
+import { MonthSpendingCard } from "@/components/me/MonthSpendingCard";
+import { Button, Card, Failure, LinkRow, Loading, Note, Page } from "@/components/ui";
+import { useApi } from "@/lib/useApi";
+
+const loadOverview = () => getOverview();
 
 export default function MePage() {
   const t = useTranslations();
   const router = useRouter();
-  const [me, setMe] = useState<Me | null>(null);
-  const [failure, setFailure] = useState<string | null>(null);
-
-  useEffect(() => {
-    getMe().then(setMe, (error: unknown) => setFailure(problemMessage(error)));
-  }, []);
+  const { data, error, loading } = useApi(loadOverview);
 
   const signOut = async () => {
     const tokens = useSession.getState().tokens;
@@ -31,23 +28,56 @@ export default function MePage() {
   };
 
   return (
-    <section className="flex flex-col gap-4">
-      <h1 className="text-xl font-semibold">{t("me.title")}</h1>
-      {failure && <p className="text-red-500">{t("common.failed", { message: failure })}</p>}
-      {!me && !failure && <p className="text-muted">{t("common.loading")}</p>}
-      {me && (
-        <dl className="grid grid-cols-[auto_1fr] gap-x-6 gap-y-2 rounded-lg border border-border bg-panel p-4">
-          <dt className="text-muted">{t("me.displayName")}</dt>
-          <dd>{me.display_name}</dd>
-          <dt className="text-muted">{t("me.role")}</dt>
-          <dd>{t(`me.roles.${me.role}`)}</dd>
-          <dt className="text-muted">{t("me.currency")}</dt>
-          <dd>{me.default_currency}</dd>
-        </dl>
+    <Page title={t("me.title")}>
+      {loading && <Loading />}
+      <Failure message={error} />
+      {data && (
+        <>
+          <Card>
+            <p className="text-lg font-medium">{data.account.display_name}</p>
+            <Note>{t(`me.roles.${data.account.role}`)}</Note>
+          </Card>
+          <MonthSpendingCard month={data.spending} />
+          <Card>
+            <div className="flex flex-col gap-1 text-sm">
+              <p>
+                {t("me.overview.terminals", { online: data.terminals.online, total: data.terminals.total })}
+                {data.terminals.needs_upgrade > 0 && ` · ${t("me.overview.needsUpgrade", { count: data.terminals.needs_upgrade })}`}
+              </p>
+              <p>
+                {t("me.overview.memory", {
+                  background: data.memory.background_items,
+                  resident: data.memory.resident,
+                  notes: data.memory.notes,
+                })}
+              </p>
+              <p>{t("me.overview.research", { count: data.research.running })}</p>
+            </div>
+          </Card>
+          <Card>
+            <div className="divide-y divide-border">
+              <LinkRow href="/me/spending" label={t("me.menu.spending")} />
+              <LinkRow href="/me/terminals" label={t("me.menu.terminals")} />
+              <LinkRow href="/me/profile" label={t("me.menu.profile")} />
+              <LinkRow href="/me/home" label={t("me.menu.home")} />
+              <LinkRow href="/me/settings" label={t("me.menu.settings")} />
+            </div>
+          </Card>
+          {data.admin && (
+            <Card title={t("me.menu.admin")}>
+              <Note>{t("me.overview.pending", { terminals: data.admin.pending_terminals, accounts: data.admin.pending_accounts })}</Note>
+              <div className="mt-1 divide-y divide-border">
+                <LinkRow href="/me/admin/accounts" label={t("me.menu.accounts")} note={data.admin.pending_accounts || undefined} />
+                <LinkRow href="/me/admin/terminals" label={t("me.menu.pendingTerminals")} note={data.admin.pending_terminals || undefined} />
+                <LinkRow href="/me/admin/invites" label={t("me.menu.invites")} />
+              </div>
+            </Card>
+          )}
+        </>
       )}
-      <button type="button" onClick={signOut} className="self-start rounded-lg border border-border px-4 py-2">
-        {t("me.logout")}
-      </button>
-    </section>
+      <div>
+        <Button onClick={signOut}>{t("me.logout")}</Button>
+      </div>
+    </Page>
   );
 }

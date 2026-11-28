@@ -29,7 +29,18 @@
   "common": {
     "loading": "加载中……",
     "notYet": "这一页的画面还在做。",
-    "failed": "出错了：{message}"
+    "failed": "出错了：{message}",
+    "save": "保存",
+    "saved": "存好了",
+    "cancel": "取消",
+    "confirm": "确定",
+    "none": "没有",
+    "yes": "是",
+    "no": "否",
+    "copy": "复制",
+    "copied": "复制好了",
+    "edit": "改",
+    "delete": "删除"
   },
   "me": {
     "title": "我的",
@@ -40,6 +51,148 @@
       "member": "成员"
     },
     "currency": "默认货币",
-    "logout": "登出"
+    "logout": "登出",
+    "menu": {
+      "spending": "花费",
+      "terminals": "终端",
+      "profile": "主人资料",
+      "home": "家的位置",
+      "settings": "设置与关于",
+      "admin": "管理员",
+      "accounts": "账号",
+      "pendingTerminals": "新终端",
+      "invites": "邀请码"
+    },
+    "overview": {
+      "terminals": "终端：在线 {online} / 共 {total} 台",
+      "needsUpgrade": "{count} 台要升级",
+      "memory": "记录：背景 {background} 条、常驻 {resident} 条、记事 {notes} 条",
+      "research": "后台调查：{count} 个在查",
+      "pending": "待处理：新终端 {terminals} 台、等同意的账号 {accounts} 个"
+    }
+  },
+  "spending": {
+    "title": "花费",
+    "month": "这个月",
+    "cap": "上限",
+    "noCap": "不设上限",
+    "remaining": "还剩",
+    "status": {
+      "ok": "正常",
+      "near": "快到上限了",
+      "reached": "到上限了，暂停回答"
+    },
+    "canRaise": "到上限后可以对 haro 说一声临时提高 {amount}",
+    "byPurpose": "按用途",
+    "today": "今天",
+    "research": "后台调查",
+    "search": "搜索",
+    "searchUsed": "用了 {used} 次",
+    "searchCap": "上限 {cap} 次"
+  },
+  "terminals": {
+    "title": "终端",
+    "empty": "还没有终端。",
+    "online": "在线",
+    "offline": "不在线",
+    "version": "版本",
+    "lastSeen": "最近连接",
+    "network": {
+      "lan": "局域网",
+      "internet": "外网"
+    },
+    "rename": "改名",
+    "remove": "移除",
+    "removeConfirm": "移除后这台终端要重新配对才能用，确定吗？",
+    "pairTitle": "添加终端",
+    "pairHint": "在终端上运行 haro -pair，把显示的配对码填在这里。",
+    "pairCode": "配对码",
+    "pair": "添加",
+    "paired": "添加好了：{name}"
+  },
+  "profile": {
+    "title": "主人资料",
+    "hint": "haro 每轮都会看到这些（写自己的习惯、家里的情况）。",
+    "household": "全家的",
+    "owner": "我自己的",
+    "chars": "{count} / {max} 字",
+    "updated": "上次改：{time}"
+  },
+  "home": {
+    "title": "家的位置",
+    "hint": "天气、「家附近」这类问题按这里算；节假日按选的国家。",
+    "current": "现在",
+    "notSet": "还没设",
+    "search": "搜地名",
+    "searchButton": "搜",
+    "choose": "选这个",
+    "holidays": "节假日的国家",
+    "noHolidays": "不提醒节假日",
+    "clear": "不设家的位置"
+  },
+  "settings": {
+    "title": "设置与关于",
+    "displayName": "名字",
+    "currency": "默认货币",
+    "currencyHint": "ISO 4217 的三个字母，例如 JPY、CNY、USD",
+    "about": "关于",
+    "serverVersion": "服务端版本",
+    "apiVersion": "接口版本",
+    "webVersion": "网页版本"
+  },
+  "admin": {
+    "accounts": {
+      "title": "账号",
+      "status": {
+        "active": "正常",
+        "pending_approval": "等同意",
+        "disabled": "停用"
+      },
+      "joinedVia": {
+        "admin": "管理员",
+        "invite": "邀请码",
+        "approval": "申请后同意",
+        "terminal": "终端"
+      },
+      "anonymous": "（匿名终端的账号）",
+      "spent": "这个月",
+      "cap": "月上限",
+      "noCap": "不设",
+      "terminalsOnline": "在线终端",
+      "lastUsed": "最近用",
+      "deletionAt": "将在 {time} 彻底删除",
+      "approve": "同意",
+      "disable": "停用",
+      "enable": "恢复",
+      "delete": "删除",
+      "deleteConfirm": "删除后马上停用，30 天后连同全部数据彻底删掉（30 天内可以恢复）。确定吗？",
+      "setCap": "定上限"
+    },
+    "terminals": {
+      "title": "新终端",
+      "empty": "没有等批准的新终端。",
+      "requested": "申请时间",
+      "shortId": "编号",
+      "approve": "批准",
+      "reject": "拒绝"
+    },
+    "invites": {
+      "title": "邀请码",
+      "empty": "还没有邀请码。",
+      "create": "生成邀请码",
+      "note": "备注（给谁的）",
+      "hours": "多少小时后过期",
+      "created": "邀请码只显示这一次：",
+      "share": "发给对方的登录链接",
+      "status": {
+        "unused": "没用",
+        "used": "用过了",
+        "expired": "过期了",
+        "revoked": "撤销了"
+      },
+      "usedBy": "用的人：{name}",
+      "expires": "到期：{time}",
+      "revoke": "撤销"
+    }
   }
 }
