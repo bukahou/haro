@@ -50,14 +50,18 @@ func (a *Assistant) playResponse(ctx context.Context, turnSpan trace.Span, item 
 			switch e := event.(type) {
 			case realtimeproto.HaroNotice, realtimeproto.HaroWakeWordState, realtimeproto.SessionUpdated:
 				// 提示留到这一轮播完再响；醒 / 睡的回复、服务端告诉的唤醒词留给主循环
-				select {
-				case a.replay <- e:
-				default:
-					a.logger.Warn("事件太多，丢掉一个", "event", e.Type())
-				}
+				a.replayLater(e)
 			case realtimeproto.HaroWakeWordDetected:
 				if a.opts.BargeIn {
-					err := a.interrupt(ctx, turnSpan, player, item, done != nil, answer.String())
+					err := a.interrupt(ctx, turnSpan, player, item, done != nil, answer.String(), "唤醒词")
+					player = nil
+					return realtimeproto.ResponseDone{}, err
+				}
+			case realtimeproto.InputAudioBufferSpeechStarted:
+				// 一开口就打断：语音前端播放时也听人声（要回声消除），主人开始说话就停播。这句话由主循环接着收
+				if a.opts.BargeIn && a.opts.TurnDetection.Interrupts() {
+					a.replayLater(e)
+					err := a.interrupt(ctx, turnSpan, player, item, done != nil, answer.String(), "开口")
 					player = nil
 					return realtimeproto.ResponseDone{}, err
 				}
@@ -125,14 +129,14 @@ func (a *Assistant) finishResponse(turnSpan trace.Span, done realtimeproto.Respo
 	}
 }
 
-// interrupt 处理打断：立即停播；告诉服务端用户听到了多少（conversation.item.truncate）；
-// 回答还没结束时再取消，并等它确认（期间收到的其他事件留给主循环）。
-func (a *Assistant) interrupt(ctx context.Context, turnSpan trace.Span, p *player, item string, responseDone bool, answer string) error {
+// interrupt 处理打断（by 是怎么打断的：唤醒词 / 开口，写日志）：立即停播；告诉服务端用户听到了多少
+// （conversation.item.truncate）；回答还没结束时再取消，并等它确认（期间收到的其他事件留给主循环）。
+func (a *Assistant) interrupt(ctx context.Context, turnSpan trace.Span, p *player, item string, responseDone bool, answer, by string) error {
 	var played time.Duration
 	if p != nil {
 		played = p.abort()
 	}
-	a.logger.Info("✋ 被打断", "item", item, "played", played.Round(time.Millisecond), "answer_so_far", answer)
+	a.logger.Info("✋ 被打断", "by", by, "item", item, "played", played.Round(time.Millisecond), "answer_so_far", answer)
 	turnSpan.SetAttributes(attribute.String("haro.response.status", "interrupted"),
 		attribute.Float64("haro.turn.played_seconds", played.Seconds()))
 	brain := a.deps.Brain
@@ -165,13 +169,18 @@ func (a *Assistant) waitCancelled(ctx context.Context) {
 				return
 			case realtimeproto.ResponseOutputAudioDelta, realtimeproto.ResponseOutputAudioTranscriptDelta:
 			default:
-				select {
-				case a.replay <- event:
-				default:
-					a.logger.Warn("事件太多，丢掉一个", "event", event.Type())
-				}
+				a.replayLater(event)
 			}
 		}
+	}
+}
+
+// replayLater 把一个事件留给主循环（播放、等取消确认期间收到的）；放不下时丢掉并记一条。
+func (a *Assistant) replayLater(event realtimeproto.ServerEvent) {
+	select {
+	case a.replay <- event:
+	default:
+		a.logger.Warn("事件太多，丢掉一个", "event", event.Type())
 	}
 }
 

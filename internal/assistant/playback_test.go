@@ -123,6 +123,47 @@ func TestBargeInWhileGenerating(t *testing.T) {
 	}
 }
 
+// 一开口就打断（interrupt_response）：收到 speech_started 就停播、截断、取消；这句话的 speech_started 排在最前面留给主循环。
+// 对照：只能喊唤醒词打断时，speech_started 不打断。
+func TestVoiceBargeIn(t *testing.T) {
+	interrupt := true
+	brain, sink := &scriptedBrain{events: make(chan realtimeproto.ServerEvent, 16)}, newSlowSink()
+	a := NewAssistant(Dependencies{Brain: brain, Speaker: sink}, Options{BargeIn: true,
+		TurnDetection: realtimeproto.TurnDetection{InterruptResponse: &interrupt}}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	brain.events <- chunk
+	brain.events <- realtimeproto.InputAudioBufferSpeechStarted{ItemID: "item_2"}
+	_, err := a.playResponse(context.Background(), noSpan(), "item_1", time.Now())
+	if !errors.Is(err, errInterrupted) || !sink.wasAborted() {
+		t.Fatalf("开口应停播：err=%v aborted=%v", err, sink.wasAborted())
+	}
+	if sent := brain.sentTypes(); len(sent) != 2 || sent[0] != "conversation.item.truncate" || sent[1] != "response.cancel" {
+		t.Errorf("应先截断再取消：%v", sent)
+	}
+	if first := <-a.replay; first.(realtimeproto.InputAudioBufferSpeechStarted).ItemID != "item_2" {
+		t.Errorf("打断的那句话应最先留给主循环：%v", first)
+	}
+
+	brain, sink = &scriptedBrain{events: make(chan realtimeproto.ServerEvent, 16)}, newSlowSink()
+	a = newBargeInAssistant(brain, sink)
+	brain.events <- chunk
+	brain.events <- realtimeproto.InputAudioBufferSpeechStarted{ItemID: "item_2"}
+	brain.events <- realtimeproto.ResponseDone{Status: realtimeproto.StatusCompleted}
+	returned := make(chan error, 1)
+	go func() {
+		_, err := a.playResponse(context.Background(), noSpan(), "item_1", time.Now())
+		returned <- err
+	}()
+	select {
+	case err := <-returned:
+		t.Fatalf("只能喊唤醒词打断时，开口不应打断：%v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(sink.release)
+	if err := <-returned; err != nil || sink.wasAborted() {
+		t.Errorf("应照常播完：err=%v aborted=%v", err, sink.wasAborted())
+	}
+}
+
 // 回答已经生成完、声音还在播：只截断，不用取消（回答已经结束了）。
 func TestBargeInWhileDraining(t *testing.T) {
 	brain, sink := &scriptedBrain{events: make(chan realtimeproto.ServerEvent, 16)}, newSlowSink()

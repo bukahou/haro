@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: haro App API
-  version: 0.14.0
+  version: 0.15.0
   description: |
     haro 手机 App 和网页版用的接口（第一批：账号、登录、我、花费、终端、管理员）。
     服务端和 App 都从这份契约生成代码；⛔ 两边都不绕过契约私下约定字段。契约每改一次升版本号。
@@ -946,6 +946,17 @@ paths:
           $ref: '#/components/responses/ValidationFailed'
         '401':
           $ref: '#/components/responses/Unauthorized'
+    delete:
+      tags: [calendar]
+      operationId: unsyncCalendar
+      summary: 不再同步这个系统日历：它同步进来的日程从 haro 里去掉，同步记录也删掉（主人在 App 里关掉它时调用）
+      responses:
+        '204':
+          description: 去掉了
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
   /api/v1/receipts:
     get:
       tags: [expenses]
@@ -2233,7 +2244,7 @@ components:
     Limits:
       type: object
       required: [profile_max_chars, display_name_max_chars, terminal_name_max_chars, page_size, attachment_max_bytes,
-        calendar_sync_days_back, calendar_sync_days_ahead]
+        calendar_sync_days_back, calendar_sync_days_ahead, receipt_keep_days]
       properties:
         attachment_max_bytes:
           type: integer
@@ -2244,6 +2255,9 @@ components:
         calendar_sync_days_ahead:
           type: integer
           description: 同步系统日历时往后交多少天的日程
+        receipt_keep_days:
+          type: integer
+          description: 交上来的小票这么多天还没确认，就连原图一起删掉
         profile_max_chars:
           type: integer
         display_name_max_chars:
@@ -2720,11 +2734,17 @@ components:
           type: integer
     FoundTurn:
       type: object
-      required: [conversation_id, turn]
+      required: [conversation_id, kind, title, turn]
       properties:
         conversation_id:
           type: string
           description: 在哪条对话（语音那条是 voice）
+        kind:
+          $ref: '#/components/schemas/ConversationKind'
+        title:
+          type: string
+          nullable: true
+          description: 那条对话的标题（同 Conversation.title：还没有标题、语音那条时为 null）
         turn:
           $ref: '#/components/schemas/Turn'
     Backstory:

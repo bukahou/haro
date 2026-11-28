@@ -278,8 +278,8 @@ func TestAttachmentsAndSearch(t *testing.T) {
 		t.Errorf("别的对话的图片：%d", status)
 	}
 	found := f.list(t, "/api/v1/turns/search?q=%E7%8C%AB", "zh")
-	if len(found) != 1 || found[0]["conversation_id"] != "voice" {
-		t.Errorf("搜「猫」：%v", found)
+	if len(found) != 1 || found[0]["conversation_id"] != "voice" || found[0]["kind"] != "voice" || found[0]["title"] != nil {
+		t.Errorf("搜「猫」（带上是哪种对话、标题）：%v", found)
 	}
 	contract, err := openapi3.NewLoader().LoadFromFile("../../api/openapi.yaml")
 	if err != nil {

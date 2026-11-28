@@ -524,13 +524,22 @@ func (s *Server) SearchTurns(ctx context.Context, request appapi.SearchTurnsRequ
 	if err != nil {
 		return s.internalError(ctx, "搜对话", err), nil
 	}
+	threads, err := s.opts.Chat.Threads(ctx, account.OwnerPerson)
+	if err != nil {
+		return s.internalError(ctx, "读对话列表", err), nil
+	}
+	titles := make(map[string]string, len(threads)) // 找到的各轮在哪条对话：带上那条的标题，App 不用再对一遍列表
+	for _, thread := range threads {
+		titles[thread.ID] = thread.Title
+	}
 	reply := appapi.SearchTurns200JSONResponse{}
 	for _, turn := range found {
-		id := turn.Thread
-		if id == brain.VoiceThread {
-			id = voiceConversationID
+		found := appapi.FoundTurn{ConversationId: turn.Thread, Kind: appapi.Chat, Title: optional(titles[turn.Thread]),
+			Turn: s.turnOf(ctx, account.OwnerPerson, turn.Thread, turn.RecordedTurn)}
+		if turn.Thread == brain.VoiceThread {
+			found.ConversationId, found.Kind = voiceConversationID, appapi.Voice
 		}
-		reply = append(reply, appapi.FoundTurn{ConversationId: id, Turn: s.turnOf(ctx, account.OwnerPerson, turn.Thread, turn.RecordedTurn)})
+		reply = append(reply, found)
 	}
 	return reply, nil
 }

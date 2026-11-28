@@ -274,6 +274,11 @@ func (s *transcriptionSession) acceptAudio(ctx context.Context, pcm []byte) erro
 		}
 	}
 	speaking := s.vad.feed(samples)
+	if s.echo.playing && s.turnDetection.Interrupts() && s.wake.listening(false) {
+		if err := s.bargeInByVoice(ctx, speaking, now); err != nil {
+			return err
+		}
+	}
 	// 醒着时也识别唤醒词：再叫一次同样标上唤醒（文字原样交出），终端收到经服务端转来的唤醒事件后重新开始对话窗口计时
 	if keyword := s.wake.spot(samples); keyword != "" {
 		if err := s.wakeUp(ctx, keyword, speaking); err != nil {
@@ -384,10 +389,32 @@ func (s *transcriptionSession) wakeUp(ctx context.Context, keyword string, speak
 	return nil
 }
 
-// startPlayback：终端开始播放回答。只听唤醒词（打断），记下播放前醒没醒，播完恢复。
+// bargeInByVoice 是一开口就打断（会话的 turn_detection 要了 interrupt_response：终端有回声消除）：播放中连续说话
+// Timing.BargeInSpeech 才算，残留的回声、咳嗽一声不打断。算打断时不再算在播放，从这段话的开头起一句话、标上打断；
+// speech_started 照常发出，终端据此停播。只在醒着时这样：睡着时播的（到点的提醒）只有唤醒词能打断，睡着不听内容。
+func (s *transcriptionSession) bargeInByVoice(ctx context.Context, speaking bool, now int) error {
+	from, enough := s.echo.voice(speaking, now, samplesIn(s.timing.BargeInSpeech))
+	if !enough {
+		return nil
+	}
+	s.echo.interrupt()
+	s.echo.cutAt(max(from-s.turnDetection.PrefixPaddingMs*samplesPerMs, 0)) // 之前是 haro 自己的声音；识别时往前多取的那段照留
+	if err := s.beginUtterance(ctx, from); err != nil {
+		return err
+	}
+	s.current.bargeIn = true
+	s.deps.Logger.Info("打断：播放回答时主人开口了", "item", s.current.itemID, "speech_ms", (now-from)/samplesPerMs)
+	return nil
+}
+
+// startPlayback：终端开始播放回答。只听唤醒词（打断；会话要了一开口就打断时也听人声），记下播放前醒没醒，播完恢复。
 func (s *transcriptionSession) startPlayback() {
 	s.wake.pauseForPlayback(s.echo.start())
 	s.current = nil
+	if s.turnDetection.Interrupts() {
+		s.deps.Logger.Info("播放中：听唤醒词和开口（打断）")
+		return
+	}
 	s.deps.Logger.Info("播放中：只听唤醒词（打断）")
 }
 

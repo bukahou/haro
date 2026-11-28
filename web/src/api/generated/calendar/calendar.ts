@@ -15,7 +15,7 @@
  * - App 的接口都在 `/api/v1/` 下（公网只放行这一段）；`/v1/...` 是终端的语音连接，只在局域网。
  * - 网页版（另一个域名）从浏览器跨域调接口：服务端只放行网页版的那一个来源（CORS），令牌同样放在 `Authorization` 里，不用 cookie。
  *
- * OpenAPI spec version: 0.14.0
+ * OpenAPI spec version: 0.15.0
  */
 import type {
   CalendarEvent,
@@ -137,6 +137,17 @@ export const syncCalendar = (
     },
       );
     }
+  /**
+ * @summary 不再同步这个系统日历：它同步进来的日程从 haro 里去掉，同步记录也删掉（主人在 App 里关掉它时调用）
+ */
+export const unsyncCalendar = (
+    calendarId: string,
+ ) => {
+      return apiRequest<void>(
+      {url: `/api/v1/calendar/syncs/${calendarId}`, method: 'DELETE'
+    },
+      );
+    }
   export type ListOccurrencesResult = NonNullable<Awaited<ReturnType<typeof listOccurrences>>>
 export type CreateEventResult = NonNullable<Awaited<ReturnType<typeof createEvent>>>
 export type GetEventResult = NonNullable<Awaited<ReturnType<typeof getEvent>>>
@@ -145,3 +156,4 @@ export type DeleteEventResult = NonNullable<Awaited<ReturnType<typeof deleteEven
 export type ListPhoneAlertsResult = NonNullable<Awaited<ReturnType<typeof listPhoneAlerts>>>
 export type ListCalendarSyncsResult = NonNullable<Awaited<ReturnType<typeof listCalendarSyncs>>>
 export type SyncCalendarResult = NonNullable<Awaited<ReturnType<typeof syncCalendar>>>
+export type UnsyncCalendarResult = NonNullable<Awaited<ReturnType<typeof unsyncCalendar>>>

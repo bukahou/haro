@@ -66,6 +66,11 @@ haro 是一个家用语音助手：家里每个房间放一台**终端**（麦�
   接着照普通回答发文字、声音和 `response.done`。只在这台终端没在播、服务端没在答、主人没在说的时候开口（回答事件里没有回答编号，
   声音不能混在一起），所以终端不管能不能打断都报「开始播放 / 播完了」（`haro.playback.started` / `stopped`）。
   终端在主循环里照播回答的方式播（可以喊唤醒词打断），播完醒着等一个对话窗口，主人可以不叫唤醒词直接接话。
+- 回答时怎么打断由终端的 `HARO_BARGE_IN` 定：`wake` 播放时语音前端只听唤醒词；`voice` 主人一开口就停 ——
+  终端在 `turn_detection` 里带 `interrupt_response: true`（Realtime 的标准字段；haro 不填 = false），haro-asr 醒着播放时也听人声，
+  连续说话够 `asrserver.Timing.BargeInSpeech` 就算打断：照常发 `speech_started`（这句标上打断），终端收到就停播、截断、取消，
+  和喊唤醒词打断走同一条路。`voice` 要终端的麦克风有回声消除，否则会被自己的声音打断：Linux 终端用 PipeWire 自带的 echo-cancel 模块
+  （`deploy/pipewire/haro-echo-cancel.conf`，参考信号取默认音箱的监听口），终端选它建的虚拟麦克风。睡着时播的提醒只有唤醒词能打断。
 - 模型判断主人要结束这次对话时（`end_conversation`），`response.done` 带 `haro.end_conversation`：终端播完就请语音前端休眠，被打断就不睡。
   semantic_vad 判定没说完时会把下一段并进同一句，最长并到 30 秒（`asrserver.Timing.MergeLimit`），再长就按说完交出、后面的另成一句。
 

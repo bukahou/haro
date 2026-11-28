@@ -33,6 +33,7 @@ type Calendar interface {
 	Occurrences(ctx context.Context, person string, from, to time.Time) ([]calendar.Occurrence, error)
 	PhoneAlerts(ctx context.Context, person string, until time.Time) ([]calendar.PhoneAlert, error)
 	Sync(ctx context.Context, person, calendarID, name string, events []calendar.SyncedEvent) (calendar.SyncResult, error)
+	Unsync(ctx context.Context, person, calendarID string) error
 	Syncs(ctx context.Context, person string) ([]calendar.Sync, error)
 }
 
@@ -240,4 +241,19 @@ func (s *Server) SyncCalendar(ctx context.Context, request appapi.SyncCalendarRe
 		return s.calendarProblem(ctx, "同步系统日历", err), nil
 	}
 	return appapi.SyncCalendar200JSONResponse{Added: result.Added, Updated: result.Updated, Removed: result.Removed}, nil
+}
+
+// UnsyncCalendar 实现 appapi.StrictServerInterface。
+func (s *Server) UnsyncCalendar(ctx context.Context, request appapi.UnsyncCalendarRequestObject) (appapi.UnsyncCalendarResponseObject, error) {
+	account, denied := s.me(ctx)
+	if denied != nil {
+		return *denied, nil
+	}
+	if s.opts.Calendar == nil {
+		return s.notImplemented(ctx), nil
+	}
+	if err := s.opts.Calendar.Unsync(ctx, account.OwnerPerson, request.CalendarId); err != nil {
+		return s.calendarProblem(ctx, "不再同步系统日历", err), nil
+	}
+	return appapi.UnsyncCalendar204Response{}, nil
 }

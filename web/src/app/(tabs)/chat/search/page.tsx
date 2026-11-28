@@ -13,13 +13,11 @@ import { Markdown } from "@/components/chat/Markdown";
 import { Empty, Failure, Group, Loading, Page } from "@/components/ui";
 import { useTimeFormat } from "@/lib/format";
 import { useApi } from "@/lib/useApi";
-import { useConversations } from "@/stores/conversations";
 
 function Results({ q }: { q: string }) {
   const t = useTranslations("chat");
   const time = useTimeFormat();
   const titleOf = useConversationTitle();
-  const conversations = useConversations((state) => state.list);
   const { data, error, loading } = useApi(useCallback(() => searchTurns({ q }), [q]));
   if (loading) return <Loading />;
   if (error) return <Failure message={error} />;
@@ -32,7 +30,7 @@ function Results({ q }: { q: string }) {
           <Link key={`${found.conversation_id}:${found.turn.seq}`} className="row" href={`/chat/${found.conversation_id}`} style={{ alignItems: "flex-start" }}>
             <span className="grow">
               <span className="between">
-                <span className="b ell">{titleOf(conversations?.find((item) => item.conversation_id === found.conversation_id))}</span>
+                <span className="b ell">{titleOf({ kind: found.kind, title: found.title })}</span>
                 <span className="cap">{time.short(found.turn.at)}</span>
               </span>
               {found.turn.said && <span className="block ell">{found.turn.said}</span>}

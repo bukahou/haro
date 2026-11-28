@@ -300,7 +300,7 @@ func TestPrune(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	later := now.Add(receiptRetention + time.Hour)
+	later := now.Add(ReceiptRetention + time.Hour)
 	clock = func() time.Time { return later }
 	if err := service.Prune(ctx); err != nil {
 		t.Fatal(err)

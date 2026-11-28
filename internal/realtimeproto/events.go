@@ -285,7 +285,13 @@ type TurnDetection struct {
 	PrefixPaddingMs   int     `json:"prefix_padding_ms,omitempty" jsonschema:"识别时带上语音开始前的这段音频（毫秒）"`
 	SilenceDurationMs int     `json:"silence_duration_ms,omitempty" jsonschema:"静音持续多久算说完（毫秒）"`
 	CreateResponse    *bool   `json:"create_response,omitempty" jsonschema:"判定说完后服务端自己开始回答（默认 true）；false = 等客户端发 response.create"`
+	// InterruptResponse：终端播放回答时主人一开口就打断（播放期间也听人声，开始说话时照常发 speech_started，终端据此停播）。
+	// 要终端的麦克风有回声消除，否则会被自己的声音打断。haro 与 OpenAI 不同：不填 = false（不带这个字段的终端播放时只听唤醒词）
+	InterruptResponse *bool `json:"interrupt_response,omitempty" jsonschema:"播放回答时主人开口就打断（要回声消除；不填 = false，只能喊唤醒词打断）"`
 }
+
+// Interrupts 是这个会话要不要在播放回答时一开口就打断（InterruptResponse 不填 = false）。
+func (t TurnDetection) Interrupts() bool { return t.InterruptResponse != nil && *t.InterruptResponse }
 
 // 说完怎么判断（TurnDetection.Type）。
 const (

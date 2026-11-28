@@ -109,7 +109,7 @@ func run(logger *slog.Logger) error {
 	keyboard := trigger.NewKeyboardTrigger(os.Stdin)
 	options := assistantOptions(settings, sounds)
 	logger.Info("haro 启动", "version", buildinfo.Version, "server", settings.ServerURL,
-		"turn_detection", settings.TurnDetection, "barge_in", options.BargeIn, "camera_backend", settings.CameraBackend)
+		"turn_detection", settings.TurnDetection, "barge_in", settings.BargeIn, "camera_backend", settings.CameraBackend)
 	zone := config.LocalTimeZone(time.Now())
 	logger.Info("时区（日志里的时间按它；用环境变量 TZ 改）", "zone", zone.Name, "utc_offset", zone.Offset, "TZ", zone.TZ)
 	for _, note := range settings.RemovedSettingNotes {
@@ -225,7 +225,7 @@ func assistantOptions(settings config.TerminalSettings, sounds tones.Tones) assi
 		TurnDetection: settings.TurnDetectionSettings(), // create_response 不填 = 服务端判定说完时自己开始回答
 		EchoGuard:     settings.EchoGuard,
 		WakeWord:      assistant.WakeWordOptions{IdleTimeout: settings.WakeIdle, SleepTone: sounds.Sleep},
-		BargeIn:       settings.BargeIn,
+		BargeIn:       settings.BargeIn != config.BargeInOff, // 一开口就停（voice）由 TurnDetection.InterruptResponse 带给服务端
 		NoticeTone:    sounds.Notice,
 		NoticeTones: map[string]realtimeproto.PCMAudio{ // 服务端那边听不见了：和服务端断开时同样的两声
 			realtimeproto.NoticeTranscriptionLost:     sounds.Offline,

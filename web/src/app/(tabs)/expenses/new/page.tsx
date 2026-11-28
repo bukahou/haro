@@ -25,6 +25,7 @@ export default function NewReceiptPage() {
   const time = useTimeFormat();
   const categories = useCategories();
   const maxBytes = useClientConfig((state) => state.config?.limits.attachment_max_bytes);
+  const keepDays = useClientConfig((state) => state.config?.limits.receipt_keep_days);
   const open = useApi(loadReceipts);
   const [category, setCategory] = useState("");
   const [note, setNote] = useState("");
@@ -86,7 +87,7 @@ export default function NewReceiptPage() {
           </Field>
         </div>
       </Card>
-      <p className="cap mt-3">{t("receiptPolicy")}</p>
+      {keepDays !== undefined && <p className="cap mt-3">{t("receiptPolicy", { days: keepDays })}</p>}
       {open.data && open.data.length > 0 && (
         <>
           <SecTitle>{t("openTitle")}</SecTitle>

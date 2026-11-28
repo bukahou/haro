@@ -496,6 +496,16 @@ func (s *Service) Sync(ctx context.Context, person, calendar, name string, event
 	return result, nil
 }
 
+// Unsync 不再同步这个系统日历：它同步进来的日程去掉（软删除），同步记录也删掉；没同步过时返回 ErrNotFound。
+func (s *Service) Unsync(ctx context.Context, person, calendar string) error {
+	removed, err := s.store.unsync(ctx, person, calendar, s.now().UTC().Truncate(time.Second))
+	if err != nil {
+		return err
+	}
+	s.logger.Info("不再同步系统日历", "person", person, "calendar", calendar, "removed", removed)
+	return nil
+}
+
 // Syncs 是这个人同步过的系统日历（上次同步的时间）。
 func (s *Service) Syncs(ctx context.Context, person string) ([]Sync, error) {
 	return s.store.syncs(ctx, person)

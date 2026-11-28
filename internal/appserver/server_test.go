@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bukahou/akasha/pkg/oidcrp"
 	"github.com/getkin/kin-openapi/openapi3"
@@ -17,6 +18,7 @@ import (
 	"github.com/bukahou/haro/internal/accounts"
 	"github.com/bukahou/haro/internal/appapi"
 	"github.com/bukahou/haro/internal/calendar"
+	"github.com/bukahou/haro/internal/expenses"
 	"github.com/bukahou/haro/internal/money"
 	"github.com/bukahou/haro/internal/realtimeproto"
 	"github.com/bukahou/haro/internal/spending"
@@ -132,6 +134,9 @@ func TestClientConfig(t *testing.T) {
 	options := body["monthly_cap_options"].([]any)
 	if len(options) != 2 || options[1].(map[string]any)["amount"] != "3000" || options[1].(map[string]any)["currency"] != "JPY" {
 		t.Errorf("档位：%v", options)
+	}
+	if limits["receipt_keep_days"] != float64(expenses.ReceiptRetention/(24*time.Hour)) {
+		t.Errorf("小票留几天：%v", limits)
 	}
 	alerts := body["calendar_alert_options"].([]any)
 	if len(alerts) != len(calendar.AlertChoices) || alerts[0] != float64(0) || alerts[len(alerts)-1] != float64(24*60*60) {
