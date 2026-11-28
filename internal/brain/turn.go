@@ -57,6 +57,8 @@ type turnRecord struct {
 	delivered []func()
 	// interrupted：这一轮附上的情况被打断时要通知的（Briefing.Interrupted）
 	interrupted []func()
+	// decision：主人在确认卡片上点的（打字会话）：这一轮先按它确认或取消，再请模型说结果
+	decision *Decision
 }
 
 // toolRound 是模型一次要求调用工具：调用前说的话、要求的调用、各自的结果。
@@ -66,6 +68,7 @@ type toolRound struct {
 	results    map[string]string // 按调用编号；没有 = 没执行完
 	remembered map[string]string // 历史里换一种说法的结果（只对这一轮有用的要求不存进历史，换成中性的记录）
 	frameShown bool              // 这一段把摄像头画面直接交给了模型（历史里只留一句「当时看了画面」）
+	cards      map[string]Card   // 按调用编号：这次调用在聊天里出的卡片（记在历史里那次结果上）
 }
 
 func newTurnRecord(question string) *turnRecord {
@@ -83,6 +86,14 @@ func (r *turnRecord) beginRound(text string, calls []ToolCall) int {
 
 func (r *turnRecord) recordResult(round int, call ToolCall, result string) {
 	r.rounds[round].results[call.ID] = result
+}
+
+// attachCard 记下这次调用在聊天里出的卡片。
+func (r *turnRecord) attachCard(round int, call ToolCall, card Card) {
+	if r.rounds[round].cards == nil {
+		r.rounds[round].cards = map[string]Card{}
+	}
+	r.rounds[round].cards[call.ID] = card
 }
 
 // Add 实现 Deliveries：工具登记的「主人听完才算数」的事，和附上的情况一起在主人听完这一轮之后调用。
@@ -136,7 +147,11 @@ func (r *turnRecord) messages(ending turnEnding, answer string) []ChatMessage {
 			case replaced:
 				result = remembered
 			}
-			turn = append(turn, ChatMessage{Role: RoleTool, ToolName: call.Name, ToolCallID: call.ID, Text: result})
+			message := ChatMessage{Role: RoleTool, ToolName: call.Name, ToolCallID: call.ID, Text: result}
+			if card, ok := round.cards[call.ID]; ok {
+				message.Card = &card
+			}
+			turn = append(turn, message)
 		}
 		if round.frameShown {
 			turn = append(turn, ChatMessage{Role: RoleUser, Text: frameRecalledNote, Synthetic: true})

@@ -3,54 +3,133 @@
 // 一条对话：页头（返回、标题、更多）、几轮记录（往上翻读更早的）、正在答的那一轮、输入框。
 // 数据都在 stores/chat.ts；这里只管显示和把主人的操作交过去。
 import clsx from "clsx";
-import { AlertTriangle, ArrowUp, Check, Copy, ImageIcon, MessageCircle, Mic, MoreHorizontal, Square, VenetianMask, X } from "lucide-react";
+import { AlertTriangle, ArrowUp, Check, ChevronDown, ChevronRight, Copy, ImageIcon, MessageCircle, Mic, MoreHorizontal, Square, VenetianMask, X } from "lucide-react";
 import { useTranslations } from "next-intl";
 import { useRouter } from "next/navigation";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { deleteConversation, restoreConversation } from "@/api/generated/conversations/conversations";
-import type { Conversation, ReplyBlock, Turn } from "@/api/generated/model";
+import type { ConfirmationCard, Conversation, ReplyBlock, ResearchCard, Turn } from "@/api/generated/model";
 import { openDialog, showToast } from "@/components/overlay";
 import { Banner, Button, Spinner, Tag } from "@/components/ui";
-import { useChat, type LiveTurn } from "@/stores/chat";
+import { useChat, type LiveBlock, type LiveTurn } from "@/stores/chat";
 import { useClientConfig } from "@/stores/clientConfig";
 import { useConversations } from "@/stores/conversations";
 
-import { AttachmentImage } from "./AttachmentImage";
 import { MenuButton } from "@/components/shell/MenuButton";
 
+import { AttachmentImage } from "./AttachmentImage";
+import { ConfirmationCardView, ResearchCardView, ToolLine } from "./Cards";
 import { useConversationTitle } from "./ConversationList";
 import { Markdown } from "./Markdown";
 
 // ---------- 一轮的显示 ----------
 
-// 回答里连着的几个工具合成一行「用了 N 个工具」，文字按 Markdown 显示
-function ReplyBlocks({ blocks }: { blocks: ReplyBlock[] }) {
-  const t = useTranslations("chat");
-  const parts: ({ kind: "tools"; count: number } | { kind: "text"; text: string })[] = [];
-  for (const block of blocks) {
-    const last = parts[parts.length - 1];
+type Shown =
+  | { type: "text"; text: string; streaming?: boolean }
+  | { type: "tools"; tools: { key: string; label: string; done: boolean }[] }
+  | { type: "research"; research: ResearchCard }
+  | { type: "confirmation"; confirmation: ConfirmationCard };
+
+// 记录里的回答 → 要显示的几块：连着的工具合成一组
+function shownOfReply(blocks: ReplyBlock[]): Shown[] {
+  const shown: Shown[] = [];
+  blocks.forEach((block, index) => {
+    const last = shown[shown.length - 1];
     if (block.type === "tool") {
-      if (last?.kind === "tools") last.count++;
-      else parts.push({ kind: "tools", count: 1 });
-    } else if (block.text) {
-      parts.push({ kind: "text", text: block.text });
+      const tool = { key: String(index), label: block.label ?? block.tool ?? "", done: true };
+      if (last?.type === "tools") last.tools.push(tool);
+      else shown.push({ type: "tools", tools: [tool] });
+    } else if (block.type === "text" && block.text) {
+      shown.push({ type: "text", text: block.text });
+    } else if (block.type === "research" && block.research) {
+      shown.push({ type: "research", research: block.research });
+    } else if (block.type === "confirmation" && block.confirmation) {
+      shown.push({ type: "confirmation", confirmation: block.confirmation });
     }
+  });
+  return shown;
+}
+
+// 正在答的这一轮 → 要显示的几块（最后一段文字带着光标）
+function shownOfLive(blocks: LiveBlock[], answering: boolean): Shown[] {
+  const shown: Shown[] = [];
+  blocks.forEach((block, index) => {
+    const last = shown[shown.length - 1];
+    if (block.type === "tool") {
+      const tool = { key: block.callId || String(index), label: block.label, done: block.done };
+      if (last?.type === "tools") last.tools.push(tool);
+      else shown.push({ type: "tools", tools: [tool] });
+    } else if (block.type === "text") {
+      shown.push({ type: "text", text: block.text, streaming: answering && index === blocks.length - 1 });
+    } else {
+      shown.push(block);
+    }
+  });
+  return shown;
+}
+
+// 一组工具：只有一个、或者还在做时一行一行列出来；都做完、不止一个时收成「用了 N 个工具」，点开看每一个
+function ToolGroup({ tools }: { tools: { key: string; label: string; done: boolean }[] }) {
+  const t = useTranslations("chat");
+  const [open, setOpen] = useState(false);
+  const folded = tools.length > 1 && tools.every((tool) => tool.done);
+  if (!folded) {
+    return (
+      <div className="stack" style={{ gap: 6 }}>
+        {tools.map((tool) => (
+          <ToolLine key={tool.key} label={tool.label} done={tool.done} />
+        ))}
+      </div>
+    );
   }
   return (
-    <>
-      {parts.map((part, index) =>
-        part.kind === "tools" ? (
-          <div key={index} className="tool">
-            <Check size={16} className="acc" aria-hidden />
-            {t("usedTools", { count: part.count })}
-          </div>
-        ) : (
-          <div key={index} className="ai-msg">
-            <Markdown text={part.text} />
-          </div>
-        ),
+    <div>
+      <button type="button" className="tool tool-fold" onClick={() => setOpen(!open)} aria-expanded={open}>
+        <Check size={16} className="acc" aria-hidden />
+        {t("usedTools", { count: tools.length })}
+        {open ? <ChevronDown size={14} aria-hidden /> : <ChevronRight size={14} aria-hidden />}
+      </button>
+      {open && (
+        <div className="stack ml-6 mt-1.5" style={{ gap: 4 }}>
+          {tools.map((tool) => (
+            <div key={tool.key} className="tool">
+              {tool.label}
+            </div>
+          ))}
+        </div>
       )}
+    </div>
+  );
+}
+
+function ShownBlocks({ shown, conversationId, busy }: { shown: Shown[]; conversationId: string; busy: boolean }) {
+  const decide = useChat((store) => store.decide);
+  return (
+    <>
+      {shown.map((block, index) => {
+        switch (block.type) {
+          case "tools":
+            return <ToolGroup key={index} tools={block.tools} />;
+          case "text":
+            return (
+              <div key={index} className={clsx("ai-msg", block.streaming && "streaming")}>
+                <Markdown text={block.text} />
+              </div>
+            );
+          case "research":
+            return <ResearchCardView key={index} research={block.research} />;
+          case "confirmation":
+            return (
+              <ConfirmationCardView
+                key={index}
+                confirmation={block.confirmation}
+                busy={busy}
+                onDecide={(confirm) => void decide(conversationId, block.confirmation.action_id, confirm)}
+              />
+            );
+        }
+      })}
     </>
   );
 }
@@ -77,40 +156,41 @@ function CopyReply({ text }: { text: string }) {
   );
 }
 
-function TurnView({ turn }: { turn: Turn }) {
+function TurnView({ turn, conversationId, busy }: { turn: Turn; conversationId: string; busy: boolean }) {
   const t = useTranslations("chat");
   const replyText = turn.reply.filter((block) => block.type === "text" && block.text).map((block) => block.text).join("\n\n");
   return (
     <>
       {turn.attachment && <AttachmentImage attachmentId={turn.attachment} alt={t("sentImage")} />}
       {turn.said && <div className="me-msg">{turn.said}</div>}
-      <ReplyBlocks blocks={turn.reply} />
+      <ShownBlocks shown={shownOfReply(turn.reply)} conversationId={conversationId} busy={busy} />
       {replyText && <CopyReply text={replyText} />}
     </>
   );
 }
 
-function LiveView({ live, onResend, onDismiss, onReload }: { live: LiveTurn; onResend: () => void; onDismiss: () => void; onReload: () => void }) {
+function LiveView({ live, conversationId, onResend, onDismiss, onReload }: { live: LiveTurn; conversationId: string; onResend: () => void; onDismiss: () => void; onReload: () => void }) {
   const t = useTranslations("chat");
+  const said = live.request.kind === "message" ? live.request.text : t(live.request.confirm ? "card.confirm" : "card.cancel");
   return (
     <>
-      {live.imageURL && live.said && (
-        <div className="me-img">
-          {/* eslint-disable-next-line @next/next/no-img-element -- 本机选的图片（blob: 地址），不经 next/image */}
-          <img src={live.imageURL} alt={t("sentImage")} />
-        </div>
-      )}
-      {live.said && <div className="me-msg">{live.said}</div>}
-      {live.answering && !live.text && !live.failure && (
-        <div className="tool">
-          <Spinner />
-          {t("thinking")}
-        </div>
-      )}
-      {live.text && (
-        <div className={clsx("ai-msg", live.answering && "streaming")}>
-          <Markdown text={live.text} />
-        </div>
+      {!live.settled && (
+        <>
+          {live.imageURL && (
+            <div className="me-img">
+              {/* eslint-disable-next-line @next/next/no-img-element -- 本机选的图片（blob: 地址），不经 next/image */}
+              <img src={live.imageURL} alt={t("sentImage")} />
+            </div>
+          )}
+          <div className="me-msg">{said}</div>
+          {live.answering && live.blocks.length === 0 && !live.failure && (
+            <div className="tool">
+              <Spinner />
+              {t("thinking")}
+            </div>
+          )}
+          <ShownBlocks shown={shownOfLive(live.blocks, live.answering)} conversationId={conversationId} busy={live.answering} />
+        </>
       )}
       {live.ending && !live.answering && <p className="cap">{t(`ending.${live.ending}`)}</p>}
       {live.failure && !live.answering && (
@@ -297,7 +377,7 @@ export function Thread({ conversationId }: { conversationId: string }) {
   const t = useTranslations("chat");
   const conversation = useConversations((state) => state.list?.find((item) => item.conversation_id === conversationId));
   const state = useChat((store) => store.threads[conversationId]);
-  const { load, loadOlder, send, stop, dismiss } = useChat.getState();
+  const { load, loadOlder, send, retry, stop, dismiss } = useChat.getState();
   const scroller = useRef<HTMLDivElement>(null);
   const pinned = useRef(true); // 在底部时，新内容进来跟着滚到底
   const olderAnchor = useRef<number | null>(null);
@@ -377,12 +457,13 @@ export function Thread({ conversationId }: { conversationId: string }) {
           )}
           {state?.loaded && !turns?.length && !live && <EmptyThread incognito={!!conversation?.incognito} />}
           {turns?.map((turn) => (
-            <TurnView key={turn.seq} turn={turn} />
+            <TurnView key={turn.seq} turn={turn} conversationId={conversationId} busy={!!live?.answering} />
           ))}
           {live && (
             <LiveView
               live={live}
-              onResend={() => void send(conversationId, live.said, live.image)}
+              conversationId={conversationId}
+              onResend={() => void retry(conversationId)}
               onDismiss={() => dismiss(conversationId)}
               onReload={() => {
                 dismiss(conversationId);

@@ -15,11 +15,13 @@
  * - App 的接口都在 `/api/v1/` 下（公网只放行这一段）；`/v1/...` 是终端的语音连接，只在局域网。
  * - 网页版（另一个域名）从浏览器跨域调接口：服务端只放行网页版的那一个来源（CORS），令牌同样放在 `Authorization` 里，不用 cookie。
  *
- * OpenAPI spec version: 0.13.0
+ * OpenAPI spec version: 0.14.0
  */
 import type { ChatEventStatus } from './chatEventStatus';
 import type { ChatEventType } from './chatEventType';
+import type { ConfirmationCard } from './confirmationCard';
 import type { ErrorCode } from './errorCode';
+import type { ResearchCard } from './researchCard';
 
 export interface ChatEvent {
   type: ChatEventType;
@@ -27,6 +29,12 @@ export interface ChatEvent {
   turn_id?: string;
   /** text：回答的文字片段 */
   text?: string;
+  /** tool_started、tool_finished：这次工具调用的编号（对上开始和结束；成没成由回答的文字说） */
+  call_id?: string;
+  /** tool_started：在做什么（给人看的，按 Accept-Language，例如「在搜索：横滨 天气」） */
+  label?: string;
+  research?: ResearchCard;
+  confirmation?: ConfirmationCard;
   /** done：怎么结束的（incomplete = 到了输出上限等没说完） */
   status?: ChatEventStatus;
   code?: ErrorCode;

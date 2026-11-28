@@ -36,8 +36,9 @@ type transcriptionJob struct {
 
 	speakerCheckFailed bool // 开着声纹、这句却算不出声纹（声纹的第三种结果，和没比对分开）
 
-	image      []byte // 打字会话：这句带的图片（JPEG）；只交给这一轮的模型
-	attachment string // 打字会话：图片的附件编号（记进历史）
+	image      []byte    // 打字会话：这句带的图片（JPEG）；只交给这一轮的模型
+	attachment string    // 打字会话：图片的附件编号（记进历史）
+	decision   *Decision // 打字会话：主人在确认卡片上点的
 }
 
 // speakerFor 决定这句接谁的对话：认出是谁就接这个人的（对话跟人走），并记作这次醒着期间最近认出的人；
@@ -143,6 +144,7 @@ func (s *Session) respond(ctx context.Context, job *transcriptionJob) (done real
 	// 画面不直接附在这句话上：模型需要看时调用 look_at_camera，闲聊时手里就没有画面
 	record := newTurnRecord(job.text)
 	record.voiceVerified = job.speakerChecked && s.parts.Residents.verified(job.speaker)
+	record.decision = job.decision
 	record.extraNotes = s.wakeNotes(job)
 	situation, input := s.userTurn(job.text, record) // 现在的情况单独成一条、不进历史；历史里只存原话
 	if len(job.image) > 0 {                          // 打字时发的图片：只交给这一轮，历史里记附件编号
@@ -346,6 +348,10 @@ func (s *Session) generateSentences(ctx context.Context, history []ChatMessage, 
 	}
 
 	messages := append(history, input)
+	if record.decision != nil { // 主人在确认卡片上点了：先确认或作废（记成这一轮的一次工具往来），模型再照结果说
+		messages = append(messages, s.applyDecision(ctx, record)...)
+		baseRound = len(record.rounds)
+	}
 	specs := s.toolSpecs()
 	if record.restricted { // 声纹没确认的叫醒短句：不给工具
 		specs = nil
@@ -443,6 +449,7 @@ func (s *Session) generateSentences(ctx context.Context, history []ChatMessage, 
 				exchange = append(exchange, ChatMessage{Role: RoleTool, ToolName: call.Name, ToolCallID: call.ID, Text: result})
 				continue
 			}
+			callCtx := s.toolStarted(ctx, record, toolRoundIndex, call) // 打字会话：告诉 App 在做什么、收这次调用出的卡片
 			var result string
 			switch call.Name {
 			case switchPersonaTool:
@@ -454,7 +461,7 @@ func (s *Session) generateSentences(ctx context.Context, history []ChatMessage, 
 				handOff = handOff || escalated
 				record.rememberAs(toolRoundIndex, call, escalatedRecord)
 			case confirmActionTool:
-				result = s.confirmAction(ctx, record, call)
+				result = s.confirmAction(callCtx, record, call)
 			case cancelActionTool:
 				result = s.cancelAction(call)
 			case endConversationTool:
@@ -465,7 +472,7 @@ func (s *Session) generateSentences(ctx context.Context, history []ChatMessage, 
 				if err != nil { // 参数不对也照样看：问题只是帮专家看准，主人的原话照样交过去
 					s.logger.Warn("看画面的参数不对：只按主人的原话看", "err", err)
 				}
-				look := s.lookAtCamera(ctx, view, in.Question)
+				look := s.lookAtCamera(callCtx, view, in.Question)
 				direct := look.speakDirectly(calls)
 				if direct {
 					directAnswer = look.report.Spoken
@@ -480,12 +487,15 @@ func (s *Session) generateSentences(ctx context.Context, history []ChatMessage, 
 				}
 			default:
 				if s.requiresConfirmation(call.Name) { // 会破坏的：先问主人（确认闸）
-					result = s.holdForConfirmation(record, call)
+					result = s.holdForConfirmation(callCtx, record, call)
 				} else {
-					result = s.callTool(ctx, record, call)
+					result = s.callTool(callCtx, record, call)
 				}
 			}
 			record.recordResult(toolRoundIndex, call, result)
+			if s.parts.Activity != nil {
+				s.parts.Activity.ToolFinished(call.ID)
+			}
 			s.keepOpenTurn(record) // 做完了一个工具：这一轮中途服务端重启的话，重启后照实接进历史
 			exchange = append(exchange, ChatMessage{Role: RoleTool, ToolName: call.Name, ToolCallID: call.ID, Text: result})
 		}

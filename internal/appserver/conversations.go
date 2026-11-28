@@ -25,10 +25,15 @@ const voiceConversationID = "voice"
 // sendMessagePattern 是打字的路由（回答是 Server-Sent Events，手写挂载，不经生成的代码）。
 const sendMessagePattern = "POST " + PathPrefix + "conversations/{conversationId}/messages"
 
+// decidePattern 是点确认卡片的路由（回答同样是流）。
+const decidePattern = "POST " + PathPrefix + "conversations/{conversationId}/confirmations/{actionId}"
+
 // Chat 是打字对话（chat.Service 实现）。
 type Chat interface {
 	CheckThread(ctx context.Context, person, thread string) error
 	Send(ctx context.Context, speaker chat.Speaker, thread string, message chat.Message, language string) (*chat.Turn, error)
+	Decide(ctx context.Context, speaker chat.Speaker, thread, actionID string, confirm bool, language string) (*chat.Turn, error)
+	ActionOpen(person, thread, actionID string) bool
 	Upload(ctx context.Context, person, thread string, data []byte) (conversationstore.Attachment, error)
 	Image(ctx context.Context, person, id string) ([]byte, error)
 	Search(ctx context.Context, person, query string) ([]conversationstore.FoundTurn, error)
@@ -166,7 +171,7 @@ func (s *Server) ListTurns(ctx context.Context, request appapi.ListTurnsRequestO
 	}
 	page := appapi.TurnPage{Turns: []appapi.Turn{}}
 	for _, turn := range recorded {
-		page.Turns = append(page.Turns, turnOf(turn))
+		page.Turns = append(page.Turns, s.turnOf(ctx, account.OwnerPerson, threadOf(request.ConversationId), turn))
 	}
 	if len(recorded) == pageSize && recorded[0].Seq > 1 {
 		next := recorded[0].Seq
@@ -175,8 +180,9 @@ func (s *Server) ListTurns(ctx context.Context, request appapi.ListTurnsRequestO
 	return appapi.ListTurns200JSONResponse(page), nil
 }
 
-// turnOf 是给 App 看的一轮：主人说的（系统附注不算）、haro 的回答（文字和调用了的工具，按顺序）。
-func turnOf(turn conversationstore.RecordedTurn) appapi.Turn {
+// turnOf 是给 App 看的一轮：主人说的（系统附注不算）、haro 的回答（文字、调用了的工具和给人看的说明、卡片，按顺序）。
+func (s *Server) turnOf(ctx context.Context, person, thread string, turn conversationstore.RecordedTurn) appapi.Turn {
+	language := languageFrom(ctx)
 	reply := appapi.Turn{Seq: turn.Seq, Reply: []appapi.ReplyBlock{}}
 	if !turn.At.IsZero() {
 		at := turn.At
@@ -189,12 +195,14 @@ func turnOf(turn conversationstore.RecordedTurn) appapi.Turn {
 			said = append(said, message.Text)
 		case message.Role == brain.RoleAssistant:
 			for _, call := range message.ToolCalls {
-				name := call.Name
-				reply.Reply = append(reply.Reply, appapi.ReplyBlock{Type: appapi.ReplyBlockTypeTool, Tool: &name})
+				name, label := call.Name, s.opts.Phrases.ToolLabel(language, call, "")
+				reply.Reply = append(reply.Reply, appapi.ReplyBlock{Type: appapi.ReplyBlockTypeTool, Tool: &name, Label: &label})
 			}
 			if text := brain.WithoutEmotionTags(message.Text); text != "" { // 历史里存的是模型的原话（含情绪标记）
 				reply.Reply = append(reply.Reply, appapi.ReplyBlock{Type: appapi.ReplyBlockTypeText, Text: &text})
 			}
+		case message.Role == brain.RoleTool && message.Card != nil:
+			reply.Reply = append(reply.Reply, s.cardBlock(language, person, thread, *message.Card))
 		}
 	}
 	if len(said) > 0 {
@@ -240,6 +248,21 @@ func (s *Server) StopTurn(ctx context.Context, request appapi.StopTurnRequestObj
 	return appapi.StopTurn204Response{}, nil
 }
 
+// cardBlock 是历史里的一张卡片（确认卡片还能不能点，看那次操作还在不在等确认）。
+func (s *Server) cardBlock(language, person, thread string, card brain.Card) appapi.ReplyBlock {
+	if card.Kind == brain.CardResearch {
+		return appapi.ReplyBlock{Type: appapi.ReplyBlockTypeResearch, Research: &appapi.ResearchCard{TaskId: card.TaskID, Question: card.Question}}
+	}
+	confirmation := s.confirmationCard(language, card, s.opts.Chat.ActionOpen(person, thread, card.ActionID))
+	return appapi.ReplyBlock{Type: appapi.ReplyBlockTypeConfirmation, Confirmation: &confirmation}
+}
+
+// confirmationCard 是给 App 的确认卡片：要做什么按这个工具给人看的说明。
+func (s *Server) confirmationCard(language string, card brain.Card, open bool) appapi.ConfirmationCard {
+	return appapi.ConfirmationCard{ActionId: card.ActionID, Label: s.opts.Phrases.ToolLabel(language, brain.ToolCall{Name: card.Tool}, ""),
+		ExpiresAt: card.ExpiresAt, Open: open}
+}
+
 // sendMessage 是打字：验令牌（和契约里要登录的接口一样）、按契约校验请求体，开一轮，把回答以 Server-Sent Events 写回去。
 func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request) {
 	account, ok := s.bearerAccount(w, r)
@@ -279,6 +302,48 @@ func (s *Server) sendMessage(w http.ResponseWriter, r *http.Request) {
 		s.writeProblem(w, r, http.StatusInternalServerError, appapi.ErrorCodeInternal, nil)
 		return
 	}
+	s.streamTurn(w, r, turn)
+}
+
+// decideConfirmation 是主人在确认卡片上点了确认 / 取消：开一轮（先确认或作废，再由 haro 说结果），回答同样以事件流写回去。
+func (s *Server) decideConfirmation(w http.ResponseWriter, r *http.Request) {
+	account, ok := s.bearerAccount(w, r)
+	if !ok {
+		return
+	}
+	if s.opts.Chat == nil {
+		s.writeProblem(w, r, http.StatusNotImplemented, appapi.ErrorCodeNotImplemented, nil)
+		return
+	}
+	var decision appapi.ConfirmationDecision
+	actionID := r.PathValue("actionId")
+	if err := json.NewDecoder(r.Body).Decode(&decision); err != nil || !decision.Decision.Valid() || actionID == "" || len(actionID) > maxActionIDBytes {
+		s.writeProblem(w, r, http.StatusBadRequest, appapi.ErrorCodeValidationFailed, map[string]string{"detail": "decision"})
+		return
+	}
+	speaker := chat.Speaker{Owner: account.OwnerPerson, Guest: account.GuestPerson, Admin: account.Role == accounts.RoleAdmin}
+	turn, err := s.opts.Chat.Decide(r.Context(), speaker, threadOf(r.PathValue("conversationId")), actionID,
+		decision.Decision == appapi.Confirm, languageFrom(r.Context()))
+	switch {
+	case errors.Is(err, chat.ErrNotFound):
+		s.writeProblem(w, r, http.StatusNotFound, appapi.ErrorCodeNotFound, nil)
+		return
+	case errors.Is(err, chat.ErrBusy):
+		s.writeProblem(w, r, http.StatusConflict, appapi.ErrorCodeConflict, nil)
+		return
+	case err != nil:
+		s.logger.Error("开一轮（点确认卡片）出错", "err", err)
+		s.writeProblem(w, r, http.StatusInternalServerError, appapi.ErrorCodeInternal, nil)
+		return
+	}
+	s.streamTurn(w, r, turn)
+}
+
+// maxActionIDBytes 是确认卡片上操作编号的上限（和契约 decideConfirmation 的 actionId 的 maxLength 一致）。
+const maxActionIDBytes = 64
+
+// streamTurn 把这一轮的事件以 Server-Sent Events 写回去，直到这一轮结束或 App 断开（断开后这一轮照样答完、存好）。
+func (s *Server) streamTurn(w http.ResponseWriter, r *http.Request, turn *chat.Turn) {
 	defer turn.Detach() // App 断开：这一轮照样答完、存好
 	flusher, _ := w.(http.Flusher)
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -318,6 +383,19 @@ func (s *Server) chatEventOf(ctx context.Context, event chat.Event) appapi.ChatE
 		out.TurnId = &event.TurnID
 	case chat.EventText:
 		out.Text = &event.Text
+	case chat.EventToolStarted:
+		out.CallId, out.Label = &event.CallID, &event.Label
+	case chat.EventToolFinished:
+		out.CallId = &event.CallID
+	case chat.EventCard:
+		if event.Card.Kind == brain.CardResearch {
+			out.Type = appapi.ChatEventTypeResearch
+			out.Research = &appapi.ResearchCard{TaskId: event.Card.TaskID, Question: event.Card.Question}
+		} else {
+			out.Type = appapi.ChatEventTypeConfirmation
+			card := s.confirmationCard(languageFrom(ctx), *event.Card, true)
+			out.Confirmation = &card
+		}
 	case chat.EventDone:
 		status := appapi.ChatEventStatusCompleted
 		switch event.Status {
@@ -452,7 +530,7 @@ func (s *Server) SearchTurns(ctx context.Context, request appapi.SearchTurnsRequ
 		if id == brain.VoiceThread {
 			id = voiceConversationID
 		}
-		reply = append(reply, appapi.FoundTurn{ConversationId: id, Turn: turnOf(turn.RecordedTurn)})
+		reply = append(reply, appapi.FoundTurn{ConversationId: id, Turn: s.turnOf(ctx, account.OwnerPerson, turn.Thread, turn.RecordedTurn)})
 	}
 	return reply, nil
 }

@@ -100,7 +100,7 @@ func (s *Session) answerOverBudget(ctx context.Context, record *turnRecord, capE
 		}
 		switch call.Name {
 		case RaiseMonthlyCapTool:
-			s.holdForConfirmation(record, call)
+			s.holdForConfirmation(ctx, record, call)
 		case confirmActionTool:
 			s.confirmAction(ctx, record, call)
 		case cancelActionTool:

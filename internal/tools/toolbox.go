@@ -104,7 +104,7 @@ func (b *Toolbox) add(server *MCPServer, caller toolCaller, only, confirm []stri
 			return fmt.Errorf("%s 的工具 %s 参数定义解析不了: %w", server.name, tool.Name, err)
 		}
 		schemas[tool.Name] = resolved
-		specs = append(specs, brain.ToolSpec{Name: tool.Name, Description: tool.Description, Parameters: parameters,
+		specs = append(specs, brain.ToolSpec{Name: tool.Name, Title: toolTitle(tool), Description: tool.Description, Parameters: parameters,
 			RequiresConfirmation: requiresConfirmation(tool.Annotations) || slices.Contains(confirm, tool.Name), AdminOnly: adminOnly})
 	}
 	for _, spec := range specs { // 全部校验过才加：不留下加了一半的服务
@@ -189,4 +189,15 @@ func (b *Toolbox) Close() {
 	for _, closer := range closers {
 		_ = closer()
 	}
+}
+
+// toolTitle 是 MCP 服务给这个工具声明的、给人看的名字（tool.title，旧的写在 annotations.title）；没有时为空。
+func toolTitle(tool *mcp.Tool) string {
+	if tool.Title != "" {
+		return tool.Title
+	}
+	if tool.Annotations != nil {
+		return tool.Annotations.Title
+	}
+	return ""
 }

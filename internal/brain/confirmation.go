@@ -169,8 +169,8 @@ func validateArguments(parameters json.RawMessage, arguments map[string]any) (js
 }
 
 // holdForConfirmation 拦下一次会破坏的调用：说话的不是登记过的人就不做；参数不对就交回哪里不对、不存下；
-// 都对就存成待确认的操作，把要点交给模型。
-func (s *Session) holdForConfirmation(record *turnRecord, call ToolCall) string {
+// 都对就存成待确认的操作，把要点交给模型。打字会话（App）里同时出一张确认卡片，主人在卡片上点确认 / 取消。
+func (s *Session) holdForConfirmation(ctx context.Context, record *turnRecord, call ToolCall) string {
 	if !record.voiceVerified {
 		s.logger.Info("要确认的操作：这句话没认出是登记过的人，不做", "tool", call.Name)
 		return confirmationResult{Status: "denied", Tool: call.Name,
@@ -192,11 +192,20 @@ func (s *Session) holdForConfirmation(record *turnRecord, call ToolCall) string 
 	s.currentConversation().addPendingAction(action)
 	record.askedConfirmation = true
 	s.logger.Info("要确认的操作：先问主人", "tool", call.Name, "action", action.ID, "expires_in", timeout)
+	note := "还没有执行。用你自己的话把要做的事（按上面的参数）说清楚，问主人要不要做；" +
+		"主人回答后，同意就调用 " + confirmActionTool + "，不同意就调用 " + cancelActionTool + "。"
+	if ShowsCards(ctx) {
+		ShowCard(ctx, Card{Kind: CardConfirmation, ActionID: action.ID, Tool: call.Name, ExpiresAt: action.ExpiresAt})
+		note = cardConfirmationNote
+	}
 	return confirmationResult{Status: "needs_confirmation", ActionID: action.ID, Tool: call.Name, Arguments: arguments,
-		ExpiresIn: int(timeout.Seconds()),
-		Note: "还没有执行。用你自己的话把要做的事（按上面的参数）说清楚，问主人要不要做；" +
-			"主人回答后，同意就调用 " + confirmActionTool + "，不同意就调用 " + cancelActionTool + "。"}.text()
+		ExpiresIn: int(timeout.Seconds()), Note: note}.text()
 }
+
+// cardConfirmationNote：打字会话里，确认只能由主人在卡片上点（模型不能代为确认）；主人打字说不要了，还可以作废。
+const cardConfirmationNote = "还没有执行。聊天里已经给主人出了一张确认卡片（要做什么、确认 / 取消）。" +
+	"用你自己的话把要做的事（按上面的参数）说清楚，请主人在卡片上点「确认」；不要自己确认，也不要让主人打字回答。" +
+	"主人打字说不要了，就调用 " + cancelActionTool + "。"
 
 // confirmAction 执行 confirm_action：四项核对都过了，才用当初存下的参数执行。
 func (s *Session) confirmAction(ctx context.Context, record *turnRecord, call ToolCall) string {
@@ -220,6 +229,8 @@ func (s *Session) confirmAction(ctx context.Context, record *turnRecord, call To
 		return refuse("要等主人回答之后（下一句话）才能确认：先问主人，不要自己确认。")
 	case !record.voiceVerified:
 		return refuse("这句话没认出是登记过声纹的人，不能确认：没有执行。")
+	case s.parts.TextOnly && (record.decision == nil || record.decision.ActionID != in.ActionID):
+		return refuse("打字的对话里，要主人在确认卡片上点「确认」才执行，不能由你确认：没有执行。请主人点卡片。")
 	}
 	conversation.takePendingAction(in.ActionID)
 	s.logger.Info("主人确认了：执行", "action", action.ID, "tool", action.Call.Name)
@@ -243,3 +254,25 @@ func (s *Session) cancelAction(call ToolCall) string {
 
 // confirmationSpecs 是确认、取消两个工具的定义：有会破坏的工具时一直有（见 sessionTool.gate）。
 func (s *Session) confirmationSpecs() []ToolSpec { return s.sessionToolSpecs(true) }
+
+// applyDecision 按主人在确认卡片上点的确认或作废那次操作（和模型调用 confirm_action / cancel_action 同样的核对），
+// 记成这一轮的一段工具往来，交回要接在这一轮请求里的两条消息（调用和结果），模型据此告诉主人结果。
+func (s *Session) applyDecision(ctx context.Context, record *turnRecord) []ChatMessage {
+	decision := record.decision
+	name := cancelActionTool
+	if decision.Confirm {
+		name = confirmActionTool
+	}
+	calls := []ToolCall{{Name: name, Arguments: map[string]any{"action_id": decision.ActionID}}}
+	s.assignToolCallIDs(calls)
+	call := calls[0]
+	round := record.beginRound("", calls)
+	var result string
+	if decision.Confirm {
+		result = s.confirmAction(ctx, record, call)
+	} else {
+		result = s.cancelAction(call)
+	}
+	record.recordResult(round, call, result)
+	return []ChatMessage{{Role: RoleAssistant, ToolCalls: calls}, {Role: RoleTool, ToolName: name, ToolCallID: call.ID, Text: result}}
+}

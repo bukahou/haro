@@ -28,11 +28,14 @@ const (
 	PhraseCalendarAlertAhead = "calendar_alert_ahead"
 	// {spent} {limit}：这个账号这个月的费用到了管理员给它定的上限（不能口头提高）
 	PhraseOverAccountMonthly = "over_account_monthly"
+	// PhraseCardConfirm、PhraseCardCancel：主人在确认卡片上点的（记成主人这一轮说的话）
+	PhraseCardConfirm = "card_confirm"
+	PhraseCardCancel  = "card_cancel"
 )
 
 var phraseKeys = []string{PhraseOverMonthlyBudget, PhraseOverResearchDaily, PhraseOverSearchDaily,
 	PhraseLedgerUnavailable, PhraseRefused, PhraseModelUnavailable, PhraseOverMonthlyBudgetRaisable, PhraseConfirmCapRaise,
-	PhraseMonthlyCapRaised, PhraseCalendarAlertAhead, PhraseOverAccountMonthly}
+	PhraseMonthlyCapRaised, PhraseCalendarAlertAhead, PhraseOverAccountMonthly, PhraseCardConfirm, PhraseCardCancel, toolLabelFallback}
 
 // Phrases 是每种语言的固定的话：语种（识别给的，例如 zh、ja、en）→ 键 → 话。Default 是没有这种语言时用的。
 type Phrases struct {

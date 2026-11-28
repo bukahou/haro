@@ -15,11 +15,12 @@
  * - App 的接口都在 `/api/v1/` 下（公网只放行这一段）；`/v1/...` 是终端的语音连接，只在局域网。
  * - 网页版（另一个域名）从浏览器跨域调接口：服务端只放行网页版的那一个来源（CORS），令牌同样放在 `Authorization` 里，不用 cookie。
  *
- * OpenAPI spec version: 0.13.0
+ * OpenAPI spec version: 0.14.0
  */
 import type {
   AttachmentInfo,
   ChatEvent,
+  ConfirmationDecision,
   Conversation,
   ConversationCreate,
   FoundTurn,
@@ -93,8 +94,10 @@ export const listTurns = (
       );
     }
   /**
- * 响应是 `text/event-stream`：每个事件一行 `data: <ChatEvent 的 JSON>`，依次是 `started`（带这一轮的 turn_id，停止时用）、
- * 若干 `text`（回答的文字片段，按顺序拼起来就是 Markdown）、最后 `done` 或 `failed`。
+ * 响应是 `text/event-stream`：每个事件一行 `data: <ChatEvent 的 JSON>`，先是 `started`（带这一轮的 turn_id，停止时用），
+ * 然后按发生的顺序：`text`（回答的文字片段，按顺序拼起来就是 Markdown）、`tool_started` / `tool_finished`（工具在做什么、做完没有）、
+ * `research`（派了后台调查：卡片）、`confirmation`（要主人确认的操作：卡片，点了用 decideConfirmation），最后 `done` 或 `failed`。
+ * 不认识的事件类型跳过即可（以后会加）。
  * App 断开后这一轮照样做完、存好（重新打开对话时用 `turns` 翻到）；要停止用 `turns/{turnId}/stop`。
  * 同一条对话同时只答一句：上一句还在答时回 409。
  * @summary 说一句（打字）；回答以 Server-Sent Events 流回来
@@ -107,6 +110,23 @@ export const sendMessage = (
       {url: `/api/v1/conversations/${conversationId}/messages`, method: 'POST',
       headers: {'Content-Type': 'application/json', },
       data: messageSend
+    },
+      );
+    }
+  /**
+ * 确认的是登录的账号本人（等同语音里「主人的声音 + 有时效的确认」）。过期、已经处理过、不是这条对话的，haro 会照实说没有执行。
+ * 同一条对话同时只答一句：上一句还在答时回 409。
+ * @summary 主人在确认卡片上点了确认 / 取消：按编号执行或作废那次操作，haro 再用一句话说结果（Server-Sent Events，同 sendMessage）
+ */
+export const decideConfirmation = (
+    conversationId: string,
+    actionId: string,
+    confirmationDecision: ConfirmationDecision,
+ ) => {
+      return apiRequest<ChatEvent>(
+      {url: `/api/v1/conversations/${conversationId}/confirmations/${actionId}`, method: 'POST',
+      headers: {'Content-Type': 'application/json', },
+      data: confirmationDecision
     },
       );
     }
@@ -166,6 +186,7 @@ export type DeleteConversationResult = NonNullable<Awaited<ReturnType<typeof del
 export type RestoreConversationResult = NonNullable<Awaited<ReturnType<typeof restoreConversation>>>
 export type ListTurnsResult = NonNullable<Awaited<ReturnType<typeof listTurns>>>
 export type SendMessageResult = NonNullable<Awaited<ReturnType<typeof sendMessage>>>
+export type DecideConfirmationResult = NonNullable<Awaited<ReturnType<typeof decideConfirmation>>>
 export type StopTurnResult = NonNullable<Awaited<ReturnType<typeof stopTurn>>>
 export type UploadAttachmentResult = NonNullable<Awaited<ReturnType<typeof uploadAttachment>>>
 export type GetAttachmentResult = NonNullable<Awaited<ReturnType<typeof getAttachment>>>

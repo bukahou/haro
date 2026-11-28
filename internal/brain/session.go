@@ -29,6 +29,8 @@ type Components struct {
 	Thread string
 	// TextOnly：打字会话（App 的打字入口）—— 不开识别流、不合成语音、只发文字，说的话由 SubmitText 交进来
 	TextOnly bool
+	// Activity 收这一轮里发生的事（工具在做什么、卡片），App 的打字对话显示用；nil = 不发（语音会话）
+	Activity ActivityObserver
 	// TextFront 是打字会话用的前台（同一个模型和工具，说话格式是写给人看的，见 PromptValuesFor）；没有模型时用 Front
 	TextFront    Agent
 	NewSegmenter func() TextSegmenter // 每次回答新建一个
