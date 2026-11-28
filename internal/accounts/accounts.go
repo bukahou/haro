@@ -138,7 +138,17 @@ func (s *Store) EnsureAdmin(ctx context.Context, admin Admin) (Account, error) {
 	case err != nil:
 		return Account{}, err
 	default:
-		if account.OwnerPerson != admin.Person || account.GuestPerson != admin.GuestPerson {
+		samePersons := account.OwnerPerson == admin.Person && account.GuestPerson == admin.GuestPerson
+		switch {
+		case samePersons:
+		case account.Status == StatusPendingApproval:
+			// 管理员先登录一次（从日志里拿到自己的 sub）才写进配置：那次登录建的是等同意的账号，从来没用过、没有数据，
+			// 直接换成原来的人
+			if _, err := tx.ExecContext(ctx, `UPDATE accounts SET owner_person = ?, guest_person = ?, joined_via = ? WHERE id = ?`,
+				admin.Person, admin.GuestPerson, JoinedViaAdmin, account.ID); err != nil {
+				return Account{}, fmt.Errorf("把等同意的账号换成管理员: %w", err)
+			}
+		default:
 			return Account{}, fmt.Errorf("管理员账号原来对应的人是 %q / %q，配置里是 %q / %q：人名改了的话数据就对不上了，先查清楚",
 				account.OwnerPerson, account.GuestPerson, admin.Person, admin.GuestPerson)
 		}

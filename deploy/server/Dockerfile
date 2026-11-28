@@ -77,7 +77,8 @@ ENV LD_LIBRARY_PATH=/opt/haro/lib \
     HARO_CONVERSATIONS_DB=/data/conversations.db \
     HARO_PERSONA_STATE=/data/persona \
     HARO_MODEL_PRICES_CACHE=/data/model-prices.json \
-    HARO_EXCHANGE_RATES_CACHE=/data/exchange-rates.json
+    HARO_EXCHANGE_RATES_CACHE=/data/exchange-rates.json \
+    HARO_ACCOUNTS_DB=/data/accounts.db
 
 # 版本标签放在最后：ARG 之后的 RUN 都会因版本号变化而重建（apt 那一层就不能复用缓存了）
 ARG VERSION=dev

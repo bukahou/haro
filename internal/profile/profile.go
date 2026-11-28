@@ -36,6 +36,9 @@ import (
 // 吃得到提示词缓存，多写一些几乎不花钱；两份都写满时前台的一次请求也还在 4 万 token 左右，离单价变贵的长度（10 万）很远。
 const maxProfileRunes = 10_000
 
+// MaxRunes 是每份资料最多多少字（App 编辑资料时的上限，和发给模型时截断的是同一个数）。
+const MaxRunes = maxProfileRunes
+
 // HouseholdFile 是全家共用的资料文件名。
 const HouseholdFile = "household.md"
 

@@ -20,6 +20,7 @@ import (
 	"github.com/bukahou/haro/internal/graceful"
 	"github.com/bukahou/haro/internal/holidays"
 	"github.com/bukahou/haro/internal/llm"
+	"github.com/bukahou/haro/internal/memory"
 	"github.com/bukahou/haro/internal/money"
 	"github.com/bukahou/haro/internal/notes"
 	"github.com/bukahou/haro/internal/profile"
@@ -149,6 +150,8 @@ type tooling struct {
 	briefers     []brain.Briefer  // 每轮补充给模型的即时情况：现在几号几点、额度提醒、主人家大致在哪、任务板
 	notices      *brain.NoticeHub // 给终端的提示（后台调查查完了让终端响一声）和服务端自己开口（到点的提醒）
 	expertSearch vision.Search    // 看画面的专家联网查：和主对话的快查同一套搜索与额度；不能查时为 nil
+	memory       *memory.Keeper   // 长期记忆（App 的概览数条数）；没开那组工具时为 nil
+	research     *research.Runner // 后台调查（App 的概览数进行中的）；没开时为 nil
 }
 
 // buildTooling 准备工具：自研工具内置（长期记忆（记事已并进来）、提醒直接连数据库；天气；联网搜索与后台调查），MCP 只接第三方（现在还没有）。
@@ -172,6 +175,7 @@ func buildTooling(ctx context.Context, settings config.ServerSettings, catalog a
 		}
 		shutdown.add("记事库", store.Close)
 		keeper, stopMemory := startMemory(ctx, settings, store, deps, logger)
+		kit.memory = keeper
 		shutdown.add("长期记忆", stopMemory)
 		builtins = append(builtins, tools.MemoryTools(keeper, time.Local, logger))
 		kit.briefers = append(kit.briefers, keeper) // 常驻记忆：每轮附在情况说明里
@@ -210,6 +214,7 @@ func buildTooling(ctx context.Context, settings config.ServerSettings, catalog a
 			if err != nil {
 				return kit, err
 			}
+			kit.research = runner
 			shutdown.add("后台调查", closeRunner)
 			builtins = append(builtins, tools.ResearchTools(runner))
 			kit.briefers = append(kit.briefers, runner)
@@ -308,7 +313,7 @@ func openConversationStore(ctx context.Context, settings config.ServerSettings, 
 
 // serve 对外提供服务，直到收到退出信号：停止接新连接 → 结束会话（每一轮收尾、落盘）→ 返回后由 shutdownSteps 依次收尾。
 func serve(ctx context.Context, settings config.ServerSettings, components brain.Components, options brain.Options, deps services,
-	logger *slog.Logger) error {
+	entry entrypoints, logger *slog.Logger) error {
 	newSession := func(terminal brainserver.Terminal) brainserver.Session {
 		parts := components
 		if terminal.DeviceTools != nil { // haro 终端：它的摄像头经 MCP 用（普通 Realtime 客户端没有）
@@ -326,7 +331,7 @@ func serve(ctx context.Context, settings config.ServerSettings, components brain
 	}
 	monitor := readiness.NewMonitor(checks, readinessInterval, readinessTimeout, logger)
 	go monitor.Run(ctx)
-	handler, err := brainHandler(settings, newSession, monitor, logger)
+	handler, err := brainHandler(settings, newSession, monitor, entry, logger)
 	if err != nil {
 		return err
 	}

@@ -371,3 +371,40 @@ func TestSearchMeterRecordsEveryRequest(t *testing.T) {
 		t.Errorf("不完整的那笔照样算进额度：%+v %v", totals, err)
 	}
 }
+
+// 汇总：这个月的花费（日元的、美元的都换成默认货币）、离上限多远、按用途分开、今天的调查和搜索。
+func TestGuardSummary(t *testing.T) {
+	ctx := context.Background()
+	ledger, err := OpenLedger(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ledger.Close()
+	guard := NewGuard(ledger, Limits{Currency: "JPY", Monthly: jpy(1000), ResearchDaily: jpy(100), SearchDailyCredits: 30,
+		WarnRatio: 0.8, MonthlyRaise: jpy(500)}, fixedRates{}, quietLogger)
+	_ = ledger.Record(ctx, Charge{Purpose: PurposeChat, Item: "llm:x", Cost: money.Of(5, money.USD)}) // 500 日元
+	_ = ledger.Record(ctx, Charge{Purpose: PurposeResearch, Item: "llm:x", Cost: jpy(350), Credits: 4})
+	summary, err := guard.Summary(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.Month.Total.Amount != jpy(850) || summary.Status != StatusNear || summary.MonthCap != jpy(1000) ||
+		!summary.CanRaise || summary.Raise != jpy(500) {
+		t.Errorf("这个月：%+v", summary)
+	}
+	if summary.Month.ByCurrency.Amount(money.USD) != money.Of(5, money.USD) || len(summary.Month.Total.Converted) != 1 {
+		t.Errorf("按币种分开的原始合计、换算了哪些：%+v", summary.Month)
+	}
+	if summary.TodayResearch.Total.Amount != jpy(350) || summary.SearchCredits != 4 || summary.SearchCap != 30 {
+		t.Errorf("今天：%+v", summary)
+	}
+	for _, purpose := range summary.ByPurpose {
+		if purpose.Purpose == PurposeChat && purpose.Spent.Total.Amount != jpy(500) {
+			t.Errorf("聊天这个月：%+v", purpose)
+		}
+	}
+	_ = ledger.Record(ctx, Charge{Purpose: PurposeChat, Item: "llm:x", Cost: jpy(200)})
+	if summary, _ := guard.Summary(ctx); summary.Status != StatusReached {
+		t.Errorf("到了上限：%+v", summary.Status)
+	}
+}

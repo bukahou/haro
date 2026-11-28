@@ -274,3 +274,19 @@ var (
 	recallDuration = telemetry.MustLatencyHistogram(meter, "haro.memory.recall.duration", "一次按意思查（嵌入问句 + 检索 + 取内容）用了多久")
 	indexEntries   = telemetry.MustGauge(meter, "haro.memory.index.entries", "内存里的向量索引有几条（记住的事 + 以前的对话轮次）", "{entry}")
 )
+
+// countResidentLimit 是数常驻记忆时最多取多少条（每轮只附 residentMaxItems 条，存的可以更多）。
+const countResidentLimit = 10_000
+
+// Counts 是 person 记着的事有几条：常驻的、一般的（App 的概览用；忘掉的不算）。
+func (k *Keeper) Counts(ctx context.Context, person string) (resident, others int, err error) {
+	_, total, err := k.notes.List(ctx, person, 1)
+	if err != nil {
+		return 0, 0, err
+	}
+	residentNotes, err := k.notes.Resident(ctx, person, countResidentLimit)
+	if err != nil {
+		return 0, 0, err
+	}
+	return len(residentNotes), max(total-len(residentNotes), 0), nil
+}

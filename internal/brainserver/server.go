@@ -56,6 +56,7 @@ type SessionFactory func(terminal Terminal) Session
 type Options struct {
 	Heartbeat   heartbeat.Timing // 零值 = heartbeat.Default
 	MaxSessions int              // 同时最多几条对话会话；零值 = realtimeproto.MaxSessions（和 haro-asr 的转写会话同一个数）
+	Online      *OnlineTerminals // 记现在连着的 haro 终端（nil = 不记）
 }
 
 // haroProtocolPrefix 是 haro 各版本子协议名的共同开头。
@@ -165,6 +166,11 @@ func serveConversation(w http.ResponseWriter, r *http.Request, newSession Sessio
 		writeMu.Lock()
 		defer writeMu.Unlock()
 		return conn.Write(ctx, websocket.MessageText, data)
+	}
+
+	if protocol == realtimeproto.Protocol && opts.Online != nil {
+		id := opts.Online.add(terminalVersion)
+		defer opts.Online.remove(id)
 	}
 
 	var terminal Terminal

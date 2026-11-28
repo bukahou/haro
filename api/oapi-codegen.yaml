@@ -1,0 +1,16 @@
+# oapi-codegen 的设置：从 api/openapi.yaml 生成服务端的接口代码（标准库 net/http，strict server：每个接口一个有类型的方法）。
+# 生成：go generate ./internal/appapi/
+package: appapi
+output: appapi.gen.go # 相对 go generate 的目录（internal/appapi）
+generate:
+  std-http-server: true
+  strict-server: true
+  models: true
+  embedded-spec: true
+output-options:
+  # 契约里没被接口直接引用的类型也要（例如 OidcError：登录回调地址上的错误码）
+  skip-prune: true
+  # 登录的两个跳转（浏览器导航，不是 JSON）由 akasha 的 oidcrp 直接处理，手写挂载：契约里照样写着（App 要知道地址），这里不生成
+  exclude-operation-ids:
+    - startLogin
+    - finishLogin

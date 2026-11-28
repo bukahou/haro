@@ -149,3 +149,21 @@ func TestTokensOfUnusableAccounts(t *testing.T) {
 		t.Errorf("等同意的账号不能刷新：%v", err)
 	}
 }
+
+// 管理员先登录一次（建了等同意的账号、从日志里拿到 sub）再写进配置：那个账号直接变成管理员，人换成原来的声纹名和全家共用。
+func TestEnsureAdminAfterFirstLogin(t *testing.T) {
+	ctx := context.Background()
+	store := openTest(t)
+	if _, err := store.ResolveLogin(ctx, "sub-owner", "主人"); !errors.Is(err, ErrPendingApproval) {
+		t.Fatal(err)
+	}
+	pending, _ := store.BySubject(ctx, "sub-owner")
+	admin, err := store.EnsureAdmin(ctx, testAdmin)
+	if err != nil || admin.ID != pending.ID || admin.Role != RoleAdmin || admin.Status != StatusActive ||
+		admin.OwnerPerson != "主人" || admin.GuestPerson != "" || admin.JoinedVia != JoinedViaAdmin {
+		t.Errorf("等同意的账号变成管理员：%+v %v", admin, err)
+	}
+	if _, err := store.ResolveLogin(ctx, "sub-owner", "主人"); err != nil {
+		t.Errorf("之后能正常登录：%v", err)
+	}
+}

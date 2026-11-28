@@ -195,7 +195,21 @@ type ServerSettings struct {
 	// 外部的 MCP 服务列在 HARO_MCP_SERVERS_FILE 里（格式照 Claude Code 的 .mcp.json，见 internal/tools/remote_servers.go）
 	ToolGroups     []string `env:"HARO_TOOLS" envSeparator:","`
 	MCPServersFile string   `env:"HARO_MCP_SERVERS_FILE"`
-	NotesDB        string   `env:"HARO_NOTES_DB"` // 记事与记忆（v10：记事已并进记忆）、提醒的存储：SQLite 文件路径（服务端直接连）
+
+	// App 的接口（/v1/...，契约 api/openapi.yaml）：设了 HARO_APP_PUBLIC_URL 才开。登录经 haro 后端代理 akasha（OIDC，机密客户端），
+	// App 不直接调 akasha。下面的地址、凭证都跟部署有关，没有默认值；凭证只来自环境变量（K8s Secret）
+	AppPublicURL      string `env:"HARO_APP_PUBLIC_URL"`                     // 公网上 App 连的根地址（例如 https://haro.example.com），登录回调 = 它 + /v1/auth/oidc/callback
+	AccountsDB        string `env:"HARO_ACCOUNTS_DB"`                        // 账号库（SQLite 文件）
+	OIDCIssuer        string `env:"HARO_OIDC_ISSUER"`                        // akasha 的 issuer
+	OIDCClientID      string `env:"HARO_OIDC_CLIENT_ID"`                     // 在 akasha 注册的 haro 客户端
+	OIDCClientSecret  string `env:"HARO_OIDC_CLIENT_SECRET"`                 // 凭证
+	OIDCCookieSecret  string `env:"HARO_OIDC_COOKIE_SECRET"`                 // 给登录流程的状态 cookie 签名（凭证，至少 32 个字符）
+	AdminSubject      string `env:"HARO_ADMIN_SUBJECT"`                      // 管理员在 akasha 的 sub（信任的根）；不知道时先空着，第一次登录的日志里有
+	AdminPerson       string `env:"HARO_ADMIN_PERSON"`                       // 管理员原来的声纹名（现有的对话、记忆按它存）；设了 HARO_ADMIN_SUBJECT 就必须设
+	AdminName         string `env:"HARO_ADMIN_NAME"`                         // 管理员的显示名；空 = 用声纹名
+	AppMinVersion     string `env:"HARO_APP_MIN_VERSION" envDefault:"0.0.0"` // 支持的最低 App 版本（更旧时 App 提示更新）
+	AppMonthlyCapList string `env:"HARO_APP_MONTHLY_CAP_OPTIONS"`            // 管理员给账号 / 终端定月上限时的可选档位（默认货币，逗号分隔）；空 = 没有档位
+	NotesDB           string `env:"HARO_NOTES_DB"`                           // 记事与记忆（v10：记事已并进记忆）、提醒的存储：SQLite 文件路径（服务端直接连）
 	// 列出记忆、没法按意思找时交给模型挑的最多条数（新的在前）；超过时结果里写明一共几条、只给了几条
 	NotesListLimit int `env:"HARO_NOTES_LIST_LIMIT" envDefault:"200"`
 	// 长期记忆按意思找（v10）：OpenAI 兼容的嵌入接口的根（集群里是 Text Embeddings Inference，例如 http://host/v1）。
@@ -381,7 +395,7 @@ func (settings TerminalSettings) validateTerminal() error {
 func (settings ServerSettings) validateBrain() error {
 	for _, validate := range []func() error{settings.validateCommon, settings.validateSpeech, settings.validateModels,
 		settings.validateSpending, settings.validateWeather, settings.validateStorage, settings.validateConversation,
-		settings.validateResearch, settings.validateListen, settings.validateToolGroups} {
+		settings.validateResearch, settings.validateListen, settings.validateToolGroups, settings.validateAppAPI} {
 		if err := validate(); err != nil {
 			return err
 		}
@@ -661,6 +675,52 @@ func (s ServerSettings) ToolGroupOn(group string) bool {
 }
 
 // validateToolGroups 检查 HARO_TOOLS：只能是组名，或单独一个 none。原来的 true / false 不再认（写明怎么改）。
+// AppAPIEnabled 判断开不开 App 的接口。
+func (s ServerSettings) AppAPIEnabled() bool { return s.AppPublicURL != "" }
+
+// MonthlyCapOptions 是管理员定月上限时的可选档位（加载时已校验）。
+func (s ServerSettings) MonthlyCapOptions() []float64 {
+	var options []float64
+	for _, part := range strings.Split(s.AppMonthlyCapList, ",") {
+		if value, err := strconv.ParseFloat(strings.TrimSpace(part), 64); err == nil && value > 0 {
+			options = append(options, value)
+		}
+	}
+	return options
+}
+
+// validateAppAPI 检查 App 接口的配置：开了就要有账号库、akasha 的地址和凭证；设了管理员就要有他原来的声纹名。
+func (s ServerSettings) validateAppAPI() error {
+	if !s.AppAPIEnabled() {
+		return nil
+	}
+	if err := requireHTTPURL("HARO_APP_PUBLIC_URL", s.AppPublicURL, "App 连的公网根地址"); err != nil {
+		return err
+	}
+	if err := requireHTTPURL("HARO_OIDC_ISSUER", s.OIDCIssuer, "akasha 的 issuer"); err != nil {
+		return err
+	}
+	switch {
+	case s.AccountsDB == "":
+		return fmt.Errorf("开着 App 的接口（HARO_APP_PUBLIC_URL）时必须设 HARO_ACCOUNTS_DB")
+	case s.OIDCClientID == "" || s.OIDCClientSecret == "":
+		return fmt.Errorf("开着 App 的接口时必须设 HARO_OIDC_CLIENT_ID、HARO_OIDC_CLIENT_SECRET（在 akasha 注册的 haro 客户端）")
+	case len(s.OIDCCookieSecret) < 32:
+		return fmt.Errorf("HARO_OIDC_COOKIE_SECRET 至少要 32 个字符（给登录流程的状态 cookie 签名）")
+	case s.AdminSubject != "" && s.AdminPerson == "":
+		return fmt.Errorf("设了 HARO_ADMIN_SUBJECT 就必须设 HARO_ADMIN_PERSON（管理员原来的声纹名，现有数据按它存）")
+	}
+	for _, part := range strings.Split(s.AppMonthlyCapList, ",") {
+		if strings.TrimSpace(part) == "" {
+			continue
+		}
+		if value, err := strconv.ParseFloat(strings.TrimSpace(part), 64); err != nil || value <= 0 {
+			return fmt.Errorf("HARO_APP_MONTHLY_CAP_OPTIONS 要是大于 0 的数（逗号分隔），现在有 %q", part)
+		}
+	}
+	return nil
+}
+
 func (s ServerSettings) validateToolGroups() error {
 	for _, group := range s.ToolGroups {
 		switch {
