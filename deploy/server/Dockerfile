@@ -17,7 +17,7 @@
 # （.github/dependabot.yml）。系统包的安全补丁在构建时打（apt-get upgrade）：补丁那一层按构建当时的 Debian 安全源，
 # CI 有缓存时沿用上一次的，基础镜像 digest 一变就重新打。
 
-FROM golang:1.27-trixie@sha256:f18c3d73a184fb0582828510722e723b63a93f7188d11dd223d9be6f6880e65d AS build
+FROM golang:1.27-trixie@sha256:430985542100b871e108ccc00e8dcc5eef08ca14ee5825e98ebf563d8ffec4ee AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
@@ -30,7 +30,7 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags "-X github.com/bukahou/haro/intern
  && mkdir -p /out/lib \
  && cp "$(go list -m -f '{{.Dir}}' github.com/k2-fsa/sherpa-onnx-go-linux/v2)"/lib/x86_64-unknown-linux-gnu/*.so /out/lib/
 
-FROM debian:trixie-slim@sha256:a72b4433de1cf7d6bae0c4cee74d0547f58601a643b3375f070c51600d63b6b2
+FROM debian:trixie-slim@sha256:8aa5a7bf5a1955bddbe7d74fcdd0b91ab30e74362a8b73af672b0481b35b44a0
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y \
  && apt-get install -y --no-install-recommends ca-certificates libstdc++6 \
  && rm -rf /var/lib/apt/lists/* \
