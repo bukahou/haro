@@ -25,3 +25,12 @@ func ParsePerson(person string) (accountID string, owner, ok bool) {
 	}
 	return rest, true, !strings.Contains(rest, ":")
 }
+
+// BillingAccountOf 是花费算哪个账号的：PersonsOf 写出来的人是那个账号；别的（管理员沿用的名字、全家共用、终端上声纹认出的名字、
+// 没标人）都是管理员的，记成空（spending.AccountOf）。
+func BillingAccountOf(person string) string {
+	if id, _, ok := ParsePerson(person); ok {
+		return id
+	}
+	return ""
+}

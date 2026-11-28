@@ -26,6 +26,11 @@ func (l *chargeLog) Record(_ context.Context, charge Charge) error {
 	l.charges = append(l.charges, charge)
 	return nil
 }
+
+func (l *chargeLog) AccountTotal(context.Context, string, time.Time, ...Purpose) (Totals, error) {
+	return Totals{Spent: money.Sum{}}, nil
+}
+
 func (l *chargeLog) Total(context.Context, time.Time, ...Purpose) (Totals, error) {
 	return Totals{}, nil
 }

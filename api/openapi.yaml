@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: haro App API
-  version: 0.11.0
+  version: 0.12.0
   description: |
     haro 手机 App 和网页版用的接口（第一批：账号、登录、我、花费、终端、管理员）。
     服务端和 App 都从这份契约生成代码；⛔ 两边都不绕过契约私下约定字段。契约每改一次升版本号。
@@ -1352,6 +1352,35 @@ paths:
   /api/v1/admin/accounts/{accountId}:
     parameters:
       - $ref: '#/components/parameters/AccountId'
+    patch:
+      tags: [admin]
+      operationId: updateAccount
+      summary: 给一个账号定月上限（默认货币；null = 不设）。到了上限，这个账号这个月的请求按「额度用完」处理，别的账号不受影响；全局的上限照旧兜底。管理员的账号用全局的上限（409）
+      parameters:
+        - $ref: '#/components/parameters/AcceptLanguage'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AccountUpdate'
+      responses:
+        '200':
+          description: 改好的
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AccountSummary'
+        '400':
+          $ref: '#/components/responses/ValidationFailed'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
     delete:
       tags: [admin]
       operationId: deleteAccount
@@ -1533,7 +1562,7 @@ paths:
     post:
       tags: [admin]
       operationId: approveTerminal
-      summary: 批准新终端（它成为一个匿名账号的终端；每台的月上限在第 20 段加）
+      summary: 批准新终端（它成为一个匿名账号的终端；它的月上限给那个账号定：updateAccount）
       responses:
         '204':
           description: 已批准
@@ -2054,6 +2083,15 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/ExpenseGroup'
+    AccountUpdate:
+      type: object
+      required: [monthly_cap]
+      properties:
+        monthly_cap:
+          description: 月上限（币种必须是服务端的默认货币，大于 0；可选的档位在 client-config 的 monthly_cap_options）；null = 不设
+          nullable: true
+          allOf:
+            - $ref: '#/components/schemas/Money'
     InviteStatus:
       type: string
       description: unused = 还没用；used = 用过了（used_by_name 是谁）；expired = 过期了；revoked = 撤销了
@@ -2968,8 +3006,11 @@ components:
         joined_via:
           $ref: '#/components/schemas/JoinedVia'
         spent_this_month:
-          $ref: '#/components/schemas/MoneyTotal'
+          description: 这个账号自己这个月的花费（管理员那一行是管理员自己的；所有账号一起的在花费页）
+          allOf:
+            - $ref: '#/components/schemas/MoneyTotal'
         cap:
+          description: 管理员给它定的月上限；没定、管理员自己（用全局的上限）为 null
           allOf:
             - $ref: '#/components/schemas/Money'
           nullable: true

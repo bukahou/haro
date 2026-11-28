@@ -30,11 +30,13 @@ type fakeModel struct {
 	delay     time.Duration
 	lastInput brain.ChatMessage
 	history   []brain.ChatMessage
+	billed    string // 最近一次调用时 ctx 里标的「算谁的」
 }
 
 func (f *fakeModel) StreamReply(ctx context.Context, request brain.ChatRequest) iter.Seq2[brain.ReplyDelta, error] {
 	messages := request.Messages
 	f.lastInput, f.history = messages[len(messages)-1], messages[:len(messages)-1]
+	f.billed = brain.BillingPersonFrom(ctx)
 	return func(yield func(brain.ReplyDelta, error) bool) {
 		for _, token := range f.tokens {
 			select {

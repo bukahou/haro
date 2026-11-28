@@ -237,7 +237,7 @@ func (r *Runner) runTask(ctx context.Context, id int64) {
 		r.logger.Info("排队时已经结束的调查：跳过", "id", id, "status", task.Status)
 		return
 	}
-	taskCtx, cancel := context.WithCancel(ctx)
+	taskCtx, cancel := context.WithCancel(brain.WithBillingPerson(ctx, task.Person)) // 花费算派出调查的人
 	defer cancel()
 	r.mu.Lock()
 	r.cancels[id] = cancel

@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/bukahou/haro/internal/attachments"
+	"github.com/bukahou/haro/internal/brain"
 	"github.com/bukahou/haro/internal/money"
 )
 
@@ -164,7 +165,7 @@ func (s *Service) parse(receipt Receipt) {
 		s.finishParse(receipt, nil, FailureUnavailable, err)
 		return
 	}
-	draft, err := s.parser.Parse(ctx, image, categories, Hint{Category: receipt.CategoryHint, Note: receipt.NoteHint})
+	draft, err := s.parser.Parse(brain.WithBillingPerson(ctx, receipt.Person), image, categories, Hint{Category: receipt.CategoryHint, Note: receipt.NoteHint})
 	switch {
 	case s.lifetime.Err() != nil: // 服务端在停：留着 parsing，重启后接着解析
 		return

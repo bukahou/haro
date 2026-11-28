@@ -119,7 +119,8 @@ func connectServices(ctx context.Context, settings config.ServerSettings, logger
 	if err != nil {
 		return deps, err
 	}
-	deps.ledger = spending.WithBookkeeping(ledger, logger)
+	// 最外层按 ctx 里标的人记上账号（写不进、留着补写的那笔也带着）；没开 App 的接口时只有管理员的人，都记成管理员的
+	deps.ledger = spending.WithAttribution(spending.WithBookkeeping(ledger, logger), accounts.BillingAccountOf)
 	shutdown.add("用量账本", deps.ledger.Close)
 	if settings.UsageDB == "" {
 		logger.Warn("没设 HARO_USAGE_DB：用量只记在内存里，服务端重启后额度重新计算")

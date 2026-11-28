@@ -64,7 +64,7 @@ func (b *ConversationBook) maybeSummarize(c *Conversation) {
 			ctx, cancel = context.WithTimeout(context.Background(), agent.Timeout)
 		}
 		defer cancel()
-		summary, err := summarizeTurns(ctx, b.logger, *agent, previous, batch)
+		summary, err := summarizeTurns(WithBillingPerson(ctx, c.person), b.logger, *agent, previous, batch) // 花费算这条对话的人
 		c.mu.Lock()
 		c.summarizing = false
 		if err == nil && summary != "" {

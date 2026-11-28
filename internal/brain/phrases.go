@@ -26,11 +26,13 @@ const (
 	PhraseMonthlyCapRaised          = "monthly_cap_raised" // {limit}：上限提高了
 	// {title} {minutes}：日历里的日程提前 {minutes} 分钟在终端响的提醒（提前 0 分钟的直接念标题）
 	PhraseCalendarAlertAhead = "calendar_alert_ahead"
+	// {spent} {limit}：这个账号这个月的费用到了管理员给它定的上限（不能口头提高）
+	PhraseOverAccountMonthly = "over_account_monthly"
 )
 
 var phraseKeys = []string{PhraseOverMonthlyBudget, PhraseOverResearchDaily, PhraseOverSearchDaily,
 	PhraseLedgerUnavailable, PhraseRefused, PhraseModelUnavailable, PhraseOverMonthlyBudgetRaisable, PhraseConfirmCapRaise,
-	PhraseMonthlyCapRaised, PhraseCalendarAlertAhead}
+	PhraseMonthlyCapRaised, PhraseCalendarAlertAhead, PhraseOverAccountMonthly}
 
 // Phrases 是每种语言的固定的话：语种（识别给的，例如 zh、ja、en）→ 键 → 话。Default 是没有这种语言时用的。
 type Phrases struct {

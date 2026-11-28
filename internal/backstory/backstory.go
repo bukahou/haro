@@ -16,6 +16,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/bukahou/haro/internal/brain"
 	"github.com/bukahou/haro/internal/conversationstore"
 )
 
@@ -198,7 +199,7 @@ func (s *Service) mergeNew(ctx context.Context, person string, lastSeq int64) er
 		return err
 	}
 	kept, current := split(backstory.Items)
-	entries, err := s.merger.Merge(ctx, kept, current, turns)
+	entries, err := s.merger.Merge(brain.WithBillingPerson(ctx, person), kept, current, turns) // 花费算这个人
 	if err != nil {
 		return err
 	}
@@ -229,7 +230,7 @@ func (s *Service) consolidateIfDue(ctx context.Context, person string) error {
 	if len(current) == 0 {
 		return nil
 	}
-	entries, err := s.merger.Merge(ctx, kept, current, nil)
+	entries, err := s.merger.Merge(brain.WithBillingPerson(ctx, person), kept, current, nil)
 	if err != nil {
 		return err
 	}

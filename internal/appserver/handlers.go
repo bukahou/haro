@@ -221,14 +221,17 @@ func (s *Server) GetOverview(ctx context.Context, _ appapi.GetOverviewRequestObj
 	return appapi.GetOverview200JSONResponse(overview), nil
 }
 
-// spendingFor 是这个账号的花费。账本还不分账号（第 20 段才分）：现在只有管理员在用，管理员 = 全部花费；
-// 别的账号（还在等同意）什么都用不了，是 0。
+// spendingFor 是这个账号看到的花费：管理员看全局的（所有账号一起、全局的上限），别的账号看自己的（管理员给它定的上限）。
 func (s *Server) spendingFor(ctx context.Context, account accounts.Account) (spending.Summary, error) {
+	return s.opts.Spending.SummaryFor(ctx, billingAccount(account))
+}
+
+// billingAccount 是账本里记这个账号用的名字：管理员为空（和 accounts.BillingAccountOf 对管理员的人给的一样）。
+func billingAccount(account accounts.Account) string {
 	if account.Role == accounts.RoleAdmin {
-		return s.opts.Spending.Summary(ctx)
+		return ""
 	}
-	empty := spending.Spent{ByCurrency: money.Sum{}, Total: money.Total{Amount: money.Amount{Currency: s.currencyOf(account)}}}
-	return spending.Summary{Currency: s.currencyOf(account), Month: empty, Status: spending.StatusOK, TodayResearch: empty}, nil
+	return account.ID
 }
 
 func (s *Server) pendingAccounts(ctx context.Context) (int, error) {

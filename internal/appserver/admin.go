@@ -10,6 +10,7 @@ import (
 
 	"github.com/bukahou/haro/internal/accounts"
 	"github.com/bukahou/haro/internal/appapi"
+	"github.com/bukahou/haro/internal/money"
 )
 
 // AccountAdmin 是管理员管账号、邀请码（accounts.Store 实现）。
@@ -18,20 +19,26 @@ type AccountAdmin interface {
 	Disable(ctx context.Context, id string) (accounts.Account, error)
 	Enable(ctx context.Context, id string) (accounts.Account, error)
 	ScheduleDeletion(ctx context.Context, id string) (accounts.Account, error)
+	SetMonthlyCap(ctx context.Context, id string, cap money.Amount) (accounts.Account, error)
 	CreateInvite(ctx context.Context, createdBy, note string, ttl time.Duration) (accounts.Invite, string, error)
 	Invites(ctx context.Context) ([]accounts.Invite, error)
 	RevokeInvite(ctx context.Context, id string) error
 }
 
-// accountSummary 是管理员看到的一个账号（运维信息：用量、终端、版本；看不到内容）。
+// accountSummary 是管理员看到的一个账号（运维信息：自己这个月的用量、管理员给它定的上限、终端、版本；看不到内容）。
+// 管理员那一行是管理员自己的用量、没有上限（全局的上限在花费页）。
 func (s *Server) accountSummary(ctx context.Context, account accounts.Account) (appapi.AccountSummary, error) {
-	summary, err := s.spendingFor(ctx, account)
+	spent, err := s.opts.Spending.AccountSpent(ctx, billingAccount(account))
+	if err != nil {
+		return appapi.AccountSummary{}, err
+	}
+	limit, err := s.opts.Spending.AccountCap(ctx, billingAccount(account))
 	if err != nil {
 		return appapi.AccountSummary{}, err
 	}
 	row := appapi.AccountSummary{AccountId: account.ID, DisplayName: account.DisplayName, Role: appapi.Role(account.Role),
 		Status: appapi.AccountStatus(account.Status), JoinedVia: appapi.JoinedVia(account.JoinedVia),
-		SpentThisMonth: s.moneyTotal(ctx, summary.Month), Cap: optionalMoney(summary.MonthCap)}
+		SpentThisMonth: s.moneyTotal(ctx, spent), Cap: optionalMoney(limit)}
 	terminals, err := s.terminalCounts(ctx, account)
 	if err != nil {
 		return appapi.AccountSummary{}, err
@@ -77,7 +84,8 @@ func (s *Server) manageAccount(ctx context.Context, id string, change func(conte
 			reply = s.internalError(ctx, "读账号", err)
 			return appapi.AccountSummary{}, &reply
 		}
-		s.logger.Info("管理员改了账号", "account", account.ID, "status", account.Status, "deletion_due", !account.DeletionDueAt.IsZero())
+		s.logger.Info("管理员改了账号", "account", account.ID, "status", account.Status, "deletion_due", !account.DeletionDueAt.IsZero(),
+			"monthly_cap", account.MonthlyCap.String())
 		return summary, nil
 	}
 	return appapi.AccountSummary{}, &reply
@@ -245,4 +253,24 @@ func (s *Server) RevokeInvite(ctx context.Context, request appapi.RevokeInviteRe
 		return s.internalError(ctx, "撤销邀请码", err), nil
 	}
 	return appapi.RevokeInvite204Response{}, nil
+}
+
+// UpdateAccount 实现 appapi.StrictServerInterface：定月上限（默认货币）。
+func (s *Server) UpdateAccount(ctx context.Context, request appapi.UpdateAccountRequestObject) (appapi.UpdateAccountResponseObject, error) {
+	var limit money.Amount
+	if body := request.Body.MonthlyCap; body != nil {
+		parsed, err := money.ParseAmount(body.Amount, body.Currency)
+		if err != nil || parsed.Currency != s.opts.DefaultCurrency || parsed.Micros <= 0 {
+			return s.fail(ctx, http.StatusBadRequest, appapi.ErrorCodeValidationFailed,
+				map[string]string{"detail": "monthly_cap：要大于 0、币种是 " + s.opts.DefaultCurrency}), nil
+		}
+		limit = parsed
+	}
+	summary, denied := s.manageAccount(ctx, request.AccountId, func(ctx context.Context, id string) (accounts.Account, error) {
+		return s.opts.Admin.SetMonthlyCap(ctx, id, limit)
+	})
+	if denied != nil {
+		return *denied, nil
+	}
+	return appapi.UpdateAccount200JSONResponse(summary), nil
 }

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/bukahou/haro/internal/money"
 )
 
 // DeletionGrace 是软删除以后多久彻底删（v11 第 9 节第 7 项：先软删除，30 天后彻底删）。
@@ -18,30 +20,30 @@ var (
 
 // Approve 同意一个在等的账号（等待批准 → 正常）。
 func (s *Store) Approve(ctx context.Context, id string) (Account, error) {
-	return s.changeStatus(ctx, id, `status = ?`, []any{StatusActive}, `status = ?`, []any{StatusPendingApproval})
+	return s.updateAccount(ctx, id, `status = ?`, []any{StatusActive}, `status = ?`, []any{StatusPendingApproval})
 }
 
 // Disable 停用一个账号（正常 / 等待批准 → 停用）：作废它的全部登录令牌。终端的连接由调用方断开。
 func (s *Store) Disable(ctx context.Context, id string) (Account, error) {
-	return s.changeStatus(ctx, id, `status = ?, disabled_at = ?`, []any{StatusDisabled, s.now().Unix()},
+	return s.updateAccount(ctx, id, `status = ?, disabled_at = ?`, []any{StatusDisabled, s.now().Unix()},
 		`status IN (?, ?) AND role != ?`, []any{StatusActive, StatusPendingApproval, RoleAdmin})
 }
 
 // Enable 恢复一个停用了的账号（停用 → 正常）；软删除了、还没到期的也恢复（撤销删除）。
 func (s *Store) Enable(ctx context.Context, id string) (Account, error) {
-	return s.changeStatus(ctx, id, `status = ?, disabled_at = NULL, deletion_due_at = NULL`, []any{StatusActive},
+	return s.updateAccount(ctx, id, `status = ?, disabled_at = NULL, deletion_due_at = NULL`, []any{StatusActive},
 		`status = ?`, []any{StatusDisabled})
 }
 
 // ScheduleDeletion 软删除一个账号：停用、DeletionGrace 以后彻底删（PurgeDue）。已经软删除的不改到期时间。
 func (s *Store) ScheduleDeletion(ctx context.Context, id string) (Account, error) {
 	now := s.now()
-	return s.changeStatus(ctx, id, `status = ?, disabled_at = COALESCE(disabled_at, ?), deletion_due_at = COALESCE(deletion_due_at, ?)`,
+	return s.updateAccount(ctx, id, `status = ?, disabled_at = COALESCE(disabled_at, ?), deletion_due_at = COALESCE(deletion_due_at, ?)`,
 		[]any{StatusDisabled, now.Unix(), now.Add(DeletionGrace).Unix()}, `role != ?`, []any{RoleAdmin})
 }
 
-// changeStatus 按条件改账号（条件不满足：管理员报 ErrIsAdmin，别的报 ErrAccountState），停用的作废全部登录令牌（同一个事务）。
-func (s *Store) changeStatus(ctx context.Context, id, set string, setArgs []any, where string, whereArgs []any) (Account, error) {
+// updateAccount 按条件改账号（条件不满足：管理员报 ErrIsAdmin，别的报 ErrAccountState），停用的作废全部登录令牌（同一个事务）。
+func (s *Store) updateAccount(ctx context.Context, id, set string, setArgs []any, where string, whereArgs []any) (Account, error) {
 	account, err := s.ByID(ctx, id)
 	if err != nil {
 		return Account{}, err
@@ -106,4 +108,28 @@ func (s *Store) Purge(ctx context.Context, id string) error {
 		return ErrAccountState
 	}
 	return nil
+}
+
+// SetMonthlyCap 定一个账号的月上限（cap 为零值 = 不设）。管理员的账号用全局的上限，报 ErrIsAdmin。
+func (s *Store) SetMonthlyCap(ctx context.Context, id string, cap money.Amount) (Account, error) {
+	if cap.Micros < 0 {
+		return Account{}, errors.New("上限不能是负数")
+	}
+	var micros, currency any
+	if cap.Micros > 0 {
+		micros, currency = cap.Micros, cap.Currency
+	}
+	return s.updateAccount(ctx, id, `monthly_cap_micros = ?, monthly_cap_currency = ?`, []any{micros, currency}, `role != ?`, []any{RoleAdmin})
+}
+
+// MonthlyCapOf 实现 spending.AccountCaps：账号的月上限（没有这个账号、没定的为零值）。
+func (s *Store) MonthlyCapOf(ctx context.Context, id string) (money.Amount, error) {
+	account, err := s.ByID(ctx, id)
+	if errors.Is(err, ErrNotFound) {
+		return money.Amount{}, nil
+	}
+	if err != nil {
+		return money.Amount{}, err
+	}
+	return account.MonthlyCap, nil
 }

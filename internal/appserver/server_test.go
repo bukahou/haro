@@ -25,7 +25,28 @@ var quietLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
 
 type fakeSpending struct{}
 
-func (fakeSpending) Summary(context.Context) (spending.Summary, error) {
+// SummaryFor：管理员看到的是全局的这一份；别的账号是自己的（这里都是 0、上限 1000）。
+func (f fakeSpending) SummaryFor(ctx context.Context, account string) (spending.Summary, error) {
+	if account != "" {
+		spent, _ := f.AccountSpent(ctx, account)
+		return spending.Summary{Currency: "JPY", Month: spent, MonthCap: money.Of(1000, "JPY"), Status: spending.StatusOK,
+			TodayResearch: spent}, nil
+	}
+	return f.summary()
+}
+
+func (fakeSpending) AccountSpent(context.Context, string) (spending.Spent, error) {
+	return spending.Spent{ByCurrency: money.Sum{}, Total: money.Total{Amount: money.Amount{Currency: "JPY"}}}, nil
+}
+
+func (fakeSpending) AccountCap(_ context.Context, account string) (money.Amount, error) {
+	if account == "" {
+		return money.Amount{}, nil
+	}
+	return money.Of(1000, "JPY"), nil
+}
+
+func (fakeSpending) summary() (spending.Summary, error) {
 	month := spending.Spent{ByCurrency: money.Sum{"USD": 2_000_000, "JPY": 100_000_000},
 		Total: money.Total{Amount: money.Of(420, "JPY"), Converted: []string{"USD"}}}
 	return spending.Summary{Currency: "JPY", Month: month, MonthCap: money.Of(3000, "JPY"), Status: spending.StatusOK,

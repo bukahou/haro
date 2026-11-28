@@ -15,6 +15,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/bukahou/haro/internal/money"
+
 	"github.com/pressly/goose/v3"
 
 	"github.com/bukahou/haro/internal/sqliteschema"
@@ -64,7 +66,8 @@ type Account struct {
 	CreatedAt       time.Time
 	LastUsedAt      time.Time // 零值 = 还没用过
 	AppVersion      string
-	DeletionDueAt   time.Time // 软删除后彻底删的时间；零值 = 没删
+	DeletionDueAt   time.Time    // 软删除后彻底删的时间；零值 = 没删
+	MonthlyCap      money.Amount // 管理员给它定的月上限；零值 = 不设（管理员自己用全局的上限）
 }
 
 // 出错的种类（errors.Is 判断；接口按它给稳定的错误码）。
@@ -267,7 +270,8 @@ func (s *Store) UpdateProfile(ctx context.Context, id, displayName, currency str
 }
 
 const selectAccount = `SELECT id, COALESCE(subject, ''), display_name, role, status, joined_via, default_currency, owner_person,
-	guest_person, created_at, COALESCE(last_used_at, 0), COALESCE(app_version, ''), COALESCE(deletion_due_at, 0) FROM accounts`
+	guest_person, created_at, COALESCE(last_used_at, 0), COALESCE(app_version, ''), COALESCE(deletion_due_at, 0),
+	COALESCE(monthly_cap_micros, 0), COALESCE(monthly_cap_currency, '') FROM accounts`
 
 type rowScanner interface{ Scan(dest ...any) error }
 
@@ -275,7 +279,8 @@ func scanAccount(row rowScanner) (Account, error) {
 	var account Account
 	var created, lastUsed, deletionDue int64
 	err := row.Scan(&account.ID, &account.Subject, &account.DisplayName, &account.Role, &account.Status, &account.JoinedVia,
-		&account.DefaultCurrency, &account.OwnerPerson, &account.GuestPerson, &created, &lastUsed, &account.AppVersion, &deletionDue)
+		&account.DefaultCurrency, &account.OwnerPerson, &account.GuestPerson, &created, &lastUsed, &account.AppVersion, &deletionDue,
+		&account.MonthlyCap.Micros, &account.MonthlyCap.Currency)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Account{}, ErrNotFound
 	}

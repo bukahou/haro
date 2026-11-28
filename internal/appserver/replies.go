@@ -99,3 +99,4 @@ func (p problemReply) VisitDeleteAccountResponse(w http.ResponseWriter) error  {
 func (p problemReply) VisitListInvitesResponse(w http.ResponseWriter) error    { return p.write(w) }
 func (p problemReply) VisitCreateInviteResponse(w http.ResponseWriter) error   { return p.write(w) }
 func (p problemReply) VisitRevokeInviteResponse(w http.ResponseWriter) error   { return p.write(w) }
+func (p problemReply) VisitUpdateAccountResponse(w http.ResponseWriter) error  { return p.write(w) }

@@ -1,12 +1,27 @@
 package appserver
 
 import (
+	"context"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/bukahou/haro/internal/accounts"
 	"github.com/bukahou/haro/internal/brain"
+	"github.com/bukahou/haro/internal/money"
 )
+
+// storedCaps 是上限从账号库读的假花费（别的同 fakeSpending）：测得到改的上限真的存下了。
+type storedCaps struct {
+	fakeSpending
+	store *accounts.Store
+}
+
+func (s storedCaps) AccountCap(ctx context.Context, account string) (money.Amount, error) {
+	if account == "" {
+		return money.Amount{}, nil
+	}
+	return s.store.MonthlyCapOf(ctx, account)
+}
 
 // 管理员：生成邀请码（码只给这次）→ 列出 → 撤销；在等的账号批准 → 停用（它的令牌作废）→ 恢复 → 删除（彻底删的时间）→ 撤销删除；
 // 管理员自己停用 409；不是管理员 403。
@@ -19,7 +34,7 @@ func TestAdminOverHTTP(t *testing.T) {
 	t.Cleanup(func() { _ = store.Close() })
 	admin, _ := store.EnsureAdmin(ctx, accounts.Admin{Subject: "sub-owner", DisplayName: "主人", Person: "主人", GuestPerson: brain.SharedPerson})
 	pair, _ := store.IssueTokens(ctx, admin.ID)
-	handler, err := NewHandler(ctx, Options{Accounts: store, Admin: store, Spending: fakeSpending{}, DefaultCurrency: "JPY",
+	handler, err := NewHandler(ctx, Options{Accounts: store, Admin: store, Spending: storedCaps{store: store}, DefaultCurrency: "JPY",
 		MinAppVersion: "1.0.0", ProfileMaxChars: 10000, Logger: quietLogger})
 	if err != nil {
 		t.Fatal(err)
@@ -79,6 +94,25 @@ func TestAdminOverHTTP(t *testing.T) {
 	}
 	if status, _ := f.call(t, "POST", "/api/v1/admin/accounts/"+admin.ID+"/disable", key, ""); status != 409 {
 		t.Errorf("停用管理员：%d", status)
+	}
+	if status, body := f.call(t, "PATCH", path, key, `{"monthly_cap":{"amount":"1000","currency":"JPY"}}`); status != 200 ||
+		body["cap"].(map[string]any)["amount"] != "1000" {
+		t.Errorf("定月上限：%d %v", status, body)
+	}
+	if got, _ := store.MonthlyCapOf(ctx, guest.ID); got.Micros != 1000*1_000_000 || got.Currency != "JPY" {
+		t.Errorf("存下的上限：%+v", got)
+	}
+	for _, bad := range []string{`{"monthly_cap":{"amount":"10","currency":"USD"}}`, `{"monthly_cap":{"amount":"0","currency":"JPY"}}`,
+		`{"monthly_cap":{"amount":"abc","currency":"JPY"}}`} {
+		if status, _ := f.call(t, "PATCH", path, key, bad); status != 400 {
+			t.Errorf("%s：%d", bad, status)
+		}
+	}
+	if status, body := f.call(t, "PATCH", path, key, `{"monthly_cap":null}`); status != 200 || body["cap"] != nil {
+		t.Errorf("不设上限：%d %v", status, body)
+	}
+	if status, _ := f.call(t, "PATCH", "/api/v1/admin/accounts/"+admin.ID, key, `{"monthly_cap":{"amount":"1000","currency":"JPY"}}`); status != 409 {
+		t.Errorf("管理员用全局的上限：%d", status)
 	}
 	if status, _ := f.call(t, "DELETE", "/api/v1/admin/accounts/没有", key, ""); status != 404 {
 		t.Errorf("没有的账号：%d", status)

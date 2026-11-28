@@ -50,7 +50,11 @@ type Accounts interface {
 
 // Spending 是花费的汇总（spending.Guard 实现）。
 type Spending interface {
-	Summary(ctx context.Context) (spending.Summary, error)
+	// SummaryFor 是一个账号看到的汇总（account 为空 = 管理员：全局的）。
+	SummaryFor(ctx context.Context, account string) (spending.Summary, error)
+	// AccountSpent、AccountCap：一个账号自己这个月花了多少、管理员给它定的上限（管理员的账号列表用）。
+	AccountSpent(ctx context.Context, account string) (spending.Spent, error)
+	AccountCap(ctx context.Context, account string) (money.Amount, error)
 }
 
 // Memory 是某个人记着的事（memory.Keeper 实现）：有几条、列出、忘掉、找回。

@@ -156,9 +156,37 @@ type Guard struct {
 	logger *slog.Logger
 	now    func() time.Time
 
+	// accountOf、caps：分账号（UseAccounts）。没接时一切都算管理员的、只有全局上限
+	accountOf AccountOf
+	caps      AccountCaps
+
 	mu         sync.Mutex
 	warnedFor  string // 已经提醒过的月份（"2026-11"），每月只提醒一次
 	pendingMsg string // 还没告诉主人的提醒
+}
+
+// AccountCaps 是每个账号的月上限（accounts.Store 实现）：零值 = 不设。管理员（账号为空）用全局的上限，不问它。
+type AccountCaps interface {
+	MonthlyCapOf(ctx context.Context, account string) (money.Amount, error)
+}
+
+// UseAccounts 接上账号：ctx 里标的人（brain.WithBillingPerson）按 accountOf 换成账号，按账号的月上限判断；
+// 全局的额度提醒、口头提高上限只给管理员。启动时、放行任何调用之前调用一次。
+func (g *Guard) UseAccounts(accountOf AccountOf, caps AccountCaps) {
+	g.accountOf, g.caps = accountOf, caps
+}
+
+// accountOfPerson 是这个人所在的账号（空 = 管理员；没接账号时都是管理员）。
+func (g *Guard) accountOfPerson(person string) string {
+	if g.accountOf == nil {
+		return ""
+	}
+	return g.accountOf(person)
+}
+
+// account 是 ctx 里标的人所在的账号。
+func (g *Guard) account(ctx context.Context) string {
+	return g.accountOfPerson(brain.BillingPersonFrom(ctx))
 }
 
 // NewGuard 创建额度守卫。rates 把账本的原始金额换成默认货币（limits.Currency）。
@@ -179,10 +207,21 @@ func (g *Guard) startOfMonth() time.Time {
 // spentSince 合计 since 之后的花费（purposes 为空 = 所有用途），拿来判断额度：先把之前写不进账本的补写进去。
 // 补写不成、读不出时返回 ErrLedgerUnavailable：合计不完整（写不进时它不再增长），不能拿来放行。
 func (g *Guard) spentSince(ctx context.Context, since time.Time, purposes ...Purpose) (Totals, error) {
+	return g.spentOf(ctx, nil, since, purposes...)
+}
+
+// spentOf 同 spentSince，account 不为 nil 时只算这个账号的。
+func (g *Guard) spentOf(ctx context.Context, account *string, since time.Time, purposes ...Purpose) (Totals, error) {
 	if err := g.ledger.FlushPending(ctx); err != nil {
 		return Totals{}, &ledgerUnavailable{err: err}
 	}
-	spent, err := g.ledger.Total(ctx, since, purposes...)
+	var spent Totals
+	var err error
+	if account == nil {
+		spent, err = g.ledger.Total(ctx, since, purposes...)
+	} else {
+		spent, err = g.ledger.AccountTotal(ctx, *account, since, purposes...)
+	}
 	if err != nil {
 		return Totals{}, &ledgerUnavailable{err: err}
 	}
@@ -243,7 +282,54 @@ func (g *Guard) AllowPaidLLM(ctx context.Context) error {
 	return g.allowMonthly(ctx)
 }
 
+// allowMonthly 先看全局的月度上限，再看这个账号自己的。
 func (g *Guard) allowMonthly(ctx context.Context) error {
+	account := g.account(ctx)
+	if err := g.allowGlobalMonthly(ctx, account); err != nil {
+		return err
+	}
+	return g.allowAccountMonthly(ctx, account)
+}
+
+// allowAccountMonthly 看这个账号这个月的花费到没到管理员给它定的上限（管理员、没定上限的不看）。
+func (g *Guard) allowAccountMonthly(ctx context.Context, account string) error {
+	limit, err := g.accountCap(ctx, account)
+	if err != nil || limit.Micros <= 0 {
+		return err
+	}
+	totals, err := g.spentOf(ctx, &account, g.startOfMonth())
+	if err != nil {
+		return err
+	}
+	spent, err := g.inDefault(totals.Spent)
+	if err != nil {
+		return err
+	}
+	if spent.Micros >= limit.Micros {
+		return &budgetError{message: fmt.Sprintf("这个账号这个月的费用已经约 %s，到了管理员定的上限 %s。", spent, limit),
+			phrase: brain.PhraseOverAccountMonthly, values: map[string]string{"spent": spent.Rounded(), "limit": limit.Rounded(),
+				brain.PhraseCurrency: g.limits.Currency}}
+	}
+	return nil
+}
+
+// accountCap 是这个账号的月上限，换成默认货币；管理员、没接账号、没定的为零值。
+func (g *Guard) accountCap(ctx context.Context, account string) (money.Amount, error) {
+	if account == "" || g.caps == nil {
+		return money.Amount{}, nil
+	}
+	limit, err := g.caps.MonthlyCapOf(ctx, account)
+	if err != nil {
+		return money.Amount{}, &ledgerUnavailable{err: err}
+	}
+	if limit.Micros <= 0 {
+		return money.Amount{}, nil
+	}
+	return g.inDefault(money.Sum{limit.Currency: limit.Micros})
+}
+
+// allowGlobalMonthly 看全局（所有账号一起）的月度上限；用到提醒的比例时准备一条提醒（只告诉管理员）。
+func (g *Guard) allowGlobalMonthly(ctx context.Context, account string) error {
 	if g.limits.Monthly.Micros <= 0 {
 		return nil
 	}
@@ -260,7 +346,7 @@ func (g *Guard) allowMonthly(ctx context.Context) error {
 		return err
 	}
 	if spent.Micros >= limit.Micros {
-		return g.overMonthly(spent, limit)
+		return g.overMonthly(spent, limit, account == "")
 	}
 	if g.limits.WarnRatio > 0 && spent.Value() >= limit.Value()*g.limits.WarnRatio {
 		month := g.startOfMonth().Format("2006-01")
@@ -289,15 +375,16 @@ func (g *Guard) monthlyLimit(ctx context.Context) (money.Amount, error) {
 	return money.Amount{Micros: g.limits.Monthly.Micros + raisedTotal.Micros, Currency: g.limits.Currency}, nil
 }
 
-// overMonthly 是月度总费用到了上限的错误：能口头提高时，念的那句顺带说怎么提高。
-func (g *Guard) overMonthly(spent, limit money.Amount) error {
+// overMonthly 是月度总费用到了上限的错误：管理员（admin）能口头提高时，念的那句顺带说怎么提高；
+// 别的账号只说到了上限（不能提高，也不进「要不要提高」的判断）。
+func (g *Guard) overMonthly(spent, limit money.Amount, admin bool) error {
 	message := fmt.Sprintf("这个月的费用（大模型和搜索）已经约 %s，到上限 %s 了，这个月先不回答了。", spent, limit)
 	values := map[string]string{"spent": spent.Rounded(), "limit": limit.Rounded(), brain.PhraseCurrency: g.limits.Currency}
 	phrase := brain.PhraseOverMonthlyBudget
-	if g.limits.MonthlyRaise.Micros > 0 {
+	if admin && g.limits.MonthlyRaise.Micros > 0 {
 		phrase, values["raise"] = brain.PhraseOverMonthlyBudgetRaisable, g.limits.MonthlyRaise.Rounded()
 	}
-	return &budgetError{message: message, phrase: phrase, values: values, monthly: true}
+	return &budgetError{message: message, phrase: phrase, values: values, monthly: admin}
 }
 
 // RaiseMonthlyCap 实现 brain.MonthlyCap：主人口头确认后，把这个月的上限提高 MonthlyRaise（记进账本，重启后照样算），
@@ -305,6 +392,9 @@ func (g *Guard) overMonthly(spent, limit money.Amount) error {
 func (g *Guard) RaiseMonthlyCap(ctx context.Context, person string) (money.Amount, error) {
 	if _, err := brain.RequireConfirmation(ctx, brain.RaiseMonthlyCapTool, person); err != nil {
 		return money.Amount{}, err
+	}
+	if g.accountOfPerson(person) != "" { // 全局的上限只有管理员能提高（执行方自己守门）
+		return money.Amount{}, errors.New("只有管理员能提高这个月的上限")
 	}
 	if g.limits.Monthly.Micros <= 0 || g.limits.MonthlyRaise.Micros <= 0 {
 		return money.Amount{}, errors.New("没有设月度上限，或者不允许口头提高")
@@ -315,8 +405,11 @@ func (g *Guard) RaiseMonthlyCap(ctx context.Context, person string) (money.Amoun
 	return g.monthlyLimit(ctx)
 }
 
-// Brief 实现 brain.Briefer：有还没告诉主人的额度提醒时附上；这一轮说完才算告诉了（被打断、出错时下一轮再附上）。
-func (g *Guard) Brief(string) brain.Briefing {
+// Brief 实现 brain.Briefer：有还没告诉主人的额度提醒时附上（全局的额度只告诉管理员）；这一轮说完才算告诉了（被打断、出错时下一轮再附上）。
+func (g *Guard) Brief(person string) brain.Briefing {
+	if g.accountOfPerson(person) != "" {
+		return brain.Briefing{}
+	}
 	g.mu.Lock()
 	msg := g.pendingMsg
 	g.mu.Unlock()
