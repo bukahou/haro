@@ -18,12 +18,16 @@ import (
 
 // Registrar 是终端登记的执行方（账号库经适配器实现）。轮询凭据不认得时返回 ErrRegistrationNotFound。
 type Registrar interface {
-	StartRegistration(ctx context.Context, name, version, remote string) (realtimeproto.RegistrationStarted, error)
+	// StartRegistration 开始登记；invite 不为空时用邀请码直接批准（码不对报 ErrInviteInvalid）。
+	StartRegistration(ctx context.Context, name, version, remote, invite string) (realtimeproto.RegistrationStarted, error)
 	PollRegistration(ctx context.Context, pollToken string) (realtimeproto.RegistrationOutcome, error)
 }
 
 // ErrRegistrationNotFound 是轮询凭据不认得。
 var ErrRegistrationNotFound = errors.New("没有这个登记")
+
+// ErrInviteInvalid 是登记带的邀请码不对、过期了、用过了或者撤销了（Registrar 交回）。
+var ErrInviteInvalid = errors.New("邀请码不对")
 
 // 登记接口的限量：请求体很小；开始登记、问结果各一个令牌桶（整个服务端共用：现在只在局域网，开到公网时按来源分开）。
 const (
@@ -50,14 +54,21 @@ func RegisterRegistrationRoutes(mux *http.ServeMux, registrar Registrar, logger 
 				"登记要带终端的名字"))
 			return
 		}
-		started, err := registrar.StartRegistration(r.Context(), name, r.Header.Get(buildinfo.Header), remoteHost(r))
+		started, err := registrar.StartRegistration(r.Context(), name, r.Header.Get(buildinfo.Header), remoteHost(r),
+			strings.TrimSpace(request.Invite))
+		if errors.Is(err, ErrInviteInvalid) {
+			logger.Warn("终端登记带的邀请码不对", "remote", r.RemoteAddr, "name", name)
+			writeHTTPError(w, http.StatusBadRequest, realtimeproto.NewHTTPError(http.StatusBadRequest, realtimeproto.CodeInviteInvalid,
+				"邀请码不对、过期了或者用过了：向管理员要一个新的，或者不带邀请码登记（等管理员批准）"))
+			return
+		}
 		if err != nil {
 			logger.Error("终端登记出错", "remote", r.RemoteAddr, "err", err)
 			writeHTTPError(w, http.StatusInternalServerError, realtimeproto.NewHTTPError(http.StatusInternalServerError,
 				realtimeproto.CodeServerError, "服务端登记出错：稍后再试"))
 			return
 		}
-		logger.Info("终端开始登记（等配对或管理员批准）", "remote", r.RemoteAddr, "name", name)
+		logger.Info("终端开始登记", "remote", r.RemoteAddr, "name", name, "invite", request.Invite != "")
 		writeJSON(w, started)
 	})
 	mux.HandleFunc(realtimeproto.RegistrationPollRoute, func(w http.ResponseWriter, r *http.Request) {

@@ -294,6 +294,10 @@ type ServerSettings struct {
 	PublicListen string `env:"HARO_PUBLIC_LISTEN"`
 	// 一个账号同时连着几台终端（管理员不限）；0 = 不限
 	TerminalMaxOnline int `env:"HARO_TERMINAL_MAX_ONLINE" envDefault:"3"`
+	// 新建的匿名账号（终端批准、终端带邀请码登记时建的）的月上限（默认货币；0 = 不设，靠全局的上限兜底）
+	TerminalMonthlyCap float64 `env:"HARO_TERMINAL_MONTHLY_CAP" envDefault:"0"`
+	// 匿名账号的终端都这么多天没连过就软删除（30 天后彻底删）；0 = 不清
+	AnonymousIdleDays int `env:"HARO_ANONYMOUS_IDLE_DAYS" envDefault:"90"`
 
 	// 其他：普通 HTTP 请求、每次模型请求的总期限（要大于 0）
 	RequestTimeout time.Duration `env:"HARO_REQUEST_TIMEOUT" envDefault:"120s"`
@@ -575,6 +579,9 @@ func (settings ServerSettings) validateListen() error {
 	}
 	if settings.TerminalMaxOnline < 0 {
 		return fmt.Errorf("HARO_TERMINAL_MAX_ONLINE 不能是负数，现在是 %d", settings.TerminalMaxOnline)
+	}
+	if settings.TerminalMonthlyCap < 0 || settings.AnonymousIdleDays < 0 {
+		return fmt.Errorf("HARO_TERMINAL_MONTHLY_CAP、HARO_ANONYMOUS_IDLE_DAYS 不能是负数")
 	}
 	return nil
 }

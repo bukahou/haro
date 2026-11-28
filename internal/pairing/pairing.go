@@ -26,6 +26,7 @@ import (
 type Options struct {
 	ServerURL      string // 服务端的地址（同 HARO_SERVER_URL）
 	Name           string // 这台终端的名字（App 里显示、能改）
+	Invite         string // 管理员发的邀请码（可以不带）：有效时服务端直接批准，不用等
 	CredentialFile string // 设备凭证存到哪里
 	Out            io.Writer
 	Client         *http.Client
@@ -35,17 +36,28 @@ type Options struct {
 var (
 	ErrRejected = errors.New("管理员拒绝了这台终端")
 	ErrExpired  = errors.New("配对码过期了：重新运行 haro -pair")
+	// ErrInviteInvalid 是邀请码不对、过期了、用过了或者撤销了。
+	ErrInviteInvalid = errors.New("邀请码不对、过期了或者用过了：向管理员要一个新的，或者不带邀请码运行 haro -pair（等管理员批准）")
 )
 
 // Run 登记这台终端：显示配对码，等到批准后存下设备凭证。
 func Run(ctx context.Context, opts Options) error {
 	var started realtimeproto.RegistrationStarted
-	if err := post(ctx, opts, realtimeproto.RegistrationPath, realtimeproto.RegistrationRequest{Name: opts.Name}, &started); err != nil {
+	err := post(ctx, opts, realtimeproto.RegistrationPath, realtimeproto.RegistrationRequest{Name: opts.Name, Invite: opts.Invite}, &started)
+	var refused *httpFailure
+	if errors.As(err, &refused) && refused.code == realtimeproto.CodeInviteInvalid {
+		return ErrInviteInvalid
+	}
+	if err != nil {
 		return fmt.Errorf("开始登记: %w", err)
 	}
-	fmt.Fprintf(opts.Out, "\n  配对码：%s（%d 分钟内有效）\n\n", started.Code, started.ExpiresIn/60)
-	fmt.Fprintf(opts.Out, "在 App 的「添加终端」里输入这个配对码；或者请管理员在「新终端」里批准编号 %s 的这台。\n等结果中……\n",
-		started.ShortID)
+	if opts.Invite != "" {
+		fmt.Fprintln(opts.Out, "邀请码认了，正在取设备凭证……")
+	} else {
+		fmt.Fprintf(opts.Out, "\n  配对码：%s（%d 分钟内有效）\n\n", started.Code, started.ExpiresIn/60)
+		fmt.Fprintf(opts.Out, "在 App 的「添加终端」里输入这个配对码；或者请管理员在「新终端」里批准编号 %s 的这台。\n等结果中……\n",
+			started.ShortID)
+	}
 	interval := time.Duration(max(started.Interval, 1)) * time.Second
 	for {
 		select {

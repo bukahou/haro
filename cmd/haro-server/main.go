@@ -98,6 +98,7 @@ func run(logger *slog.Logger) error {
 	}
 	if deps.accounts.store != nil { // 分账号：按账号的月上限判断，全局的额度提醒、口头提高只给管理员（放行任何调用之前接上）
 		deps.guard.UseAccounts(accounts.BillingAccountOf, deps.accounts.store)
+		deps.accounts.store.SetAnonymousMonthlyCap(money.Of(settings.TerminalMonthlyCap, settings.Currency()))
 	}
 	kit, err := buildTooling(ctx, settings, catalog, deps, logger, &shutdown)
 	if err != nil {

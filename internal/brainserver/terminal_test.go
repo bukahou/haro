@@ -128,7 +128,10 @@ func waitFor(t *testing.T, condition func() bool) {
 // fakeRegistrar 记下登记，问结果时第一次是 pending、之后是 approved。
 type fakeRegistrar struct{ polls int }
 
-func (f *fakeRegistrar) StartRegistration(_ context.Context, name, _, _ string) (realtimeproto.RegistrationStarted, error) {
+func (f *fakeRegistrar) StartRegistration(_ context.Context, name, _, _, invite string) (realtimeproto.RegistrationStarted, error) {
+	if invite == "bad" {
+		return realtimeproto.RegistrationStarted{}, brainserver.ErrInviteInvalid
+	}
 	return realtimeproto.RegistrationStarted{Code: "ABCD-EFGH", ShortID: "A1B2C3", PollToken: "poll-" + name, ExpiresIn: 600, Interval: 5}, nil
 }
 
@@ -168,6 +171,11 @@ func TestRegistrationRoutes(t *testing.T) {
 	}
 	if status := post(realtimeproto.RegistrationPath, realtimeproto.RegistrationRequest{Name: " "}, nil); status != 400 {
 		t.Errorf("没名字：%d", status)
+	}
+	var refused realtimeproto.HTTPError
+	if status := post(realtimeproto.RegistrationPath, realtimeproto.RegistrationRequest{Name: "客厅", Invite: "bad"}, &refused); status != 400 ||
+		refused.Error.Code != realtimeproto.CodeInviteInvalid {
+		t.Errorf("邀请码不对：%d %+v", status, refused)
 	}
 	var outcome realtimeproto.RegistrationOutcome
 	if status := post(realtimeproto.RegistrationPollPath, realtimeproto.RegistrationPoll{PollToken: started.PollToken}, &outcome); status != 200 ||

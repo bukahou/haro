@@ -52,7 +52,7 @@ func TestPairRenameRemoveTerminal(t *testing.T) {
 	f, online := newTerminalFixture(t)
 	ctx := t.Context()
 	key := f.adminKey.AccessToken
-	registration, err := f.store.StartRegistration(ctx, "客厅", "v0.0.1", "192.168.1.20")
+	registration, err := f.store.StartRegistration(ctx, "客厅", "v0.0.1", "192.168.1.20", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,8 +107,8 @@ func TestPendingTerminalsForAdmin(t *testing.T) {
 	f, _ := newTerminalFixture(t)
 	ctx := t.Context()
 	key := f.adminKey.AccessToken
-	approved, _ := f.store.StartRegistration(ctx, "书房", "v0.0.1", "203.0.113.7")
-	rejected, _ := f.store.StartRegistration(ctx, "门口", "v0.0.1", "192.168.1.30")
+	approved, _ := f.store.StartRegistration(ctx, "书房", "v0.0.1", "203.0.113.7", "")
+	rejected, _ := f.store.StartRegistration(ctx, "门口", "v0.0.1", "192.168.1.30", "")
 	pending := f.list(t, "/api/v1/admin/terminals/pending", "zh")
 	networks := map[string]any{}
 	for _, item := range pending {
@@ -147,7 +147,7 @@ func TestPendingTerminalsForAdmin(t *testing.T) {
 func mustCredential(t *testing.T, f fixture, name string) string {
 	t.Helper()
 	ctx := t.Context()
-	registration, err := f.store.StartRegistration(ctx, name, "v0.0.1", "")
+	registration, err := f.store.StartRegistration(ctx, name, "v0.0.1", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

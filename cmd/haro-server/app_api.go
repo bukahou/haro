@@ -181,7 +181,8 @@ func buildAppAPI(ctx context.Context, settings config.ServerSettings, deps servi
 	}
 	personData = append(personData, accounts.NamedData{Name: dataVoiceprints,
 		Data: voiceprintEraser{asrURL: settings.ASRURL, client: deps.httpClient}})
-	go accounts.Purger{Store: store, Data: personData, Logger: logger.With("component", "account-purge")}.Run(ctx)
+	go accounts.Purger{Store: store, Data: personData, Logger: logger.With("component", "account-purge"),
+		IdleAnonymousAfter: time.Duration(settings.AnonymousIdleDays) * 24 * time.Hour}.Run(ctx)
 	handler, err := appserver.NewHandler(ctx, options)
 	if err != nil {
 		return nil, err

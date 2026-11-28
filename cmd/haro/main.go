@@ -38,6 +38,7 @@ func main() {
 	enrollSeconds := flag.Duration("seconds", 5*time.Second, "和 -enroll 一起用：每句录多久")
 	pair := flag.Bool("pair", false, "配对这台终端：显示配对码，在 App 的「添加终端」里输入（或请管理员批准），配好后存下设备凭证")
 	pairName := flag.String("name", "", "和 -pair 一起用：这台终端的名字（App 里显示、能改）；不填 = 主机名")
+	pairInvite := flag.String("invite", "", "和 -pair 一起用：管理员发的邀请码（有效时直接配好，不用等批准）")
 	showVersion := flag.Bool("version", false, "打印版本号后退出")
 	versionJSON := flag.Bool("json", false, "和 -version 一起用：输出一行 JSON（program、version、os、arch、go），给安装脚本、CI 读")
 	flag.Parse()
@@ -51,7 +52,7 @@ func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	slog.SetDefault(logger)
 	if *pair {
-		if err := pairTerminal(*pairName); err != nil {
+		if err := pairTerminal(*pairName, *pairInvite); err != nil {
 			fmt.Fprintln(os.Stderr, "配对失败：", err)
 			os.Exit(1)
 		}
@@ -166,7 +167,7 @@ func deviceCredential(settings config.TerminalSettings, logger *slog.Logger) (st
 }
 
 // pairTerminal 是 haro -pair：向服务端登记这台终端，显示配对码，等到批准后存下设备凭证。
-func pairTerminal(name string) error {
+func pairTerminal(name, invite string) error {
 	settings, err := config.LoadTerminalSettings()
 	if err != nil {
 		return err
@@ -183,7 +184,7 @@ func pairTerminal(name string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	fmt.Printf("服务端：%s\n这台终端：%s\n", settings.ServerURL, name)
-	return pairing.Run(ctx, pairing.Options{ServerURL: settings.ServerURL, Name: name, CredentialFile: path, Out: os.Stdout,
+	return pairing.Run(ctx, pairing.Options{ServerURL: settings.ServerURL, Name: name, Invite: invite, CredentialFile: path, Out: os.Stdout,
 		Client: &http.Client{Timeout: 30 * time.Second}})
 }
 

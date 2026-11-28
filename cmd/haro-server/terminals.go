@@ -37,8 +37,11 @@ func (a terminalAuthenticator) Authenticate(ctx context.Context, credential, ver
 type terminalRegistrar struct{ store *accounts.Store }
 
 // StartRegistration 实现 brainserver.Registrar。
-func (r terminalRegistrar) StartRegistration(ctx context.Context, name, version, remote string) (realtimeproto.RegistrationStarted, error) {
-	registration, err := r.store.StartRegistration(ctx, name, version, remote)
+func (r terminalRegistrar) StartRegistration(ctx context.Context, name, version, remote, invite string) (realtimeproto.RegistrationStarted, error) {
+	registration, err := r.store.StartRegistration(ctx, name, version, remote, invite)
+	if errors.Is(err, accounts.ErrInviteInvalid) {
+		return realtimeproto.RegistrationStarted{}, errors.Join(brainserver.ErrInviteInvalid, err)
+	}
 	if err != nil {
 		return realtimeproto.RegistrationStarted{}, err
 	}
