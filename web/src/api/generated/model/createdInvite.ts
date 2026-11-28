@@ -15,7 +15,7 @@
  * - App 的接口都在 `/api/v1/` 下（公网只放行这一段）；`/v1/...` 是终端的语音连接，只在局域网。
  * - 网页版（另一个域名）从浏览器跨域调接口：服务端只放行网页版的那一个来源（CORS），令牌同样放在 `Authorization` 里，不用 cookie。
  *
- * OpenAPI spec version: 0.13.0
+ * OpenAPI spec version: 0.14.0
  */
 import type { Invite } from './invite';
 

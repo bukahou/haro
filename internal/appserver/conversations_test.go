@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -23,6 +24,7 @@ import (
 	"github.com/bukahou/haro/internal/accounts"
 	"github.com/bukahou/haro/internal/attachments"
 	"github.com/bukahou/haro/internal/brain"
+	"github.com/bukahou/haro/internal/brain/braintest"
 	"github.com/bukahou/haro/internal/chat"
 	"github.com/bukahou/haro/internal/conversationstore"
 	"github.com/bukahou/haro/internal/speech"
@@ -53,6 +55,12 @@ func (titleModel) StreamReply(context.Context, brain.ChatRequest) iter.Seq2[brai
 
 func newChatFixture(t *testing.T) fixture {
 	t.Helper()
+	return newChatFixtureWith(t, echoModel{}, nil)
+}
+
+// newChatFixtureWith 是打字对话的夹具：前台用 model、工具用 tools（nil = 没有工具）。
+func newChatFixtureWith(t *testing.T, model brain.ChatModel, tools brain.Toolbox) fixture {
+	t.Helper()
 	ctx := t.Context()
 	store, err := accounts.Open(ctx, "")
 	if err != nil {
@@ -79,11 +87,16 @@ func newChatFixture(t *testing.T) fixture {
 		t.Fatal(err)
 	}
 	service := chat.NewService(ctx, chat.Options{Store: conversations, Images: images, Logger: quietLogger,
-		Titler: chat.AgentTitler{Agent: brain.Agent{Name: "起标题", Model: titleModel{}}},
-		Sessions: func(speaker chat.Speaker, thread string) chat.TextSession {
-			return brain.NewSession(brain.Components{Front: brain.Agent{Name: "前台", Model: echoModel{}, MaxSteps: 8, RepeatLimit: 3, RepeatWindow: 4},
-				Conversations: book, Thread: thread, TextOnly: true,
-				NewSegmenter: func() brain.TextSegmenter { return speech.NewSentenceSegmenter(4, 40) }}, options, quietLogger)
+		Titler:  chat.AgentTitler{Agent: brain.Agent{Name: "起标题", Model: titleModel{}}},
+		Actions: book,
+		Sessions: func(speaker chat.Speaker, thread string, activity brain.ActivityObserver) chat.TextSession {
+			parts := brain.Components{Front: brain.Agent{Name: "前台", Model: model, MaxSteps: 8, RepeatLimit: 3, RepeatWindow: 4},
+				Conversations: book, Thread: thread, TextOnly: true, Activity: activity,
+				NewSegmenter: func() brain.TextSegmenter { return speech.NewSentenceSegmenter(4, 40) }}
+			if tools != nil {
+				parts.Tools = tools
+			}
+			return brain.NewSession(parts, options, quietLogger)
 		}})
 	handler, err := NewHandler(ctx, Options{Accounts: store, Spending: fakeSpending{}, DefaultCurrency: "JPY", MinAppVersion: "1.0.0",
 		ProfileMaxChars: 10000, Chat: service, Logger: quietLogger})
@@ -98,7 +111,13 @@ func newChatFixture(t *testing.T) fixture {
 // stream 发一句、读完事件流，返回各事件。
 func (f fixture) stream(t *testing.T, conversation, token, body string) (int, []map[string]any) {
 	t.Helper()
-	request, _ := http.NewRequest("POST", f.server.URL+"/api/v1/conversations/"+conversation+"/messages", strings.NewReader(body))
+	return f.events(t, "/api/v1/conversations/"+conversation+"/messages", token, body)
+}
+
+// events 向 path 发请求、读完事件流，返回各事件。
+func (f fixture) events(t *testing.T, path, token, body string) (int, []map[string]any) {
+	t.Helper()
+	request, _ := http.NewRequest("POST", f.server.URL+path, strings.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
 	if token != "" {
 		request.Header.Set("Authorization", "Bearer "+token)
@@ -273,5 +292,99 @@ func TestAttachmentsAndSearch(t *testing.T) {
 	slices.Sort(types)
 	if want := slices.Sorted(slices.Values(uploadedTypes)); !slices.Equal(types, want) {
 		t.Errorf("契约里收的图片格式 %v，代码里 %v", types, want)
+	}
+}
+
+// gateToolbox 有一个只读的搜索和一个会破坏的删除（要过确认闸），记下执行过的。
+type gateToolbox struct {
+	mu    sync.Mutex
+	calls []string
+}
+
+func (g *gateToolbox) Specs() []brain.ToolSpec {
+	return []brain.ToolSpec{{Name: "web_search", Parameters: json.RawMessage(`{}`)},
+		{Name: "delete_note", Parameters: json.RawMessage(`{}`), RequiresConfirmation: true}}
+}
+
+func (g *gateToolbox) Call(_ context.Context, call brain.ToolCall) (string, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.calls = append(g.calls, call.Name)
+	return `{"ok":true}`, nil
+}
+
+func (g *gateToolbox) called() []string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return slices.Clone(g.calls)
+}
+
+// 打字对话里的工具进度和确认卡片：事件流里有工具开始 / 做完（带给人看的说明）、确认卡片；记录里的工具带说明、卡片还能点；
+// 点卡片上的确认（decideConfirmation）才执行，之后记录里那张卡片不能再点。请求体不对 400、没有这条对话 404。
+func TestChatActivityAndConfirmationCard(t *testing.T) {
+	model := braintest.NewModel(t, braintest.Call("web_search", map[string]any{"query": "笔记"}),
+		braintest.Call("delete_note", map[string]any{"ids": []any{3}}), braintest.Say("要删掉第 3 条吗？"), braintest.Say("删好了。"))
+	tools := &gateToolbox{}
+	f := newChatFixtureWith(t, model, tools)
+	key := f.adminKey.AccessToken
+	_, created := f.call(t, "POST", "/api/v1/conversations", key, `{}`)
+	id := created["conversation_id"].(string)
+
+	status, events := f.stream(t, id, key, `{"text":"把第 3 条笔记删了"}`)
+	var kinds []string
+	var confirmation map[string]any
+	for _, event := range events {
+		kinds = append(kinds, event["type"].(string))
+		if event["type"] == "tool_started" && event["label"] == "搜索：笔记" && event["call_id"] == "" {
+			t.Error("工具开始要带调用编号")
+		}
+		if event["type"] == "confirmation" {
+			confirmation = event["confirmation"].(map[string]any)
+		}
+	}
+	if status != 200 || !slices.Contains(kinds, "tool_started") || !slices.Contains(kinds, "tool_finished") || confirmation == nil ||
+		confirmation["action_id"] != "act_1" || confirmation["open"] != true || kinds[len(kinds)-1] != "done" {
+		t.Fatalf("事件流：%d %v", status, events)
+	}
+	if slices.Contains(tools.called(), "delete_note") {
+		t.Fatal("点确认之前不应执行删除")
+	}
+	blocks := func() []any {
+		_, page := f.call(t, "GET", "/api/v1/conversations/"+id+"/turns", key, "")
+		return page["turns"].([]any)[0].(map[string]any)["reply"].([]any)
+	}
+	var labels []string
+	var open any
+	for _, block := range blocks() {
+		block := block.(map[string]any)
+		if block["type"] == "tool" {
+			labels = append(labels, block["label"].(string))
+		}
+		if block["type"] == "confirmation" {
+			open = block["confirmation"].(map[string]any)["open"]
+		}
+	}
+	if len(labels) != 2 || labels[0] != "搜索：笔记" || open != true {
+		t.Errorf("记录里的工具说明、确认卡片：%v %v", labels, blocks())
+	}
+
+	path := "/api/v1/conversations/" + id + "/confirmations/act_1"
+	if status, _ := f.events(t, path, key, `{"decision":"maybe"}`); status != 400 {
+		t.Errorf("决定不对：%d", status)
+	}
+	if status, _ := f.events(t, "/api/v1/conversations/nope/confirmations/act_1", key, `{"decision":"confirm"}`); status != 404 {
+		t.Errorf("没有这条对话：%d", status)
+	}
+	status, events = f.events(t, path, key, `{"decision":"confirm"}`)
+	if status != 200 || events[len(events)-1]["type"] != "done" {
+		t.Fatalf("点确认：%d %v", status, events)
+	}
+	if got := tools.called(); !slices.Equal(got, []string{"web_search", "delete_note"}) {
+		t.Errorf("点了确认才执行删除：%v", got)
+	}
+	for _, block := range blocks() {
+		if block := block.(map[string]any); block["type"] == "confirmation" && block["confirmation"].(map[string]any)["open"] != false {
+			t.Errorf("确认过的卡片不能再点：%v", block)
+		}
 	}
 }

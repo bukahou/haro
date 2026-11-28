@@ -32,9 +32,14 @@ func ResearchTools(desk ResearchDesk) Builtin {
 				if err != nil {
 					return startResearchOutput{}, err
 				}
-				// 告诉模型怎么跟主人说：调查查好了终端只会响一声、不会自己说结论（不说明的话，模型会答应盯着、一有消息就说）
+				// 告诉模型怎么跟主人说：调查查好了终端只会响一声、不会自己说结论（不说明的话，模型会答应盯着、一有消息就说）；
+				// 打字的对话里聊天中出一张调查卡片，查完卡片上就有结论
 				out := startResearchOutput{ID: task.ID, Ahead: ahead,
 					HowToTell: "照实告诉主人：查好了终端会「叮」一声，到时叫醒你问就行（你不会自己说结论）；不要说会盯着、守着。"}
+				if brain.ShowsCards(ctx) {
+					brain.ShowCard(ctx, brain.Card{Kind: brain.CardResearch, TaskID: task.ID, Question: task.Question})
+					out.HowToTell = "聊天里已经出了一张调查卡片：照实告诉主人查好了卡片上会显示结论，也可以问你；不要说会盯着、守着。"
+				}
 				if ahead > 0 {
 					out.Note = "前面还有别的调查在查或排队，要多等一会儿。"
 				} else {

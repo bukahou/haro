@@ -15,14 +15,20 @@
  * - App 的接口都在 `/api/v1/` 下（公网只放行这一段）；`/v1/...` 是终端的语音连接，只在局域网。
  * - 网页版（另一个域名）从浏览器跨域调接口：服务端只放行网页版的那一个来源（CORS），令牌同样放在 `Authorization` 里，不用 cookie。
  *
- * OpenAPI spec version: 0.13.0
+ * OpenAPI spec version: 0.14.0
  */
+import type { ConfirmationCard } from './confirmationCard';
 import type { ReplyBlockType } from './replyBlockType';
+import type { ResearchCard } from './researchCard';
 
 export interface ReplyBlock {
   type: ReplyBlockType;
-  /** type = text：回答的文字（打字的对话里是 Markdown） */
+  /** type = text：回答的文字（打字的对话里是 Markdown；不含给语音用的情绪标记） */
   text?: string;
-  /** type = tool：调用了哪个工具（工具的名字） */
+  /** type = tool：调用了哪个工具（工具的名字，程序用） */
   tool?: string;
+  /** type = tool：给人看的说明（按 Accept-Language，例如「搜索了：横滨 天气」） */
+  label?: string;
+  research?: ResearchCard;
+  confirmation?: ConfirmationCard;
 }

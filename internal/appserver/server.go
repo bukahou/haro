@@ -19,6 +19,7 @@ import (
 
 	"github.com/bukahou/haro/internal/accounts"
 	"github.com/bukahou/haro/internal/appapi"
+	"github.com/bukahou/haro/internal/brain"
 	"github.com/bukahou/haro/internal/buildinfo"
 	"github.com/bukahou/haro/internal/conversationstore"
 	"github.com/bukahou/haro/internal/memory"
@@ -120,7 +121,9 @@ type Options struct {
 	Household       Household        // 每个账号的主人资料和家；nil = 没有（那几个接口回 501）
 	Places          PlaceFinder      // 搜地名；nil = 没有（天气的工具组关着）
 	WebURL          string           // 网页版的公开根地址：放行它跨域调接口、登录完回它的回调页；空 = 没有网页版
-	Logger          *slog.Logger
+	// Phrases：每种语言的固定的话（工具给人看的说明在这里，和大脑同一份）；零值 = 程序里带的那份
+	Phrases brain.Phrases
+	Logger  *slog.Logger
 }
 
 // Server 实现 appapi.StrictServerInterface。
@@ -137,6 +140,13 @@ var _ appapi.StrictServerInterface = (*Server)(nil)
 
 // NewHandler 建 App 接口的 http.Handler（挂在 PathPrefix 下）。
 func NewHandler(ctx context.Context, opts Options) (http.Handler, error) {
+	if opts.Phrases.Languages == nil {
+		phrases, err := brain.LoadPhrases("")
+		if err != nil {
+			return nil, err
+		}
+		opts.Phrases = phrases
+	}
 	loadedTexts, err := loadTexts()
 	if err != nil {
 		return nil, err
@@ -177,6 +187,7 @@ func NewHandler(ctx context.Context, opts Options) (http.Handler, error) {
 	})
 	generated := appapi.HandlerWithOptions(strict, appapi.StdHTTPServerOptions{BaseRouter: http.NewServeMux()})
 	mux.Handle(sendMessagePattern, limiter.wrap(http.HandlerFunc(server.sendMessage), server)) // 回答是流：不经生成的代码
+	mux.Handle(decidePattern, limiter.wrap(http.HandlerFunc(server.decideConfirmation), server))
 	mux.Handle(uploadPattern, limiter.wrap(http.HandlerFunc(server.uploadAttachment), server)) // 请求体是图片：不经生成的代码
 	mux.Handle(attachmentPattern, limiter.wrap(http.HandlerFunc(server.getAttachment), server))
 	mux.Handle(receiptUploadPattern, limiter.wrap(http.HandlerFunc(server.uploadReceipt), server))

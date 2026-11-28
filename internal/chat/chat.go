@@ -57,13 +57,19 @@ type Recaller interface {
 	RecallTurns(ctx context.Context, person, query string) ([]int64, error)
 }
 
-// Options 是打字对话的部件。Titler、Images、Recall 可以是 nil（不起标题 / 不收图片 / 只按文字找）。
+// Actions 判断确认卡片上的那次操作还在不在等确认（brain.ConversationBook 实现）。
+type Actions interface {
+	ActionOpen(person, thread, actionID string) bool
+}
+
+// Options 是打字对话的部件。Titler、Images、Recall、Actions 可以是 nil（不起标题 / 不收图片 / 只按文字找 / 卡片都当已失效）。
 type Options struct {
 	Store    Store
 	Sessions SessionFactory
 	Titler   Titler
 	Images   Images
 	Recall   Recaller
+	Actions  Actions
 	Logger   *slog.Logger
 }
 
@@ -81,8 +87,8 @@ type Speaker struct {
 	Admin        bool
 }
 
-// SessionFactory 为这个人的一条对话开一个打字会话。
-type SessionFactory func(speaker Speaker, thread string) TextSession
+// SessionFactory 为这个人的一条对话开一个打字会话；activity 收这一轮里发生的事（工具在做什么、卡片）。
+type SessionFactory func(speaker Speaker, thread string, activity brain.ActivityObserver) TextSession
 
 // titleTimeout 是起一次标题最多等多久（后台做：起不成就没有标题，下一轮再起）。
 const titleTimeout = 30 * time.Second
@@ -95,6 +101,7 @@ type Service struct {
 	titler     Titler   // nil = 不起标题
 	images     Images   // nil = 不收图片
 	recall     Recaller // nil = 只按文字找
+	actions    Actions  // nil = 卡片都当已失效
 	logger     *slog.Logger
 
 	mu      sync.Mutex
@@ -106,18 +113,21 @@ type turnKey struct{ person, thread string }
 // NewService 建打字对话；后台起标题随 lifetime 停。
 func NewService(lifetime context.Context, opts Options) *Service {
 	return &Service{lifetime: lifetime, store: opts.Store, newSession: opts.Sessions, titler: opts.Titler, images: opts.Images,
-		recall: opts.Recall, logger: opts.Logger.With("component", "chat"), running: map[turnKey]*Turn{}}
+		recall: opts.Recall, actions: opts.Actions, logger: opts.Logger.With("component", "chat"), running: map[turnKey]*Turn{}}
 }
 
 // EventType 是回答的事件。
 type EventType string
 
-// 回答的事件（依次：开始、若干文字片段、结束或失败）。
+// 回答的事件（先开始；然后按发生的顺序：文字片段、工具开始 / 做完、卡片；最后结束或失败）。
 const (
-	EventStarted EventType = "started"
-	EventText    EventType = "text"
-	EventDone    EventType = "done"
-	EventFailed  EventType = "failed"
+	EventStarted      EventType = "started"
+	EventText         EventType = "text"
+	EventToolStarted  EventType = "tool_started"
+	EventToolFinished EventType = "tool_finished"
+	EventCard         EventType = "card"
+	EventDone         EventType = "done"
+	EventFailed       EventType = "failed"
 )
 
 // Event 是回答的一个事件。
@@ -125,6 +135,9 @@ type Event struct {
 	Type   EventType
 	TurnID string                       // started
 	Text   string                       // text
+	CallID string                       // tool_started、tool_finished
+	Label  string                       // tool_started：在做什么（给人看的）
+	Card   *brain.Card                  // card
 	Status realtimeproto.ResponseStatus // done：completed / incomplete / cancelled
 	Reason realtimeproto.ResponseReason // failed、incomplete 的原因
 }
@@ -144,6 +157,17 @@ func (t *Turn) Events() <-chan Event { return t.events }
 
 // Detach 不再收这一轮的事件（App 断开了）：这一轮照样答完、存好。
 func (t *Turn) Detach() { t.detach.Do(func() { close(t.detached) }) }
+
+// ToolStarted 实现 brain.ActivityObserver。
+func (t *Turn) ToolStarted(callID, label string) {
+	t.emit(Event{Type: EventToolStarted, CallID: callID, Label: label})
+}
+
+// ToolFinished 实现 brain.ActivityObserver。
+func (t *Turn) ToolFinished(callID string) { t.emit(Event{Type: EventToolFinished, CallID: callID}) }
+
+// CardShown 实现 brain.ActivityObserver。
+func (t *Turn) CardShown(card brain.Card) { t.emit(Event{Type: EventCard, Card: &card}) }
 
 // CheckThread 核对这条对话是这个人的、没删（语音那条总是有）。
 func (s *Service) CheckThread(ctx context.Context, person, thread string) error {
@@ -181,7 +205,27 @@ func (s *Service) Send(ctx context.Context, speaker Speaker, thread string, mess
 		}
 		input.Image, input.Attachment = image, message.Attachment
 	}
-	text := message.Text
+	return s.start(speaker, thread, input, message.Text)
+}
+
+// Decide 是主人在确认卡片上点了确认 / 取消：开一个打字会话，先按编号确认或作废那次操作，再由 haro 说结果。
+// 过期了、处理过了的也照样开（haro 照实说没有执行）。
+func (s *Service) Decide(ctx context.Context, speaker Speaker, thread, actionID string, confirm bool, language string) (*Turn, error) {
+	if err := s.CheckThread(ctx, speaker.Owner, thread); err != nil {
+		return nil, err
+	}
+	input := brain.TextInput{Person: speaker.Owner, Language: language, Decision: &brain.Decision{ActionID: actionID, Confirm: confirm}}
+	return s.start(speaker, thread, input, "")
+}
+
+// ActionOpen 判断确认卡片上的那次操作还在不在等确认（没设 Actions 时都当已失效）。
+func (s *Service) ActionOpen(person, thread, actionID string) bool {
+	return s.actions != nil && s.actions.ActionOpen(person, thread, actionID)
+}
+
+// start 开一个打字会话答这一句（同一条对话同时只答一句）。said 是起标题用的主人原话（点卡片的没有）。
+func (s *Service) start(speaker Speaker, thread string, input brain.TextInput, said string) (*Turn, error) {
+	text := said
 	id, err := randomID()
 	if err != nil {
 		return nil, err
@@ -195,7 +239,7 @@ func (s *Service) Send(ctx context.Context, speaker Speaker, thread string, mess
 	}
 	s.running[key] = turn
 	s.mu.Unlock()
-	turn.session = s.newSession(speaker, thread)
+	turn.session = s.newSession(speaker, thread, turn)
 	if err := turn.session.SubmitText(input); err != nil {
 		s.finish(key, turn)
 		return nil, fmt.Errorf("交给打字会话: %w", err)
@@ -221,7 +265,7 @@ func (s *Service) pump(key turnKey, turn *Turn) {
 			} else {
 				turn.emit(Event{Type: EventDone, Status: e.Status, Reason: e.Reason})
 			}
-			if e.Status == realtimeproto.StatusCompleted && key.thread != brain.VoiceThread && s.titler != nil {
+			if e.Status == realtimeproto.StatusCompleted && key.thread != brain.VoiceThread && s.titler != nil && turn.said != "" {
 				go s.titleThread(key, turn.said, answer.String())
 			}
 			return

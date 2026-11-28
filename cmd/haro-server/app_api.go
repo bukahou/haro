@@ -97,11 +97,12 @@ type appBrain struct {
 	backstory  *backstory.Service // 背景记录池；nil = 没有
 }
 
-// textSessions 为打字对话开会话：同一套部件，只发文字、接在指定的线程、不用摄像头；别的账号只认本人（同终端）。
+// textSessions 为打字对话开会话：同一套部件，只发文字、接在指定的线程、不用摄像头；别的账号只认本人（同终端）；
+// 这一轮里发生的事（工具在做什么、卡片）交给 activity。
 func (b appBrain) textSessions(logger *slog.Logger) chat.SessionFactory {
-	return func(speaker chat.Speaker, thread string) chat.TextSession {
+	return func(speaker chat.Speaker, thread string, activity brain.ActivityObserver) chat.TextSession {
 		parts := b.components
-		parts.TextOnly, parts.Thread, parts.Camera, parts.Residents = true, thread, nil, brain.Residents{}
+		parts.TextOnly, parts.Thread, parts.Camera, parts.Residents, parts.Activity = true, thread, nil, brain.Residents{}, activity
 		if !speaker.Admin {
 			parts.Residents = brain.Residents{Owner: speaker.Owner, Guest: speaker.Guest}
 		}
@@ -120,7 +121,7 @@ func buildAppAPI(ctx context.Context, settings config.ServerSettings, deps servi
 	go pruneTokens(ctx, store, logger)
 	options := appserver.Options{Accounts: store, Admin: store, Spending: deps.guard, Terminals: online, Registry: store, DefaultCurrency: settings.Currency(),
 		MinAppVersion: settings.AppMinVersion, CapOptions: settings.MonthlyCapOptions(), ProfileMaxChars: profile.MaxRunes,
-		Household: kit.household, WebURL: settings.AppWebURL, Logger: logger.With("component", "app-api"),
+		Household: kit.household, WebURL: settings.AppWebURL, Phrases: assembled.options.Phrases, Logger: logger.With("component", "app-api"),
 		Login: &appserver.LoginOptions{Issuer: settings.OIDCIssuer, ClientID: settings.OIDCClientID,
 			ClientSecret: settings.OIDCClientSecret, CookieSecret: settings.OIDCCookieSecret, PublicURL: settings.AppPublicURL}}
 	if kit.places != nil {
@@ -135,6 +136,9 @@ func buildAppAPI(ctx context.Context, settings config.ServerSettings, deps servi
 	}
 	if deps.conversations != nil { // 打字对话要对话库（线程、完整记录）
 		chatOptions := chat.Options{Store: deps.conversations, Sessions: assembled.textSessions(logger), Logger: logger}
+		if assembled.components.Conversations != nil { // 确认卡片还能不能点：看对话簿里那次操作还在不在等确认
+			chatOptions.Actions = assembled.components.Conversations
+		}
 		if assembled.title != nil {
 			chatOptions.Titler = chat.AgentTitler{Agent: *assembled.title}
 		}

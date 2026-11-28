@@ -240,6 +240,8 @@ type ChatMessage struct {
 	Synthetic bool `json:"synthetic,omitempty"`
 	// Replay：assistant：这次回答里模型服务要求原样带回的内容（见 ProviderReplay）；不存盘
 	Replay *ProviderReplay `json:"-"`
+	// Card：tool：这次调用在聊天里出的卡片（派了调查、要主人确认）；App 重新打开对话时照样显示。不交给模型
+	Card *Card `json:"card,omitempty"`
 }
 
 // ReplyDelta 是模型流式输出的一段。
@@ -254,6 +256,7 @@ type ReplyDelta struct {
 // ToolSpec 描述一个可以给模型用的工具。
 type ToolSpec struct {
 	Name                 string
+	Title                string // 给人看的名字（外部 MCP 服务声明的；没有时为空）：App 显示工具在做什么时，固定的话里没配说明就用它
 	Description          string
 	Parameters           json.RawMessage // 参数的 JSON Schema
 	RequiresConfirmation bool            // 会删除或修改数据（MCP destructiveHint）：执行前要用户口头确认

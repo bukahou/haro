@@ -26,7 +26,8 @@ var sessionTools = []sessionTool{
 	{name: endConversationTool, offer: func(s *Session) (ToolSpec, bool) { return endConversationSpec, s.usesWakeWord() }},
 	// 平时也能口头提高上限（照样过确认闸）
 	{name: RaiseMonthlyCapTool, offer: func(s *Session) (ToolSpec, bool) { return raiseMonthlyCapSpec, s.parts.MonthlyCap != nil }},
-	{name: confirmActionTool, gate: true, offer: func(*Session) (ToolSpec, bool) { return confirmActionSpec, true }},
+	// 打字会话里不给模型确认：主人在确认卡片上点（见 Decision）；取消照样给（主人打字说不要了）
+	{name: confirmActionTool, gate: true, offer: func(s *Session) (ToolSpec, bool) { return confirmActionSpec, !s.parts.TextOnly }},
 	{name: cancelActionTool, gate: true, offer: func(*Session) (ToolSpec, bool) { return cancelActionSpec, true }},
 }
 

@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: haro App API
-  version: 0.13.0
+  version: 0.14.0
   description: |
     haro 手机 App 和网页版用的接口（第一批：账号、登录、我、花费、终端、管理员）。
     服务端和 App 都从这份契约生成代码；⛔ 两边都不绕过契约私下约定字段。契约每改一次升版本号。
@@ -420,8 +420,10 @@ paths:
       operationId: sendMessage
       summary: 说一句（打字）；回答以 Server-Sent Events 流回来
       description: |
-        响应是 `text/event-stream`：每个事件一行 `data: <ChatEvent 的 JSON>`，依次是 `started`（带这一轮的 turn_id，停止时用）、
-        若干 `text`（回答的文字片段，按顺序拼起来就是 Markdown）、最后 `done` 或 `failed`。
+        响应是 `text/event-stream`：每个事件一行 `data: <ChatEvent 的 JSON>`，先是 `started`（带这一轮的 turn_id，停止时用），
+        然后按发生的顺序：`text`（回答的文字片段，按顺序拼起来就是 Markdown）、`tool_started` / `tool_finished`（工具在做什么、做完没有）、
+        `research`（派了后台调查：卡片）、`confirmation`（要主人确认的操作：卡片，点了用 decideConfirmation），最后 `done` 或 `failed`。
+        不认识的事件类型跳过即可（以后会加）。
         App 断开后这一轮照样做完、存好（重新打开对话时用 `turns` 翻到）；要停止用 `turns/{turnId}/stop`。
         同一条对话同时只答一句：上一句还在答时回 409。
       requestBody:
@@ -430,6 +432,43 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/MessageSend'
+      responses:
+        '200':
+          description: 事件流
+          content:
+            text/event-stream:
+              schema:
+                $ref: '#/components/schemas/ChatEvent'
+        '400':
+          $ref: '#/components/responses/ValidationFailed'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/conversations/{conversationId}/confirmations/{actionId}:
+    parameters:
+      - $ref: '#/components/parameters/ConversationId'
+      - name: actionId
+        in: path
+        required: true
+        schema:
+          type: string
+          maxLength: 64
+    post:
+      tags: [conversations]
+      operationId: decideConfirmation
+      summary: 主人在确认卡片上点了确认 / 取消：按编号执行或作废那次操作，haro 再用一句话说结果（Server-Sent Events，同 sendMessage）
+      description: |
+        确认的是登录的账号本人（等同语音里「主人的声音 + 有时效的确认」）。过期、已经处理过、不是这条对话的，haro 会照实说没有执行。
+        同一条对话同时只答一句：上一句还在答时回 409。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConfirmationDecision'
       responses:
         '200':
           description: 事件流
@@ -2566,7 +2605,8 @@ components:
             $ref: '#/components/schemas/ReplyBlock'
     ReplyBlockType:
       type: string
-      enum: [text, tool]
+      description: text = 回答的文字；tool = 用了一个工具；research = 派了一个后台调查（卡片）；confirmation = 要主人确认的操作（卡片）
+      enum: [text, tool, research, confirmation]
     ReplyBlock:
       type: object
       required: [type]
@@ -2575,10 +2615,44 @@ components:
           $ref: '#/components/schemas/ReplyBlockType'
         text:
           type: string
-          description: type = text：回答的文字（打字的对话里是 Markdown）
+          description: type = text：回答的文字（打字的对话里是 Markdown；不含给语音用的情绪标记）
         tool:
           type: string
-          description: type = tool：调用了哪个工具（工具的名字）
+          description: type = tool：调用了哪个工具（工具的名字，程序用）
+        label:
+          type: string
+          description: type = tool：给人看的说明（按 Accept-Language，例如「搜索了：横滨 天气」）
+        research:
+          $ref: '#/components/schemas/ResearchCard'
+        confirmation:
+          $ref: '#/components/schemas/ConfirmationCard'
+    ResearchCard:
+      type: object
+      description: 派出去的后台调查（进度和结论用 getResearchTask 取）
+      required: [task_id, question]
+      properties:
+        task_id:
+          type: integer
+          format: int64
+        question:
+          type: string
+    ConfirmationCard:
+      type: object
+      description: 一次要主人确认的操作（会删掉或改掉东西）：主人在卡片上点确认 / 取消（decideConfirmation）
+      required: [action_id, label, expires_at, open]
+      properties:
+        action_id:
+          type: string
+        label:
+          type: string
+          description: 要做什么（给人看的，按 Accept-Language，例如「删除日程」）；具体是哪一个在回答的文字里
+        expires_at:
+          type: string
+          format: date-time
+          description: 过了这个时间没确认就作废
+        open:
+          type: boolean
+          description: 现在还能点（还在等确认、没过期）；false = 已经确认、取消或过期了
     MessageSend:
       type: object
       required: [text]
@@ -2592,9 +2666,17 @@ components:
           nullable: true
           maxLength: 64
           description: 这一句带的图片（先在这条对话里上传拿到的 attachment_id；先只收一张）
+    ConfirmationDecision:
+      type: object
+      required: [decision]
+      properties:
+        decision:
+          type: string
+          enum: [confirm, cancel]
     ChatEventType:
       type: string
-      enum: [started, text, done, failed]
+      description: started → 若干 text / tool_started / tool_finished / research / confirmation（按发生的顺序）→ done 或 failed
+      enum: [started, text, tool_started, tool_finished, research, confirmation, done, failed]
     ChatEvent:
       type: object
       required: [type]
@@ -2607,6 +2689,16 @@ components:
         text:
           type: string
           description: text：回答的文字片段
+        call_id:
+          type: string
+          description: tool_started、tool_finished：这次工具调用的编号（对上开始和结束；成没成由回答的文字说）
+        label:
+          type: string
+          description: tool_started：在做什么（给人看的，按 Accept-Language，例如「在搜索：横滨 天气」）
+        research:
+          $ref: '#/components/schemas/ResearchCard'
+        confirmation:
+          $ref: '#/components/schemas/ConfirmationCard'
         status:
           type: string
           enum: [completed, incomplete, cancelled]
