@@ -15,7 +15,7 @@
  * - App 的接口都在 `/api/v1/` 下（公网只放行这一段）；`/v1/...` 是终端的语音连接，只在局域网。
  * - 网页版（另一个域名）从浏览器跨域调接口：服务端只放行网页版的那一个来源（CORS），令牌同样放在 `Authorization` 里，不用 cookie。
  *
- * OpenAPI spec version: 0.12.0
+ * OpenAPI spec version: 0.13.0
  */
 import type { Limits } from './limits';
 import type { Money } from './money';
@@ -29,4 +29,9 @@ export interface ClientConfig {
   limits: Limits;
   /** 管理员给账号 / 终端定月上限时的可选档位（默认货币） */
   monthly_cap_options?: Money[];
+  /**
+     * 新建 / 改日程时给主人选的提醒档位（提前多少秒，0 = 到点时；少的在前）。EventInput.alerts 不限于这几个
+     * @items.minimum 0
+     */
+  calendar_alert_options: number[];
 }

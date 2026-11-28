@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: haro App API
-  version: 0.12.0
+  version: 0.13.0
   description: |
     haro 手机 App 和网页版用的接口（第一批：账号、登录、我、花费、终端、管理员）。
     服务端和 App 都从这份契约生成代码；⛔ 两边都不绕过契约私下约定字段。契约每改一次升版本号。
@@ -908,6 +908,21 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
   /api/v1/receipts:
+    get:
+      tags: [expenses]
+      operationId: listReceipts
+      summary: 还没入账的小票（在读的、读好了等确认的、没读成的；新的在前）
+      responses:
+        '200':
+          description: 小票
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Receipt'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
     post:
       tags: [expenses]
       operationId: uploadReceipt
@@ -2046,7 +2061,7 @@ components:
     ExpenseGroup:
       type: object
       description: 汇总里的一组（一个分类或一家店）
-      required: [name, count, total]
+      required: [name, count, total, share]
       properties:
         key:
           type: string
@@ -2059,6 +2074,11 @@ components:
           type: integer
         total:
           $ref: '#/components/schemas/MoneyTotal'
+        share:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: 占这个月合计的比例（都换成默认货币以后；没算进合计的币种不算）
     ExpenseSummary:
       type: object
       required: [month, count, total, previous, categories, merchants]
@@ -2148,7 +2168,7 @@ components:
           description: 发给对方的登录地址（浏览器打开就用这个码登录、登录完到网页版）；没有网页版时为 null
     ClientConfig:
       type: object
-      required: [server_version, api_version, min_app_version, limits]
+      required: [server_version, api_version, min_app_version, limits, calendar_alert_options]
       properties:
         server_version:
           type: string
@@ -2165,6 +2185,12 @@ components:
           description: 管理员给账号 / 终端定月上限时的可选档位（默认货币）
           items:
             $ref: '#/components/schemas/Money'
+        calendar_alert_options:
+          type: array
+          description: 新建 / 改日程时给主人选的提醒档位（提前多少秒，0 = 到点时；少的在前）。EventInput.alerts 不限于这几个
+          items:
+            type: integer
+            minimum: 0
     Limits:
       type: object
       required: [profile_max_chars, display_name_max_chars, terminal_name_max_chars, page_size, attachment_max_bytes,

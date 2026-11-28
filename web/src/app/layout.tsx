@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 
 import { IntlProvider, interfaceLocale } from "@/i18n/IntlProvider";
+import { themeScript } from "@/lib/themeScript";
 
 import "./globals.css";
 
@@ -15,7 +16,10 @@ export const viewport: Viewport = { width: "device-width", initialScale: 1 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang={interfaceLocale}>
+    <html lang={interfaceLocale} suppressHydrationWarning>
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: themeScript }} />
+      </head>
       <body className="min-h-dvh antialiased">
         <IntlProvider>{children}</IntlProvider>
       </body>

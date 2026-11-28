@@ -1,11 +1,11 @@
 "use client";
 
-// 登录后的四个标签页共用的外壳：没登录的回登录页（读回令牌之后才判断），底部是标签。
+// 登录后各页共用的外壳：没登录的回登录页（读回令牌之后才判断）。
 import { useRouter } from "next/navigation";
 import { useEffect } from "react";
 
 import { useSignedIn } from "@/auth/useSignedIn";
-import { TabBar } from "@/components/TabBar";
+import { AppShell } from "@/components/shell/AppShell";
 
 export default function TabsLayout({ children }: { children: React.ReactNode }) {
   const router = useRouter();
@@ -18,10 +18,5 @@ export default function TabsLayout({ children }: { children: React.ReactNode }) 
   if (!hydrated || !signedIn) {
     return null;
   }
-  return (
-    <>
-      <main className="mx-auto max-w-3xl px-4 pt-6 pb-24">{children}</main>
-      <TabBar />
-    </>
-  );
+  return <AppShell>{children}</AppShell>;
 }

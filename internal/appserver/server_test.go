@@ -16,6 +16,7 @@ import (
 
 	"github.com/bukahou/haro/internal/accounts"
 	"github.com/bukahou/haro/internal/appapi"
+	"github.com/bukahou/haro/internal/calendar"
 	"github.com/bukahou/haro/internal/money"
 	"github.com/bukahou/haro/internal/realtimeproto"
 	"github.com/bukahou/haro/internal/spending"
@@ -131,6 +132,10 @@ func TestClientConfig(t *testing.T) {
 	options := body["monthly_cap_options"].([]any)
 	if len(options) != 2 || options[1].(map[string]any)["amount"] != "3000" || options[1].(map[string]any)["currency"] != "JPY" {
 		t.Errorf("档位：%v", options)
+	}
+	alerts := body["calendar_alert_options"].([]any)
+	if len(alerts) != len(calendar.AlertChoices) || alerts[0] != float64(0) || alerts[len(alerts)-1] != float64(24*60*60) {
+		t.Errorf("提醒档位：%v", alerts)
 	}
 }
 

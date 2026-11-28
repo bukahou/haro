@@ -18,6 +18,7 @@ import (
 // Expenses 是记账（expenses.Service 实现）。
 type Expenses interface {
 	Upload(ctx context.Context, person string, data []byte, hint expenses.Hint) (expenses.Receipt, error)
+	OpenReceipts(ctx context.Context, person string) ([]expenses.Receipt, error)
 	Receipt(ctx context.Context, person, id string) (expenses.Receipt, error)
 	ReceiptImage(ctx context.Context, person, id string) ([]byte, error)
 	Confirm(ctx context.Context, person, id string, draft expenses.Draft) (expenses.Expense, error)
@@ -262,6 +263,23 @@ func (s *Server) GetReceipt(ctx context.Context, request appapi.GetReceiptReques
 	return appapi.GetReceipt200JSONResponse(s.receiptReply(ctx, receipt)), nil
 }
 
+// ListReceipts 实现 appapi.StrictServerInterface。
+func (s *Server) ListReceipts(ctx context.Context, _ appapi.ListReceiptsRequestObject) (appapi.ListReceiptsResponseObject, error) {
+	person, denied := s.expensesFor(ctx)
+	if denied != nil {
+		return *denied, nil
+	}
+	receipts, err := s.opts.Expenses.OpenReceipts(ctx, person)
+	if err != nil {
+		return s.expensesProblem(ctx, "列小票", err), nil
+	}
+	reply := make(appapi.ListReceipts200JSONResponse, 0, len(receipts))
+	for _, receipt := range receipts {
+		reply = append(reply, s.receiptReply(ctx, receipt))
+	}
+	return reply, nil
+}
+
 // DiscardReceipt 实现 appapi.StrictServerInterface。
 func (s *Server) DiscardReceipt(ctx context.Context, request appapi.DiscardReceiptRequestObject) (appapi.DiscardReceiptResponseObject, error) {
 	person, denied := s.expensesFor(ctx)
@@ -414,31 +432,43 @@ func (s *Server) SummarizeExpenses(ctx context.Context, request appapi.Summarize
 	if err != nil {
 		return s.expensesProblem(ctx, "读分类", err), nil
 	}
-	total := func(sum money.Sum) (appapi.MoneyTotal, error) {
+	// total 换成默认货币的合计；micros 是换算后的数（算每组占这个月多少用）
+	total := func(sum money.Sum) (appapi.MoneyTotal, int64, error) {
 		converted, err := money.ConvertWhatCan(rates, sum, currency)
-		return s.convertedTotal(ctx, sum, converted), err
+		return s.convertedTotal(ctx, sum, converted), converted.Amount.Micros, err
 	}
 	reply := appapi.ExpenseSummary{Month: summary.Month, Count: summary.Count,
 		Categories: []appapi.ExpenseGroup{}, Merchants: []appapi.ExpenseGroup{}}
-	if reply.Total, err = total(summary.Sum); err != nil {
+	var monthMicros int64
+	if reply.Total, monthMicros, err = total(summary.Sum); err != nil {
 		return s.expensesProblem(ctx, "换算账目", err), nil
 	}
-	if reply.Previous, err = total(summary.Previous); err != nil {
+	if reply.Previous, _, err = total(summary.Previous); err != nil {
 		return s.expensesProblem(ctx, "换算账目", err), nil
 	}
-	for _, group := range summary.Categories {
-		item := appapi.ExpenseGroup{Count: group.Count, Name: s.texts.say(languageFrom(ctx), "expense_category.none", nil)}
-		if group.Key != "" {
-			item.Key, item.Name = &group.Key, namer.category(group.Key).Name
+	group := func(name string, key *string, sum money.Sum, count int) (appapi.ExpenseGroup, error) {
+		item := appapi.ExpenseGroup{Count: count, Name: name, Key: key}
+		var micros int64
+		item.Total, micros, err = total(sum)
+		if monthMicros > 0 {
+			item.Share = min(float32(float64(micros)/float64(monthMicros)), 1)
 		}
-		if item.Total, err = total(group.Sum); err != nil {
+		return item, err
+	}
+	for _, category := range summary.Categories {
+		name, key := s.texts.say(languageFrom(ctx), "expense_category.none", nil), (*string)(nil)
+		if category.Key != "" {
+			name, key = namer.category(category.Key).Name, &category.Key
+		}
+		item, err := group(name, key, category.Sum, category.Count)
+		if err != nil {
 			return s.expensesProblem(ctx, "换算账目", err), nil
 		}
 		reply.Categories = append(reply.Categories, item)
 	}
-	for _, group := range summary.Merchants {
-		item := appapi.ExpenseGroup{Count: group.Count, Name: group.Key}
-		if item.Total, err = total(group.Sum); err != nil {
+	for _, merchant := range summary.Merchants {
+		item, err := group(merchant.Key, nil, merchant.Sum, merchant.Count)
+		if err != nil {
 			return s.expensesProblem(ctx, "换算账目", err), nil
 		}
 		reply.Merchants = append(reply.Merchants, item)

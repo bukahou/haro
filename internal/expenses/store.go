@@ -140,6 +140,11 @@ func (s *Store) receipt(ctx context.Context, id string) (Receipt, error) {
 	return receipts[0], nil
 }
 
+// openReceipts 是这个人还没入账的小票（新的在前）。
+func (s *Store) openReceipts(ctx context.Context, person string) ([]Receipt, error) {
+	return s.receipts(ctx, `SELECT `+receiptColumns+` FROM receipts WHERE person = ? AND status != ? ORDER BY created_at DESC, id`, person, StatusConfirmed)
+}
+
 // parsingReceipts 是还在解析的小票（服务端重启时没解析完的）。
 func (s *Store) parsingReceipts(ctx context.Context) ([]Receipt, error) {
 	return s.receipts(ctx, `SELECT `+receiptColumns+` FROM receipts WHERE status = ? ORDER BY created_at`, StatusParsing)
