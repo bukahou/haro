@@ -41,7 +41,7 @@ func OpenSQLite(ctx context.Context, path string) (*SQLiteStore, error) {
 // Close 关闭数据库。
 func (s *SQLiteStore) Close() error { return s.db.Close() }
 
-const columns = `id, person, text, rrule, starts_at, next_at, created_at, cancelled_at, spoken_at, missed_at`
+const columns = `id, person, text, rrule, starts_at, next_at, created_at, cancelled_at, spoken_at, missed_at, event_id, lead_seconds`
 
 func (s *SQLiteStore) Add(ctx context.Context, r Reminder) (Reminder, error) {
 	r.Text = strings.TrimSpace(r.Text)
@@ -49,8 +49,9 @@ func (s *SQLiteStore) Add(ctx context.Context, r Reminder) (Reminder, error) {
 		return Reminder{}, errors.New("提醒缺少人、要说的话或时间")
 	}
 	r.CreatedAt = time.Now().UTC().Truncate(time.Second)
-	result, err := s.db.ExecContext(ctx, `INSERT INTO reminders (person, text, rrule, starts_at, next_at, created_at)
-		VALUES (?, ?, ?, ?, ?, ?)`, r.Person, r.Text, nullString(r.Rule), r.StartsAt.Unix(), r.NextAt.Unix(), r.CreatedAt.Unix())
+	result, err := s.db.ExecContext(ctx, `INSERT INTO reminders (person, text, rrule, starts_at, next_at, created_at, event_id, lead_seconds)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, r.Person, r.Text, nullString(r.Rule), r.StartsAt.Unix(), r.NextAt.Unix(), r.CreatedAt.Unix(),
+		nullString(r.EventID), int64(r.Lead.Seconds()))
 	if err != nil {
 		return Reminder{}, err
 	}
@@ -95,6 +96,28 @@ func (s *SQLiteStore) Cancel(ctx context.Context, person string, id int64, at ti
 func (s *SQLiteStore) Restore(ctx context.Context, person string, id int64, next time.Time) (Reminder, error) {
 	return s.change(ctx, person, id, `UPDATE reminders SET cancelled_at = NULL, next_at = ?
 		WHERE person = ? AND id = ? AND cancelled_at IS NOT NULL`, next.Unix(), person, id)
+}
+
+// ForEvent 是一条日程在用的提醒（没取消的）。
+func (s *SQLiteStore) ForEvent(ctx context.Context, eventID string) ([]Reminder, error) {
+	return s.query(ctx, `SELECT `+columns+` FROM reminders WHERE event_id = ? AND cancelled_at IS NULL ORDER BY lead_seconds DESC, id`, eventID)
+}
+
+// CancelForEvent 取消一条日程在用的提醒（日程改了、删了）。
+func (s *SQLiteStore) CancelForEvent(ctx context.Context, eventID string, at time.Time) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE reminders SET cancelled_at = ? WHERE event_id = ? AND cancelled_at IS NULL`, at.Unix(), eventID)
+	return err
+}
+
+// Unadopted 是还没挂到日程上的在用提醒（旧的；日历启动时收编）。
+func (s *SQLiteStore) Unadopted(ctx context.Context) ([]Reminder, error) {
+	return s.query(ctx, `SELECT `+columns+` FROM reminders WHERE event_id IS NULL AND cancelled_at IS NULL ORDER BY id`)
+}
+
+// Adopt 把一条旧提醒挂到日程上：记下 event_id，规则清掉（之后下一次到点问日历）。
+func (s *SQLiteStore) Adopt(ctx context.Context, id int64, eventID string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE reminders SET event_id = ?, rrule = NULL WHERE id = ? AND event_id IS NULL`, eventID, id)
+	return err
 }
 
 // change 改一条（只改符合条件的那条），看影响行数决定有没有这一条（G5），返回改完的样子。
@@ -160,13 +183,13 @@ func (s *SQLiteStore) query(ctx context.Context, statement string, args ...any) 
 	var list []Reminder
 	for rows.Next() {
 		var r Reminder
-		var rule sql.NullString
-		var starts, created int64
+		var rule, event sql.NullString
+		var starts, created, lead int64
 		var next, cancelled, spoken, missed sql.NullInt64
-		if err := rows.Scan(&r.ID, &r.Person, &r.Text, &rule, &starts, &next, &created, &cancelled, &spoken, &missed); err != nil {
+		if err := rows.Scan(&r.ID, &r.Person, &r.Text, &rule, &starts, &next, &created, &cancelled, &spoken, &missed, &event, &lead); err != nil {
 			return nil, err
 		}
-		r.Rule = rule.String
+		r.Rule, r.EventID, r.Lead = rule.String, event.String, time.Duration(lead)*time.Second
 		r.StartsAt, r.CreatedAt = time.Unix(starts, 0).UTC(), time.Unix(created, 0).UTC()
 		r.NextAt, r.CancelledAt, r.SpokenAt, r.MissedAt = fromNull(next), fromNull(cancelled), fromNull(spoken), fromNull(missed)
 		list = append(list, r)

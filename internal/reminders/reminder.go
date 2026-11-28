@@ -26,6 +26,9 @@ type Reminder struct {
 	CancelledAt time.Time // 零值 = 在用
 	SpokenAt    time.Time // 最近一次说出来的时间；零值 = 还没说过
 	MissedAt    time.Time // 错过了、还没告诉主人的那一次到点；零值 = 没有
+	// EventID：属于日历里的哪条日程（这种提醒没有 Rule，下一次到点问日历）；空 = 还没收编的旧提醒
+	EventID string
+	Lead    time.Duration // 比日程开始提前多久
 }
 
 // Repeats 表示这是重复的提醒。
