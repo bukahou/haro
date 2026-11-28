@@ -325,7 +325,25 @@
     "deleteTitle": "删除这条对话？",
     "deleteBody": "「{title}」会从列表里去掉。",
     "deleted": "删掉了",
-    "undo": "撤销"
+    "undo": "撤销",
+    "card": {
+      "confirm": "确认",
+      "cancel": "取消"
+    },
+    "research": {
+      "title": "后台调查",
+      "running": "在查，查完卡片上会显示结论",
+      "open": "看完整结论",
+      "details": "看调查"
+    },
+    "confirmation": {
+      "needed": "需要你确认",
+      "expired": "已过期，没有执行",
+      "closed": "已经处理了",
+      "cancel": "取消",
+      "confirm": "确认",
+      "countdown": "{seconds} 秒内不确认就自动作废"
+    }
   },
   "backstory": {
     "title": "背景记录池",
