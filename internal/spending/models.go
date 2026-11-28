@@ -75,14 +75,14 @@ func (m *MeteredChatModel) StreamReply(ctx context.Context, request brain.ChatRe
 
 func (m *MeteredChatModel) record(ctx context.Context, usage *brain.ReplyUsage) {
 	charge := Charge{Purpose: m.purpose, Item: "llm:" + m.model, InputTokens: usage.PromptTokens, OutputTokens: usage.OutputTokens,
-		CacheReadTokens: usage.CacheReadTokens, CacheWriteTokens: usage.CacheWriteTokens, Yen: m.pricing.LLMYen(m.model, *usage),
+		CacheReadTokens: usage.CacheReadTokens, CacheWriteTokens: usage.CacheWriteTokens, Cost: m.pricing.LLMCost(m.model, *usage),
 		Incomplete: usage.Incomplete, TokensUnknown: usage.TokensUnknown}
 	// 不跟着这一轮取消：回答被打断（ctx 取消）时，已经产生的费用照样要记；期限另算（recordTimeout）。
 	// 记上的每一笔由账本那层打日志；写不进的由账本留着补写，补写成功之前不放行有上限的付费调用，见 WithBookkeeping
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
 	defer cancel()
 	if err := m.ledger.Record(ctx, charge); err != nil {
-		m.logger.Warn("💴 这次的用量没写进账本", "err", err, "item", charge.Item, "yen", charge.Yen, "incomplete", charge.Incomplete)
+		m.logger.Warn("💴 这次的用量没写进账本", "err", err, "item", charge.Item, "cost", charge.Cost.String(), "incomplete", charge.Incomplete)
 	}
 }
 

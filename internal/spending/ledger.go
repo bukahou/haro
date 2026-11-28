@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bukahou/haro/internal/money"
 	"github.com/bukahou/haro/internal/sqliteschema"
 )
 
@@ -51,17 +52,17 @@ type Charge struct {
 	// 提示词缓存：输入里有多少是读缓存 / 写缓存的（价格不同；看缓存效果也靠它们）
 	CacheReadTokens  int
 	CacheWriteTokens int
-	Credits          int     // 搜索服务的积分
-	Yen              float64 // 折成日元（按配置的单价与汇率；不完整时只按知道的部分算）
+	Credits          int          // 搜索服务的积分
+	Cost             money.Amount // 花了多少，原始币种（服务商按美元收费；不完整时只按知道的部分算）
 	// Incomplete：调用被打断或出错，用量只知道一部分：输出数不知道（账本里记 NULL）。
 	// TokensUnknown：连输入也不知道（还没开始就失败了），各项 token 都记 NULL。不知道的不编成 0
 	Incomplete    bool
 	TokensUnknown bool
 }
 
-// Totals 是一段时间的合计。
+// Totals 是一段时间的合计：花费按币种分开（换成默认货币在判断额度、汇总时做）。
 type Totals struct {
-	Yen     float64
+	Spent   money.Sum
 	Credits int
 }
 
@@ -75,17 +76,17 @@ type Ledger interface {
 	FlushPending(ctx context.Context) error
 	// CheckWritable 确认账本现在写得进去（就绪检查用）：有待补写的先补写，此外不改任何数据。
 	CheckWritable(ctx context.Context) error
-	// RaiseCap 记下一次主人确认的临时提高上限；CapRaised 合计 since 之后提高了多少日元。
+	// RaiseCap 记下一次主人确认的临时提高上限；CapRaised 合计 since 之后提高了多少（按币种分开）。
 	RaiseCap(ctx context.Context, raise CapRaise) error
-	CapRaised(ctx context.Context, since time.Time) (float64, error)
+	CapRaised(ctx context.Context, since time.Time) (money.Sum, error)
 	Close() error
 }
 
 // CapRaise 是主人口头确认的一次临时提高上限。
 type CapRaise struct {
-	At     time.Time // 零值 = 现在
-	Yen    float64
-	Person string // 谁确认的（对话名）
+	At     time.Time    // 零值 = 现在
+	Amount money.Amount // 提高了多少（当时的默认货币）
+	Person string       // 谁确认的（对话名）
 }
 
 // OpenLedger 打开用量账本：path 是 SQLite 文件路径；空 = 只在内存里（服务端重启就清零，额度也跟着重置）。
@@ -121,16 +122,16 @@ func (l *sqliteLedger) Record(ctx context.Context, charge Charge) error {
 	inputUnknown := charge.TokensUnknown
 	outputUnknown := charge.TokensUnknown || charge.Incomplete
 	_, err := l.db.ExecContext(ctx,
-		`INSERT INTO charges (at, purpose, item, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, credits, yen, incomplete)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO charges (at, purpose, item, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, credits,
+		 amount_micros, currency, incomplete) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		charge.At.Unix(), string(charge.Purpose), charge.Item, known(charge.InputTokens, inputUnknown),
 		known(charge.OutputTokens, outputUnknown), known(charge.CacheReadTokens, inputUnknown),
-		known(charge.CacheWriteTokens, inputUnknown), charge.Credits, charge.Yen, charge.Incomplete)
+		known(charge.CacheWriteTokens, inputUnknown), charge.Credits, charge.Cost.Micros, charge.Cost.Currency, charge.Incomplete)
 	return err
 }
 
 func (l *sqliteLedger) Total(ctx context.Context, since time.Time, purposes ...Purpose) (Totals, error) {
-	query := `SELECT COALESCE(SUM(yen), 0), COALESCE(SUM(credits), 0) FROM charges WHERE at >= ?`
+	query := `SELECT currency, COALESCE(SUM(amount_micros), 0), COALESCE(SUM(credits), 0) FROM charges WHERE at >= ?`
 	args := []any{since.Unix()}
 	if len(purposes) > 0 {
 		query += ` AND purpose IN (?` + strings.Repeat(",?", len(purposes)-1) + `)`
@@ -138,9 +139,25 @@ func (l *sqliteLedger) Total(ctx context.Context, since time.Time, purposes ...P
 			args = append(args, string(purpose))
 		}
 	}
-	var totals Totals
-	err := l.db.QueryRowContext(ctx, query, args...).Scan(&totals.Yen, &totals.Credits)
-	return totals, err
+	rows, err := l.db.QueryContext(ctx, query+` GROUP BY currency`, args...)
+	if err != nil {
+		return Totals{}, err
+	}
+	defer rows.Close()
+	totals := Totals{Spent: money.Sum{}}
+	for rows.Next() {
+		var code string
+		var micros int64
+		var credits int
+		if err := rows.Scan(&code, &micros, &credits); err != nil {
+			return Totals{}, err
+		}
+		totals.Credits += credits
+		if code != "" { // 不花钱的（例如免费额度内的搜索）没有币种
+			totals.Spent.Add(money.Amount{Micros: micros, Currency: code})
+		}
+	}
+	return totals, rows.Err()
 }
 
 // CheckWritable 开一个写事务（拿到写锁）再回滚：磁盘只读、库文件被锁住时会出错，数据不变。
@@ -162,14 +179,28 @@ func (l *sqliteLedger) RaiseCap(ctx context.Context, raise CapRaise) error {
 	if raise.At.IsZero() {
 		raise.At = time.Now()
 	}
-	_, err := l.db.ExecContext(ctx, `INSERT INTO cap_raises (at, yen, person) VALUES (?, ?, ?)`, raise.At.Unix(), raise.Yen, raise.Person)
+	_, err := l.db.ExecContext(ctx, `INSERT INTO cap_raises (at, amount_micros, currency, person) VALUES (?, ?, ?, ?)`,
+		raise.At.Unix(), raise.Amount.Micros, raise.Amount.Currency, raise.Person)
 	return err
 }
 
-func (l *sqliteLedger) CapRaised(ctx context.Context, since time.Time) (float64, error) {
-	var yen float64
-	err := l.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(yen), 0) FROM cap_raises WHERE at >= ?`, since.Unix()).Scan(&yen)
-	return yen, err
+func (l *sqliteLedger) CapRaised(ctx context.Context, since time.Time) (money.Sum, error) {
+	rows, err := l.db.QueryContext(ctx,
+		`SELECT currency, COALESCE(SUM(amount_micros), 0) FROM cap_raises WHERE at >= ? GROUP BY currency`, since.Unix())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	raised := money.Sum{}
+	for rows.Next() {
+		var code string
+		var micros int64
+		if err := rows.Scan(&code, &micros); err != nil {
+			return nil, err
+		}
+		raised.Add(money.Amount{Micros: micros, Currency: code})
+	}
+	return raised, rows.Err()
 }
 
 func (l *sqliteLedger) Close() error { return l.db.Close() }

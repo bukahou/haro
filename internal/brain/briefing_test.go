@@ -210,7 +210,7 @@ type spokenErr struct{}
 
 func (spokenErr) Error() string { return "over" }
 func (spokenErr) Phrase() (string, map[string]string) {
-	return brain.PhraseOverMonthlyBudget, map[string]string{"spent": "3100", "limit": "3000"}
+	return brain.PhraseOverMonthlyBudget, map[string]string{"spent": "3100", "limit": "3000", brain.PhraseCurrency: "JPY"}
 }
 
 func (overBudgetModel) StreamReply(context.Context, brain.ChatRequest) iter.Seq2[brain.ReplyDelta, error] {

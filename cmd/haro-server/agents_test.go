@@ -13,6 +13,7 @@ import (
 
 	"github.com/bukahou/haro/internal/agents"
 	"github.com/bukahou/haro/internal/config"
+	"github.com/bukahou/haro/internal/money"
 	"github.com/bukahou/haro/internal/spending"
 )
 
@@ -40,7 +41,7 @@ func testAssembly(t *testing.T, settings config.ServerSettings, overrides map[st
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	pricing := spending.Pricing{Models: map[string]spending.TokenPrice{"base-model": {Free: true}, "strong-model": {Free: true}}}
 	return agentAssembly{settings: settings, catalog: catalog, client: &http.Client{}, pricing: pricing, ledger: ledger,
-		guard: spending.NewGuard(ledger, spending.Limits{}, logger), logger: logger}
+		guard: spending.NewGuard(ledger, spending.Limits{}, money.SameCurrencyOnly{}, logger), logger: logger}
 }
 
 // cloudSettings 是用 OpenAI 兼容接口的云端配置（只建模型、不连网），更强的模型用在 uses 上。
@@ -76,7 +77,7 @@ func TestBuildAgentsFromBuiltinDefinitions(t *testing.T) {
 // 没设上限时没有。
 func TestBuildOverBudgetAgent(t *testing.T) {
 	settings := cloudSettings(nil, config.VisionByExpert)
-	settings.MonthlyYen, settings.MonthlyRaiseYen, settings.OverBudgetDailyCalls = 3000, 500, 30
+	settings.DefaultCurrency, settings.MonthlyCap, settings.MonthlyRaise, settings.OverBudgetDailyCalls = "JPY", 3000, 500, 30
 	built, err := testAssembly(t, settings, nil).build(nil, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -93,7 +94,7 @@ func TestBuildOverBudgetAgent(t *testing.T) {
 	if strings.Contains(judge.Instructions, "{{") || judge.MaxSteps != 1 {
 		t.Errorf("额度判断：%+v", judge)
 	}
-	settings.MonthlyYen = 0
+	settings.MonthlyCap = 0
 	if built, err := testAssembly(t, settings, nil).build(nil, nil); err != nil || built.overBudget != nil {
 		t.Errorf("不限月度费用时不应有额度判断：%v %+v", err, built.overBudget)
 	}
@@ -153,7 +154,7 @@ func TestBuildAgentsRejectsBadToolLists(t *testing.T) {
 // 阳性对照：正文跟着去掉就起得来。
 func TestOverBudgetPromptMentionsOnlyAllowedTools(t *testing.T) {
 	settings := cloudSettings(nil, config.VisionByExpert)
-	settings.MonthlyYen, settings.MonthlyRaiseYen, settings.OverBudgetDailyCalls = 3000, 500, 30
+	settings.DefaultCurrency, settings.MonthlyCap, settings.MonthlyRaise, settings.OverBudgetDailyCalls = "JPY", 3000, 500, 30
 	judge := "---\ntitle: 额度判断\nmode: subtask\nmodel: base\npurpose: chat\ntools: [raise_monthly_cap]\nmax_steps: 1\n---\n%s\n"
 	mentionsConfirm := strings.Replace(judge, "%s", "要提高就调用 {{.RaiseTool}}；同意就调用 {{.ConfirmTool}}。", 1)
 	if _, err := testAssembly(t, settings, map[string]string{agents.OverBudget: mentionsConfirm}).build(nil, nil); err == nil {

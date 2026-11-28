@@ -17,7 +17,7 @@ func (l *loggingLedger) Record(ctx context.Context, charge Charge) error {
 	if err := l.Ledger.Record(ctx, charge); err != nil {
 		return err
 	}
-	args := []any{"purpose", charge.Purpose, "item", charge.Item, "yen", charge.Yen}
+	args := []any{"purpose", charge.Purpose, "item", charge.Item, "cost", charge.Cost.String()}
 	switch {
 	case charge.Credits > 0:
 		args = append(args, "credits", charge.Credits)
@@ -43,6 +43,6 @@ func (l *loggingLedger) RaiseCap(ctx context.Context, raise CapRaise) error {
 	if err := l.Ledger.RaiseCap(ctx, raise); err != nil {
 		return err
 	}
-	l.logger.Info("记账：主人确认临时提高这个月的上限", "yen", raise.Yen, "person", raise.Person)
+	l.logger.Info("记账：主人确认临时提高这个月的上限", "amount", raise.Amount.String(), "person", raise.Person)
 	return nil
 }

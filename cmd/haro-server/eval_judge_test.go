@@ -126,7 +126,7 @@ func newEvalJudge(t *testing.T, settings config.ServerSettings, key, model, thin
 	}
 	return &evalJudge{ChatModel: llm.NewAnthropicChatModel(llm.AnthropicOptions{API: api, Model: model, MaxTokens: maxTokens,
 		Effort: "low", Thinking: thinking, MaxRetries: 2}), model: model,
-		pricing: spending.Pricing{USDToYen: 1, Models: map[string]spending.TokenPrice{model: price}}}
+		pricing: spending.Pricing{Models: map[string]spending.TokenPrice{model: price}}}
 }
 
 func (j *evalJudge) StreamReply(ctx context.Context, request brain.ChatRequest) iter.Seq2[brain.ReplyDelta, error] {
@@ -134,7 +134,7 @@ func (j *evalJudge) StreamReply(ctx context.Context, request brain.ChatRequest) 
 		for delta, err := range j.ChatModel.StreamReply(ctx, request) {
 			if delta.Usage != nil {
 				j.mu.Lock()
-				j.usd += j.pricing.LLMYen(j.model, *delta.Usage)
+				j.usd += j.pricing.LLMCost(j.model, *delta.Usage).Value()
 				j.mu.Unlock()
 			}
 			if !yield(delta, err) {

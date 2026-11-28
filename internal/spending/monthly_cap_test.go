@@ -20,9 +20,9 @@ func TestMonthlyCapRaise(t *testing.T) {
 		t.Fatal(err)
 	}
 	november := time.Date(2026, 11, 21, 12, 0, 0, 0, time.Local)
-	guard := NewGuard(ledger, Limits{MonthlyYen: 100, MonthlyRaiseYen: 50}, quietLogger)
+	guard := NewGuard(ledger, Limits{Currency: "JPY", Monthly: jpy(100), MonthlyRaise: jpy(50)}, fixedRates{}, quietLogger)
 	guard.now = func() time.Time { return november }
-	if err := ledger.Record(ctx, Charge{At: november, Purpose: PurposeChat, Item: "llm:cloud", Yen: 120}); err != nil {
+	if err := ledger.Record(ctx, Charge{At: november, Purpose: PurposeChat, Item: "llm:cloud", Cost: jpy(120)}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -35,7 +35,7 @@ func TestMonthlyCapRaise(t *testing.T) {
 		t.Errorf("念的那句要说能提高多少：%s %v", key, values)
 	}
 	limit, err := guard.RaiseMonthlyCap(confirmedRaise("主人"), "主人")
-	if err != nil || limit != 150 {
+	if err != nil || limit != jpy(150) {
 		t.Fatalf("提高后上限应为 150：%v %v", limit, err)
 	}
 	if err := guard.AllowPaidLLM(ctx); err != nil {
@@ -48,7 +48,7 @@ func TestMonthlyCapRaise(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer reopened.Close()
-	guard = NewGuard(reopened, Limits{MonthlyYen: 100, MonthlyRaiseYen: 50}, quietLogger)
+	guard = NewGuard(reopened, Limits{Currency: "JPY", Monthly: jpy(100), MonthlyRaise: jpy(50)}, fixedRates{}, quietLogger)
 	guard.now = func() time.Time { return november }
 	if err := guard.AllowPaidLLM(ctx); err != nil {
 		t.Errorf("重开账本后提高的照样算：%v", err)
@@ -56,7 +56,7 @@ func TestMonthlyCapRaise(t *testing.T) {
 
 	december := time.Date(2026, 12, 2, 12, 0, 0, 0, time.Local)
 	guard.now = func() time.Time { return december }
-	if err := reopened.Record(ctx, Charge{At: december, Purpose: PurposeChat, Item: "llm:cloud", Yen: 120}); err != nil {
+	if err := reopened.Record(ctx, Charge{At: december, Purpose: PurposeChat, Item: "llm:cloud", Cost: jpy(120)}); err != nil {
 		t.Fatal(err)
 	}
 	if err := guard.AllowPaidLLM(ctx); !errors.Is(err, brain.ErrMonthlyCapReached) {
@@ -74,7 +74,7 @@ func confirmedRaise(person string) context.Context {
 func TestMonthlyCapRaiseNeedsConfirmation(t *testing.T) {
 	ctx := context.Background()
 	ledger := openTestLedger(t)
-	guard := NewGuard(ledger, Limits{MonthlyYen: 100, MonthlyRaiseYen: 50}, quietLogger)
+	guard := NewGuard(ledger, Limits{Currency: "JPY", Monthly: jpy(100), MonthlyRaise: jpy(50)}, fixedRates{}, quietLogger)
 	for label, call := range map[string]context.Context{
 		"绕过会话直接调用":  ctx,
 		"带着别的工具的确认": brain.WithConfirmation(ctx, brain.Confirmation{ActionID: "act_1", Tool: "delete_note", Person: "主人"}),
@@ -84,10 +84,10 @@ func TestMonthlyCapRaiseNeedsConfirmation(t *testing.T) {
 			t.Errorf("%s：应拒绝：%v", label, err)
 		}
 	}
-	if raised, err := ledger.CapRaised(ctx, time.Time{}); err != nil || raised != 0 {
+	if raised, err := ledger.CapRaised(ctx, time.Time{}); err != nil || raised.Amount("JPY").Micros != 0 {
 		t.Fatalf("没确认的不该提高：%v %v", raised, err)
 	}
-	if limit, err := guard.RaiseMonthlyCap(confirmedRaise("主人"), "主人"); err != nil || limit != 150 {
+	if limit, err := guard.RaiseMonthlyCap(confirmedRaise("主人"), "主人"); err != nil || limit != jpy(150) {
 		t.Errorf("带着主人的确认应能提高：%v %v", limit, err)
 	}
 }
@@ -96,8 +96,8 @@ func TestMonthlyCapRaiseNeedsConfirmation(t *testing.T) {
 func TestMonthlyCapWithoutRaise(t *testing.T) {
 	ctx := context.Background()
 	ledger := openTestLedger(t)
-	guard := NewGuard(ledger, Limits{MonthlyYen: 100, SearchDailyCredits: 1}, quietLogger)
-	if err := ledger.Record(ctx, Charge{Purpose: PurposeSearch, Item: "tavily", Credits: 1, Yen: 120}); err != nil {
+	guard := NewGuard(ledger, Limits{Currency: "JPY", Monthly: jpy(100), SearchDailyCredits: 1}, fixedRates{}, quietLogger)
+	if err := ledger.Record(ctx, Charge{Purpose: PurposeSearch, Item: "tavily", Credits: 1, Cost: jpy(120)}); err != nil {
 		t.Fatal(err)
 	}
 	var spoken brain.SpokenError

@@ -42,6 +42,7 @@ import (
 
 	"github.com/bukahou/haro/internal/config"
 	"github.com/bukahou/haro/internal/llm"
+	"github.com/bukahou/haro/internal/money"
 	"github.com/bukahou/haro/internal/research"
 	"github.com/bukahou/haro/internal/spending"
 )
@@ -281,7 +282,7 @@ func buildExamReviewer(t *testing.T, shared researchShared, settings config.Serv
 	recorded := &recordingLedger{Ledger: ledger}
 	logger := slog.New(slog.DiscardHandler)
 	assembly := agentAssembly{settings: settings, catalog: shared.catalog, claude: shared.api, client: &http.Client{},
-		pricing: shared.pricing, ledger: recorded, guard: spending.NewGuard(recorded, spending.Limits{}, logger), logger: logger}
+		pricing: shared.pricing, ledger: recorded, guard: spending.NewGuard(recorded, spending.Limits{}, money.SameCurrencyOnly{}, logger), logger: logger}
 	built, err := assembly.researchAgents(researchLimits(settings))
 	if err != nil {
 		t.Fatal(err)
@@ -309,7 +310,7 @@ func runExamReview(reviewer examReviewer, arm string, today time.Time, item exam
 	reviewer.ledger.mu.Lock()
 	defer reviewer.ledger.mu.Unlock()
 	for _, charge := range reviewer.ledger.charges[before:] {
-		run.USD += charge.Yen // 汇率记成 1：即美元
+		run.USD += charge.Cost.Value() // 按原始的美元记
 	}
 	return run
 }

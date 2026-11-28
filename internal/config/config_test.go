@@ -77,7 +77,7 @@ func TestValidateStrongLLM(t *testing.T) {
 	}
 	strong := base
 	strong.StrongLLMModel, strong.StrongLLMUse, strong.StrongLLMEffort = "claude-sonnet-5-5", []string{"vision", "correction", "research"}, "low"
-	strong.USDToYen = 160
+	strong.DefaultCurrency = "JPY"
 	if err := strong.validateStrongLLM(); err != nil {
 		t.Fatalf("配齐了应通过：%v", err)
 	}
@@ -97,7 +97,7 @@ func TestValidateStrongLLM(t *testing.T) {
 		change func(*ServerSettings)
 		want   string
 	}{
-		{"没设汇率", func(s *ServerSettings) { s.USDToYen = 0 }, "HARO_USD_JPY"},
+		{"没设默认货币", func(s *ServerSettings) { s.DefaultCurrency = "" }, "HARO_DEFAULT_CURRENCY"},
 		{"不认识的用途", func(s *ServerSettings) { s.StrongLLMUse = []string{"vision", "chat"} }, "HARO_STRONG_LLM_USE"},
 		{"云端接口没配好", func(s *ServerSettings) { s.CloudLLMModel = "" }, "HARO_STRONG_LLM_MODEL"},
 		{"看画面的方式不对", func(s *ServerSettings) { s.StrongLLMVisionMode = "both" }, "HARO_STRONG_LLM_VISION_MODE"},
@@ -325,8 +325,8 @@ func TestValidateBrainTable(t *testing.T) {
 		{"不认识的模型来源", func(s *ServerSettings) { s.LLMProvider = "remote" }, "HARO_LLM_PROVIDER"},
 		{"用云端却没设模型", func(s *ServerSettings) { s.LLMProvider, s.CloudLLMModel = LLMCloud, "" }, "HARO_CLOUD_LLM_MODEL"},
 		{"用云端却没设汇率", func(s *ServerSettings) {
-			s.LLMProvider, s.CloudLLMModel, s.AnthropicAPIKey, s.USDToYen = LLMCloud, "claude-haiku-5-5", "k", 0
-		}, "HARO_USD_JPY"},
+			s.LLMProvider, s.CloudLLMModel, s.AnthropicAPIKey, s.DefaultCurrency = LLMCloud, "claude-haiku-5-5", "k", ""
+		}, "HARO_DEFAULT_CURRENCY"},
 		{"开着记事却没有记事库", func(s *ServerSettings) { s.ToolGroups, s.NotesDB = nil, "" }, "HARO_NOTES_DB"},
 		{"记事候选上限为零", func(s *ServerSettings) { s.ToolGroups, s.NotesDB, s.NotesListLimit = nil, "/tmp/notes.db", 0 }, "HARO_NOTES_LIST_LIMIT"},
 		{"工具组写错", func(s *ServerSettings) { s.ToolGroups = []string{"memory", "wether"} }, "HARO_TOOLS"},
@@ -358,8 +358,8 @@ func localServerSettings(t *testing.T) ServerSettings {
 // cloudServerSettings 是用云端模型、配齐了费用刹车（月度上限 + 账本）的服务端配置。
 func cloudServerSettings(t *testing.T) ServerSettings {
 	settings := localServerSettings(t)
-	settings.LLMProvider, settings.CloudLLMModel, settings.AnthropicAPIKey, settings.USDToYen = LLMCloud, "claude-haiku-5-5", "k", 150
-	settings.MonthlyYen, settings.UsageDB = 1000, "/tmp/usage.db"
+	settings.LLMProvider, settings.CloudLLMModel, settings.AnthropicAPIKey, settings.DefaultCurrency = LLMCloud, "claude-haiku-5-5", "k", "JPY"
+	settings.MonthlyCap, settings.UsageDB = 1000, "/tmp/usage.db"
 	return settings
 }
 
@@ -375,18 +375,19 @@ func TestSpendingBrakes(t *testing.T) {
 	}
 	research := localServerSettings(t)
 	research.ToolGroups, research.TavilyAPIKey = []string{ToolGroupResearch}, "k"
-	research.CloudLLMModel, research.AnthropicAPIKey, research.USDToYen = "claude-haiku-5-5", "k", 150
+	research.CloudLLMModel, research.AnthropicAPIKey, research.DefaultCurrency = "claude-haiku-5-5", "k", "JPY"
 	for _, c := range []struct {
 		name     string
 		settings ServerSettings
 		change   func(*ServerSettings)
 		want     string
 	}{
-		{"用云端却没设月度上限", cloud, func(s *ServerSettings) { s.MonthlyYen = 0 }, "HARO_MONTHLY_YEN"},
-		{"只开后台调查（也用云端）却没设月度上限", research, func(*ServerSettings) {}, "HARO_MONTHLY_YEN"},
+		{"用云端却没设月度上限", cloud, func(s *ServerSettings) { s.MonthlyCap = 0 }, "HARO_MONTHLY_CAP"},
+		{"只开后台调查（也用云端）却没设月度上限", research, func(*ServerSettings) {}, "HARO_MONTHLY_CAP"},
 		{"用云端、有上限却没有账本", cloud, func(s *ServerSettings) { s.UsageDB = "" }, "HARO_USAGE_DB"},
-		{"本地模型设了月度上限却没有账本", localServerSettings(t), func(s *ServerSettings) { s.MonthlyYen = 500 }, "HARO_USAGE_DB"},
-		{"能口头提高却一次都不判断", cloud, func(s *ServerSettings) { s.OverBudgetDailyCalls = 0 }, "HARO_OVER_BUDGET_DAILY_CALLS"},
+		{"本地模型设了月度上限却没有账本", localServerSettings(t), func(s *ServerSettings) { s.MonthlyCap, s.DefaultCurrency = 500, "JPY" }, "HARO_USAGE_DB"},
+		{"设了上限却没设默认货币", localServerSettings(t), func(s *ServerSettings) { s.MonthlyCap, s.UsageDB = 500, "/tmp/usage.db" }, "HARO_DEFAULT_CURRENCY"},
+		{"能口头提高却一次都不判断", cloud, func(s *ServerSettings) { s.MonthlyRaise, s.OverBudgetDailyCalls = 500, 0 }, "HARO_OVER_BUDGET_DAILY_CALLS"},
 	} {
 		settings := c.settings
 		c.change(&settings)
@@ -395,9 +396,9 @@ func TestSpendingBrakes(t *testing.T) {
 		}
 	}
 	noRaise := cloud
-	noRaise.MonthlyRaiseYen, noRaise.OverBudgetDailyCalls = 0, 0
+	noRaise.MonthlyRaise, noRaise.OverBudgetDailyCalls = 0, 0
 	if err := noRaise.validateBrain(); err != nil {
-		t.Errorf("不让口头提高（HARO_MONTHLY_RAISE_YEN=0）时判断次数是 0 也行：%v", err)
+		t.Errorf("不让口头提高（不设 HARO_MONTHLY_RAISE）时判断次数是 0 也行：%v", err)
 	}
 }
 
@@ -407,13 +408,13 @@ func TestNumericSettingRanges(t *testing.T) {
 		name   string
 		change func(*ServerSettings)
 	}{
-		{"HARO_MONTHLY_YEN", func(s *ServerSettings) { s.MonthlyYen = -1 }},
-		{"HARO_RESEARCH_DAILY_YEN", func(s *ServerSettings) { s.ResearchDailyYen = -1 }},
-		{"HARO_MONTHLY_RAISE_YEN", func(s *ServerSettings) { s.MonthlyRaiseYen = -1 }},
+		{"HARO_MONTHLY_CAP", func(s *ServerSettings) { s.MonthlyCap = -1 }},
+		{"HARO_RESEARCH_DAILY_CAP", func(s *ServerSettings) { s.ResearchDailyCap = -1 }},
+		{"HARO_MONTHLY_RAISE", func(s *ServerSettings) { s.MonthlyRaise = -1 }},
 		{"HARO_OVER_BUDGET_DAILY_CALLS", func(s *ServerSettings) { s.OverBudgetDailyCalls = -1 }},
 		{"HARO_SEARCH_DAILY_CREDITS", func(s *ServerSettings) { s.SearchDailyCredits = -1 }},
 		{"HARO_SEARCH_CREDIT_USD", func(s *ServerSettings) { s.SearchCreditUSD = -0.01 }},
-		{"HARO_USD_JPY", func(s *ServerSettings) { s.USDToYen = -1 }},
+		{"HARO_DEFAULT_CURRENCY", func(s *ServerSettings) { s.DefaultCurrency = "YEN" }},
 		{"HARO_TTS_TIMEOUT", func(s *ServerSettings) { s.TTSTimeout = 0 }},
 		{"HARO_MAX_SEGMENT_RUNES", func(s *ServerSettings) { s.MaxSegmentRunes = 0 }},
 		{"HARO_FIRST_SEGMENT_MIN_RUNES", func(s *ServerSettings) { s.FirstSegmentMinRunes = -1 }},
@@ -470,10 +471,10 @@ func TestResearchReviewed(t *testing.T) {
 // 写明了「0 = 不限 / 关掉 / 用程序里的默认值」的项，写 0 照常启动。
 func TestZeroMeansUnlimitedOffOrDefault(t *testing.T) {
 	for name, change := range map[string]func(*ServerSettings){
-		"HARO_RESEARCH_DAILY_YEN（不限）":            func(s *ServerSettings) { s.ResearchDailyYen = 0 },
+		"HARO_RESEARCH_DAILY_CAP（不限）":            func(s *ServerSettings) { s.ResearchDailyCap = 0 },
 		"HARO_SEARCH_DAILY_CREDITS（不限）":          func(s *ServerSettings) { s.SearchDailyCredits = 0 },
 		"HARO_SEARCH_CREDIT_USD（免费额度内）":          func(s *ServerSettings) { s.SearchCreditUSD = 0 },
-		"HARO_MONTHLY_RAISE_YEN（不能口头提高）":         func(s *ServerSettings) { s.MonthlyRaiseYen = 0 },
+		"HARO_MONTHLY_RAISE（不能口头提高）":             func(s *ServerSettings) { s.MonthlyRaise = 0 },
 		"HARO_CONTEXT_COMPACT_TOKENS（不看）":        func(s *ServerSettings) { s.CompactContextTokens = 0 },
 		"HARO_WAKE_ARBITRATION（不仲裁）":             func(s *ServerSettings) { s.WakeArbitration = 0 },
 		"HARO_FIRST_SEGMENT_MIN_RUNES（不提前切）":     func(s *ServerSettings) { s.FirstSegmentMinRunes = 0 },

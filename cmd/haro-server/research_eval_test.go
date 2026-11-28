@@ -50,6 +50,7 @@ import (
 	"github.com/bukahou/haro/internal/agents"
 	"github.com/bukahou/haro/internal/config"
 	"github.com/bukahou/haro/internal/llm"
+	"github.com/bukahou/haro/internal/money"
 	"github.com/bukahou/haro/internal/pricecatalog"
 	"github.com/bukahou/haro/internal/research"
 	"github.com/bukahou/haro/internal/spending"
@@ -233,7 +234,7 @@ func newResearchShared(t *testing.T, base config.ServerSettings, key string) res
 	if err != nil {
 		t.Fatal(err)
 	}
-	pricing := spending.Pricing{USDToYen: 1, Models: map[string]spending.TokenPrice{}}
+	pricing := spending.Pricing{Models: map[string]spending.TokenPrice{}}
 	for _, model := range []string{base.CloudLLMModel, base.StrongLLMModel} {
 		if pricing.Models[model], err = prices.Price(model); err != nil {
 			t.Fatal(err)
@@ -265,7 +266,7 @@ func runResearchCase(shared researchShared, settings config.ServerSettings, arm 
 	defer ledger.Close()
 	recorded := &recordingLedger{Ledger: ledger}
 	assembly := agentAssembly{settings: settings, catalog: shared.catalog, claude: shared.api, client: &http.Client{},
-		pricing: shared.pricing, ledger: recorded, guard: spending.NewGuard(recorded, spending.Limits{}, logger), logger: logger}
+		pricing: shared.pricing, ledger: recorded, guard: spending.NewGuard(recorded, spending.Limits{}, money.SameCurrencyOnly{}, logger), logger: logger}
 	searcher := connectWebSearch(settings, &http.Client{}, logger)
 	defer searcher.Close()
 	runner, stop, err := startResearch(ctx, settings, assembly, searcher, logger)
@@ -299,8 +300,8 @@ func runResearchCase(shared researchShared, settings config.ServerSettings, arm 
 			run.Credits += charge.Credits
 			continue
 		}
-		run.USD += charge.Yen
-		run.ModelUSD[strings.TrimPrefix(charge.Item, "llm:")] += charge.Yen
+		run.USD += charge.Cost.Value()
+		run.ModelUSD[strings.TrimPrefix(charge.Item, "llm:")] += charge.Cost.Value()
 		run.InputTokens += charge.InputTokens
 		run.OutputTokens += charge.OutputTokens
 		run.CacheRead += charge.CacheReadTokens

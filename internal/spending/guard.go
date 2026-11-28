@@ -10,11 +10,11 @@ import (
 	"time"
 
 	"github.com/bukahou/haro/internal/brain"
+	"github.com/bukahou/haro/internal/money"
 )
 
-// Pricing 是把用量折成日元的单价（来自配置：云端价格以美元计，汇率也由配置给，都不写死在代码里）。
+// Pricing 是把用量算成钱的单价：服务商按美元收费，所以算出来的是原始的美元金额（换成默认货币在汇总时做，见 money.Converter）。
 type Pricing struct {
-	USDToYen float64 // 1 美元折多少日元
 	// 每个用到的模型都要在表里：要花钱的写单价，本地模型标 Free。不在表里 = 组装漏了（记账模型建不起来，见 Knows）
 	Models map[string]TokenPrice
 	// 搜索服务每个积分的美元单价（Tavily 免费额度内为 0；R5 默认把搜索封在免费额度内）
@@ -60,11 +60,11 @@ func (p Pricing) Knows(model string) bool {
 	return ok
 }
 
-// LLMYen 算一次模型调用折多少日元：没命中缓存的输入、缓存读、缓存写、输出各按各的价。
-func (p Pricing) LLMYen(model string, usage brain.ReplyUsage) float64 {
+// LLMCost 算一次模型调用花了多少（美元）：没命中缓存的输入、缓存读、缓存写、输出各按各的价。
+func (p Pricing) LLMCost(model string, usage brain.ReplyUsage) money.Amount {
 	price, ok := p.Models[model]
 	if !ok || price.Free { // 不在表里的建不出记账模型（NewMeteredChatModel），走不到这里
-		return 0
+		return money.Amount{Currency: money.USD}
 	}
 	longFactor := price.LongCacheWriteFactor
 	price = price.forInput(usage.PromptTokens)
@@ -84,25 +84,26 @@ func (p Pricing) LLMYen(model string, usage brain.ReplyUsage) float64 {
 	usd := (float64(uncached)*price.InputUSDPerMillion + float64(usage.CacheReadTokens)*cacheRead +
 		float64(usage.CacheWriteTokens-longWrite)*cacheWrite + float64(longWrite)*longWritePrice +
 		float64(usage.OutputTokens)*price.OutputUSDPerMillion) / 1e6
-	return usd * p.USDToYen
+	return money.Of(usd, money.USD)
 }
 
-// SearchYen 算搜索积分折多少日元。
-func (p Pricing) SearchYen(credits int) float64 {
-	return float64(credits) * p.SearchCreditUSD * p.USDToYen
+// SearchCost 算搜索积分花了多少（美元）。
+func (p Pricing) SearchCost(credits int) money.Amount {
+	return money.Of(float64(credits)*p.SearchCreditUSD, money.USD)
 }
 
 // DefaultWarnRatio 是月度费用用到上限的这个比例时提醒一次（提醒的话由 Guard 交给前台）。
 const DefaultWarnRatio = 0.8
 
-// Limits 是费用上限；0 = 不设上限。
+// Limits 是费用上限：金额都是默认货币（Currency）的；0 = 不设这一项。账本按原始币种记，判断时换成默认货币再比。
 type Limits struct {
-	ResearchDailyYen   float64 // 后台调查每天最多花多少（默认 100 日元）
-	MonthlyYen         float64 // 每月总费用上限：大模型 + 搜索，不分用途合计
-	SearchDailyCredits int     // 搜索积分每天最多用多少（默认封在 Tavily 免费额度内：每月 1,000 ≈ 每天 30）
-	WarnRatio          float64 // 月度用到这个比例时提醒一次（DefaultWarnRatio）；0 = 不提醒
-	// MonthlyRaiseYen：主人口头确认一次，这个月的上限临时提高多少；0 = 不能口头提高（到上限就停到下个月）
-	MonthlyRaiseYen float64
+	Currency           string       // 默认货币（ISO 4217）：上限、念给主人的金额都用它
+	ResearchDaily      money.Amount // 后台调查每天最多花多少
+	Monthly            money.Amount // 每月总费用上限：大模型 + 搜索，不分用途合计
+	SearchDailyCredits int          // 搜索积分每天最多用多少（默认封在 Tavily 免费额度内：每月 1,000 ≈ 每天 30）
+	WarnRatio          float64      // 月度用到这个比例时提醒一次（DefaultWarnRatio）；0 = 不提醒
+	// MonthlyRaise：主人口头确认一次，这个月的上限临时提高多少；0 = 不能口头提高（到上限就停到下个月）
+	MonthlyRaise money.Amount
 }
 
 // ErrOverBudget 表示额度用完了（errors.Is 判断）。
@@ -123,10 +124,14 @@ func (e *budgetError) Is(target error) bool {
 }
 func (e *budgetError) Phrase() (string, map[string]string) { return e.phrase, e.values }
 
-// overBudget 用花了多少、上限多少两个数造一个额度用完的错误：spentName 是那句话里「花了多少」的名字。
-func overBudget(phrase, spentName string, spent, limit string, format string, args ...any) error {
-	return &budgetError{message: fmt.Sprintf(format, args...), phrase: phrase,
-		values: map[string]string{spentName: spent, "limit": limit}}
+// overBudget 用花了多少、上限多少造一个额度用完的错误：spentName 是那句话里「花了多少」的名字；
+// 金额的值另带币种（brain.PhraseCurrency），那句话按主人的语言念币种。
+func overBudget(phrase, spentName string, spent, limit string, currency string, format string, args ...any) error {
+	values := map[string]string{spentName: spent, "limit": limit}
+	if currency != "" {
+		values[brain.PhraseCurrency] = currency
+	}
+	return &budgetError{message: fmt.Sprintf(format, args...), phrase: phrase, values: values}
 }
 
 // ErrLedgerUnavailable 表示用量账本用不了（errors.Is 判断）：读不出，或者之前写不进的补写不进去。
@@ -147,6 +152,7 @@ func (e *ledgerUnavailable) Phrase() (string, map[string]string) {
 type Guard struct {
 	ledger Ledger
 	limits Limits
+	rates  money.Converter // 账本里不是默认货币的（服务商的美元）换成默认货币
 	logger *slog.Logger
 	now    func() time.Time
 
@@ -155,9 +161,9 @@ type Guard struct {
 	pendingMsg string // 还没告诉主人的提醒
 }
 
-// NewGuard 创建额度守卫。
-func NewGuard(ledger Ledger, limits Limits, logger *slog.Logger) *Guard {
-	return &Guard{ledger: ledger, limits: limits, logger: logger, now: time.Now}
+// NewGuard 创建额度守卫。rates 把账本的原始金额换成默认货币（limits.Currency）。
+func NewGuard(ledger Ledger, limits Limits, rates money.Converter, logger *slog.Logger) *Guard {
+	return &Guard{ledger: ledger, limits: limits, rates: rates, logger: logger, now: time.Now}
 }
 
 func (g *Guard) startOfDay() time.Time {
@@ -183,21 +189,34 @@ func (g *Guard) spentSince(ctx context.Context, since time.Time, purposes ...Pur
 	return spent, nil
 }
 
+// inDefault 把按币种分开的合计换成默认货币。换算不了（没有汇率）时按账本用不了处理：不知道花了多少就不放行。
+func (g *Guard) inDefault(sum money.Sum) (money.Amount, error) {
+	total, err := g.rates.Convert(sum, g.limits.Currency)
+	if err != nil {
+		return money.Amount{}, &ledgerUnavailable{err: err}
+	}
+	return total.Amount, nil
+}
+
 // AllowResearch 判断今天还能不能派后台调查（以及调查进行中每一轮之前再判一次）。
 func (g *Guard) AllowResearch(ctx context.Context) error {
 	if err := g.allowMonthly(ctx); err != nil {
 		return err
 	}
-	if g.limits.ResearchDailyYen <= 0 {
+	if g.limits.ResearchDaily.Micros <= 0 {
 		return nil
 	}
-	spent, err := g.spentSince(ctx, g.startOfDay(), PurposeResearch)
+	totals, err := g.spentSince(ctx, g.startOfDay(), PurposeResearch)
 	if err != nil {
 		return err
 	}
-	if spent.Yen >= g.limits.ResearchDailyYen {
-		return overBudget(brain.PhraseOverResearchDaily, "spent", yen(spent.Yen), yen(g.limits.ResearchDailyYen),
-			"今天的调查已经花了约 %.0f 日元（上限 %.0f 日元），明天再查吧。", spent.Yen, g.limits.ResearchDailyYen)
+	spent, err := g.inDefault(totals.Spent)
+	if err != nil {
+		return err
+	}
+	if spent.Micros >= g.limits.ResearchDaily.Micros {
+		return overBudget(brain.PhraseOverResearchDaily, "spent", spent.Rounded(), g.limits.ResearchDaily.Rounded(), g.limits.Currency,
+			"今天的调查已经花了约 %s（上限 %s），明天再查吧。", spent, g.limits.ResearchDaily)
 	}
 	return nil
 }
@@ -212,7 +231,7 @@ func (g *Guard) AllowSearch(ctx context.Context, credits int) error {
 		return err
 	}
 	if used.Credits+credits > g.limits.SearchDailyCredits {
-		return overBudget(brain.PhraseOverSearchDaily, "used", strconv.Itoa(used.Credits), strconv.Itoa(g.limits.SearchDailyCredits),
+		return overBudget(brain.PhraseOverSearchDaily, "used", strconv.Itoa(used.Credits), strconv.Itoa(g.limits.SearchDailyCredits), "",
 			"今天的搜索已经用了 %d 次（上限 %d 次），明天再搜吧。", used.Credits, g.limits.SearchDailyCredits)
 	}
 	return nil
@@ -225,65 +244,73 @@ func (g *Guard) AllowPaidLLM(ctx context.Context) error {
 }
 
 func (g *Guard) allowMonthly(ctx context.Context) error {
-	if g.limits.MonthlyYen <= 0 {
+	if g.limits.Monthly.Micros <= 0 {
 		return nil
 	}
-	spent, err := g.spentSince(ctx, g.startOfMonth())
+	totals, err := g.spentSince(ctx, g.startOfMonth())
+	if err != nil {
+		return err
+	}
+	spent, err := g.inDefault(totals.Spent)
 	if err != nil {
 		return err
 	}
 	limit, err := g.monthlyLimit(ctx)
 	if err != nil {
-		return &ledgerUnavailable{err: err}
+		return err
 	}
-	if spent.Yen >= limit {
-		return g.overMonthly(spent.Yen, limit)
+	if spent.Micros >= limit.Micros {
+		return g.overMonthly(spent, limit)
 	}
-	if g.limits.WarnRatio > 0 && spent.Yen >= limit*g.limits.WarnRatio {
+	if g.limits.WarnRatio > 0 && spent.Value() >= limit.Value()*g.limits.WarnRatio {
 		month := g.startOfMonth().Format("2006-01")
 		g.mu.Lock()
 		if g.warnedFor != month {
 			g.warnedFor = month
-			g.pendingMsg = fmt.Sprintf("这个月的费用（大模型和搜索）已经用到约 %.0f 日元（上限 %.0f 日元，%.0f%%）。超过上限后暂停回答（主人可以口头临时提高上限）。",
-				spent.Yen, limit, spent.Yen/limit*100)
-			g.logger.Warn("💴 "+g.pendingMsg, "spent_yen", spent.Yen, "limit_yen", limit)
+			g.pendingMsg = fmt.Sprintf("这个月的费用（大模型和搜索）已经用到约 %s（上限 %s，%.0f%%）。超过上限后暂停回答（主人可以口头临时提高上限）。",
+				spent, limit, spent.Value()/limit.Value()*100)
+			g.logger.Warn("💴 "+g.pendingMsg, "spent", spent.String(), "limit", limit.String())
 		}
 		g.mu.Unlock()
 	}
 	return nil
 }
 
-// monthlyLimit 是这个月的上限：配置的上限 + 这个月主人口头提高的合计。
-func (g *Guard) monthlyLimit(ctx context.Context) (float64, error) {
+// monthlyLimit 是这个月的上限：配置的上限 + 这个月主人口头提高的合计（都换成默认货币）。
+func (g *Guard) monthlyLimit(ctx context.Context) (money.Amount, error) {
 	raised, err := g.ledger.CapRaised(ctx, g.startOfMonth())
 	if err != nil {
-		return 0, err
+		return money.Amount{}, &ledgerUnavailable{err: err}
 	}
-	return g.limits.MonthlyYen + raised, nil
+	raisedTotal, err := g.inDefault(raised)
+	if err != nil {
+		return money.Amount{}, err
+	}
+	return money.Amount{Micros: g.limits.Monthly.Micros + raisedTotal.Micros, Currency: g.limits.Currency}, nil
 }
 
 // overMonthly 是月度总费用到了上限的错误：能口头提高时，念的那句顺带说怎么提高。
-func (g *Guard) overMonthly(spent, limit float64) error {
-	message := fmt.Sprintf("这个月的费用（大模型和搜索）已经约 %.0f 日元，到上限 %.0f 日元了，这个月先不回答了。", spent, limit)
-	values := map[string]string{"spent": yen(spent), "limit": yen(limit)}
+func (g *Guard) overMonthly(spent, limit money.Amount) error {
+	message := fmt.Sprintf("这个月的费用（大模型和搜索）已经约 %s，到上限 %s 了，这个月先不回答了。", spent, limit)
+	values := map[string]string{"spent": spent.Rounded(), "limit": limit.Rounded(), brain.PhraseCurrency: g.limits.Currency}
 	phrase := brain.PhraseOverMonthlyBudget
-	if g.limits.MonthlyRaiseYen > 0 {
-		phrase, values["raise"] = brain.PhraseOverMonthlyBudgetRaisable, yen(g.limits.MonthlyRaiseYen)
+	if g.limits.MonthlyRaise.Micros > 0 {
+		phrase, values["raise"] = brain.PhraseOverMonthlyBudgetRaisable, g.limits.MonthlyRaise.Rounded()
 	}
 	return &budgetError{message: message, phrase: phrase, values: values, monthly: true}
 }
 
-// RaiseMonthlyCap 实现 brain.MonthlyCap：主人口头确认后，把这个月的上限提高 MonthlyRaiseYen（记进账本，重启后照样算）。
-// 执行方自己守门：ctx 里没有 person 对提高上限的确认（brain.WithConfirmation）就不提高，交回 brain.ErrNotConfirmed。
-func (g *Guard) RaiseMonthlyCap(ctx context.Context, person string) (float64, error) {
+// RaiseMonthlyCap 实现 brain.MonthlyCap：主人口头确认后，把这个月的上限提高 MonthlyRaise（记进账本，重启后照样算），
+// 返回提高后的上限。执行方自己守门：ctx 里没有 person 对提高上限的确认（brain.WithConfirmation）就不提高，交回 brain.ErrNotConfirmed。
+func (g *Guard) RaiseMonthlyCap(ctx context.Context, person string) (money.Amount, error) {
 	if _, err := brain.RequireConfirmation(ctx, brain.RaiseMonthlyCapTool, person); err != nil {
-		return 0, err
+		return money.Amount{}, err
 	}
-	if g.limits.MonthlyYen <= 0 || g.limits.MonthlyRaiseYen <= 0 {
-		return 0, errors.New("没有设月度上限，或者不允许口头提高")
+	if g.limits.Monthly.Micros <= 0 || g.limits.MonthlyRaise.Micros <= 0 {
+		return money.Amount{}, errors.New("没有设月度上限，或者不允许口头提高")
 	}
-	if err := g.ledger.RaiseCap(ctx, CapRaise{At: g.now(), Yen: g.limits.MonthlyRaiseYen, Person: person}); err != nil {
-		return 0, fmt.Errorf("记不下提高的上限: %w", err)
+	if err := g.ledger.RaiseCap(ctx, CapRaise{At: g.now(), Amount: g.limits.MonthlyRaise, Person: person}); err != nil {
+		return money.Amount{}, fmt.Errorf("记不下提高的上限: %w", err)
 	}
 	return g.monthlyLimit(ctx)
 }
@@ -335,9 +362,6 @@ func (m *SearchMeter) AllowSearch(ctx context.Context, credits int) error {
 func (m *SearchMeter) RecordSearch(ctx context.Context, credits int, incomplete bool) error {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
 	defer cancel()
-	return m.ledger.Record(ctx, Charge{Purpose: m.purpose, Item: m.item, Credits: credits, Yen: m.pricing.SearchYen(credits),
+	return m.ledger.Record(ctx, Charge{Purpose: m.purpose, Item: m.item, Credits: credits, Cost: m.pricing.SearchCost(credits),
 		Incomplete: incomplete})
 }
-
-// yen 是念给主人的日元数（取整）。
-func yen(amount float64) string { return strconv.FormatFloat(amount, 'f', 0, 64) }

@@ -8,6 +8,7 @@ import (
 
 	"github.com/bukahou/haro/internal/brain"
 	"github.com/bukahou/haro/internal/brain/braintest"
+	"github.com/bukahou/haro/internal/money"
 )
 
 // capReached 是额度那一层交出的「这个月到上限了」（能念给主人，能认出是月度上限）。
@@ -26,13 +27,13 @@ type fakeCap struct {
 	confirmations []brain.Confirmation
 }
 
-func (f *fakeCap) RaiseMonthlyCap(ctx context.Context, person string) (float64, error) {
+func (f *fakeCap) RaiseMonthlyCap(ctx context.Context, person string) (money.Amount, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	confirmation, _ := brain.ConfirmationFrom(ctx)
 	f.raises = append(f.raises, person)
 	f.confirmations = append(f.confirmations, confirmation)
-	return 3000 + 500*float64(len(f.raises)), nil
+	return money.Of(3000+500*float64(len(f.raises)), "JPY"), nil
 }
 
 func (f *fakeCap) count() int { f.mu.Lock(); defer f.mu.Unlock(); return len(f.raises) }
@@ -48,7 +49,7 @@ func newCapTalker(t *testing.T, model, judge brain.ChatModel, cap brain.MonthlyC
 func newCapTalkerWith(t *testing.T, model brain.ChatModel, overBudget *brain.Agent, cap brain.MonthlyCap) *talker {
 	t.Helper()
 	return newTalker(t, brain.Components{Front: brain.Agent{Model: model}, Synthesizer: fakeSynthesizer{}, MonthlyCap: cap, OverBudget: overBudget},
-		brain.Options{MaxHistoryTurn: 6, MonthlyRaiseYen: 500})
+		brain.Options{MaxHistoryTurn: 6, MonthlyRaise: money.Of(500, "JPY")})
 }
 
 // 上限到了、主人说的不是要提高：不回答，念固定的话（到上限了、怎么提高）；判断用的模型说了话也不念。

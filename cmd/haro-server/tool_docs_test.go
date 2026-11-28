@@ -15,6 +15,7 @@ import (
 	"github.com/bukahou/haro/internal/brain"
 	"github.com/bukahou/haro/internal/config"
 	"github.com/bukahou/haro/internal/docstest"
+	"github.com/bukahou/haro/internal/money"
 	"github.com/bukahou/haro/internal/spending"
 )
 
@@ -42,7 +43,7 @@ func toolingWith(t *testing.T, adjust func(*config.ServerSettings)) tooling {
 		t.Fatal(err)
 	}
 	deps := services{httpClient: &http.Client{}, modelHTTP: &http.Client{}, ledger: ledger,
-		guard:   spending.NewGuard(ledger, spending.Limits{}, logger),
+		guard:   spending.NewGuard(ledger, spending.Limits{}, money.SameCurrencyOnly{}, logger),
 		pricing: spending.Pricing{Models: map[string]spending.TokenPrice{"base-model": {Free: true}}}}
 	ctx, cancel := context.WithCancel(context.Background())
 	var shutdown shutdownSteps
@@ -93,7 +94,7 @@ func TestHolidaysBriefing(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = ledger.Close() })
-	deps := services{httpClient: &http.Client{}, guard: spending.NewGuard(ledger, spending.Limits{}, logger)}
+	deps := services{httpClient: &http.Client{}, guard: spending.NewGuard(ledger, spending.Limits{}, money.SameCurrencyOnly{}, logger)}
 	catalog, err := agents.Load("")
 	if err != nil {
 		t.Fatal(err)

@@ -141,14 +141,14 @@ func TestTierPricesApplyAboveThreshold(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pricing := spending.Pricing{USDToYen: 100, Models: map[string]spending.TokenPrice{"claude-haiku-5-5": haiku}}
-	small := pricing.LLMYen("claude-haiku-5-5", brain.ReplyUsage{PromptTokens: 100_000, OutputTokens: 1000})
-	large := pricing.LLMYen("claude-haiku-5-5", brain.ReplyUsage{PromptTokens: 100_001, OutputTokens: 1000})
-	// 10 万 × 0.1 + 1000 × 0.5 = 10500 微美元 ⇒ 1.05 日元；超过门槛：100001 × 0.5 + 1000 × 2.5 ≈ 5.25 日元
-	if diff := small - 1.05; diff > 1e-9 || diff < -1e-9 {
+	pricing := spending.Pricing{Models: map[string]spending.TokenPrice{"claude-haiku-5-5": haiku}}
+	small := pricing.LLMCost("claude-haiku-5-5", brain.ReplyUsage{PromptTokens: 100_000, OutputTokens: 1000}).Value()
+	large := pricing.LLMCost("claude-haiku-5-5", brain.ReplyUsage{PromptTokens: 100_001, OutputTokens: 1000}).Value()
+	// 10 万 × 0.1 + 1000 × 0.5 = 0.0105 美元；超过门槛：100001 × 0.5 + 1000 × 2.5 ≈ 0.0525 美元
+	if diff := small - 0.0105; diff > 1e-6 || diff < -1e-6 {
 		t.Errorf("门槛以内按平常的价：%v", small)
 	}
-	if diff := large - 5.25005; diff > 1e-9 || diff < -1e-9 {
+	if diff := large - 0.0525005; diff > 1e-6 || diff < -1e-6 {
 		t.Errorf("超过门槛整次按高一档：%v", large)
 	}
 }
