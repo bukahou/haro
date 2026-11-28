@@ -69,17 +69,30 @@ func optionalMoney(amount money.Amount) *appapi.Money {
 	return &value
 }
 
-// moneyTotal 是一笔合计（换成默认货币 + 按币种的原始合计 + 有换算时的提示）。
+// moneyTotal 是一笔花费的合计。
 func (s *Server) moneyTotal(ctx context.Context, spent spending.Spent) appapi.MoneyTotal {
-	total := appapi.MoneyTotal{Total: moneyOf(spent.Total.Amount), ByCurrency: []appapi.Money{}}
-	for _, code := range spent.ByCurrency.Currencies() {
-		total.ByCurrency = append(total.ByCurrency, moneyOf(spent.ByCurrency.Amount(code)))
+	return s.convertedTotal(ctx, spent.ByCurrency, spent.Total)
+}
+
+// convertedTotal 是一笔合计（换成默认货币 + 按币种的原始合计 + 有换算、有没算进去的币种时的提示）。
+func (s *Server) convertedTotal(ctx context.Context, byCurrency money.Sum, converted money.Total) appapi.MoneyTotal {
+	total := appapi.MoneyTotal{Total: moneyOf(converted.Amount), ByCurrency: []appapi.Money{}}
+	for _, code := range byCurrency.Currencies() {
+		total.ByCurrency = append(total.ByCurrency, moneyOf(byCurrency.Amount(code)))
 	}
-	if len(spent.Total.Converted) > 0 {
-		note := s.texts.say(languageFrom(ctx), "conversion", map[string]string{"currencies": strings.Join(spent.Total.Converted, "、"),
-			"date": spent.Total.RateDate.Format(time.DateOnly), "target": spent.Total.Amount.Currency})
-		date := openapi_types.Date{Time: spent.Total.RateDate}
-		total.ConversionNote, total.RateDate = &note, &date
+	var notes []string
+	if len(converted.Converted) > 0 {
+		notes = append(notes, s.texts.say(languageFrom(ctx), "conversion", map[string]string{"currencies": strings.Join(converted.Converted, "、"),
+			"date": converted.RateDate.Format(time.DateOnly), "target": converted.Amount.Currency}))
+		date := openapi_types.Date{Time: converted.RateDate}
+		total.RateDate = &date
+	}
+	if len(converted.Missing) > 0 {
+		notes = append(notes, s.texts.say(languageFrom(ctx), "conversion_missing", map[string]string{"currencies": strings.Join(converted.Missing, "、")}))
+	}
+	if len(notes) > 0 {
+		note := strings.Join(notes, " ")
+		total.ConversionNote = &note
 	}
 	return total
 }

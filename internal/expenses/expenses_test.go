@@ -205,3 +205,116 @@ func TestAgentParser(t *testing.T) {
 		t.Errorf("草稿：%+v %v", draft, err)
 	}
 }
+
+// blockingParser 一直解析到 release 关掉。
+type blockingParser struct{ release chan struct{} }
+
+func (p blockingParser) Parse(ctx context.Context, image []byte, categories []Category, hint Hint) (Draft, error) {
+	select {
+	case <-p.release:
+	case <-ctx.Done():
+		return Draft{}, ctx.Err()
+	}
+	return fakeParser{}.Parse(ctx, image, categories, hint)
+}
+
+// 一个人同时在解析的最多 MaxPending 张；解析中的不能丢掉、不能确认。
+func TestPendingLimit(t *testing.T) {
+	parser := blockingParser{release: make(chan struct{})}
+	service, _ := newService(t, parser)
+	ctx := context.Background()
+	var first Receipt
+	for i := range MaxPending {
+		receipt, err := service.Upload(ctx, "主人", pngBytes(t), Hint{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i == 0 {
+			first = receipt
+		}
+	}
+	if _, err := service.Upload(ctx, "主人", pngBytes(t), Hint{}); !errors.Is(err, ErrTooMany) {
+		t.Errorf("第 %d 张：%v", MaxPending+1, err)
+	}
+	if _, err := service.Upload(ctx, "别人", pngBytes(t), Hint{}); err != nil {
+		t.Errorf("别人的不受影响：%v", err)
+	}
+	if err := service.Discard(ctx, "主人", first.ID); !errors.Is(err, ErrState) {
+		t.Errorf("解析中丢掉：%v", err)
+	}
+	spent := time.Now()
+	if _, err := service.Confirm(ctx, "主人", first.ID, Draft{Merchant: "店", SpentAt: &spent, Currency: "JPY", Total: "1"}); !errors.Is(err, ErrState) {
+		t.Errorf("解析中确认：%v", err)
+	}
+	close(parser.release)
+	waitParsed(t, service, "主人", first.ID)
+}
+
+// 两个请求同时确认同一张：只入账一笔。
+func TestConfirmOnce(t *testing.T) {
+	service, _ := newService(t, fakeParser{})
+	ctx := context.Background()
+	receipt, err := service.Upload(ctx, "主人", pngBytes(t), Hint{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	draft := *waitParsed(t, service, "主人", receipt.ID).Draft
+	results := make(chan error, 4)
+	for range cap(results) {
+		go func() { _, err := service.Confirm(ctx, "主人", receipt.ID, draft); results <- err }()
+	}
+	succeeded := 0
+	for range cap(results) {
+		if err := <-results; err == nil {
+			succeeded++
+		} else if !errors.Is(err, ErrState) {
+			t.Error(err)
+		}
+	}
+	month := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	if list, _ := service.Expenses(ctx, "主人", Filter{From: month, To: month.AddDate(0, 1, 0)}); succeeded != 1 || len(list) != 1 {
+		t.Errorf("成功 %d 次、入账 %d 笔", succeeded, len(list))
+	}
+}
+
+// 过期的小票：没确认的连原图一起删；确认过的只删记录（原图跟着账目留着）。
+func TestPrune(t *testing.T) {
+	now := time.Now()
+	store, err := OpenStore(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	files, err := attachments.OpenFiles(filepath.Join(t.TempDir(), "images"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := func() time.Time { return now }
+	service := NewService(context.Background(), Options{Store: store, Images: files, Parser: fakeParser{}, Location: time.UTC, Logger: quiet,
+		Now: func() time.Time { return clock() }})
+	ctx := context.Background()
+	abandoned, _ := service.Upload(ctx, "主人", pngBytes(t), Hint{})
+	kept, _ := service.Upload(ctx, "主人", pngBytes(t), Hint{})
+	waitParsed(t, service, "主人", abandoned.ID)
+	expense, err := service.Confirm(ctx, "主人", kept.ID, *waitParsed(t, service, "主人", kept.ID).Draft)
+	if err != nil {
+		t.Fatal(err)
+	}
+	later := now.Add(receiptRetention + time.Hour)
+	clock = func() time.Time { return later }
+	if err := service.Prune(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Receipt(ctx, "主人", abandoned.ID); !errors.Is(err, ErrNotFound) {
+		t.Errorf("没确认的小票：%v", err)
+	}
+	if _, err := files.Read(abandoned.AttachmentID); err == nil {
+		t.Error("没确认的小票的原图应删掉")
+	}
+	if _, err := service.Receipt(ctx, "主人", kept.ID); !errors.Is(err, ErrNotFound) {
+		t.Errorf("确认过的小票记录：%v", err)
+	}
+	if _, err := service.ExpenseImage(ctx, "主人", expense.ID); err != nil {
+		t.Errorf("账目的原图应留着：%v", err)
+	}
+}

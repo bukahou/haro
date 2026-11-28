@@ -360,18 +360,8 @@ func (s *Server) uploadAttachment(w http.ResponseWriter, r *http.Request) {
 		s.writeProblem(w, r, http.StatusNotImplemented, appapi.ErrorCodeNotImplemented, nil)
 		return
 	}
-	media, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
-	if err != nil || !slices.Contains(uploadedTypes, media) {
-		s.writeProblem(w, r, http.StatusBadRequest, appapi.ErrorCodeValidationFailed, map[string]string{"detail": "Content-Type"})
-		return
-	}
-	data, err := io.ReadAll(r.Body)
-	var tooLarge *http.MaxBytesError
-	switch {
-	case errors.As(err, &tooLarge):
-		s.writeProblem(w, r, http.StatusBadRequest, appapi.ErrorCodeValidationFailed, map[string]string{"detail": "size"})
-		return
-	case err != nil:
+	data, ok := s.readImage(w, r)
+	if !ok {
 		return
 	}
 	attachment, err := s.opts.Chat.Upload(r.Context(), account.OwnerPerson, threadOf(r.PathValue("conversationId")), data)
@@ -395,6 +385,32 @@ func (s *Server) uploadAttachment(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(appapi.AttachmentInfo{AttachmentId: attachment.ID, Width: attachment.Width, Height: attachment.Height})
 }
 
+// readImage 读请求体里的一张图片（聊天的图片、小票共用）：格式不在 uploadedTypes 里、超过上限的回 400。
+func (s *Server) readImage(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
+	media, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || !slices.Contains(uploadedTypes, media) {
+		s.writeProblem(w, r, http.StatusBadRequest, appapi.ErrorCodeValidationFailed, map[string]string{"detail": "Content-Type"})
+		return nil, false
+	}
+	data, err := io.ReadAll(r.Body)
+	var tooLarge *http.MaxBytesError
+	switch {
+	case errors.As(err, &tooLarge):
+		s.writeProblem(w, r, http.StatusBadRequest, appapi.ErrorCodeValidationFailed, map[string]string{"detail": "size"})
+		return nil, false
+	case err != nil:
+		return nil, false
+	}
+	return data, true
+}
+
+// writeImage 回一张存好的图片（都是 JPEG；只有本人取得到，浏览器可以缓存一天）。
+func writeImage(w http.ResponseWriter, data []byte) {
+	w.Header().Set("Content-Type", "image/jpeg")
+	w.Header().Set("Cache-Control", "private, max-age=86400")
+	_, _ = w.Write(data)
+}
+
 // getAttachment 是取回自己的一张图片。
 func (s *Server) getAttachment(w http.ResponseWriter, r *http.Request) {
 	account, ok := s.bearerAccount(w, r)
@@ -415,9 +431,7 @@ func (s *Server) getAttachment(w http.ResponseWriter, r *http.Request) {
 		s.writeProblem(w, r, http.StatusInternalServerError, appapi.ErrorCodeInternal, nil)
 		return
 	}
-	w.Header().Set("Content-Type", "image/jpeg")
-	w.Header().Set("Cache-Control", "private, max-age=86400")
-	_, _ = w.Write(data)
+	writeImage(w, data)
 }
 
 // SearchTurns 实现 appapi.StrictServerInterface。

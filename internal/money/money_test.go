@@ -158,3 +158,15 @@ func TestParseAmount(t *testing.T) {
 		t.Error("币种不对应报错")
 	}
 }
+
+// 没有汇率的币种不算进合计、列在 Missing 里；能换的照常。
+func TestConvertWhatCan(t *testing.T) {
+	sum := Sum{"JPY": 1000 * MicrosPerUnit, "VND": 50_000 * MicrosPerUnit}
+	total, err := ConvertWhatCan(SameCurrencyOnly{}, sum, "JPY")
+	if err != nil || total.Amount.Micros != 1000*MicrosPerUnit || len(total.Missing) != 1 || total.Missing[0] != "VND" {
+		t.Errorf("%+v %v", total, err)
+	}
+	if total, err := ConvertWhatCan(SameCurrencyOnly{}, Sum{"JPY": 5}, "JPY"); err != nil || total.Missing != nil {
+		t.Errorf("都能换：%+v %v", total, err)
+	}
+}

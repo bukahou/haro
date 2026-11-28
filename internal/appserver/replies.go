@@ -74,3 +74,20 @@ func (p problemReply) VisitDeleteEventResponse(w http.ResponseWriter) error     
 func (p problemReply) VisitListPhoneAlertsResponse(w http.ResponseWriter) error   { return p.write(w) }
 func (p problemReply) VisitListCalendarSyncsResponse(w http.ResponseWriter) error { return p.write(w) }
 func (p problemReply) VisitSyncCalendarResponse(w http.ResponseWriter) error      { return p.write(w) }
+
+func (p problemReply) VisitGetReceiptResponse(w http.ResponseWriter) error        { return p.write(w) }
+func (p problemReply) VisitDiscardReceiptResponse(w http.ResponseWriter) error    { return p.write(w) }
+func (p problemReply) VisitConfirmReceiptResponse(w http.ResponseWriter) error    { return p.write(w) }
+func (p problemReply) VisitListExpensesResponse(w http.ResponseWriter) error      { return p.write(w) }
+func (p problemReply) VisitCreateExpenseResponse(w http.ResponseWriter) error     { return p.write(w) }
+func (p problemReply) VisitGetExpenseResponse(w http.ResponseWriter) error        { return p.write(w) }
+func (p problemReply) VisitUpdateExpenseResponse(w http.ResponseWriter) error     { return p.write(w) }
+func (p problemReply) VisitDeleteExpenseResponse(w http.ResponseWriter) error     { return p.write(w) }
+func (p problemReply) VisitSummarizeExpensesResponse(w http.ResponseWriter) error { return p.write(w) }
+func (p problemReply) VisitListExpenseCategoriesResponse(w http.ResponseWriter) error {
+	return p.write(w)
+}
+func (p problemReply) VisitAddExpenseCategoryResponse(w http.ResponseWriter) error { return p.write(w) }
+func (p problemReply) VisitDeleteExpenseCategoryResponse(w http.ResponseWriter) error {
+	return p.write(w)
+}

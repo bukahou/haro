@@ -22,6 +22,7 @@ import (
 	"github.com/bukahou/haro/internal/buildinfo"
 	"github.com/bukahou/haro/internal/conversationstore"
 	"github.com/bukahou/haro/internal/memory"
+	"github.com/bukahou/haro/internal/money"
 	"github.com/bukahou/haro/internal/notes"
 	"github.com/bukahou/haro/internal/research"
 	"github.com/bukahou/haro/internal/spending"
@@ -104,6 +105,8 @@ type Options struct {
 	Chat            Chat             // 打字对话；nil = 没有（对话的接口回 501）
 	Backstory       Backstory        // 背景记录池；nil = 没有（那几个接口回 501）
 	Calendar        Calendar         // 日历；nil = 没有（日历的接口回 501）
+	Expenses        Expenses         // 记账；nil = 没有（记账的接口回 501）
+	Rates           money.Converter  // 汇总记账时换成默认货币用的汇率；nil = 只认同一种币种
 	DefaultCurrency string           // 服务端的默认货币（账号没改时用）
 	MinAppVersion   string           // 支持的最低 App 版本
 	CapOptions      []float64        // 管理员定月上限的可选档位（默认货币）
@@ -171,6 +174,9 @@ func NewHandler(ctx context.Context, opts Options) (http.Handler, error) {
 	mux.Handle(sendMessagePattern, limiter.wrap(http.HandlerFunc(server.sendMessage), server)) // 回答是流：不经生成的代码
 	mux.Handle(uploadPattern, limiter.wrap(http.HandlerFunc(server.uploadAttachment), server)) // 请求体是图片：不经生成的代码
 	mux.Handle(attachmentPattern, limiter.wrap(http.HandlerFunc(server.getAttachment), server))
+	mux.Handle(receiptUploadPattern, limiter.wrap(http.HandlerFunc(server.uploadReceipt), server))
+	mux.Handle(receiptImagePattern, limiter.wrap(http.HandlerFunc(server.getReceiptImage), server))
+	mux.Handle(expenseImagePattern, limiter.wrap(http.HandlerFunc(server.getExpenseImage), server))
 	mux.Handle(PathPrefix, limiter.wrap(validator(generated), server))
 	// 跨域套在限流外面：被限流、出错的回答也带上跨域的头，网页版才读得到 429 / problem（预检由 cors 直接回）
 	withCrossOrigin, err := crossOrigin(spec, opts.WebURL, mux)
@@ -184,14 +190,15 @@ func NewHandler(ctx context.Context, opts Options) (http.Handler, error) {
 var largeBodies = func() *http.ServeMux {
 	routes := http.NewServeMux()
 	routes.Handle(uploadPattern, http.NotFoundHandler())
+	routes.Handle(receiptUploadPattern, http.NotFoundHandler())
 	routes.Handle(syncPattern, http.NotFoundHandler())
 	return routes
 }()
 
-// bodyLimit 是这个请求的请求体上限：传图片的 attachmentMaxBytes，同步系统日历的 syncMaxBytes，其余 maxBodyBytes。
+// bodyLimit 是这个请求的请求体上限：传图片、交小票的 attachmentMaxBytes，同步系统日历的 syncMaxBytes，其余 maxBodyBytes。
 func bodyLimit(r *http.Request) int64 {
 	switch _, pattern := largeBodies.Handler(r); pattern {
-	case uploadPattern:
+	case uploadPattern, receiptUploadPattern:
 		return attachmentMaxBytes
 	case syncPattern:
 		return syncMaxBytes

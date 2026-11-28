@@ -35,27 +35,98 @@ func (s *Store) Close() error { return s.db.Close() }
 
 const receiptColumns = `id, person, attachment_id, category_hint, note_hint, status, draft, failure, expense_id, created_at, updated_at`
 
-func (s *Store) putReceipt(ctx context.Context, receipt Receipt) error {
-	var draft, expense any
-	if receipt.Draft != nil {
-		data, err := json.Marshal(receipt.Draft)
-		if err != nil {
-			return err
-		}
-		draft = string(data)
-	}
-	if receipt.ExpenseID != "" {
-		expense = receipt.ExpenseID
-	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO receipts (`+receiptColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT (id) DO UPDATE SET status = excluded.status, draft = excluded.draft, failure = excluded.failure,
-			expense_id = excluded.expense_id, updated_at = excluded.updated_at`,
-		receipt.ID, receipt.Person, receipt.AttachmentID, receipt.CategoryHint, receipt.NoteHint, receipt.Status, draft, receipt.Failure,
-		expense, receipt.CreatedAt.Unix(), receipt.UpdatedAt.Unix())
+func (s *Store) insertReceipt(ctx context.Context, receipt Receipt) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO receipts (`+receiptColumns+`) VALUES (?, ?, ?, ?, ?, ?, NULL, '', NULL, ?, ?)`,
+		receipt.ID, receipt.Person, receipt.AttachmentID, receipt.CategoryHint, receipt.NoteHint, receipt.Status,
+		receipt.CreatedAt.Unix(), receipt.UpdatedAt.Unix())
 	if err != nil {
 		return fmt.Errorf("存小票: %w", err)
 	}
 	return nil
+}
+
+// finishParse 存解析的结果：只改还在解析的（解析期间被删掉的不再建回来）。
+func (s *Store) finishParse(ctx context.Context, receipt Receipt) error {
+	draft, err := draftJSON(receipt.Draft)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `UPDATE receipts SET status = ?, draft = ?, failure = ?, updated_at = ? WHERE id = ? AND status = ?`,
+		receipt.Status, draft, receipt.Failure, receipt.UpdatedAt.Unix(), receipt.ID, StatusParsing)
+	if err != nil {
+		return fmt.Errorf("存小票的解析结果: %w", err)
+	}
+	return nil
+}
+
+// confirm 在一个事务里入账、把小票标成已入账：小票已经不是「解析好了」（另一个请求先确认了）时报 ErrState、什么都不改。
+func (s *Store) confirm(ctx context.Context, receiptID string, draft Draft, expense Expense) error {
+	data, err := draftJSON(&draft)
+	if err != nil {
+		return err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	result, err := tx.ExecContext(ctx, `UPDATE receipts SET status = ?, draft = ?, expense_id = ?, updated_at = ? WHERE id = ? AND status = ?`,
+		StatusConfirmed, data, expense.ID, expense.UpdatedAt.Unix(), receiptID, StatusReady)
+	if err != nil {
+		return fmt.Errorf("标小票已入账: %w", err)
+	}
+	if affected, err := result.RowsAffected(); err != nil {
+		return err
+	} else if affected == 0 {
+		return ErrState
+	}
+	if err := putExpense(ctx, tx, expense); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// deleteReceipt 删一张还没确认的小票（不是解析好 / 解析失败的报 ErrState）。
+func (s *Store) deleteReceipt(ctx context.Context, id string) error {
+	result, err := s.db.ExecContext(ctx, `DELETE FROM receipts WHERE id = ? AND status IN (?, ?)`, id, StatusReady, StatusFailed)
+	if err != nil {
+		return fmt.Errorf("删小票: %w", err)
+	}
+	if affected, err := result.RowsAffected(); err != nil {
+		return err
+	} else if affected == 0 {
+		return ErrState
+	}
+	return nil
+}
+
+// pendingCount 是这个人在解析的小票有几张。
+func (s *Store) pendingCount(ctx context.Context, person string) (int, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM receipts WHERE person = ? AND status = ?`, person, StatusParsing).Scan(&count)
+	return count, err
+}
+
+// staleReceipts 是 before 之前交的、已经不在解析的小票（清理用）。
+func (s *Store) staleReceipts(ctx context.Context, before time.Time) ([]Receipt, error) {
+	return s.receipts(ctx, `SELECT `+receiptColumns+` FROM receipts WHERE created_at < ? AND status != ?`, before.Unix(), StatusParsing)
+}
+
+// dropReceipt 删一条小票记录（清理用，不管状态）。
+func (s *Store) dropReceipt(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM receipts WHERE id = ?`, id)
+	return err
+}
+
+func draftJSON(draft *Draft) (any, error) {
+	if draft == nil {
+		return nil, nil
+	}
+	data, err := json.Marshal(draft)
+	if err != nil {
+		return nil, err
+	}
+	return string(data), nil
 }
 
 func (s *Store) receipt(ctx context.Context, id string) (Receipt, error) {
@@ -116,7 +187,16 @@ type storedItem struct {
 	TaxRate   string `json:"tax_rate,omitempty"`
 }
 
+// execer 是 *sql.DB 和 *sql.Tx 共有的：存账目在事务里、外都用同一个写法。
+type execer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
 func (s *Store) putExpense(ctx context.Context, expense Expense) error {
+	return putExpense(ctx, s.db, expense)
+}
+
+func putExpense(ctx context.Context, db execer, expense Expense) error {
 	items := make([]storedItem, 0, len(expense.Items))
 	for _, item := range expense.Items {
 		stored := storedItem{Name: item.Name, Quantity: item.Quantity, Amount: item.Amount.Micros, TaxRate: item.TaxRate}
@@ -140,7 +220,7 @@ func (s *Store) putExpense(ctx context.Context, expense Expense) error {
 	if expense.AttachmentID != "" {
 		attachment = expense.AttachmentID
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO expenses (`+expenseColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	_, err = db.ExecContext(ctx, `INSERT INTO expenses (`+expenseColumns+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (id) DO UPDATE SET merchant = excluded.merchant, spent_at = excluded.spent_at, currency = excluded.currency,
 			total_micros = excluded.total_micros, subtotal_micros = excluded.subtotal_micros, tax_micros = excluded.tax_micros,
 			payment_method = excluded.payment_method, category = excluded.category, note = excluded.note, items = excluded.items,
@@ -185,9 +265,20 @@ func (s *Store) list(ctx context.Context, person string, filter Filter) ([]Expen
 	return s.expenses(ctx, query+` ORDER BY spent_at DESC, created_at DESC`, args...)
 }
 
+// deleteExpense 删一笔账和它来自的那张小票的记录（同一个事务）。
 func (s *Store) deleteExpense(ctx context.Context, id string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM expenses WHERE id = ?`, id)
-	return err
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM receipts WHERE expense_id = ?`, id); err != nil {
+		return fmt.Errorf("删账目的小票: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM expenses WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("删账目: %w", err)
+	}
+	return tx.Commit()
 }
 
 func (s *Store) expenses(ctx context.Context, query string, args ...any) ([]Expense, error) {

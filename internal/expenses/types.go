@@ -21,7 +21,6 @@ const (
 const (
 	FailureUnreadable  = "unreadable"  // 看不出是小票、或者看不清
 	FailureUnavailable = "unavailable" // 模型用不了（连不上、额度用完）
-	FailureInterrupted = "interrupted" // 服务端重启，没解析完
 )
 
 // 上限（定值）。
@@ -29,8 +28,12 @@ const (
 	MaxItems         = 200
 	MaxTextRunes     = 200 // 店名、名称、付款方式、分类
 	MaxNoteRunes     = 1000
-	parseConcurrency = 2 // 同时解析几张
+	parseConcurrency = 2  // 同时解析几张（所有人一起）
+	MaxPending       = 10 // 一个人同时在解析的小票最多几张
 	parseTimeout     = 2 * time.Minute
+	// receiptRetention：交上来以后这么久还没确认的小票连原图一起删；确认过的小票记录也删（原图跟着账目走，留着）
+	receiptRetention = 30 * 24 * time.Hour
+	pruneEvery       = 24 * time.Hour
 )
 
 // 错误。
@@ -38,6 +41,7 @@ var (
 	ErrNotFound = errors.New("没有这笔账 / 这张小票")
 	ErrInvalid  = errors.New("账目不合规")
 	ErrState    = errors.New("这张小票现在不能这样做（还在解析、已经入账、或者解析失败了）")
+	ErrTooMany  = errors.New("在解析的小票太多了，等解析完再交")
 )
 
 // Item 是一行明细。金额是原始币种；数量、税率可以没有（零值）。

@@ -56,14 +56,50 @@ func NewService(lifetime context.Context, opts Options) *Service {
 		now: now, logger: opts.Logger.With("component", "expenses"), slots: make(chan struct{}, parseConcurrency)}
 }
 
-// Resume 把服务端重启时还没解析完的小票接着解析（启动时做一次）。
-func (s *Service) Resume(ctx context.Context) error {
+// Run 先把服务端重启时还没解析完的小票接着解析，之后每天清一次过期的小票；ctx 结束时返回。
+func (s *Service) Run(ctx context.Context) {
 	pending, err := s.store.parsingReceipts(ctx)
 	if err != nil {
-		return err
+		s.logger.Error("读没解析完的小票出错", "err", err)
 	}
 	for _, receipt := range pending {
 		go s.parse(receipt)
+	}
+	if len(pending) > 0 {
+		s.logger.Info("接着解析服务端重启前没解析完的小票", "receipts", len(pending))
+	}
+	ticker := time.NewTicker(pruneEvery)
+	defer ticker.Stop()
+	for {
+		if err := s.Prune(ctx); err != nil {
+			s.logger.Error("清过期的小票出错", "err", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+// Prune 清过期的小票：交上来 receiptRetention 以后还没确认的连原图一起删；确认过的只删记录（原图跟着账目）。
+func (s *Service) Prune(ctx context.Context) error {
+	stale, err := s.store.staleReceipts(ctx, s.now().Add(-receiptRetention))
+	if err != nil {
+		return err
+	}
+	for _, receipt := range stale {
+		if err := s.store.dropReceipt(ctx, receipt.ID); err != nil {
+			return err
+		}
+		if receipt.Status != StatusConfirmed {
+			if err := s.images.Remove(receipt.AttachmentID); err != nil {
+				s.logger.Warn("删过期小票的原图出错（记录已删）", "receipt", receipt.ID, "err", err)
+			}
+		}
+	}
+	if len(stale) > 0 {
+		s.logger.Info("清掉过期的小票", "receipts", len(stale))
 	}
 	return nil
 }
@@ -77,6 +113,11 @@ func (s *Service) Upload(ctx context.Context, person string, data []byte, hint H
 	}
 	if utf8.RuneCountInString(hint.Note) > MaxNoteRunes {
 		return Receipt{}, fmt.Errorf("%w：说明最多 %d 字", ErrInvalid, MaxNoteRunes)
+	}
+	if pending, err := s.store.pendingCount(ctx, person); err != nil {
+		return Receipt{}, err
+	} else if pending >= MaxPending {
+		return Receipt{}, ErrTooMany
 	}
 	encoded, _, _, err := attachments.Normalize(data)
 	if err != nil {
@@ -96,8 +137,8 @@ func (s *Service) Upload(ctx context.Context, person string, data []byte, hint H
 	now := s.now().UTC().Truncate(time.Second)
 	receipt := Receipt{ID: id, Person: person, AttachmentID: attachment, CategoryHint: hint.Category, NoteHint: strings.TrimSpace(hint.Note),
 		Status: StatusParsing, CreatedAt: now, UpdatedAt: now}
-	if err := s.store.putReceipt(ctx, receipt); err != nil {
-		return Receipt{}, err
+	if err := s.store.insertReceipt(ctx, receipt); err != nil {
+		return Receipt{}, errors.Join(err, s.images.Remove(attachment))
 	}
 	go s.parse(receipt)
 	return receipt, nil
@@ -146,7 +187,7 @@ func (s *Service) finishParse(receipt Receipt, draft *Draft, failure string, err
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(s.lifetime), 10*time.Second)
 	defer cancel()
-	if err := s.store.putReceipt(ctx, receipt); err != nil {
+	if err := s.store.finishParse(ctx, receipt); err != nil {
 		s.logger.Error("存小票的解析结果出错", "receipt", receipt.ID, "err", err)
 	}
 }
@@ -183,14 +224,25 @@ func (s *Service) Confirm(ctx context.Context, person, id string, draft Draft) (
 		return Expense{}, err
 	}
 	expense.AttachmentID = receipt.AttachmentID
-	if err := s.store.putExpense(ctx, expense); err != nil {
-		return Expense{}, err
-	}
-	receipt.Status, receipt.ExpenseID, receipt.Draft, receipt.UpdatedAt = StatusConfirmed, expense.ID, &draft, expense.UpdatedAt
-	if err := s.store.putReceipt(ctx, receipt); err != nil {
+	if err := s.store.confirm(ctx, receipt.ID, draft, expense); err != nil {
 		return Expense{}, err
 	}
 	return expense, nil
+}
+
+// Discard 不要这张小票了（解析好了不想入账、或者解析失败了要重拍）：连原图一起删。还在解析、已经入账的不行（ErrState）。
+func (s *Service) Discard(ctx context.Context, person, id string) error {
+	receipt, err := s.Receipt(ctx, person, id)
+	if err != nil {
+		return err
+	}
+	if err := s.store.deleteReceipt(ctx, id); err != nil {
+		return err
+	}
+	if err := s.images.Remove(receipt.AttachmentID); err != nil {
+		s.logger.Warn("删小票的原图出错（小票已删）", "receipt", id, "err", err)
+	}
+	return nil
 }
 
 // Create 手记一笔（没有小票）。
@@ -371,7 +423,7 @@ func (s *Service) AddCategory(ctx context.Context, person, name string) (Categor
 	return category, s.store.addCategory(ctx, person, category.Key, name, s.now())
 }
 
-// DeleteCategory 删一个主人自己的分类（用过它的账目分类留着、显示成「已删的分类」由 App 处理）。
+// DeleteCategory 删一个主人自己的分类（用过它的账目的分类键留着；接口把认不出的键显示成「已删的分类」）。
 func (s *Service) DeleteCategory(ctx context.Context, person, key string) error {
 	return s.store.deleteCategory(ctx, person, key)
 }
@@ -381,6 +433,21 @@ func (s *Service) monthRange(month time.Time) (from, to time.Time) {
 	local := month.In(s.location)
 	from = time.Date(local.Year(), local.Month(), 1, 0, 0, 0, 0, s.location)
 	return from.UTC(), from.AddDate(0, 1, 0).UTC()
+}
+
+// MonthLayout 是月份的写法（YYYY-MM）。
+const MonthLayout = "2006-01"
+
+// ParseMonth 把「YYYY-MM」变成那个月（按记账的时区）；空 = 这个月。
+func (s *Service) ParseMonth(text string) (time.Time, error) {
+	if text == "" {
+		return s.now().In(s.location), nil
+	}
+	month, err := time.ParseInLocation(MonthLayout, text, s.location)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("%w：月份要写成 YYYY-MM", ErrInvalid)
+	}
+	return month, nil
 }
 
 // MonthFilter 是 month 那个月的条件（再按需要加分类、店名）。
@@ -398,6 +465,7 @@ type Group struct {
 
 // Summary 是一个月的汇总：按币种分开的合计、按分类、按店（各自按合计排）；上个月的合计（比较用）。
 type Summary struct {
+	Month      string // YYYY-MM
 	From, To   time.Time
 	Count      int
 	Sum        money.Sum
@@ -418,7 +486,7 @@ func (s *Service) Summarize(ctx context.Context, person string, month time.Time,
 	if err != nil {
 		return Summary{}, err
 	}
-	summary := Summary{From: from, To: to, Count: len(current), Sum: money.Sum{}, Previous: money.Sum{}}
+	summary := Summary{Month: from.In(s.location).Format(MonthLayout), From: from, To: to, Count: len(current), Sum: money.Sum{}, Previous: money.Sum{}}
 	categories, merchants := map[string]*Group{}, map[string]*Group{}
 	for _, expense := range current {
 		summary.Sum.Add(expense.Total)

@@ -86,6 +86,7 @@ type services struct {
 	ledger     spending.Ledger
 	guard      *spending.Guard
 	pricing    spending.Pricing
+	rates      money.Converter // 参考汇率（花费上限、记账的汇总共用）
 	// conversations 是对话库（没设 HARO_CONVERSATIONS_DB 时为 nil：对话只在内存里）：大脑存对话，长期记忆从完整记录里按意思找
 	conversations *conversationstore.SQLiteStore
 	embedder      *embedding.Client // 嵌入服务（没设 HARO_EMBEDDING_URL 时为 nil：长期记忆不按意思找）
@@ -130,7 +131,7 @@ func connectServices(ctx context.Context, settings config.ServerSettings, logger
 	limits := spending.Limits{Currency: currency, ResearchDaily: money.Of(settings.ResearchDailyCap, currency),
 		Monthly: money.Of(settings.MonthlyCap, currency), SearchDailyCredits: settings.SearchDailyCredits,
 		WarnRatio: spending.DefaultWarnRatio, MonthlyRaise: money.Of(settings.MonthlyRaise, currency)}
-	deps.guard = spending.NewGuard(deps.ledger, limits, rates, logger)
+	deps.guard, deps.rates = spending.NewGuard(deps.ledger, limits, rates, logger), rates
 	logger.Info("费用上限（默认货币；账本按原始币种记，判断时按参考汇率换算）", "currency", currency,
 		"research_daily", limits.ResearchDaily.String(), "monthly", limits.Monthly.String(), "search_daily_credits", settings.SearchDailyCredits)
 	if deps.conversations, err = openConversationStore(ctx, settings, shutdown); err != nil {
@@ -323,13 +324,14 @@ func assembleBrain(ctx context.Context, settings config.ServerSettings, catalog 
 	if settings.WakeArbitration > 0 { // 多台终端同时听到唤醒词：只让最合适的那台回答
 		components.WakeArbiter = brain.NewWakeArbiter(settings.WakeArbitration)
 	}
-	extras.title = built.title
+	extras.title, extras.receipt = built.title, built.receipt
 	return components, options, extras, nil
 }
 
-// brainExtras 是组装大脑时一起建好、App 的接口要用的：起标题的代理、背景记录池（没有时为 nil）。
+// brainExtras 是组装大脑时一起建好、App 的接口要用的：起标题、读小票的代理、背景记录池（没有时为 nil）。
 type brainExtras struct {
 	title     *brain.Agent
+	receipt   *brain.Agent
 	backstory *backstory.Service
 }
 

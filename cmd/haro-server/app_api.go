@@ -14,6 +14,7 @@ import (
 	"github.com/bukahou/haro/internal/brainserver"
 	"github.com/bukahou/haro/internal/chat"
 	"github.com/bukahou/haro/internal/config"
+	"github.com/bukahou/haro/internal/expenses"
 	"github.com/bukahou/haro/internal/household"
 	"github.com/bukahou/haro/internal/memory"
 	"github.com/bukahou/haro/internal/profile"
@@ -92,6 +93,7 @@ type appBrain struct {
 	components brain.Components
 	options    brain.Options
 	title      *brain.Agent       // 起标题；nil = 不起
+	receipt    *brain.Agent       // 记账时读小票；nil = 没有记账
 	backstory  *backstory.Service // 背景记录池；nil = 没有
 }
 
@@ -109,7 +111,7 @@ func (b appBrain) textSessions(logger *slog.Logger) chat.SessionFactory {
 
 // buildAppAPI 建 App 的接口（HARO_APP_PUBLIC_URL 设了才开）：经后端代理的 akasha 登录、各接口。
 func buildAppAPI(ctx context.Context, settings config.ServerSettings, deps services, kit tooling, assembled appBrain,
-	online *brainserver.OnlineTerminals, logger *slog.Logger) (http.Handler, error) {
+	online *brainserver.OnlineTerminals, logger *slog.Logger, shutdown *shutdownSteps) (http.Handler, error) {
 	store := deps.accounts.store
 	if store == nil {
 		logger.Info("App 的接口：没设 HARO_APP_PUBLIC_URL，不开")
@@ -124,6 +126,13 @@ func buildAppAPI(ctx context.Context, settings config.ServerSettings, deps servi
 	if kit.places != nil {
 		options.Places = kit.places
 	}
+	var images *attachments.Files // App 里发的图片、小票的原图（同一个目录）
+	if settings.AttachmentsDir != "" {
+		var err error
+		if images, err = attachments.OpenFiles(settings.AttachmentsDir); err != nil {
+			return nil, err
+		}
+	}
 	if deps.conversations != nil { // 打字对话要对话库（线程、完整记录）
 		chatOptions := chat.Options{Store: deps.conversations, Sessions: assembled.textSessions(logger), Logger: logger}
 		if assembled.title != nil {
@@ -132,12 +141,8 @@ func buildAppAPI(ctx context.Context, settings config.ServerSettings, deps servi
 		if kit.memory != nil {
 			chatOptions.Recall = memoryRecall{keeper: kit.memory}
 		}
-		if settings.AttachmentsDir != "" { // App 里发的图片
-			files, err := attachments.OpenFiles(settings.AttachmentsDir)
-			if err != nil {
-				return nil, err
-			}
-			chatOptions.Images = files
+		if images != nil {
+			chatOptions.Images = images
 		} else {
 			logger.Info("App 的打字对话：没设 HARO_ATTACHMENTS_DIR，不收图片")
 		}
@@ -154,6 +159,19 @@ func buildAppAPI(ctx context.Context, settings config.ServerSettings, deps servi
 	}
 	if kit.research != nil {
 		options.Research = kit.research
+	}
+	if settings.ExpensesDB != "" && assembled.receipt != nil { // 记账（配置校验保证了有存原图的目录）
+		books, err := expenses.OpenStore(ctx, settings.ExpensesDB)
+		if err != nil {
+			return nil, err
+		}
+		shutdown.add("账目的库", books.Close)
+		// 按月汇总的「月」按服务端的时区（和提醒、日历一样：time.Local，即 TZ）
+		service := expenses.NewService(ctx, expenses.Options{Store: books, Images: images,
+			Parser: expenses.AgentParser{Agent: *assembled.receipt}, Logger: logger})
+		go service.Run(ctx)
+		options.Expenses, options.Rates = service, deps.rates
+		logger.Info("记账：交小票由代理读成草稿，主人确认才入账", "db", settings.ExpensesDB)
 	}
 	handler, err := appserver.NewHandler(ctx, options)
 	if err != nil {
