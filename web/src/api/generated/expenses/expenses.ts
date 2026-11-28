@@ -15,7 +15,7 @@
  * - App 的接口都在 `/api/v1/` 下（公网只放行这一段）；`/v1/...` 是终端的语音连接，只在局域网。
  * - 网页版（另一个域名）从浏览器跨域调接口：服务端只放行网页版的那一个来源（CORS），令牌同样放在 `Authorization` 里，不用 cookie。
  *
- * OpenAPI spec version: 0.12.0
+ * OpenAPI spec version: 0.13.0
  */
 import type {
   Expense,
@@ -33,6 +33,17 @@ import { apiRequest } from '../../request';
 
 
 
+  /**
+ * @summary 还没入账的小票（在读的、读好了等确认的、没读成的；新的在前）
+ */
+export const listReceipts = (
+
+ ) => {
+      return apiRequest<Receipt[]>(
+      {url: `/api/v1/receipts`, method: 'GET'
+    },
+      );
+    }
   /**
  * 一个人同时在解析的最多 10 张（多了回 409）。交上来 30 天还没确认的小票连原图一起删掉。
  * @summary 交一张小票、发票、收据或订单页的截图（请求体就是图片）：存好原图，开始在后台解析；之后用 getReceipt 看草稿
@@ -217,7 +228,8 @@ export const deleteExpenseCategory = (
     },
       );
     }
-  export type UploadReceiptResult = NonNullable<Awaited<ReturnType<typeof uploadReceipt>>>
+  export type ListReceiptsResult = NonNullable<Awaited<ReturnType<typeof listReceipts>>>
+export type UploadReceiptResult = NonNullable<Awaited<ReturnType<typeof uploadReceipt>>>
 export type GetReceiptResult = NonNullable<Awaited<ReturnType<typeof getReceipt>>>
 export type DiscardReceiptResult = NonNullable<Awaited<ReturnType<typeof discardReceipt>>>
 export type GetReceiptImageResult = NonNullable<Awaited<ReturnType<typeof getReceiptImage>>>

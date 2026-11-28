@@ -193,6 +193,11 @@ func (s *Service) finishParse(receipt Receipt, draft *Draft, failure string, err
 	}
 }
 
+// OpenReceipts 是这个人还没入账的小票：在解析的、解析好了等确认的、没解析成的（新的在前）。
+func (s *Service) OpenReceipts(ctx context.Context, person string) ([]Receipt, error) {
+	return s.store.openReceipts(ctx, person)
+}
+
 // Receipt 是这个人的一张小票。
 func (s *Service) Receipt(ctx context.Context, person, id string) (Receipt, error) {
 	receipt, err := s.store.receipt(ctx, id)

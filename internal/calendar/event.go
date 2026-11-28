@@ -28,6 +28,9 @@ const (
 	minRecurrenceGap = 5 * time.Minute
 )
 
+// AlertChoices 是 App 新建 / 改日程时给主人选的提醒档位（少的在前）；语音定的提醒不限于这几个。
+var AlertChoices = []time.Duration{0, 5 * time.Minute, 15 * time.Minute, 30 * time.Minute, time.Hour, 24 * time.Hour}
+
 // 错误（App 的接口按它们给状态）。
 var (
 	ErrNotFound = errors.New("没有这条日程")

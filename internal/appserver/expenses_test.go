@@ -120,6 +120,9 @@ func TestExpensesOverHTTP(t *testing.T) {
 	}
 	receiptID := uploaded["receipt_id"].(string)
 	receipt := f.waitReceipt(t, receiptID)
+	if open := f.list(t, "/api/v1/receipts", "zh"); len(open) != 1 || open[0]["receipt_id"] != receiptID || open[0]["status"] != "ready" {
+		t.Errorf("还没入账的小票：%v", open)
+	}
 	draft, _ := receipt["draft"].(map[string]any)
 	if receipt["status"] != "ready" || draft["merchant"] != "ロピア" || draft["category"] != "groceries" || len(draft["uncertain"].([]any)) != 1 {
 		t.Fatalf("草稿：%v", receipt)
@@ -139,6 +142,9 @@ func TestExpensesOverHTTP(t *testing.T) {
 	expenseID := expense["expense_id"].(string)
 	if status, _ := f.call(t, "POST", "/api/v1/receipts/"+receiptID+"/confirm", key, confirm); status != 409 {
 		t.Errorf("确认两次：%d", status)
+	}
+	if open := f.list(t, "/api/v1/receipts", "zh"); len(open) != 0 {
+		t.Errorf("入账以后不再列：%v", open)
 	}
 	manual := `{"merchant":"淘宝","spent_at":"2026-11-12T03:00:00Z","currency":"CNY","total":"35.5","category":"` + pets["key"].(string) + `"}`
 	status, other := f.call(t, "POST", "/api/v1/expenses", key, manual)
@@ -169,8 +175,12 @@ func TestExpensesOverHTTP(t *testing.T) {
 		len(total["by_currency"].([]any)) != 2 || total["conversion_note"] == nil {
 		t.Fatalf("汇总：%d %v", status, summary)
 	}
-	if groups := summary["categories"].([]any); len(groups) != 2 || groups[0].(map[string]any)["name"] != "食品杂货" {
+	groups := summary["categories"].([]any)
+	if len(groups) != 2 || groups[0].(map[string]any)["name"] != "食品杂货" {
 		t.Errorf("按分类：%v", groups)
+	}
+	if shares := groups[0].(map[string]any)["share"].(float64) + groups[1].(map[string]any)["share"].(float64); shares < 0.99 || shares > 1.01 {
+		t.Errorf("各组占的比例加起来应是 1：%v", groups)
 	}
 	if status, body := f.call(t, "POST", "/api/v1/expenses", key, `{"merchant":"店","spent_at":"2026-11-12T03:00:00Z","currency":"JPY","total":"一百"}`); status != 400 ||
 		body["code"] != "validation_failed" {

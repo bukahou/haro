@@ -75,6 +75,7 @@ func (p problemReply) VisitListPhoneAlertsResponse(w http.ResponseWriter) error 
 func (p problemReply) VisitListCalendarSyncsResponse(w http.ResponseWriter) error { return p.write(w) }
 func (p problemReply) VisitSyncCalendarResponse(w http.ResponseWriter) error      { return p.write(w) }
 
+func (p problemReply) VisitListReceiptsResponse(w http.ResponseWriter) error      { return p.write(w) }
 func (p problemReply) VisitGetReceiptResponse(w http.ResponseWriter) error        { return p.write(w) }
 func (p problemReply) VisitDiscardReceiptResponse(w http.ResponseWriter) error    { return p.write(w) }
 func (p problemReply) VisitConfirmReceiptResponse(w http.ResponseWriter) error    { return p.write(w) }
