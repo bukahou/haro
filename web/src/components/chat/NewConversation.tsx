@@ -9,6 +9,7 @@ import { useState } from "react";
 
 import { problemMessage } from "@/api/problem";
 import { showToast } from "@/components/overlay";
+import { MenuButton } from "@/components/shell/MenuButton";
 import { Toggle } from "@/components/ui";
 import { useChat } from "@/stores/chat";
 
@@ -23,6 +24,7 @@ export function NewConversation() {
     <div className="chat solo">
       <section className="thread">
         <div className="thread-head">
+          <MenuButton />
           <span className="ico n" style={{ width: 30, height: 30 }}>
             {incognito ? <VenetianMask size={16} aria-hidden /> : <MessageCircle size={16} aria-hidden />}
           </span>

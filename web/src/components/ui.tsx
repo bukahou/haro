@@ -7,6 +7,7 @@ import { useTranslations } from "next-intl";
 import Link from "next/link";
 
 import type { MoneyTotal } from "@/api/generated/model";
+import { MenuButton } from "@/components/shell/MenuButton";
 import { useMoneyFormat } from "@/lib/format";
 
 import type { ButtonKind } from "./overlay";
@@ -14,6 +15,7 @@ import type { ButtonKind } from "./overlay";
 // ---------- 页面 ----------
 
 // Page 是一页的内容区：页头（返回、标题、右边的操作）、一句说明、内容。wide = 日历这类要更宽的页。
+// 没有返回的页（日历、记账、我的这些顶层页）在窄屏的页头左边放菜单按钮。
 export function Page({
   title,
   back,
@@ -33,10 +35,12 @@ export function Page({
   return (
     <div className={clsx("content", wide && "wide")}>
       <div className="page-head">
-        {back && (
+        {back ? (
           <Link className="back" href={back} aria-label={t("back")}>
             <ChevronLeft size={22} />
           </Link>
+        ) : (
+          <MenuButton />
         )}
         <h1>{title}</h1>
         {actions}

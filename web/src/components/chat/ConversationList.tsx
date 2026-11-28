@@ -1,6 +1,6 @@
 "use client";
 
-// 对话列表：语音那条在最前（单独一节），其余新的在前。侧栏里是紧凑的一行一条；手机的聊天页多一行最近的回答。
+// 对话列表（在侧栏里）：语音那条在最前（单独一节），其余新的在前，一行一条。
 // filter 只筛已经读到的标题和最近一句（搜内容走 /chat/search，由后端搜）。
 import clsx from "clsx";
 import { BookOpen, MessageCircle, Mic, VenetianMask } from "lucide-react";
@@ -11,15 +11,13 @@ import type { Conversation } from "@/api/generated/model";
 import { useTimeFormat } from "@/lib/format";
 import { useConversations } from "@/stores/conversations";
 
-import { Markdown } from "./Markdown";
-
 export function useConversationTitle() {
   const t = useTranslations("chat");
   return (conversation: Conversation | undefined) =>
     conversation?.title ?? (conversation?.kind === "voice" ? t("voiceTitle") : t("untitled"));
 }
 
-export function ConversationList({ activeId, filter, compact }: { activeId: string | null; filter: string; compact?: boolean }) {
+export function ConversationList({ activeId, filter }: { activeId: string | null; filter: string }) {
   const t = useTranslations("chat");
   const time = useTimeFormat();
   const titleOf = useConversationTitle();
@@ -41,18 +39,13 @@ export function ConversationList({ activeId, filter, compact }: { activeId: stri
         aria-current={conversation.conversation_id === activeId ? "page" : undefined}
       >
         <span className={clsx("ico", conversation.kind !== "voice" && "n")}>
-          <Icon size={compact ? 15 : 18} aria-hidden />
+          <Icon size={15} aria-hidden />
         </span>
         <span className="grow">
           <span className="between">
             <span className="t ell">{titleOf(conversation)}</span>
             <span className="cap">{time.short(conversation.updated_at)}</span>
           </span>
-          {!compact && conversation.last_text && (
-            <span className="sub excerpt">
-              <Markdown text={conversation.last_text} />
-            </span>
-          )}
         </span>
       </Link>
     );
@@ -63,12 +56,10 @@ export function ConversationList({ activeId, filter, compact }: { activeId: stri
       {voice.map(item)}
       <div className="conv-sec between">
         {t("chatSection")}
-        {compact && (
-          <Link className="sec-link" href="/chat/backstory">
-            <BookOpen size={14} aria-hidden />
-            {t("backstory")}
-          </Link>
-        )}
+        <Link className="sec-link" href="/chat/backstory">
+          <BookOpen size={14} aria-hidden />
+          {t("backstory")}
+        </Link>
       </div>
       {chats.length ? chats.map(item) : <p className="sub px-2.5 py-3">{needle ? t("noMatch", { filter }) : t("noChats")}</p>}
     </>

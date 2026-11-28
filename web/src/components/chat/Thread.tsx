@@ -3,9 +3,8 @@
 // 一条对话：页头（返回、标题、更多）、几轮记录（往上翻读更早的）、正在答的那一轮、输入框。
 // 数据都在 stores/chat.ts；这里只管显示和把主人的操作交过去。
 import clsx from "clsx";
-import { AlertTriangle, ArrowUp, Check, ChevronLeft, Copy, ImageIcon, MessageCircle, Mic, MoreHorizontal, Square, VenetianMask, X } from "lucide-react";
+import { AlertTriangle, ArrowUp, Check, Copy, ImageIcon, MessageCircle, Mic, MoreHorizontal, Square, VenetianMask, X } from "lucide-react";
 import { useTranslations } from "next-intl";
-import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
@@ -18,6 +17,8 @@ import { useClientConfig } from "@/stores/clientConfig";
 import { useConversations } from "@/stores/conversations";
 
 import { AttachmentImage } from "./AttachmentImage";
+import { MenuButton } from "@/components/shell/MenuButton";
+
 import { useConversationTitle } from "./ConversationList";
 import { Markdown } from "./Markdown";
 
@@ -276,9 +277,7 @@ function ThreadHead({ conversation, conversationId }: { conversation: Conversati
     });
   return (
     <div className="thread-head">
-      <Link className="back min-[900px]:hidden" href="/chat" aria-label={t("common.back")}>
-        <ChevronLeft size={22} />
-      </Link>
+      <MenuButton />
       <span className={clsx("ico", !voice && "n")} style={{ width: 30, height: 30 }}>
         <Icon size={16} aria-hidden />
       </span>
