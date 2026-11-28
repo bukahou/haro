@@ -360,13 +360,18 @@ func (s *Scheduler) announce(reminder Reminder) bool {
 // 没能说就留着，调度循环之后再试（还在 CatchUpWindow 以内的话）。
 func (s *Scheduler) finished(reminder Reminder, occurrence time.Time, outcome brain.AnnouncementOutcome) {
 	s.mu.Lock()
-	delete(s.inFlight, reminder.ID)
 	caughtUp := s.waiting[reminder.ID]
 	if outcome != brain.AnnouncementDropped {
 		delete(s.waiting, reminder.ID)
 	}
 	s.mu.Unlock()
 	defer s.Poke()
+	// 记下「说过了」（或者没记成）之后才从「交出去了」里拿掉：先拿掉的话，这期间调度被叫醒会看到它到了点、没说过，再交一遍
+	defer func() {
+		s.mu.Lock()
+		delete(s.inFlight, reminder.ID)
+		s.mu.Unlock()
+	}()
 	if outcome == brain.AnnouncementDropped {
 		s.logger.Warn("提醒没能说出来：之后再试", "id", reminder.ID)
 		return

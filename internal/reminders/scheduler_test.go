@@ -314,3 +314,56 @@ func TestRunAnnouncesWhenPoked(t *testing.T) {
 		t.Fatal("ctx 结束后应退出")
 	}
 }
+
+// blockingSpoken 是「记下说过了」那一步卡住的账本：卡住期间调度又看一遍到点的，也不能再交一次。
+type blockingSpoken struct {
+	Store
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (b *blockingSpoken) Spoken(ctx context.Context, id int64, at, next time.Time) error {
+	close(b.entered)
+	<-b.release
+	return b.Store.Spoken(ctx, id, at, next)
+}
+
+// 说完以后、记下「说过了」之前（这期间调度可能被别的事叫醒），同一条不会再交一次；记下之后不再到点。
+func TestNoRepeatWhileRecordingSpoken(t *testing.T) {
+	inner, err := OpenSQLite(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = inner.Close() })
+	store := &blockingSpoken{Store: inner, entered: make(chan struct{}), release: make(chan struct{})}
+	announcer := &fakeAnnouncer{online: true}
+	now := &clock{now: time.Date(2026, 11, 27, 7, 0, 0, 0, jst)}
+	s := NewScheduler(store, announcer, SchedulerOptions{Location: jst, Now: now.Now}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ctx := context.Background()
+	if _, err := s.Set(ctx, "主人", Request{Text: "该喝水了。", After: time.Minute}); err != nil {
+		t.Fatal(err)
+	}
+	now.advance(time.Minute)
+	s.handleDue(ctx)
+	first := announcer.taken()
+	if len(first) != 1 {
+		t.Fatalf("到点应交一次：%d", len(first))
+	}
+	go first[0].Done(brain.AnnouncementSpoken)
+	<-store.entered // 正在记「说过了」
+	s.handleDue(ctx)
+	if again := announcer.taken(); len(again) != 0 {
+		t.Errorf("记下之前又交了一次：%d", len(again))
+	}
+	close(store.release)
+	for range 100 {
+		if listing, _ := s.List(ctx, "主人", false); len(listing.Active) == 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	s.handleDue(ctx)
+	if again := announcer.taken(); len(again) != 0 {
+		t.Errorf("记下之后又交了一次：%d", len(again))
+	}
+}
