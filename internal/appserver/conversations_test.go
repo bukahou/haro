@@ -28,12 +28,12 @@ import (
 	"github.com/bukahou/haro/internal/speech"
 )
 
-// echoModel 回一句固定的话。
+// echoModel 回一句固定的话（带一个情绪标记：那是给语音用的，流给 App 的和记录里都不该有）。
 type echoModel struct{}
 
 func (echoModel) StreamReply(context.Context, brain.ChatRequest) iter.Seq2[brain.ReplyDelta, error] {
 	return func(yield func(brain.ReplyDelta, error) bool) {
-		for _, token := range []string{"好的，", "**记下了**。"} {
+		for _, token := range []string{"[温柔]好的，", "**记下了**。"} {
 			if !yield(brain.ReplyDelta{Text: token}, nil) {
 				return
 			}
@@ -155,7 +155,10 @@ func TestChatOverHTTP(t *testing.T) {
 	status, page := f.call(t, "GET", "/api/v1/conversations/"+id+"/turns", key, "")
 	turns, _ := page["turns"].([]any)
 	if status != 200 || len(turns) != 1 || turns[0].(map[string]any)["said"] != "帮我记一下" || page["next_before"] != nil {
-		t.Errorf("翻记录：%d %v", status, page)
+		t.Fatalf("翻记录：%d %v", status, page)
+	}
+	if blocks := turns[0].(map[string]any)["reply"].([]any); len(blocks) != 1 || blocks[0].(map[string]any)["text"] != "好的，**记下了**。" {
+		t.Errorf("记录里的回答（不带情绪标记）：%v", blocks)
 	}
 	waitTitle := time.Now().Add(2 * time.Second)
 	for {

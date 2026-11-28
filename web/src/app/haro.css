@@ -254,7 +254,7 @@ textarea.input { min-height: 140px; resize: vertical; line-height: 1.6; }
 .me-img img { width: 100%; height: 100%; object-fit: cover; }
 .ai-msg { max-width: 100%; line-height: 1.7; }
 .ai-msg h4 { font-size: 17px; font-weight: 600; margin: 4px 0 6px; }
-.ai-msg p + p, .ai-msg p + ol, .ai-msg ol + p, .ai-msg p + ul { margin-top: 8px; }
+.ai-msg > * + * { margin-top: 8px; }
 .ai-msg ol, .ai-msg ul { margin: 6px 0 0; padding-left: 22px; }
 .ai-msg table { border-collapse: collapse; margin-top: 8px; width: 100%; font-size: 14px; }
 .ai-msg .table-scroll { overflow-x: auto; max-width: 100%; }
