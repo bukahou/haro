@@ -26,6 +26,7 @@ func TestBuiltinDefinitions(t *testing.T) {
 		agents.OverBudget:     {agents.ModeSubtask, agents.TierBase, "chat"},
 		agents.Research:       {agents.ModeSubtask, agents.TierBase, "research"},
 		agents.ResearchReview: {agents.ModeSubtask, agents.TierBase, "research"}, // 审查和调查记在一起，受每天的调查额度管；用哪档由配置换
+		agents.Title:          {agents.ModeSubtask, agents.TierBase, "summary"},  // 起标题也是压缩对话，记在「对话摘要」里
 	}
 	if len(catalog) != len(want) {
 		t.Errorf("程序里带了 %d 个代理，这里核对了 %d 个", len(catalog), len(want))

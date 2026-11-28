@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -35,6 +36,7 @@ type Store interface {
 	DeleteThread(ctx context.Context, person, id string, now time.Time) error
 	RestoreThread(ctx context.Context, person, id string) error
 	ThreadTurns(ctx context.Context, person, thread string, before int64, limit int) ([]conversationstore.RecordedTurn, error)
+	SetThreadTitle(ctx context.Context, person, id, title string) error
 }
 
 // TextSession 是答一句话的打字会话（brain.Session 实现）。
@@ -54,10 +56,15 @@ type Speaker struct {
 // SessionFactory 为这个人的一条对话开一个打字会话。
 type SessionFactory func(speaker Speaker, thread string) TextSession
 
+// titleTimeout 是起一次标题最多等多久（后台做：起不成就没有标题，下一轮再起）。
+const titleTimeout = 30 * time.Second
+
 // Service 是打字对话。
 type Service struct {
+	lifetime   context.Context // 后台起标题跟着它停
 	store      Store
 	newSession SessionFactory
+	titler     Titler // nil = 不起标题
 	logger     *slog.Logger
 
 	mu      sync.Mutex
@@ -66,9 +73,10 @@ type Service struct {
 
 type turnKey struct{ person, thread string }
 
-// NewService 建打字对话。
-func NewService(store Store, newSession SessionFactory, logger *slog.Logger) *Service {
-	return &Service{store: store, newSession: newSession, logger: logger.With("component", "chat"), running: map[turnKey]*Turn{}}
+// NewService 建打字对话。titler 为 nil 时不起标题；后台起标题随 lifetime 停。
+func NewService(lifetime context.Context, store Store, newSession SessionFactory, titler Titler, logger *slog.Logger) *Service {
+	return &Service{lifetime: lifetime, store: store, newSession: newSession, titler: titler, logger: logger.With("component", "chat"),
+		running: map[turnKey]*Turn{}}
 }
 
 // EventType 是回答的事件。
@@ -94,6 +102,7 @@ type Event struct {
 // Turn 是正在答的一句。Events 在这一轮结束后关闭；Detach 之后（App 断开）事件丢掉，但这一轮照样答完、存好。
 type Turn struct {
 	ID       string
+	said     string // 主人说的这一句（起标题用）
 	events   chan Event
 	detached chan struct{}
 	detach   sync.Once
@@ -133,7 +142,7 @@ func (s *Service) Send(ctx context.Context, speaker Speaker, thread, text, langu
 		return nil, err
 	}
 	key := turnKey{person: speaker.Owner, thread: thread}
-	turn := &Turn{ID: id, events: make(chan Event, 64), detached: make(chan struct{})}
+	turn := &Turn{ID: id, said: text, events: make(chan Event, 64), detached: make(chan struct{})}
 	s.mu.Lock()
 	if _, busy := s.running[key]; busy {
 		s.mu.Unlock()
@@ -155,15 +164,20 @@ func (s *Service) pump(key turnKey, turn *Turn) {
 	defer s.finish(key, turn)
 	defer close(turn.events)
 	turn.emit(Event{Type: EventStarted, TurnID: turn.ID})
+	var answer strings.Builder
 	for event := range turn.session.Events() {
 		switch e := event.(type) {
 		case realtimeproto.ResponseOutputAudioTranscriptDelta:
+			answer.WriteString(e.Delta)
 			turn.emit(Event{Type: EventText, Text: e.Delta})
 		case realtimeproto.ResponseDone:
 			if e.Status == realtimeproto.StatusFailed {
 				turn.emit(Event{Type: EventFailed, Reason: e.Reason})
 			} else {
 				turn.emit(Event{Type: EventDone, Status: e.Status, Reason: e.Reason})
+			}
+			if e.Status == realtimeproto.StatusCompleted && key.thread != brain.VoiceThread && s.titler != nil {
+				go s.titleThread(key, turn.said, answer.String())
 			}
 			return
 		}
@@ -190,6 +204,24 @@ func (s *Service) finish(key turnKey, turn *Turn) {
 		if err := turn.session.Close(); err != nil {
 			s.logger.Warn("关打字会话出错", "err", err)
 		}
+	}
+}
+
+// titleThread 给还没有标题的对话起标题（第一轮答完后，后台做）。起不成只记日志：下一轮答完再起。
+func (s *Service) titleThread(key turnKey, said, answer string) {
+	ctx, cancel := context.WithTimeout(s.lifetime, titleTimeout)
+	defer cancel()
+	thread, err := s.store.ThreadOf(ctx, key.person, key.thread)
+	if err != nil || thread.Title != "" {
+		return
+	}
+	title, err := s.titler.Title(ctx, said, answer)
+	if err != nil {
+		s.logger.Warn("起标题没成（下一轮再起）", "thread", key.thread, "err", err)
+		return
+	}
+	if err := s.store.SetThreadTitle(ctx, key.person, key.thread, title); err != nil {
+		s.logger.Warn("存标题没成", "thread", key.thread, "err", err)
 	}
 }
 

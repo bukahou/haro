@@ -57,11 +57,11 @@ func newService(t *testing.T) (*Service, *conversationstore.SQLiteStore, chan *f
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	opened := make(chan *fakeSession, 4)
-	service := NewService(store, func(Speaker, string) TextSession {
+	service := NewService(context.Background(), store, func(Speaker, string) TextSession {
 		session := newFakeSession()
 		opened <- session
 		return session
-	}, quiet)
+	}, nil, quiet)
 	return service, store, opened
 }
 

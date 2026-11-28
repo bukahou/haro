@@ -10,6 +10,7 @@ import (
 
 	"github.com/bukahou/haro/internal/agents"
 	"github.com/bukahou/haro/internal/brain"
+	"github.com/bukahou/haro/internal/chat"
 	"github.com/bukahou/haro/internal/config"
 	"github.com/bukahou/haro/internal/llm"
 	"github.com/bukahou/haro/internal/research"
@@ -65,6 +66,7 @@ type conversationAgents struct {
 	handoff   brain.Handoff     // 主人纠正时（或看画面接手时）接手的强模型；没配时为零值
 	expert    brain.FrameExpert // 看画面的专家；没配时为 nil
 	summary   *brain.Agent      // 写滚动摘要；没开时为 nil
+	title     *brain.Agent      // App 里的对话起标题
 	// overBudget：月度上限到了以后判断主人要不要临时提高（不受额度管、按天限次数）；不能口头提高时为 nil
 	overBudget *brain.Agent
 	// breaker：前台和接手的模型共用的「连不上」熔断；刚恢复时由它告诉模型断过多久（每轮的情况说明）
@@ -131,6 +133,17 @@ func (a agentAssembly) build(toolbox brain.Toolbox, expertSearch vision.Search) 
 		built.expert = expert
 		a.logger.Info("代理：看画面交给幕后专家，判断由前台转述", "agent", rules.Name, "model", model, "search", expertSearch != nil)
 	}
+
+	titleDefinition := a.catalog[agents.Title]
+	titleModel, _, err := a.metered(titleDefinition)
+	if err != nil {
+		return built, err
+	}
+	title, err := a.agent(titleDefinition, spending.NewBudgetedChatModel(titleModel, a.guard, a.logger), chat.TitlePromptValues(), nil)
+	if err != nil {
+		return built, err
+	}
+	built.title = &title
 
 	if s.ConversationSummary {
 		definition := a.catalog[agents.Summary]

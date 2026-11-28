@@ -291,6 +291,13 @@ v10（2026-11-22 裁定）：记住的事和以前的对话都能按意思找回
   大脑（资料）、天气（家在哪、每轮的「家大约在哪」）、节假日的提醒都按这一轮说话的人找到账号再取，App 的接口（`/me/profile`、`/me/home`、
   `/places`、`/countries`）在这里改，改了下一轮就生效。管理员账号在 App 里没设过的项用服务端的配置（`HARO_PROFILE_DIR`、`HARO_WEATHER_HOME`、
   `HARO_HOLIDAYS`），和没有账号时一样；别的账号没设时就是没有。终端上声纹认出的别的名字归管理员账号、只带「全家」那段（终端配对之前都归管理员）。
+- **打字对话**（`internal/chat`）：一个人有语音那条对话（`brain.VoiceThread`，终端上说的都接在这里，App 里也能接着打字）和 App 里新建的几条（线程）。
+  对话库按（人, 线程）存历史；轮次编号是每个人一套、所有线程共用，完整记录、向量、长期记忆的索引都还按（人, 编号）找；无痕线程的轮次不算向量。
+  说一句 = 开一个打字会话（`brain.Session` 的 `TextOnly`：不开识别流、不合成语音、模型写的原样发出），打的字当成账号本人说的交进去
+  （`Session.SubmitText`，等同声纹确认），同一套前台、工具、确认闸、额度；前台的规则按 `{{.Medium}}` 渲染成打字用的（能用 Markdown、不用情绪标记）。
+  回答经 `POST /conversations/{id}/messages` 以 Server-Sent Events 流回去（手写挂载，验令牌、限流同其他接口）；App 断开后这一轮照样答完、存好；
+  同一条对话同时只答一句。App 里新建的对话第一轮答完后，代理「起标题」在后台起标题（记在「对话摘要」的用途里）。
+  对话库迁移前自动备份到 `<库>.before-migrate`（`sqliteschema`：有待跑的迁移时先 `VACUUM INTO`）。
 - **终端**：`/terminals`（列表、配对、改名、移除）、`/admin/terminals/pending`（管理员批准 / 拒绝新终端）；配对码输错按来源 IP 限流，
   同一个账号 10 分钟内输错 5 次也先停一停（`pairing_attempts_exceeded`）。终端的登记、设备凭证存在账号库（`terminals`、`terminal_registrations`）。
 - **网页版跨域**：网页版在另一个域名，设了 `HARO_APP_WEB_URL` 才放行它这一个来源（`rs/cors`，方法从契约里取）；令牌在 `Authorization` 里，不用 cookie。

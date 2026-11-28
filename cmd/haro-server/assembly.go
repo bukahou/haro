@@ -260,14 +260,14 @@ func buildTooling(ctx context.Context, settings config.ServerSettings, catalog a
 
 // assembleBrain 装配大脑：代理（模型）、对话簿、主人资料、多终端仲裁、月度上限的口头提高。
 func assembleBrain(ctx context.Context, settings config.ServerSettings, catalog agents.Catalog, deps services, kit tooling,
-	logger *slog.Logger, shutdown *shutdownSteps) (brain.Components, brain.Options, error) {
+	logger *slog.Logger, shutdown *shutdownSteps) (brain.Components, brain.Options, *brain.Agent, error) {
 	options, err := buildBrainOptions(settings)
 	if err != nil {
-		return brain.Components{}, options, err
+		return brain.Components{}, options, nil, err
 	}
 	built, err := newAgentAssembly(settings, catalog, deps, logger).build(kit.toolbox, kit.expertSearch)
 	if err != nil {
-		return brain.Components{}, options, err
+		return brain.Components{}, options, nil, err
 	}
 	logger.Info("预热模型（本地第一次可能要几十秒；云端不用预热）", "model", activeModel(settings))
 	if err := brain.WarmUp(ctx, built.front.Model); err != nil {
@@ -302,7 +302,7 @@ func assembleBrain(ctx context.Context, settings config.ServerSettings, catalog 
 	if settings.WakeArbitration > 0 {   // 多台终端同时听到唤醒词：只让最合适的那台回答
 		components.WakeArbiter = brain.NewWakeArbiter(settings.WakeArbitration)
 	}
-	return components, options, nil
+	return components, options, built.title, nil
 }
 
 // openConversationStore 打开对话库（没设 HARO_CONVERSATIONS_DB 时为 nil：对话只在内存里）；打不开就不启动（不带着空历史开始）。

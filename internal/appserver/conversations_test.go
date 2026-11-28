@@ -9,6 +9,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+	"unicode/utf8"
 
 	"github.com/bukahou/haro/internal/accounts"
 	"github.com/bukahou/haro/internal/brain"
@@ -28,6 +30,15 @@ func (echoModel) StreamReply(context.Context, brain.ChatRequest) iter.Seq2[brain
 			}
 		}
 		yield(brain.ReplyDelta{Usage: &brain.ReplyUsage{PromptTokens: 10, OutputTokens: 2}, Stop: brain.StopCompleted}, nil)
+	}
+}
+
+// titleModel 起一个固定的标题（比上限长：要截掉）。
+type titleModel struct{}
+
+func (titleModel) StreamReply(context.Context, brain.ChatRequest) iter.Seq2[brain.ReplyDelta, error] {
+	return func(yield func(brain.ReplyDelta, error) bool) {
+		yield(brain.ReplyDelta{Text: "记事情的对话标题写得太长了要截掉一部分才行", Stop: brain.StopCompleted}, nil)
 	}
 }
 
@@ -54,11 +65,11 @@ func newChatFixture(t *testing.T) fixture {
 	t.Cleanup(func() { _ = conversations.Close() })
 	options := brain.Options{MaxHistoryTurn: 6}
 	book := brain.NewConversationBook(conversations, options, quietLogger)
-	service := chat.NewService(conversations, func(speaker chat.Speaker, thread string) chat.TextSession {
+	service := chat.NewService(ctx, conversations, func(speaker chat.Speaker, thread string) chat.TextSession {
 		return brain.NewSession(brain.Components{Front: brain.Agent{Name: "前台", Model: echoModel{}, MaxSteps: 8, RepeatLimit: 3, RepeatWindow: 4},
 			Conversations: book, Thread: thread, TextOnly: true,
 			NewSegmenter: func() brain.TextSegmenter { return speech.NewSentenceSegmenter(4, 40) }}, options, quietLogger)
-	}, quietLogger)
+	}, chat.AgentTitler{Agent: brain.Agent{Name: "起标题", Model: titleModel{}}}, quietLogger)
 	handler, err := NewHandler(ctx, Options{Accounts: store, Spending: fakeSpending{}, DefaultCurrency: "JPY", MinAppVersion: "1.0.0",
 		ProfileMaxChars: 10000, Chat: service, Logger: quietLogger})
 	if err != nil {
@@ -130,6 +141,20 @@ func TestChatOverHTTP(t *testing.T) {
 	turns, _ := page["turns"].([]any)
 	if status != 200 || len(turns) != 1 || turns[0].(map[string]any)["said"] != "帮我记一下" || page["next_before"] != nil {
 		t.Errorf("翻记录：%d %v", status, page)
+	}
+	waitTitle := time.Now().Add(2 * time.Second)
+	for {
+		listed := f.list(t, "/api/v1/conversations", "zh")
+		if title, _ := listed[1]["title"].(string); title != "" {
+			if utf8.RuneCountInString(title) != chat.TitleMaxRunes {
+				t.Errorf("标题截到 %d 个字：%q", chat.TitleMaxRunes, title)
+			}
+			break
+		}
+		if time.Now().After(waitTitle) {
+			t.Fatal("第一轮答完后应在后台起好标题")
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 	if status, events := f.stream(t, "voice", key, `{"text":"语音那条也能打字"}`); status != 200 || events[len(events)-1]["type"] != "done" {
 		t.Errorf("语音那条：%d %v", status, events)

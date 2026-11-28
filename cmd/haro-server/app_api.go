@@ -72,6 +72,7 @@ func openAccounts(ctx context.Context, settings config.ServerSettings, logger *s
 type appBrain struct {
 	components brain.Components
 	options    brain.Options
+	title      *brain.Agent // 起标题；nil = 不起
 }
 
 // textSessions 为打字对话开会话：同一套部件，只发文字、接在指定的线程、不用摄像头；别的账号只认本人（同终端）。
@@ -104,7 +105,11 @@ func buildAppAPI(ctx context.Context, settings config.ServerSettings, deps servi
 		options.Places = kit.places
 	}
 	if deps.conversations != nil { // 打字对话要对话库（线程、完整记录）
-		options.Chat = chat.NewService(deps.conversations, assembled.textSessions(logger), logger)
+		var titler chat.Titler
+		if assembled.title != nil {
+			titler = chat.AgentTitler{Agent: *assembled.title}
+		}
+		options.Chat = chat.NewService(ctx, deps.conversations, assembled.textSessions(logger), titler, logger)
 	}
 	if kit.memory != nil {
 		options.Memory = kit.memory
