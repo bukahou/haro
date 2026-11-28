@@ -140,3 +140,17 @@ func since(t time.Time) string {
 	}
 	return fmt.Sprintf("%d 分钟", int(elapsed.Minutes()))
 }
+
+// Tasks 是某人最近的调查（新的在前，最多 limit 个）：只读（App 里查看），不标「已告诉」。
+func (r *Runner) Tasks(ctx context.Context, person string, limit int) ([]Task, error) {
+	return r.store.Recent(ctx, person, limit)
+}
+
+// Task 是某人的一个调查：只读；不是这个人的当成没有（ErrTaskNotFound）。
+func (r *Runner) Task(ctx context.Context, person string, id int64) (Task, error) {
+	task, err := r.store.Get(ctx, id)
+	if err == nil && task.Person != person {
+		return Task{}, ErrTaskNotFound
+	}
+	return task, err
+}

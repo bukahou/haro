@@ -33,6 +33,7 @@ type turnRecord struct {
 	// endConversation：模型调用了 end_conversation（主人要结束这次对话）：这一轮说完，终端播完就休眠
 	endConversation bool
 	question        string      // 主人的原话（不含每轮附带的情况说明）
+	attachment      string      // 主人这句带的图片（App 上传的附件编号）；历史里记编号，不记图片
 	rounds          []toolRound // 调用了工具的那几段（按顺序）
 	// final 是最后一段（不再调用工具时）说的话。段号：第 i 段工具往来是第 i 段，最后一段的段号 = 工具往来的段数
 	// （和说出口的句子上的段号对上：被打断时只算最后一段里听到的）
@@ -124,7 +125,7 @@ func (r *turnRecord) messages(ending turnEnding, answer string) []ChatMessage {
 	case turnRestarted:
 		notRun = toolNotRunRestarted
 	}
-	turn := []ChatMessage{{Role: RoleUser, Text: r.question}}
+	turn := []ChatMessage{{Role: RoleUser, Text: r.question, Attachment: r.attachment}}
 	for _, round := range r.rounds {
 		turn = append(turn, ChatMessage{Role: RoleAssistant, Text: round.text, ToolCalls: round.calls})
 		for _, call := range round.calls {

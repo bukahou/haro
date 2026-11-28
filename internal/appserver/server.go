@@ -20,6 +20,10 @@ import (
 	"github.com/bukahou/haro/internal/accounts"
 	"github.com/bukahou/haro/internal/appapi"
 	"github.com/bukahou/haro/internal/buildinfo"
+	"github.com/bukahou/haro/internal/conversationstore"
+	"github.com/bukahou/haro/internal/memory"
+	"github.com/bukahou/haro/internal/notes"
+	"github.com/bukahou/haro/internal/research"
 	"github.com/bukahou/haro/internal/spending"
 )
 
@@ -48,9 +52,12 @@ type Spending interface {
 	Summary(ctx context.Context) (spending.Summary, error)
 }
 
-// Memory 是某个人记着的事有几条（常驻的、一般的）。
+// Memory 是某个人记着的事（memory.Keeper 实现）：有几条、列出、忘掉、找回。
 type Memory interface {
 	Counts(ctx context.Context, person string) (resident, notes int, err error)
+	List(ctx context.Context, person string, withForgotten bool) (memory.Listing, error)
+	Forget(ctx context.Context, person string, id int64) (notes.Note, error)
+	Restore(ctx context.Context, person string, id int64) (notes.Note, error)
 }
 
 // Terminals 是现在在线的终端（brainserver.OnlineTerminals 实现）。
@@ -71,9 +78,19 @@ type TerminalRegistry interface {
 	RejectRegistration(ctx context.Context, registrationID string) error
 }
 
-// Research 是某个人进行中（排队、在查）的调查有几个。
+// Research 是某个人的后台调查（research.Runner 实现）：进行中的有几个、最近的、一个。
 type Research interface {
 	Running(ctx context.Context, person string) (int, error)
+	Tasks(ctx context.Context, person string, limit int) ([]research.Task, error)
+	Task(ctx context.Context, person string, id int64) (research.Task, error)
+}
+
+// Backstory 是背景记录池（backstory.Service 实现）。
+type Backstory interface {
+	View(ctx context.Context, person string) (conversationstore.Backstory, int, error)
+	Edit(ctx context.Context, person, id, text string) error
+	Delete(ctx context.Context, person, id string) error
+	SetEnabled(ctx context.Context, person string, enabled bool) error
 }
 
 // Options 是接口服务的依赖和设置。Memory、Research 可以是 nil（没开那组工具）。
@@ -85,6 +102,7 @@ type Options struct {
 	Terminals       Terminals        // 现在连着的终端；nil = 不知道（都当成不在线）
 	Registry        TerminalRegistry // 终端的登记和归属；nil = 没有（终端的接口回 501）
 	Chat            Chat             // 打字对话；nil = 没有（对话的接口回 501）
+	Backstory       Backstory        // 背景记录池；nil = 没有（那几个接口回 501）
 	DefaultCurrency string           // 服务端的默认货币（账号没改时用）
 	MinAppVersion   string           // 支持的最低 App 版本
 	CapOptions      []float64        // 管理员定月上限的可选档位（默认货币）
@@ -150,6 +168,8 @@ func NewHandler(ctx context.Context, opts Options) (http.Handler, error) {
 	})
 	generated := appapi.HandlerWithOptions(strict, appapi.StdHTTPServerOptions{BaseRouter: http.NewServeMux()})
 	mux.Handle(sendMessagePattern, limiter.wrap(http.HandlerFunc(server.sendMessage), server)) // 回答是流：不经生成的代码
+	mux.Handle(uploadPattern, limiter.wrap(http.HandlerFunc(server.uploadAttachment), server)) // 请求体是图片：不经生成的代码
+	mux.Handle(attachmentPattern, limiter.wrap(http.HandlerFunc(server.getAttachment), server))
 	mux.Handle(PathPrefix, limiter.wrap(validator(generated), server))
 	// 跨域套在限流外面：被限流、出错的回答也带上跨域的头，网页版才读得到 429 / problem（预检由 cors 直接回）
 	withCrossOrigin, err := crossOrigin(spec, opts.WebURL, mux)
@@ -159,10 +179,25 @@ func NewHandler(ctx context.Context, opts Options) (http.Handler, error) {
 	return server.outermost(withCrossOrigin), nil
 }
 
+// largeBodies 是请求体上限比 maxBodyBytes 大的路由（按路由匹配，不比路径的字符串）。
+var largeBodies = func() *http.ServeMux {
+	routes := http.NewServeMux()
+	routes.Handle(uploadPattern, http.NotFoundHandler())
+	return routes
+}()
+
+// bodyLimit 是这个请求的请求体上限：传图片的 attachmentMaxBytes，其余 maxBodyBytes。
+func bodyLimit(r *http.Request) int64 {
+	if _, pattern := largeBodies.Handler(r); pattern == uploadPattern {
+		return attachmentMaxBytes
+	}
+	return maxBodyBytes
+}
+
 // outermost 是最外层：请求体上限、放一个空的 caller。
 func (s *Server) outermost(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+		r.Body = http.MaxBytesReader(w, r.Body, bodyLimit(r))
 		r, _ = withCaller(r, s.texts.pick(r.Header.Get("Accept-Language")))
 		next.ServeHTTP(w, r)
 	})

@@ -16,3 +16,6 @@ output-options:
     - finishLogin
     # 打字的回答是 Server-Sent Events（流），手写挂载；事件的结构（ChatEvent）照样生成
     - sendMessage
+    # 图片的上传、取回是二进制的请求体 / 响应，手写挂载（上传的请求体上限比别的接口大）
+    - uploadAttachment
+    - getAttachment

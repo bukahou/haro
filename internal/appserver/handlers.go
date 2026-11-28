@@ -100,7 +100,7 @@ func (s *Server) monthSpending(ctx context.Context, summary spending.Summary) ap
 // GetClientConfig 实现 appapi.StrictServerInterface。字数上限从契约里取（只写一处）。
 func (s *Server) GetClientConfig(ctx context.Context, _ appapi.GetClientConfigRequestObject) (appapi.GetClientConfigResponseObject, error) {
 	config := appapi.ClientConfig{ServerVersion: serverVersion(), ApiVersion: s.spec.Info.Version, MinAppVersion: s.opts.MinAppVersion,
-		Limits: appapi.Limits{ProfileMaxChars: s.opts.ProfileMaxChars, PageSize: pageSize,
+		Limits: appapi.Limits{ProfileMaxChars: s.opts.ProfileMaxChars, PageSize: pageSize, AttachmentMaxBytes: attachmentMaxBytes,
 			DisplayNameMaxChars: s.maxLength("MeUpdate", "display_name"), TerminalNameMaxChars: s.maxLength("TerminalUpdate", "name")}}
 	if len(s.opts.CapOptions) > 0 {
 		options := make([]appapi.Money, 0, len(s.opts.CapOptions))

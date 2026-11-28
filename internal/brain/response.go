@@ -35,6 +35,9 @@ type transcriptionJob struct {
 	audio          time.Duration // 这句话多长
 
 	speakerCheckFailed bool // 开着声纹、这句却算不出声纹（声纹的第三种结果，和没比对分开）
+
+	image      []byte // 打字会话：这句带的图片（JPEG）；只交给这一轮的模型
+	attachment string // 打字会话：图片的附件编号（记进历史）
 }
 
 // speakerFor 决定这句接谁的对话：认出是谁就接这个人的（对话跟人走），并记作这次醒着期间最近认出的人；
@@ -139,6 +142,9 @@ func (s *Session) respond(ctx context.Context, job *transcriptionJob) (done real
 	record.voiceVerified = job.speakerChecked && s.parts.Residents.verified(job.speaker)
 	record.extraNotes = s.wakeNotes(job)
 	situation, input := s.userTurn(job.text, record) // 现在的情况单独成一条、不进历史；历史里只存原话
+	if len(job.image) > 0 {                          // 打字时发的图片：只交给这一轮，历史里记附件编号
+		input.Image, input.Attachment, record.attachment = job.image, job.attachment, job.attachment
+	}
 	defer func() {
 		for _, round := range record.rounds {
 			for _, call := range round.calls {

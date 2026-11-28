@@ -79,3 +79,54 @@ func TestIncognitoTurnsAreNotIndexed(t *testing.T) {
 		t.Errorf("只算语音那轮：%+v %v", pending, err)
 	}
 }
+
+// 按文字找：主人说的、haro 答的都算（大小写不论、% 照字面），系统附注不算，删了的对话里的不算；按编号取回几轮带着在哪条对话。
+func TestSearchTurns(t *testing.T) {
+	ctx := context.Background()
+	store, _ := openTestStore(t)
+	if _, err := store.CreateThread(ctx, "主人", "gone", false, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	note := brain.ChatMessage{Role: brain.RoleUser, Text: "【现在的情况】猫粮快没了", Synthetic: true}
+	voice := brain.ConversationRecord{Person: "主人", TurnCount: 2, UpdatedAt: time.Now(), History: []brain.ConversationTurn{
+		numberedTurn(1, "Haro 帮我记一下猫粮", "好的，记下猫粮了"),
+		{Seq: 2, At: time.Unix(1_700_000_002, 0), Messages: []brain.ChatMessage{note, {Role: brain.RoleAssistant, Text: "100% 确定"}}}}}
+	gone := brain.ConversationRecord{Person: "主人", Thread: "gone", TurnCount: 3, UpdatedAt: time.Now(),
+		History: []brain.ConversationTurn{numberedTurn(3, "猫粮买哪家", "删掉的对话")}}
+	for _, record := range []brain.ConversationRecord{voice, gone} {
+		if err := store.SaveConversation(record); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.DeleteThread(ctx, "主人", "gone", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if found, err := store.SearchTurns(ctx, "主人", "猫粮", 10); err != nil || len(found) != 1 || found[0].Seq != 1 {
+		t.Errorf("猫粮（附注里的、删了的对话里的不算）：%+v %v", found, err)
+	}
+	if found, _ := store.SearchTurns(ctx, "主人", "haro", 10); len(found) != 1 {
+		t.Errorf("大小写不论：%+v", found)
+	}
+	if found, _ := store.SearchTurns(ctx, "主人", "100%", 10); len(found) != 1 || found[0].Seq != 2 {
+		t.Errorf("%% 照字面：%+v", found)
+	}
+	if found, _ := store.SearchTurns(ctx, "主人", "%", 10); len(found) != 1 {
+		t.Errorf("只有 %% 时只找含 %% 的：%+v", found)
+	}
+	if found, _ := store.SearchTurns(ctx, "别人", "猫粮", 10); len(found) != 0 {
+		t.Errorf("别人的：%+v", found)
+	}
+	if found, err := store.TurnsBySeq(ctx, "主人", []int64{1, 3}); err != nil || len(found) != 1 || found[0].Thread != brain.VoiceThread {
+		t.Errorf("按编号取回（删了的对话不给）：%+v %v", found, err)
+	}
+	if err := store.AddAttachment(ctx, Attachment{ID: "a1", Person: "主人", Thread: "gone", Width: 10, Height: 5, Bytes: 100,
+		CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := store.AttachmentOf(ctx, "主人", "a1"); err != nil || got.Thread != "gone" || got.Width != 10 {
+		t.Errorf("图片：%+v %v", got, err)
+	}
+	if _, err := store.AttachmentOf(ctx, "别人", "a1"); !errors.Is(err, ErrAttachmentNotFound) {
+		t.Errorf("别人的图片：%v", err)
+	}
+}

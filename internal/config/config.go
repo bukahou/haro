@@ -202,6 +202,7 @@ type ServerSettings struct {
 	// App 不直接调 akasha。下面的地址、凭证都跟部署有关，没有默认值；凭证只来自环境变量（K8s Secret）
 	AppPublicURL      string `env:"HARO_APP_PUBLIC_URL"`                     // 公网上 App 连的根地址（例如 https://haro.example.com），登录回调 = 它 + /api/v1/auth/oidc/callback
 	AccountsDB        string `env:"HARO_ACCOUNTS_DB"`                        // 账号库（SQLite 文件）
+	AttachmentsDir    string `env:"HARO_ATTACHMENTS_DIR"`                    // App 里发的图片存在哪（目录）；空 = 不收图片
 	OIDCIssuer        string `env:"HARO_OIDC_ISSUER"`                        // akasha 的 issuer
 	OIDCClientID      string `env:"HARO_OIDC_CLIENT_ID"`                     // 在 akasha 注册的 haro 客户端
 	OIDCClientSecret  string `env:"HARO_OIDC_CLIENT_SECRET"`                 // 凭证

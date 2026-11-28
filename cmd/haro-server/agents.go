@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/bukahou/haro/internal/agents"
+	"github.com/bukahou/haro/internal/backstory"
 	"github.com/bukahou/haro/internal/brain"
 	"github.com/bukahou/haro/internal/chat"
 	"github.com/bukahou/haro/internal/config"
@@ -67,6 +68,7 @@ type conversationAgents struct {
 	expert    brain.FrameExpert // 看画面的专家；没配时为 nil
 	summary   *brain.Agent      // 写滚动摘要；没开时为 nil
 	title     *brain.Agent      // App 里的对话起标题
+	backstory *brain.Agent      // 背景记录池
 	// overBudget：月度上限到了以后判断主人要不要临时提高（不受额度管、按天限次数）；不能口头提高时为 nil
 	overBudget *brain.Agent
 	// breaker：前台和接手的模型共用的「连不上」熔断；刚恢复时由它告诉模型断过多久（每轮的情况说明）
@@ -144,6 +146,16 @@ func (a agentAssembly) build(toolbox brain.Toolbox, expertSearch vision.Search) 
 		return built, err
 	}
 	built.title = &title
+	backstoryDefinition := a.catalog[agents.Backstory]
+	backstoryModel, _, err := a.metered(backstoryDefinition)
+	if err != nil {
+		return built, err
+	}
+	pool, err := a.agent(backstoryDefinition, spending.NewBudgetedChatModel(backstoryModel, a.guard, a.logger), backstory.PromptValues(), nil)
+	if err != nil {
+		return built, err
+	}
+	built.backstory = &pool
 
 	if s.ConversationSummary {
 		definition := a.catalog[agents.Summary]

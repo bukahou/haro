@@ -227,9 +227,11 @@ const (
 // ChatMessage 是一条对话消息。Image 只在本轮输入里携带，历史里不保留图片。
 // json 标签：对话存盘用；历史里不放图片。
 type ChatMessage struct {
-	Role       ChatRole   `json:"role"`
-	Text       string     `json:"text,omitempty"`
-	Image      []byte     `json:"-"`                      // JPEG；nil 表示没有图片
+	Role  ChatRole `json:"role"`
+	Text  string   `json:"text,omitempty"`
+	Image []byte   `json:"-"` // JPEG；nil 表示没有图片
+	// Attachment：user：主人在 App 里发的图片的编号（图片本身不存盘、之后的轮次不重发，和摄像头的画面一样；App 按编号取图）
+	Attachment string     `json:"attachment,omitempty"`
 	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`   // assistant：这一轮模型要求调用的工具
 	ToolName   string     `json:"tool_name,omitempty"`    // tool：这条是哪个工具的结果
 	ToolCallID string     `json:"tool_call_id,omitempty"` // tool：对应哪一次调用（ToolCall.ID）

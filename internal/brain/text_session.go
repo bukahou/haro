@@ -13,16 +13,25 @@ import (
 // textItems 给打字会话交进来的话编号（日志里的 item）。
 var textItems atomic.Int64
 
-// SubmitText 是打字会话收到的一句话：person 是登录的账号本人（App 里登录过，等同声纹确认），language 是 App 的语言
-// （固定的话按它选）。回答经 Events() 发出（文字，不合成语音）。同一时间只答一句：上一句还在答时返回 CodeResponseInProgress。
-func (s *Session) SubmitText(text, person, language string) error {
+// TextInput 是打字会话收到的一句话。
+type TextInput struct {
+	Text       string
+	Person     string // 登录的账号本人（App 里登录过，等同声纹确认）
+	Language   string // App 的语言（固定的话按它选）
+	Image      []byte // 这句带的图片（JPEG）；nil = 没有。只交给这一轮的模型
+	Attachment string // 图片的附件编号（历史里记它）
+}
+
+// SubmitText 是打字会话收到的一句话。回答经 Events() 发出（文字，不合成语音）。同一时间只答一句：
+// 上一句还在答时返回 CodeResponseInProgress。
+func (s *Session) SubmitText(input TextInput) error {
 	if !s.parts.TextOnly {
 		return realtimeproto.ProtocolErrorf(realtimeproto.CodeUnsupportedFeature, "语音会话不收打字的话")
 	}
 	done := make(chan struct{})
 	close(done) // 打的字不用等识别
-	job := &transcriptionJob{item: fmt.Sprintf("text-%d", textItems.Add(1)), done: done, text: text, started: time.Now(),
-		speaker: person, speakerChecked: true, language: language}
+	job := &transcriptionJob{item: fmt.Sprintf("text-%d", textItems.Add(1)), done: done, text: input.Text, started: time.Now(),
+		speaker: input.Person, speakerChecked: true, language: input.Language, image: input.Image, attachment: input.Attachment}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.cancelResponse != nil {
