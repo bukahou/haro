@@ -3,7 +3,7 @@ module github.com/bukahou/haro
 go 1.27
 
 require (
-	github.com/anthropics/anthropic-sdk-go/v2 v2.13.0
+	github.com/anthropics/anthropic-sdk-go/v2 v2.15.0
 	github.com/blackjack/webcam v0.6.2
 	github.com/bukahou/akasha/pkg/oidcrp v0.1.0
 	github.com/caarlos0/env/v11 v11.4.2
@@ -18,7 +18,7 @@ require (
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/oapi-codegen/nethttp-middleware v1.3.1
 	github.com/oapi-codegen/runtime v1.9.1
-	github.com/openai/openai-go/v3 v3.105.0
+	github.com/openai/openai-go/v3 v3.107.0
 	github.com/pion/mediadevices v0.10.1
 	github.com/pressly/goose/v3 v3.30.1
 	github.com/rickar/cal/v2 v2.1.34
@@ -37,9 +37,9 @@ require (
 	golang.org/x/image v0.48.0
 	golang.org/x/sync v0.25.0
 	golang.org/x/text v0.44.0
-	golang.org/x/time v0.15.0
+	golang.org/x/time v0.16.0
 	gonum.org/v1/gonum v0.17.0
-	modernc.org/sqlite v1.62.0
+	modernc.org/sqlite v1.63.0
 )
 
 require (
